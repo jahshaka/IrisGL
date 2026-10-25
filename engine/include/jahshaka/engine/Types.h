@@ -3050,6 +3050,13 @@ struct GiQualityFacts {
     /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
     /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
     unsigned cardIndirectTexels = 32768u;
+    /// THE INDIRECT HALF'S RAYS A TEXEL (PHOTON-7 stage 10, 10-1; L9): the card's indirect is gathered by this many
+    /// fixed, world-keyed, cosine-distributed occupancy rays through the voxel chain (jah_voxel_ray.glsl) - a hit reads
+    /// the voxel's side facing the ray, an escape the sky over the ray's bin, an exhausted ray is no sample.
+    unsigned cardIndirectRays = 16u;
+    /// THE BOUNCE'S RAYS A VOXEL SIDE (PHOTON-7 stage 10, 10-1; L9): the feedback's passes gather each side of a surface
+    /// voxel by this many occupancy rays from the side's own surface position - the same estimator as the cards'.
+    unsigned voxelBounceRays = 16u;
     /// THE VOXEL LIGHT'S WORK A FRAME (PHOTON-7 stage 4's hitch fix; L7: a budget is a count): a lamp's or the sun's
     /// relight of the voxels' direct term and the feedback's bounce passes each spend, every frame, the chain's whole
     /// work over THIS MANY FRAMES - the relight `chain voxels / lightWorkFrames` voxels, the feedback `chain bricks /
@@ -5931,10 +5938,11 @@ struct GiVoxelVolume {
     std::vector<float> coverageP, coverageN;
     std::vector<float> positionP, positionN;
     /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), every tier: the store holds a voxel's two SIDES (PHOTON-7 stage 7) -
-    /// `lightFront` and `lightBack` as stored (premultiplied the same way), `light` their MEAN (derived here exactly as a
-    /// reader takes it) - and `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for a two-sided voxel, whose normal
-    /// is canonical: the front is the side it points to). The faces looking +a take the front where n_a > 0, the back
-    /// where n_a < 0. (giVoxelLight fills `light`, `lightFront` and `lightBack`.)
+    /// `lightFront` and `lightBack` as stored (premultiplied the same way), `light` THE VOXEL'S LIGHT (a two-sided voxel's
+    /// the sides' mean, a one-sided voxel's its front: its back is the inside of a solid and stores 0, PHOTON-7 stage 10)
+    /// - and `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for a two-sided voxel, whose normal is canonical:
+    /// the front is the side it points to). The faces looking +a take the front where n_a > 0, the back where n_a < 0.
+    /// (giVoxelLight fills `light`, `lightFront`, `lightBack` and `normal`.)
     std::vector<float> lightFront;
     std::vector<float> lightBack;
     std::vector<float> normal;

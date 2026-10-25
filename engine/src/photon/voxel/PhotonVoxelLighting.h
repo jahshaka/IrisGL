@@ -219,6 +219,11 @@ namespace Ogre
         /// THE HOST'S FRAME (setLightFrame): the frame the CLEAR and the readings' lag are counted in.
         uint64            mLightFrame = 0u;
         bool              mFeedbackOn = true;
+        /// THE CACHE RAYS (PHOTON-7 stage 10, 10-1; setCacheRays): the last world shell, metres, and the rays a side.
+        float             mCacheRayShell = 0.0f;
+        float             mCacheRayBias = 0.0f;
+        float             mCacheRayFirstShell = 0.0f;
+        uint32            mCacheRays = 16u;
         /// One dispatch of the feedback job in `mode` (PhotonBrickFeedback_cs.glsl), one thread per brick unless the
         /// mode says otherwise; `source` and `activation` for ACCUM and PRE, `shift` for SHIFT.
         void dispatchFeedback( uint32 mode, const PhotonVoxelLighting *source = nullptr,
@@ -288,6 +293,8 @@ namespace Ogre
         uint64 mBrickUpdates = 0u, mBrickReadingsSkipped = 0u;
         ShaderParams::Param *mInjectBrickDims = nullptr;
         ShaderParams::Param *mBounceBrickMark = nullptr;
+        ShaderParams::Param *mBounceRayParams = nullptr;
+        ShaderParams::Param *mBounceRayCounts = nullptr;
         void ensureBrickMask();
         void requestBrickReading();
         ShaderParams::Param *mInjectKeepLo = nullptr;
@@ -456,6 +463,18 @@ namespace Ogre
         /// document's bounces off - THE DIRECT STORE ALONE: the lamps' direct light and nothing a surface re-emits of
         /// the sky or of another surface (no pass ever runs, and update() reads the brick mask back itself).
         void setFeedbackOn( bool on ) { mFeedbackOn = on; }
+        /// THE CACHE RAYS (PHOTON-7 stage 10, 10-1): the bounce gathers each voxel side by `rays` occupancy rays
+        /// (jah_voxel_ray.glsl), the last cascade read to the world shell `lastShellMetres` (the outermost cascade's
+        /// guaranteed radius: PhotonComponent::rayLastShellMetres), each started `biasMetres` off its surface (the
+        /// finest cascade's cell, at every cascade), this cascade's own rays reading it to the WORLD's shell end
+        /// `firstShellMetres` (the sum of eight cells of every cascade up to this one).
+        void setCacheRays( float lastShellMetres, uint32 rays, float biasMetres, float firstShellMetres )
+        {
+            mCacheRayShell = lastShellMetres;
+            mCacheRays = rays;
+            mCacheRayBias = biasMetres;
+            mCacheRayFirstShell = firstShellMetres;
+        }
         bool getFeedbackOn() const { return mFeedbackOn; }
 
         /// THE LIGHT SLOTS (P1C-LIGHT-LIST): the const buffer and LightInjection_piece_cs's

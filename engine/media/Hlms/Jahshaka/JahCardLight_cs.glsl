@@ -14,7 +14,7 @@
 // RADIANCE = DIRECT + INDIRECT + EMISSIVE, and the two lit halves have two
 // budgets (OgreSurfaceCache.cpp, planRelights): the direct half is a light
 // loop and is recomputed at every relight; the INDIRECT half is the voxel
-// march and is cached in its own layer (`cardIndirect`), recomputed only when
+// rays' gather and is cached in its own layer (`cardIndirect`), recomputed only when
 // the card asks for it (mode bit 1: a fresh capture, or the chain re-injected)
 // and otherwise read back (mode 0) — or zero (mode bit 2: a card captured
 // this frame whose march did not fit the indirect budget yet).
@@ -62,13 +62,12 @@
 //
 // INDIRECT = THE PIXEL'S OWN DIFFUSE ENVIRONMENT TERM, from the texel. With GI
 // OFF it is the SH ambient at the texel's normal (the engine's SH x gain, the
-// pixel's envColourD); with the chain it is the pixel's diffuse GI: the ONE diffuse
-// cone integrator (JahVoxelCones, jah_voxel_cones.glsl — the frame, the cone
-// set, the weights, the start bias, the escape weight; the same TEXT the
-// pixel's computeVctProbe and the bounce job run) over the ONE voxel reader
-// (JahVoxelSample + JahVoxelMarch) and the ONE environment (JahEnvironment).
-// Decoded exactly as the pixel decodes it — the voxels' share times the
-// volume's multiplier, the environment's share as radiance — and turned into
+// pixel's envColourD); with the chain it is the cosine-weighted mean radiance over
+// the hemisphere, GATHERED BY OCCUPANCY RAYS through the chain (PHOTON-7 stage 10,
+// jahCardEnvColourD below: jah_voxel_ray.glsl, the piece JahVoxelRay; the frame and
+// the start bias are the cone integrator's, JahVoxelCones), the sky only at an
+// earned miss through the ONE environment (JahEnvironment) - radiance, as the
+// store holds it - and turned into
 // outgoing radiance as BRDF_EnvMap does, envColourD x diffuse x pi x the lobe's
 // albedo, with the albedo taken as its HEMISPHERICAL mean jahDiffuseAlbedoHemi
 // (the fork's JahDiffuseAlbedo piece; above) where the pixel takes it at its own
@@ -243,7 +242,7 @@ struct CardGiParams
 	vec4 chainFromPrev[14];
 	vec4 volumeOrigin;		// xyz = cascade 0's volume origin, world
 	vec4 volumeInvSize;		// xyz = 1 / its size, world
-	vec4 counts;			// x = cascades, yzw padding (y was the decode multiplier: the voxels hold radiance, PHOTON-7 stage 1)
+	vec4 counts;			// x = cascades, y = the rays' last world shell (cascade 0's units), z = the rays a texel, w padding
 	vec4 envGainMips;		// xyz = the Sky Light's gain on the cube, w = its mips
 	vec4 envSh[9];			// the environment's nine SH coefficients, world axes
 	vec4 cloudMap;			// the cloud shadow: 1 / tile, strength, scroll xz (CLOUDS-2D-2)
@@ -299,8 +298,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) gp.chainFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	@insertpiece( JahVoxelRay )
 
-	// THE ONE DIFFUSE CONE INTEGRATOR (JahVoxelCones): the frame is built from
+	// THE ONE DIFFUSE CONE INTEGRATOR (JahVoxelCones), for its frame and its start: the frame is built from
 	// the texel's WORLD normal (jahConeBasisWorld: the pixel's cubemap-frame
 	// construction, brought back to world axes), a world direction reaches the
 	// volume's normalised space through the box, and the environment is read in
@@ -309,22 +309,46 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )
 
-	// THE PIXEL'S DIFFUSE GI at world point P with normal N: envColourD, i.e.
-	// the voxels' share plus the environment's share (both radiance).
+	// THE TEXEL'S DIFFUSE GI at world point P with normal N, GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light
+	// passes a wall): envColourD - the cosine-weighted mean radiance over the hemisphere - as the mean of N fixed,
+	// world-keyed, cosine-distributed occupancy rays through the chain (jah_voxel_ray.glsl), N = counts.z. A HIT reads
+	// the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world shell, counts.y, or its box in
+	// the band) reads the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N); an EXHAUSTED ray is no
+	// sample (the mean is over the rays that are). The sky enters ONLY at an earned miss: the four-cone set's escape
+	// and the sixteen-cone sky share (jahSkyShareFine) it replaces let the sky through a sealed room's walls (10-0's
+	// P1: the gather's peak 16.26 % of an open roof). The key is the texel's WORLD point, so a texel relit at any
+	// placement, after a walk or a teleport, traces the same rays.
 	vec3 jahCardEnvColourD( vec3 P, vec3 N )
 	{
-		vec3 posLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
-		vec3 dirLS = normalize( N * gp.volumeInvSize.xyz );
-		vec3 biasDirLS = jahConeBiasDir( dirLS );
-		posLS = jahConeStart( posLS, biasDirLS );
-		vec3 light;
-		vec3 envD;
-		jahDiffuseCones( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ), light, envD );
-		// THE SKY'S SHARE ON THE FINER QUADRATURE (CONTACT-OCCLUSION-1, jahSkyShareFine):
-		// a card is relit once per event, and the four-cone set under-read a vertical
-		// surface's sky by half.
-		envD = jahSkyShareFine( posLS, jahConeOrigin( posLS, biasDirLS ), jahConeBasisWorld( N ) );
-		return light + envD;
+		const vec3 surfLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
+		const vec3 biasDirLS = jahConeBiasDir( N * gp.volumeInvSize.xyz );
+		// one cell of cascade 0 off the surface (the chain's cascades are cubes: one cell length)
+		const float eps = JAH_VOX_INVRES( 0 ).x;
+		const vec3 posLS = surfLS + biasDirLS * eps;
+		const mat3 basis = jahConeBasisWorld( N );
+		const int rays = max( int( gp.counts.z ), 1 );
+		const float binCos = 1.0 - 1.0 / float( rays );
+		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+		const float turn = jahRayWorldTurn( P, 0u );
+		vec3 sum = vec3( 0.0, 0.0, 0.0 );
+		float taken = 0.0;
+		for( int i = 0; i < rays; ++i )
+		{
+			const vec3 d = basis * jahRayCosineDir( i, rays, turn );
+			const JahVoxelRayResult r = jahVoxelRay( posLS, JAH_CONES_TO_LS( d ), surfLS, biasDirLS, eps, ivec4( 0 ), 0.0,
+													 gp.counts.y );
+			if( r.exitReason == kJahRayHit )
+			{
+				sum += r.radiance;
+				taken += 1.0;
+			}
+			else if( r.exitReason == kJahRayEscaped )
+			{
+				sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
+				taken += 1.0;
+			}
+		}
+		return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0, 0.0, 0.0 );
 	}
 @end
 

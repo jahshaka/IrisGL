@@ -19,9 +19,12 @@
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], vctProbeSampler, u, l )
-	// PHOTON-7 stage 7: the BACK side (the store holds the two sides): this job's level-0 read takes their mean
-	// (JAH_VOX_PER_SIDE 0, jah_voxel_sample.glsl's default)
+	// PHOTON-7 stage 7: the BACK side (the store holds the two sides) and stage 10's NORMAL: a ray's hit reads the side
+	// facing it (jah_voxel_ray.glsl). The mean-of-sides read this job took (a live leak carrier: half of a sunlit outer
+	// face lit the inside) is DELETED with the cones.
+	#define JAH_VOX_PER_SIDE 1
 	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
+	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
 	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
 	// entry - the march's mip-0 read takes the opacity along its ray from it.
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], vctProbeSampler, u, l )
@@ -40,6 +43,7 @@
 	@end
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	@insertpiece( JahVoxelRay )
 
 	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
 	// into the piece JahEnvironment): what an escaping cone sees. The sky enters the
@@ -80,48 +84,66 @@
 	#define JAH_SPEC_ALBEDO( k ) jahSpecularAlbedoTable[( k ) >> 2][( k ) & 3]
 	@insertpiece( JahSpecularAlbedo )
 
-	// THE ONE DIFFUSE CONE INTEGRATOR (Jahshaka, PHOTON-CARDS-2; jah_voxel_cones.glsl,
-	// wrapped into the piece JahVoxelCones): the cone frame, the one cone set (four;
-	// it was a hard-coded six-cone set until CONE-SET-1, and the six-cone branch is
-	// deleted - SIX-CONE-DEAD-1), its weights and aperture, the start bias and the escape weight - the text the pixel
-	// shader and the surface cache's card job run. This job used to carry its own
-	// integrator: a cross-product frame about world X (a different azimuth from the
-	// pixel's for every normal), and the volume's normalised axes taken for the
-	// world's (true only for a cubic box). The frame is now built from the WORLD
-	// normal, and a world direction reaches the volume's normalised space through the
+	// THE CONE FRAME AND THE START BIAS (Jahshaka, PHOTON-CARDS-2; jah_voxel_cones.glsl, the piece JahVoxelCones): the
+	// frame is built from the WORLD normal, and a world direction reaches the volume's normalised space through the
 	// box's size (the cell size over the inverse resolution).
 	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * ( p_invVoxelResolution / p_voxelCellSize ) )
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )
-	// Jahshaka (CONTACT-OCCLUSION-1): the sky's share a voxel re-emits is gathered on
-	// the finer sky quadrature (jahSkyShareFine, JahVoxelCones - the card relight's
-	// too); the voxels' share (the bounce proper) keeps the pixel's own cone set.
 
-	/// The bounce gathered at a voxel: posLS = the voxel's centre in the volume's
-	/// normalised space, nWorld = its (unit) world normal. The result is radiance,
-	/// the store's units: the environment's gain and SH arrive as radiance too.
-	INLINE void computeVctProbe( OGRE_INOUT_REF( float3, outDiffuse ),
-								 float3 posLS, float3 nWorld )
+	/// THE BOUNCE GATHERED AT ONE SIDE OF A VOXEL, BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light passes a wall) - the
+	/// card relight's estimator (JahCardLight_cs.glsl, jahCardEnvColourD), one text of it: the cosine-weighted mean
+	/// radiance over the side's hemisphere as the mean of N fixed, world-keyed, cosine-distributed occupancy rays
+	/// (jah_voxel_ray.glsl), N = p_rayCounts.x. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the
+	/// last cascade: its world shell p_rayParams.w, or its box in the band) the sky over the ray's bin; an EXHAUSTED ray
+	/// is no sample. THE SIDE STARTS FROM ITS OWN SURFACE (the preflight's M4: the voxel's centre put a thin wall's two
+	/// sides' starts at one point, and a side's rays left from inside the wall): along the axis the side's normal is
+	/// dominant on, where the voxel's faces looking that way lie (the surface position of that half), the cell's
+	/// centre across it - then the finest cell off along the normal; the surface's tangent plane and the voxel's own
+	/// cell are the ray's (jah_voxel_ray.glsl).
+	/// `cellLS` the voxel's centre (this cascade's normalised space), `nWorld` the side's unit world normal, `turn` its
+	/// world key's (jahRayWorldTurn). The result is radiance, the store's units.
+	INLINE float3 jahBounceRays( float3 cellLS, int3 cell, float3 nWorld, float turn )
 	{
 		const float3 normalLS = jahConeBiasDir( nWorld * ( p_invVoxelResolution / p_voxelCellSize ) );
-		posLS = jahConeStart( posLS, normalLS );
-
-		if( posLS.x < 0.0 || posLS.x > 1.0 ||
-			posLS.y < 0.0 || posLS.y > 1.0 ||
-			posLS.z < 0.0 || posLS.z > 1.0 )
+		const float3 an = abs( normalLS );
+		const int a = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
+		float3 surfaceLS = cellLS;
 		{
-			return;
+			const bool plus = normalLS[a] > 0.0;
+			const float o = ( plus ? OGRE_Load3D( vctProbeCovP[0], cell, 0 ) : OGRE_Load3D( vctProbeCovN[0], cell, 0 ) )[a];
+			const float pO = ( plus ? OGRE_Load3D( vctProbePosP[0], cell, 0 ) : OGRE_Load3D( vctProbePosN[0], cell, 0 ) )[a];
+			if( o > 0.0 )
+				surfaceLS[a] = ( float( cell[a] ) + saturate( pO / o ) ) * p_invVoxelResolution[a];
 		}
-
-		// Jahshaka (CONTACT-OCCLUSION-1): the sky's share on the finer sky set
-		// (jahSkyShareFine) - the escape's; the voxels' share on the pixel's own cone set.
-		const float3 envD =
-			jahSkyShareFine( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ) );
-		float3 light;
-		float3 envCoarse;
-		jahDiffuseCones( posLS, jahConeOrigin( posLS, normalLS ), jahConeBasisWorld( nWorld ), light,
-						 envCoarse );
-		outDiffuse.xyz = light + envD;
+		// THE START: the finest cascade's cell off the surface (p_rayCounts.y, this cascade's units) - never this cascade's
+		// own cell, which would jump a slab thinner than it (the roof's top 0.4 m above a contact face in a 0.47 m cell:
+		// gi.sealed_sky)
+		const float eps = p_rayCounts.y;
+		const float3 startLS = surfaceLS + normalLS * eps;
+		const float3x3 basis = jahConeBasisWorld( nWorld );
+		const int rays = max( int( p_rayCounts.x ), 1 );
+		const float binCos = 1.0 - 1.0 / float( rays );
+		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+		float3 sum = float3( 0, 0, 0 );
+		float taken = 0.0;
+		for( int i = 0; i < rays; ++i )
+		{
+			const float3 d = basis * jahRayCosineDir( i, rays, turn );
+			const JahVoxelRayResult r = jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfaceLS, normalLS, eps,
+													 int4( cell, 1 ), p_rayCounts.z, p_rayParams.w );
+			if( r.exitReason == kJahRayHit )
+			{
+				sum += r.radiance;
+				taken += 1.0;
+			}
+			else if( r.exitReason == kJahRayEscaped )
+			{
+				sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
+				taken += 1.0;
+			}
+		}
+		return taken > 0.0 ? sum * ( 1.0 / taken ) : float3( 0, 0, 0 );
 	}
 
 	@insertpiece( DeclSRgbFuncs )
@@ -192,20 +214,23 @@
 		// A TWO-SIDED VOXEL GATHERS BOTH HEMISPHERES (PHOTON-VOXEL-5): its front (the canonical
 		// normal's side, VoxelMerge) and its back are two surfaces, each lit by what IT faces - a
 		// roof's top by the sky, its underside by the room. Each side keeps its own (PHOTON-7 stage 7:
-		// the store holds both, the mean taken at the read).
-		// ONE call site in a loop over the sides, not two: the gather is the whole cone march,
-		// inlined per call (a second call doubled the job's compile time).
+		// the store holds both). A ONE-SIDED voxel's back is the inside of a solid (PHOTON-7 stage 10's
+		// one-sided write: it stores 0, LightInjection) and gathers nothing.
+		// ONE call site in a loop over the sides, not two: the gather is the whole ray set, inlined per
+		// call (a second call doubled the job's compile time).
+		// THE WORLD KEY: the voxel's centre in the world (its lattice cell: the same at every placement of
+		// the box), and the side.
+		const float3 jahKeyPoint = p_rayParams.xyz + ( float3( jahCell ) + 0.5f ) * p_voxelCellSize;
 		float3 gathered[2];
 		gathered[0] = float3( 0, 0, 0 );
 		gathered[1] = float3( 0, 0, 0 );
 		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
 		{
-			float3 g = float3( 0, 0, 0 );
-			computeVctProbe( g, voxelUvwPos, side == 0 ? normalVal.xyz : -normalVal.xyz );
-			gathered[side] = g;
+			gathered[side] = jahBounceRays( voxelUvwPos, int3( jahCell ), side == 0 ? normalVal.xyz : -normalVal.xyz,
+											jahRayWorldTurn( jahKeyPoint, uint( side ) + 1u ) );
 		}
 		const float3 vctDiffuse = gathered[0];
-		const float3 vctDiffuseBack = twoSided ? gathered[1] : gathered[0];
+		const float3 vctDiffuseBack = gathered[1];
 		// THE BOUNCE RE-EMITS WHAT THE SURFACE RENDERS (PHOTON-WRITER-1): a voxel lit
 		// by the diffuse gather of its surroundings reflects the normalised Disney
 		// lobe's HEMISPHERICAL albedo of it (jahDiffuseAlbedoHemi, the lobe's
@@ -232,7 +257,7 @@
 			reemit += ( specF0 * sa + metalVal.w * sb ) * p_iterationDampening * albedoVal.w;
 		}
 		// each side its own fixed point: L_front = D_front + rho G_front, L_back = D_back + rho G_back (a one-sided
-		// voxel's two are one: its back gathered as its front, its direct the same on both sides)
+		// voxel's back: its direct 0 and its gather 0 - the inside of a solid)
 		currentLight.xyz += reemit * vctDiffuse;
 		backLight.xyz += reemit * vctDiffuseBack;
 		jahReemit = reemit;

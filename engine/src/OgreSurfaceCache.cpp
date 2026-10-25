@@ -1578,6 +1578,8 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     mRelight.clear();
     mRelightMode.clear();
     mVct = view.vct;
+    mIndirectRays = view.indirectRays;
+    mRayLastShell = view.rayLastShell;
     mCloudField = view.cloudField;
     for (int k = 0; k < 4; ++k) { mCloudMap[k] = view.cloudMap[k]; mCloudSun[k] = view.cloudSun[k]; }
     for (int k = 0; k < 27; ++k) mAmbientSh[k] = view.ambientSh ? view.ambientSh[k] : 0.0f;
@@ -2005,7 +2007,11 @@ void SurfaceCache::relightCards() {
         const Ogre::Vector3 size = vct->getVoxelizer()->getVoxelSize();
         g[88] = origin.x; g[89] = origin.y; g[90] = origin.z;
         g[92] = 1.0f / size.x; g[93] = 1.0f / size.y; g[94] = 1.0f / size.z;
-        g[96] = float(numCascades);   // (97: padding - the decode multiplier, deleted: the voxels hold radiance)
+        g[96] = float(numCascades);
+        // THE RAYS (PHOTON-7 stage 10, 10-1): the last cascade's world shell in cascade 0's normalised units (a cube),
+        // and the rays a texel
+        g[97] = mRayLastShell / size.x;
+        g[98] = float(std::max(mIndirectRays, 1u));
         envCube = vct->getEnvironmentCube();
         const float *gain = vct->getEnvironmentGain();
         g[100] = gain[0]; g[101] = gain[1]; g[102] = gain[2];

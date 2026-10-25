@@ -15,19 +15,31 @@
 // opacity (what the surface emits, not how much of the cell it fills). A one-sided voxel's back stores 0 (stage 10's
 // one-sided write): a ray reaching a solid's face from behind is inside the solid, and reads nothing.
 //
-// THE ORIGIN PLANE IS THE HEMISPHERE'S BOUNDARY, NEVER AN OCCLUDER (the march's rule, jah_voxel_sample.glsl): a ray
-// that leaves a surface meets that surface's own coarse cells as it climbs - an open floor's ray at 15 degrees is
-// still inside the floor's 1.875 m cells at the third hop - so a cell whose ONLY surfaces are the origin's (along the
-// axis n the surface's normal is dominant on, every face within one of this cascade's cells of the origin's depth or
-// behind it, and no face on another axis) is not a hit. Anything else in the cell - a wall standing on the floor, a
-// chair's leg - is. A surface that is not axis-aligned keeps its own cells on the other axes: the stated residual.
-//
+// THE SURFACE THE RAY LEFT IS NEVER ITS OCCLUDER - THE TANGENT PLANE (the march's origin plane, made exact for a ray):
+// a ray that leaves a surface meets that surface's own coarse cells as it climbs (an open floor's ray at 15 degrees is
+// still inside the floor's 1.875 m cells at the third hop), so an occupied cell is a hit only when one of its faces
+// lies IN FRONT of the surface's tangent plane - the plane through the surface point with the surface's normal - by
+// more than the ray's start bias `eps` (the start is that far off the surface: a face nearer the plane is the surface's
+// own). A face BEHIND the plane is unreachable by a ray that climbs away from it (every ray of a hemisphere does), so it
+// is never one either: a slab's underside in the floor's own coarse cell. A face's point is its stored position along
+// its own axis; across the cell, a face on the surface's own dominant axis takes the cell's centre (the surface and
+// its coplanar continuation), a face on another axis the cell's corner MOST IN FRONT of the plane (it may reach
+// anywhere across the cell: a wall standing on the floor is in front wherever the cell rises above the floor). (The
+// first form of this gate was the cone march's own - the faces along the dominant axis within ONE CELL of the
+// surface's coordinate, or behind it: a corner's diagonal normal made a whole wall's inner plane "the origin", and a
+// 0.4 m slab within a 0.47 m cell hid its far face - gi.sealed_sky, the sky through the room's walls.)
+// THE OWN CELL (`ownCell`: a voxel side's gather, the bounce): never read - it holds the side's own light and its
+// other side's - and a face in front inside it blocks the ray there (radiance 0: a surface nearer than a cell, a contact
+// or a cavity this cascade cannot resolve, is dark, never the voxel's other side read through itself).
 // THE SHELLS (the cone march's and LightInjection's jahInjectVisibility's, PHOTON-7 stages 1 and 5): cascade j reads
 // the ray over the distances [D_(j-1), D_j) from the start, D_j the sum of eight cells of every cascade up to j, and
 // hands over ON THE FIRST CELL PLANE OF CASCADE j + 1 PAST D_j (the next cascade enters its first cell at a face; a
 // coarse cell entered mid-way would re-read what the fine cells read); a box that ends first hands over at its face
 // (THE BAND: that ray is the placement's). A cascade whose box does not hold the point the ray has reached is passed
-// over. THE LAST CASCADE READS TO A WORLD SHELL, `lastShellC0` (the caller's: a distance every placement's last box
+// over. A CHAIN THAT STARTS PAST THE FINEST CASCADE (a coarse cascade's bounce reads its own cascade and the ones
+// outside it) keeps THE WORLD'S shells: its first cascade reads to that cascade's own D, `firstShellC0` (the job's
+// table: a c2 voxel's ray reads c2 to 5.6 m, never c3 from 3.75 m - the 4 m room's far corners in the outer cascade's
+// cells, where an inside floor and the sky-lit ground outside are one cell's one side). THE LAST CASCADE READS TO A WORLD SHELL, `lastShellC0` (the caller's: a distance every placement's last box
 // contains from every point the caches gather at - the chain's table says it), or to its box if that comes first.
 //
 // THE EXIT IS EARNED (the spec's "THE MISS IS EARNED"; Lumen's closed-box leak is a ray that ran out of distance and
@@ -66,41 +78,45 @@ struct JahVoxelRayResult
 	int steps;			///< the cells it read - its price
 };
 
-/// IS AN OCCUPIED CELL THE ORIGIN'S OWN SURFACE (the header)? Cell `iv` of cascade `c` at its centre `uvw`; `org` the
-/// origin plane in this cascade's normalised space (jahConeOrigin's form: x the axis n, -1 none; y the surface's
-/// coordinate along n; z the normal's sign along n). True only when the cell's every face is the origin's: no coverage
-/// on another axis, some on n, and every half's surface on n within one cell of the origin's depth or behind it.
-bool jahVoxelRayOriginOnly( int c, vec3 uvw, ivec3 iv, vec4 org, vec3 invRes )
+/// DOES AN OCCUPIED CELL HOLD A FACE IN FRONT OF THE TANGENT PLANE (the header)? Cell `iv` of cascade `c` at its
+/// centre `uvw`; `sJ` the surface point and `epsJ` the start bias in this cascade's normalised space, `nLS` the unit
+/// normal (`invRes` this cascade's cell, per axis).
+bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes )
 {
-	if( !( org.x >= 0.0 ) )
-		return false;
-	const int n = clamp( int( org.x ), 0, 2 );	// (clamped: a constant negative index is rejected by SPIR-V)
-	const vec3 cP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ).xyz;
-	const vec3 cN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ).xyz;
-	float other = 0.0;
-	for( int b = 0; b < 3; ++b )
+	const vec3 an = abs( nLS );
+	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
+	const vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
+	const vec4 pos[2] = vec4[2]( JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 ) );
+	// the cell's centre, and its corner most in front of the plane, relative to the surface point
+	const vec3 centre = uvw - sJ;
+	const vec3 front = centre + 0.5 * invRes * sign( nLS );
+	bool any = false;
+	for( int h = 0; h < 2; ++h )
 	{
-		if( b != n )
-			other += cP[b] + cN[b];
+		for( int b = 0; b < 3; ++b )
+		{
+			const float o = cov[h][b];
+			if( !( o > 0.0 ) )
+				continue;
+			any = true;
+			// level 0 stores O x f, f the faces' place IN THE CELL (jah_voxel_sample.glsl, jahVoxelPos0Centred)
+			vec3 q = b == dom ? centre : front;
+			q[b] = ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b] - sJ[b];
+			if( dot( q, nLS ) > epsJ )
+				return true;
+		}
 	}
-	if( other > 0.0 || !( cP[n] + cN[n] > 0.0 ) )
-		return false;
-	// level 0 stores O x f, f the faces' place IN THE CELL (jah_voxel_sample.glsl, jahVoxelPos0Centred)
-	const float pP = JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[n];
-	const float pN = JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[n];
-	const float cell = invRes[n];
-	if( cP[n] > 0.0 && ( ( pP / cP[n] + float( iv[n] ) ) * cell - org.y ) * org.z > cell )
-		return false;
-	if( cN[n] > 0.0 && ( ( pN / cN[n] + float( iv[n] ) ) * cell - org.y ) * org.z > cell )
-		return false;
-	return true;
+	return !any;	// (occupied with no coverage read: a hit - never a leak on a quantum)
 }
 
-/// THE RAY from `posLS0` (cascade 0's normalised space; a cache's caller starts it off its surface: jahConeStart) along
-/// the unit `dirLS` (the same space; the chain's cascades are cubes, so it is every cascade's direction), with the
-/// origin plane `origin` (jahConeOrigin; kJahVoxelNoOrigin for a ray in free space) and the last cascade's world shell
-/// `lastShellC0` (cascade 0's normalised units from the start; 0 or less: its box alone).
-JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastShellC0 )
+/// THE RAY from `posLS0` (cascade 0's normalised space; a cache's caller starts it `epsC0` off its surface) along the
+/// unit `dirLS` (the same space; the chain's cascades are cubes, so it is every cascade's direction); the surface it left
+/// - its point `surfLS0` and unit normal `nLS` (zero: a ray in free space, no surface) - and the voxel side's own cell
+/// `ownCell` (xyz in cascade 0's cells, w 1; w 0: none); the first cascade's world shell end `firstShellC0` (0 or
+/// less: its eight cells - the finest cascade's own D) and the last cascade's world shell `lastShellC0` (cascade 0's
+/// normalised units from the start; 0 or less: its box alone).
+JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, float epsC0, ivec4 ownCell,
+							   float firstShellC0, float lastShellC0 )
 {
 	JahVoxelRayResult r;
 	r.radiance = vec3( 0.0, 0.0, 0.0 );
@@ -108,9 +124,12 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastS
 	r.cascade = 0;
 	r.tC0 = 0.0;
 	r.steps = 0;
-	if( !finite3( posLS0 ) || !finite3( dirLS ) || !finite1( lastShellC0 ) || !finite1( origin.y ) )
+	if( !finite3( posLS0 ) || !finite3( dirLS ) || !finite1( lastShellC0 ) || !finite3( surfLS0 ) || !finite3( nLS ) ||
+		!finite1( epsC0 ) || !finite1( firstShellC0 ) )
 		return r;
+	const bool surface = dot( nLS, nLS ) > 0.0;
 	vec3 posJ = posLS0;		// the start, in cascade j's normalised space
+	vec3 surfJ = surfLS0;	// ...and the surface point
 	float s0j = 1.0;		// cascade 0's normalised units to cascade j's (one scale: cubes)
 	float shellC0 = 0.0;	// D_j, cascade 0's units from the start
 	float tCur = 0.0;		// how far the ray has been read, cascade 0's units
@@ -119,12 +138,12 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastS
 	{
 		const vec3 invRes = JAH_VOX_INVRES( j );
 		const vec3 res = vec3( 1.0, 1.0, 1.0 ) / invRes;
-		shellC0 += 8.0 * invRes.x / s0j;
+		shellC0 += j == 0 && firstShellC0 > 0.0 ? firstShellC0 : 8.0 * invRes.x / s0j;
 		const bool last = j + 1 >= JAH_VOX_COUNT;
-		// THE NEXT CASCADE's map of the start and of the origin plane (computed here, indexed j + 1 >= 1)
+		// THE NEXT CASCADE's map of the start and of the surface point (computed here, indexed j + 1 >= 1)
 		vec3 posN = posJ;
+		vec3 surfN = surfJ;
 		float s0n = s0j;
-		vec4 orgN = origin;
 		vec3 resN = res;
 #if JAH_VOX_MAX_CASCADES > 1
 		if( !last )
@@ -132,12 +151,8 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastS
 			const vec4 sc = JAH_VOX_FROM_PREV_SCALE( j + 1 );
 			const vec4 of = JAH_VOX_FROM_PREV_OFFSET( j + 1 );
 			posN = posJ * sc.xyz + of.xyz;
+			surfN = surfJ * sc.xyz + of.xyz;
 			s0n = s0j * sc.x;
-			if( origin.x >= 0.0 )
-			{
-				const int n = clamp( int( origin.x ), 0, 2 );
-				orgN.y = origin.y * sc[n] + of[n];
-			}
 			resN = vec3( 1.0, 1.0, 1.0 ) / JAH_VOX_INVRES( j + 1 );
 		}
 #endif
@@ -190,7 +205,17 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastS
 				++r.steps;
 				const vec3 uvw = ( vec3( iv ) + 0.5 ) * invRes;
 				const vec4 iso = JAH_VOX_SAMPLE_ISO( j, uvw, 0.0 );
-				if( iso.w > 0.0 && !jahVoxelRayOriginOnly( j, uvw, iv, origin, invRes ) )
+				const bool own = j == 0 && ownCell.w > 0 && all( equal( iv, ownCell.xyz ) );
+				const bool front = iso.w > 0.0 && ( !surface || jahVoxelRayFront( j, uvw, iv, surfJ, nLS, epsC0 * s0j, invRes ) );
+				if( front && own )
+				{
+					// a face in front inside the side's own cell: blocked there, dark (the header)
+					r.exitReason = kJahRayHit;
+					r.cascade = j;
+					r.tC0 = tIn;
+					return r;
+				}
+				if( front )
 				{
 					// THE SIDE FACING THE RAY (the header), un-premultiplied
 					const vec4 bk = JAH_VOX_SAMPLE_BACK( j, uvw, 0.0 );
@@ -229,8 +254,8 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec4 origin, float lastS
 			return r;
 		}
 		posJ = posN;
+		surfJ = surfN;
 		s0j = s0n;
-		origin = orgN;
 	}
 	return r;
 }

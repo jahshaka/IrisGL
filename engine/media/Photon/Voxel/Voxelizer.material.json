@@ -197,7 +197,7 @@
             "threads_per_group" : [4, 4, 4],
 
             "source" : "LightVctBounceInject_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "LightVctBounceInject_piece_cs.any"],
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "LightVctBounceInject_piece_cs.any"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 

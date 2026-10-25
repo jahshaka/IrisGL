@@ -32,8 +32,8 @@
 ///       (JAH_MARCH_ONE_STEP) - what the march itself reads there, through its loop
 const uint kJahParityAxisRead = 65536u;
 /// ...or, with the flag kJahParityRay (PHOTON-7 stage 10, 10-1), THE OCCUPANCY RAY (jah_voxel_ray.glsl) from posLS
-/// along dirLS, its origin plane from biasDirLS (zero: a ray in free space), its last world shell the fourth float4's
-/// y (cascade 0's units; 0: the last box alone):
+/// along dirLS, the surface it left one cell of cascade 0 behind it along biasDirLS (zero: a ray in free space), its
+/// last world shell the fourth float4's y (cascade 0's units; 0: the last box alone):
 ///   [0] its hit's radiance and its exit reason (kJahRay*), [1] its distance (cascade 0's units), the cascade it ended
 ///   in, the cells it read; [2], [3] zero.
 const uint kJahParityRay = 131072u;
@@ -49,7 +49,8 @@ vec4 jahParityAnswer( int cone, int part )
 	int cascade = int( c2.w );
 	if( ( rawFlags & kJahParityRay ) != 0u )
 	{
-		const JahVoxelRayResult ray = jahVoxelRay( c0.xyz, c1.xyz, jahConeOrigin( c0.xyz, c2.xyz ), c3.y );
+		const float eps = JAH_VOX_INVRES( 0 ).x;
+		const JahVoxelRayResult ray = jahVoxelRay( c0.xyz, c1.xyz, c0.xyz - c2.xyz * eps, c2.xyz, eps, ivec4( 0 ), 0.0, c3.y );
 		if( part == 0 )
 			return vec4( ray.radiance, float( ray.exitReason ) );
 		if( part == 1 )

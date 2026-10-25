@@ -675,18 +675,17 @@
 			}
 		}
 	}
-	// a one-sided voxel's two sides are its one light (today's isotropic semantics, kept: the per-side physics of a
-	// one-sided wall is VOXEL-LEAK-1's)
-	if( !twoSided )
-		back = front;
+	// A ONE-SIDED VOXEL'S BACK IS THE INSIDE OF A SOLID (PHOTON-7 stage 10, 10-1; the spec's ONE-SIDED WRITE; L9): it
+	// stores 0 - a ray that meets the face from behind reads nothing (a back face is 0), where the one light written to
+	// both sides let a sunlit outer face light the room behind it. Its emission is the front's alone too.
 
 	const float3 emissive = emissiveVal.xyz;
 	wshort3 voxelCelUvw = wshort3( jahInjCell );
 	// LEVEL 0 HOLDS THE TWO SIDES (PHOTON-7 stage 7): the FRONT here (lightVoxel and its direct copy) and the back
 	// beside it (backVoxel, below) - their mean is taken at the read, never a side derived from a stored mean
-	// (jah_voxel_sample.glsl says why). A one-sided voxel writes its one light to both.
+	// (jah_voxel_sample.glsl says why). A one-sided voxel's back holds 0 (above).
 	float4 injectedVoxel = float4( ( front + emissive ) * c, c );
-	const float4 backVoxelVal = float4( ( back + emissive ) * c, c );
+	const float4 backVoxelVal = float4( twoSided ? ( back + emissive ) * c : float3( 0, 0, 0 ), c );
 @property( jah_inject_delta )
 	// THE DELTA (PHOTON-7 stage 2; PREFLIGHT_1_2 W1): at a scroll's commit the direct term REPLACES ITS OLD SELF inside
 	// each side - front += Df_new - Df_old, back += Db_new - Db_old, each against ITS OWN store's read-back (never one

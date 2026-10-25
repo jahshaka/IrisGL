@@ -303,6 +303,11 @@ struct CardSceneView {
     float cloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     float cloudSun[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     unsigned indirectBudgetTexels = 0u;
+    /// THE INDIRECT HALF'S RAYS (PHOTON-7 stage 10, 10-1): how many a texel (GiQualityFacts::cardIndirectRays), and the
+    /// last cascade's WORLD SHELL in metres - the outermost cascade's guaranteed radius (GiStatus::CascadeStatus): a ray
+    /// that has read that far from its start unhit has left every placement's world, and is the sky's.
+    unsigned indirectRays = 16u;
+    float rayLastShell = 0.0f;
     /// THE AMBIENT AT GI OFF (PHOTON-CARDS-5): the scene's own SH, 27 floats in
     /// world axes (Scene::setAmbientSh's order: the sky's SH x the Sky Light's
     /// gain, exactly what the engine pushes to HlmsPbs). With no chain the
@@ -774,6 +779,8 @@ private:
     Ogre::UavBufferPacked *mGiBuffer = nullptr;
     std::vector<float> mGiCpu;
     Ogre::PhotonVoxelLighting *mVct = nullptr;
+    unsigned mIndirectRays = 16u;   // CardSceneView::indirectRays
+    float mRayLastShell = 0.0f;     // CardSceneView::rayLastShell, metres
     /// This frame's cloud shadow (CardSceneView's), for the relight.
     Ogre::TextureGpu *mCloudField = nullptr;
     float mCloudMap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

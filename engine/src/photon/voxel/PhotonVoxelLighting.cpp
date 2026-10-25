@@ -285,6 +285,8 @@ namespace Ogre
         mBounceEnvGainMips = addLocalBounceShaderParam( "envGainMips" );
         mBounceEnvSh = addLocalBounceShaderParam( "envSh" );
         mBounceBrickMark = addLocalBounceShaderParam( "brickMark" );
+        mBounceRayParams = addLocalBounceShaderParam( "rayParams" );
+        mBounceRayCounts = addLocalBounceShaderParam( "rayCounts" );
 
         // THE FEEDBACK'S JOBS (PHOTON-7 stage 4; Voxelizer.material.json), shared by name like the bounce's.
         mFeedbackJob = hlmsCompute->findComputeJob( "Photon/BrickFeedback" );
@@ -696,9 +698,9 @@ namespace Ogre
         // the surface position per half, the list's last entries - bound after the probe
         // sets and before `directVoxel`.
         uint8 numNeededTexUnits = 10u + 8u * static_cast<uint8>( numExtraCascades ) + 1u;
-        // PHOTON-7 stage 7: + every cascade's BACK SIDE (the store holds the two sides; this job's gather reads their
-        // mean), the array after the surface position
-        numNeededTexUnits += static_cast<uint8>( 1u + numExtraCascades );
+        // PHOTON-7 stage 7: + every cascade's BACK SIDE (the store holds the two sides), the array after the surface
+        // position; stage 10, 10-1: + every cascade's NORMAL after it (a ray's hit reads the side facing it)
+        numNeededTexUnits += static_cast<uint8>( 2u * ( 1u + numExtraCascades ) );
         // Jahshaka (PHOTON-ENV-1): +1 for the environment cube, at the very last unit
         // (after `directVoxel`) and only while one is set - the job's `jah_env`
         // property says so to the shader, and it is re-asserted per dispatch with
@@ -830,6 +832,19 @@ namespace Ogre
                 mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u, mSamplerblockTrilinear );
             }
         }
+        // PHOTON-7 stage 10, 10-1: every cascade's NORMAL, sampled at a hit (the side facing the ray) - this cascade's
+        // first, then the outer ones
+        for( size_t cascadeIdx = 0u; cascadeIdx < numExtraCascades + 1u; ++cascadeIdx )
+        {
+            PhotonVoxelLighting *owner = cascadeIdx == 0u ? this : mExtraCascades[cascadeIdx - 1u];
+            texSlot.texture = owner->mLightVoxel[owner->normalIndex()];
+            mLightVctBounceInject->setTexture( texSlotIdx++, texSlot, 0, false );
+            if( bSetSamplerNow )
+            {
+                hlmsManager->addReference( mSamplerblockTrilinear );
+                mLightVctBounceInject->_setSamplerblock( texSlotIdx - 1u, mSamplerblockTrilinear );
+            }
+        }
 
         // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, at the last unit. Read with a plain
         // Load3D at the voxel being written, so it needs no sampler of its own (the
@@ -887,7 +902,7 @@ namespace Ogre
         // every cascade), then `directVoxel` (JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076)) and voxelEmissiveTex
         // (PHOTON-WRITER-1). It was compared with a unit count (8 + 6e + 2 / 5 + 3e + 2), which the
         // list never had, so the "glsl" list was rebuilt and set dirty on every bounce dispatch.
-        const size_t numTextureVariables = 9u;   // (PHOTON-7 stage 7: + the backs)
+        const size_t numTextureVariables = 10u;   // (PHOTON-7 stage 7: + the backs; stage 10: + the normals)
         const size_t numNeededParams = 2u + numTextureVariables + 4u;
 
         // This code assumes there's 2 textures at the beginning that always stays the same
@@ -907,8 +922,8 @@ namespace Ogre
             // Jahshaka (PHOTON-VOXEL-3/-4): + the coverage and the surface position per
             // half-axis, the last four arrays.
             const char *names[4] = { "vctProbes", "vctProbeX", "vctProbeY", "vctProbeZ" };
-            const char *splitNames[5] = { "vctProbeCovP", "vctProbeCovN", "vctProbePosP",
-                                          "vctProbePosN", "vctProbeBack" };
+            const char *splitNames[6] = { "vctProbeCovP", "vctProbeCovN", "vctProbePosP",
+                                          "vctProbePosN", "vctProbeBack", "vctProbeNrm" };
 
             for( size_t i = 0u; i < numTextureVariables; ++i )
             {
@@ -1190,6 +1205,18 @@ namespace Ogre
         {
             const uint32 mark[4] = { 1u, mBrickDims[0], mBrickDims[1], 0u };
             mBounceBrickMark->setManualValue( mark, 4u );
+        }
+        // THE CACHE RAYS (PHOTON-7 stage 10, 10-1): this cascade's world origin (a voxel's world key) and the last
+        // world shell in its normalised units (a cube: one size), the rays a side
+        {
+            const Vector3 o = mVoxelizer->getVoxelOrigin();
+            const Vector3 size = mVoxelizer->getVoxelSize();
+            const float rayParams[4] = { o.x, o.y, o.z, size.x > 0.0f ? mCacheRayShell / size.x : 0.0f };
+            mBounceRayParams->setManualValue( rayParams, 4u );
+            const float rayCounts[4] = { float( std::max( mCacheRays, 1u ) ),
+                                         size.x > 0.0f ? mCacheRayBias / size.x : 0.0f,
+                                         size.x > 0.0f ? mCacheRayFirstShell / size.x : 0.0f, 0.0f };
+            mBounceRayCounts->setManualValue( rayCounts, 4u );
         }
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );

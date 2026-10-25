@@ -910,6 +910,8 @@ public:
     /// The cards' frame: the cache built, fed and updated (engine.cards, once a frame).
     void updateSurfaceCache();
     void updateSurfaceCacheFrame(bool &built);
+    /// THE CACHE RAYS' LAST WORLD SHELL, metres (PHOTON-7 stage 10, 10-1): the outermost cascade's guaranteed radius.
+    float rayLastShellMetres() const;
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out);

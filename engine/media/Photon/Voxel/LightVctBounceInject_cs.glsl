@@ -40,8 +40,12 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value(
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
 // PHOTON-7 stage 7: every cascade's BACK SIDE, after the surface position (VctLighting::setupBounceTextures' order): the
-// store holds the two sides (vctProbes the front) and the march's level-0 read here takes their MEAN.
+// store holds the two sides (vctProbes the front); a ray's hit reads the side facing it (stage 10, jah_voxel_ray.glsl).
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
+@add( vctTexUnit, hlms_num_vct_cascades )
+// PHOTON-7 stage 10, 10-1: every cascade's NORMAL (the voxeliser's: the canonical normal of a two-sided voxel says which
+// side is the front), after the backs - the side a ray's hit reads.
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeNrm[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
 
 // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, at the unit after every probe array (the
@@ -124,6 +128,11 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform float4 envSh[9];
 	// PHOTON-7 stage 3: yz = the bricks along x and y (the mask's and the state's index).
 	uniform uint4 brickMark;
+	// PHOTON-7 stage 10, 10-1: THE CACHE RAYS - xyz this cascade's volume origin (world: a voxel's world key), w the
+	// last world shell (this cascade's normalised units); and x the rays a side, y the start bias (the finest cascade's
+	// cell, in this cascade's normalised units), z this cascade's own world shell end D (the same units)
+	uniform float4 rayParams;
+	uniform float4 rayCounts;
 vulkan( }; )
 
 #define p_voxelCellSize voxelCellSize
@@ -133,6 +142,8 @@ vulkan( }; )
 #define p_vctFromPreviousProbeToNext fromPreviousProbeToNext
 #define p_envGainMips envGainMips
 #define p_envSh envSh
+#define p_rayParams rayParams
+#define p_rayCounts rayCounts
 #define p_brickMark brickMark
 
 @insertpiece( HeaderCS )

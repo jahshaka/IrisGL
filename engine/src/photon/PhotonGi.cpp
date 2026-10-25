@@ -811,6 +811,16 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
     // THE BOUNCES ARE THE FEEDBACK'S (PHOTON-7 stage 4): bounces off is THE DIRECT STORE ALONE (BOUNCES-ZERO-1) - no
     // pass ever runs, so no surface re-emits the sky or another surface.
     lighting->setFeedbackOn(mGi.bounces);
+    // THE CACHE RAYS (PHOTON-7 stage 10, 10-1): the bounce's rays a side and the world shell they read to
+    {
+        // the world's shell end of THIS cascade: eight cells of every cascade up to it (jah_voxel_ray.glsl)
+        float shellEnd = 0.0f;
+        for (size_t k = 0; k <= i && k < mVctCascades.size(); ++k) shellEnd += 8.0f * mVctCascades[k].cell();
+        lighting->setCacheRays(rayLastShellMetres(),
+                               giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr : GiViewProfile::Desktop)
+                                   .voxelBounceRays,
+                               mVctCascades.empty() ? 0.0f : mVctCascades.front().cell(), shellEnd);
+    }
     lighting->setLightFrame(frame);
     // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's
     // light starts there and every brick resumes the feedback; a DELTA keeps what the feedback built (setCommitLight).
@@ -1702,16 +1712,27 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lig
             for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
             out.available = true;
         };
-        // THE TWO SIDES, THE TOTAL THEIR MEAN (PHOTON-7 stage 7: the store holds the front and the back): `lightFront`
-        // and `lightBack` as stored, `light` derived exactly as a reader takes it
+        // THE TWO SIDES (PHOTON-7 stage 7: the store holds the front and the back): `lightFront` and `lightBack` as
+        // stored, and `light` THE VOXEL'S LIGHT - a two-sided voxel's the sides' mean (what a read edge-on takes), a
+        // one-sided voxel's its front (its back is the inside of a solid and stores 0: PHOTON-7 stage 10's one-sided
+        // write) - so the number is what it was before that write for every voxel. The voxeliser's normal says which.
+        // PHOTON-VOXEL-5: the voxelizer's normal (every tier), read here for both paths.
+        out.normal.clear();
+        {
+            Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
+            if (!nrm || !grab(nrm, out.normal)) return false;
+        }
         {
             Ogre::TextureGpu *backTex = lighting->getLightVoxelTextures()[lighting->backIndex()];
             std::vector<float> backVals;
             if (!backTex || !grab(total, out.lightFront) || !grab(backTex, backVals) ||
-                backVals.size() != out.lightFront.size())
+                backVals.size() != out.lightFront.size() || out.normal.size() != out.lightFront.size())
                 return false;
             out.light.resize(out.lightFront.size());
-            for (size_t i = 0; i < out.light.size(); ++i) out.light[i] = 0.5f * (out.lightFront[i] + backVals[i]);
+            for (size_t i = 0; i < out.light.size(); ++i) {
+                const bool twoSided = out.normal[(i & ~size_t(3)) + 3u] > 0.5f;
+                out.light[i] = twoSided || (i & 3u) == 3u ? 0.5f * (out.lightFront[i] + backVals[i]) : out.lightFront[i];
+            }
             out.lightBack = std::move(backVals);
         }
         if (lightOnly) {   // Scene::giVoxelLight: the total alone (and the two sides it came from)
@@ -1722,12 +1743,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lig
             !grab(coverage[1], out.coverageN) || !grab(position[0], out.positionP) ||
             !grab(position[1], out.positionN))
             return false;
-        // PHOTON-VOXEL-5: the voxelizer's normal (every tier; level 0's back side was taken with the front, above).
-        out.normal.clear();
-        {
-            Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
-            if (!nrm || !grab(nrm, out.normal)) return false;
-        }
+        // (PHOTON-VOXEL-5: the voxelizer's normal was read with the two sides, above.)
         // ENGINE-UPGRADE-U5 (decision 11 g): the emissive, and the build's raw integers.
         if (!grab(voxelizer->getEmissiveVox(), out.emissive)) return false;
         if (!grab(voxelizer->getEmitVox(0), out.emitP) || !grab(voxelizer->getEmitVox(1), out.emitN)) return false;
@@ -8453,6 +8469,21 @@ void PhotonComponent::updateSurfaceCache() {
     syncUpdatePass(built);
 }
 
+/// THE CACHE RAYS' LAST WORLD SHELL (PHOTON-7 stage 10, 10-1; jah_voxel_ray.glsl): the outermost cascade's GUARANTEED
+/// RADIUS (Types.h's giCascadeGuaranteedRadius, through its own function) - the ball about the head its box covers at
+/// every placement, so a ray from near the head that has read that far unhit has left every placement's world and is
+/// the sky's, whichever way the scroll's hysteresis put the box. A ray from farther out may meet the box's face first:
+/// THE BAND, that ray the placement's.
+float PhotonComponent::rayLastShellMetres() const {
+    if (mVctCascades.empty()) return 0.0f;
+    const VctCascade &c = mVctCascades.back();
+    GiParams::GiCascadeDesc shape;
+    shape.halfSize   = c.halfSize;
+    shape.resolution = int(c.resolution);
+    shape.stepCells  = c.stepCells;
+    return std::max(giCascadeGuaranteedRadius(shape), 0.0f);
+}
+
 void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // THE CARDS RUN ONLY WHERE RAYS RUN (PHOTON-CARDS-2; ATOM-S3-CARDCAP): every
     // reader of a card is a ray job's hit (rq_reflect.comp, the gather,
@@ -8510,6 +8541,8 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // from) and its budget.
     view.vct = mVctLighting;
     view.indirectBudgetTexels = facts.cardIndirectTexels;
+    view.indirectRays = facts.cardIndirectRays;
+    view.rayLastShell = rayLastShellMetres();
     // THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: the light-walk fold of every lamp (C4) and the
     // re-injection signature folding every rest and commit (C5) are DELETED): the frame's LAMP regions stale the direct
     // half of the cards they meet, its SLAB regions (a commit's entering and leaving slabs) their indirect half; the sun's
