@@ -1,13 +1,15 @@
 // THE DIFFUSE CONE INTEGRATOR — the one copy (PHOTON-CARDS-2 part A; the
 // CARDS-1 audit's F3, the one-reader law).
 //
-// WHO READS IT. The pixel's passes that still march cones (the blended and refractive
-// ones, PhotonVct_piece_ps.any; the no-ray route's screen integrate), through the piece
-// `JahVoxelCones` the build WRAPS this file into (irisgl/engine/CMakeLists.txt). The
-// world caches - the bounce-injection job (Photon/Voxel/LightVctBounceInject_piece_cs.any)
-// and the surface cache's card job (Hlms/Jahshaka/JahCardLight_cs.glsl) - GATHER BY RAYS
-// (PHOTON-7 stage 10, jah_voxel_ray.glsl) and take only this file's frame and start bias:
-// the sky's sixteen-cone share they read (jahSkyShareFine) is deleted with their cones. Before this file the integrator — the cone
+// WHO READS IT. THE DIFFUSE IS GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L5: ONE
+// estimator, jahRayDiffuse below over jah_voxel_ray.glsl): the surface cache's card job
+// (Hlms/Jahshaka/JahCardLight_cs.glsl), the bounce-injection job
+// (Photon/Voxel/LightVctBounceInject_piece_cs.any), the no-ray route's screen integrate and
+// the pixel's passes where no field answers (Photon/Hlms/PhotonVct_piece_ps.any) - through
+// the piece `JahVoxelCones` the build WRAPS this file into (irisgl/engine/CMakeLists.txt).
+// The four-cone diffuse set (jahDiffuseCones) and the sky's sixteen-cone share
+// (jahSkyShareFine) are deleted. What still marches a cone is the SPECULAR lobe
+// (jahSpecularCone, below). Before this file the integrator — the cone
 // frame, the two cone sets, their weights and apertures, the start bias, the
 // escape weight — existed three times: the pixel's, a line-for-line copy in the
 // card job, and the bounce job's own (a cross-product frame about world X and
@@ -15,10 +17,10 @@
 // pixel's were two integrals of one volume; now they are one text.
 //
 // WHAT IT IS NOT: the march. Every cone is walked by jahConeMarch
-// (jah_voxel_march.glsl, the piece JahVoxelMarch) and every escape reads the
-// one environment (jah_environment.glsl, the piece JahEnvironment: the diffuse
-// set its SH irradiance, the fine sky set its cone lookup); both pieces are
-// inserted BEFORE this one.
+// (jah_voxel_march.glsl, the piece JahVoxelMarch), every ray by jahVoxelRay
+// (jah_voxel_ray.glsl, the piece JahVoxelRay), and every escape reads the one
+// environment (jah_environment.glsl, the piece JahEnvironment); the three pieces
+// are inserted BEFORE this one.
 //
 // HOW A CALLER BINDS IT — the march's macros and the environment's, and:
 //
@@ -135,52 +137,48 @@ vec4 jahSpecularConeStart( vec3 surfaceLS, vec3 dirLS, vec3 biasDirLS )
 	return vec4( surfaceLS + step, length( step ) );
 }
 
-/// THE DIFFUSE GI AT A SURFACE POINT: the cone set walked from `posLS` (already
-/// off the surface: jahConeStart), in the frame `basis` (third axis = the
-/// normal, in the caller's space).
-///   `light`  the voxels' share, weighted — radiance, as the store holds it
-///            (PHOTON-7 stage 1: nothing to decode)
-///   `envD`   the environment's share: each cone's ESCAPE (the part of the cone
-///            the voxels did not stop, the march's escape estimate, not the
-///            colour's opacity — they differ only where the anisotropic volumes
-///            are read) times the one environment IN THAT CONE'S DIRECTION AT
-///            THAT CONE'S APERTURE, weighted — radiance, in whatever units the
-///            caller bound the environment in
-/// THE CONE SET: four cones at 45 degrees, 0.25 each, tan 0.98269 = 44.5 degrees
-/// (the one set: upstream's six-cone alternative is deleted, SIX-CONE-DEAD-1). The
-/// weights carry the cosine. Each cone's escape reads its azimuthal QUADRANT of the
-/// hemisphere, cosine-weighted (jahEnvQuadrant, PHOTON-I-1): the four quadrants sum
-/// to the exact irradiance. With no environment cube the quadrant reads the nine-band
-/// SH at the set's own band weights 1 / P_l( cos 45 ) = sqrt( 2 ), 4 (CARD-VIEW-BIAS-1:
-/// a ring of N >= 3 directions at polar angle t averages a band-l harmonic to
-/// P_l( cos t ) times its value on the normal, so those weights make the open-sky sum
-/// the SH irradiance exactly).
-void jahDiffuseCones( vec3 posLS, vec4 origin, mat3 basis,
-					  out vec3 light, out vec3 envD )
+/// THE DIFFUSE GI AT A SURFACE POINT, GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L5: ONE estimator; L9: no light
+/// passes a wall) - the world caches' (the card relight, the bounce's voxel sides) and the pixel's where it reads no
+/// field (the no-ray route's screen integrate; the blended and refractive passes): the cosine-weighted mean radiance over
+/// the hemisphere as the mean of `rays` fixed cosine-distributed occupancy rays (jah_voxel_ray.glsl) turned by `turn`
+/// about the normal. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world
+/// shell `lastShellC0`, or its box in the band) the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N);
+/// an EXHAUSTED ray is no sample (the mean is over the rays that are). The sky enters ONLY at an earned miss.
+/// `surfLS` the surface point and `nLS` its unit normal (cascade 0's normalised space), `basis` the frame whose third
+/// axis is the normal (the caller's space: JAH_CONES_TO_LS / _TO_WORLD take its directions to the volume and the
+/// world), `epsC0` the start's offset along the normal (cascade 0's units), `ownCell` the voxel side's own cell
+/// (w 0: none), `firstShellC0` its chain's first world shell end (0: the finest cascade's own).
+/// THE PIXEL'S RAYS (the no-ray route's screen integrate and the passes where no field answers): one count for both, so
+/// the two routes are one integral (gi.screen_integrate). A pixel is recomputed every frame, so it traces fewer than a
+/// cache texel, at a fixed turn (smooth across a surface; a per-pixel key would be noise).
+const int kJahPixelDiffuseRays = 8;
+
+vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float turn, float epsC0, ivec4 ownCell,
+					float firstShellC0, float lastShellC0 )
 {
-	const int kCones = 4;
-	const vec3 coneDirs[4] = vec3[4]( vec3( 0.707107, 0.0, 0.707107 ),
-									  vec3( 0.0, 0.707107, 0.707107 ),
-									  vec3( -0.707107, 0.0, 0.707107 ),
-									  vec3( 0.0, -0.707107, 0.707107 ) );
-	const float coneWeights[4] = float[4]( 0.25, 0.25, 0.25, 0.25 );
-	const float coneAngleTan = 0.98269;
-	const uint coneFlags = 0u;
-	light = vec3( 0.0, 0.0, 0.0 );
-	envD = vec3( 0.0, 0.0, 0.0 );
-	for( int i = 0; i < kCones; ++i )
+	const int n = max( rays, 1 );
+	const vec3 startLS = surfLS + nLS * epsC0;
+	const float binCos = 1.0 - 1.0 / float( n );
+	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+	vec3 sum = vec3( 0.0, 0.0, 0.0 );
+	float taken = 0.0;
+	for( int i = 0; i < n; ++i )
 	{
-		vec3 d = basis * coneDirs[i];
-		vec4 coneOrigin = origin;
-		coneOrigin.w = jahConeBelow( normalize( d ), basis[2], coneAngleTan );
-		JahConeResult result = jahConeMarch( posLS, JAH_CONES_TO_LS( d ), coneAngleTan, coneOrigin, coneFlags );
-		light += coneWeights[i] * result.colour;
-		envD += coneWeights[i] * ( 1.0 - min( 1.0, result.alpha / 0.95 ) ) *
-				jahEnvQuadrant( JAH_CONES_TO_WORLD( d ), JAH_CONES_TO_WORLD( basis[2] ) );   // its quadrant, cosine-weighted
+		const vec3 d = basis * jahRayCosineDir( i, n, turn );
+		const JahVoxelRayResult r =
+			jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfLS, nLS, epsC0, ownCell, firstShellC0, lastShellC0 );
+		if( r.exitReason == kJahRayHit )
+		{
+			sum += r.radiance;
+			taken += 1.0;
+		}
+		else if( r.exitReason == kJahRayEscaped )
+		{
+			sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
+			taken += 1.0;
+		}
 	}
-	// THE SET'S SUM is what is clamped, never a cone (jahEnvQuadrant's note): the four
-	// quadrants' exact sum survives a negative band-weighted quadrant.
-	envD = max( envD, vec3( 0.0, 0.0, 0.0 ) );
+	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0, 0.0, 0.0 );
 }
 
 /// THE SPECULAR CONE AT A SURFACE POINT (PHOTON-7 stage 7, 7-6: ONE text for the pixel's passes that still bind the

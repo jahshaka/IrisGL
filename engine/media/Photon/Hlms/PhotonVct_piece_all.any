@@ -22,7 +22,7 @@
 		float specSdfMaxMip;
 		float specularSdfFactor;
 		float blendFade;
-		float padding0;	// (the decode multiplier D_max / pi, deleted: the voxels hold radiance - PHOTON-7 stage 1)
+		float rayLastShell;	// PHOTON-7 stage 10, 10-1: the diffuse rays' last world shell, cascade 0's normalised units
 
 		float4 xform_row0;
 		float4 xform_row1;

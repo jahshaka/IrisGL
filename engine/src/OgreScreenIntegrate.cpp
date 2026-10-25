@@ -294,6 +294,8 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
             chain[97] = pb[skip];
             chain[98] = pb[skip + 1u];
         }
+        // THE RAYS' LAST WORLD SHELL (PHOTON-7 stage 10, 10-1: the diffuse fallback's occupancy rays), cascade 0's units
+        chain[99] = size.x > 0.0 ? float(scene->photon().rayLastShellMetres() / size.x) : 0.0f;
         envCube = vct->getEnvironmentCube();
         const float *gain = vct->getEnvironmentGain();
         chain[100] = gain[0]; chain[101] = gain[1]; chain[102] = gain[2];

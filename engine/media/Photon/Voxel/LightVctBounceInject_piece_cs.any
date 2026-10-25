@@ -92,7 +92,7 @@
 	@insertpiece( JahVoxelCones )
 
 	/// THE BOUNCE GATHERED AT ONE SIDE OF A VOXEL, BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light passes a wall) - the
-	/// card relight's estimator (JahCardLight_cs.glsl, jahCardEnvColourD), one text of it: the cosine-weighted mean
+	/// card relight's estimator, ONE TEXT of it (jah_voxel_cones.glsl's jahRayDiffuse): the cosine-weighted mean
 	/// radiance over the side's hemisphere as the mean of N fixed, world-keyed, cosine-distributed occupancy rays
 	/// (jah_voxel_ray.glsl), N = p_rayCounts.x. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the
 	/// last cascade: its world shell p_rayParams.w, or its box in the band) the sky over the ray's bin; an EXHAUSTED ray
@@ -120,30 +120,8 @@
 		// own cell, which would jump a slab thinner than it (the roof's top 0.4 m above a contact face in a 0.47 m cell:
 		// gi.sealed_sky)
 		const float eps = p_rayCounts.y;
-		const float3 startLS = surfaceLS + normalLS * eps;
-		const float3x3 basis = jahConeBasisWorld( nWorld );
-		const int rays = max( int( p_rayCounts.x ), 1 );
-		const float binCos = 1.0 - 1.0 / float( rays );
-		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
-		float3 sum = float3( 0, 0, 0 );
-		float taken = 0.0;
-		for( int i = 0; i < rays; ++i )
-		{
-			const float3 d = basis * jahRayCosineDir( i, rays, turn );
-			const JahVoxelRayResult r = jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfaceLS, normalLS, eps,
-													 int4( cell, 1 ), p_rayCounts.z, p_rayParams.w );
-			if( r.exitReason == kJahRayHit )
-			{
-				sum += r.radiance;
-				taken += 1.0;
-			}
-			else if( r.exitReason == kJahRayEscaped )
-			{
-				sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
-				taken += 1.0;
-			}
-		}
-		return taken > 0.0 ? sum * ( 1.0 / taken ) : float3( 0, 0, 0 );
+		return jahRayDiffuse( surfaceLS, normalLS, jahConeBasisWorld( nWorld ), int( p_rayCounts.x ), turn, eps,
+							  int4( cell, 1 ), p_rayCounts.z, p_rayParams.w );
 	}
 
 	@insertpiece( DeclSRgbFuncs )

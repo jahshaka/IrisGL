@@ -311,7 +311,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 
 	// THE TEXEL'S DIFFUSE GI at world point P with normal N, GATHERED BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light
 	// passes a wall): envColourD - the cosine-weighted mean radiance over the hemisphere - as the mean of N fixed,
-	// world-keyed, cosine-distributed occupancy rays through the chain (jah_voxel_ray.glsl), N = counts.z. A HIT reads
+	// world-keyed, cosine-distributed occupancy rays through the chain (jah_voxel_cones.glsl's jahRayDiffuse, the one
+	// text the bounce and the pixel run too), N = counts.z. A HIT reads
 	// the side of the voxel facing the ray; an ESCAPE (out of the last cascade: its world shell, counts.y, or its box in
 	// the band) reads the sky over the ray's bin (a cone of the bin's solid angle, 2 pi / N); an EXHAUSTED ray is no
 	// sample (the mean is over the rays that are). The sky enters ONLY at an earned miss: the four-cone set's escape
@@ -322,33 +323,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 	{
 		const vec3 surfLS = ( P - gp.volumeOrigin.xyz ) * gp.volumeInvSize.xyz;
 		const vec3 biasDirLS = jahConeBiasDir( N * gp.volumeInvSize.xyz );
-		// one cell of cascade 0 off the surface (the chain's cascades are cubes: one cell length)
-		const float eps = JAH_VOX_INVRES( 0 ).x;
-		const vec3 posLS = surfLS + biasDirLS * eps;
-		const mat3 basis = jahConeBasisWorld( N );
-		const int rays = max( int( gp.counts.z ), 1 );
-		const float binCos = 1.0 - 1.0 / float( rays );
-		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
-		const float turn = jahRayWorldTurn( P, 0u );
-		vec3 sum = vec3( 0.0, 0.0, 0.0 );
-		float taken = 0.0;
-		for( int i = 0; i < rays; ++i )
-		{
-			const vec3 d = basis * jahRayCosineDir( i, rays, turn );
-			const JahVoxelRayResult r = jahVoxelRay( posLS, JAH_CONES_TO_LS( d ), surfLS, biasDirLS, eps, ivec4( 0 ), 0.0,
-													 gp.counts.y );
-			if( r.exitReason == kJahRayHit )
-			{
-				sum += r.radiance;
-				taken += 1.0;
-			}
-			else if( r.exitReason == kJahRayEscaped )
-			{
-				sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
-				taken += 1.0;
-			}
-		}
-		return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0, 0.0, 0.0 );
+		// one cell of cascade 0 off the surface (the chain's cascades are cubes: one cell length), the one integrator
+		return jahRayDiffuse( surfLS, biasDirLS, jahConeBasisWorld( N ), int( gp.counts.z ), jahRayWorldTurn( P, 0u ),
+							  JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0, gp.counts.y );
 	}
 @end
 

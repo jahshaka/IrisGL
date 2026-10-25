@@ -147,6 +147,7 @@
 	@end
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	@insertpiece( JahVoxelRay )
 
 	// THE ONE ENVIRONMENT, BOUND TO THE PIXEL SHADER (PHOTON-ENV-1): the binding, one text for this pass and the no-ray
 	// route's screen-cone pass (PhotonShared_piece_ps.any's JahPhotonEnvBinding, with its rationale).
@@ -183,22 +184,20 @@
 	}
 
 	@property( !vct_disable_diffuse )
-	// THE DIFFUSE CONES (JahVoxelCones): the voxels' share, and each cone's escape
-	// reading the one environment in that cone's direction at that cone's aperture -
-	// radiance, added after the voxels' decode. Under a field this runs from JahIfd's
-	// post hook, and only where the field's fallback weight is above zero (SPEED-GPU,
-	// audit PH-2): inside the field that weight is exactly 0 and the four marches were
-	// multiplied by it.
+	// THE DIFFUSE THE FIELD DOES NOT COVER, GATHERED BY THE WORLD CACHES' RAYS (PHOTON-7 stage 10, 10-1; the refresh's
+	// paths 4 and 7; L5: ONE estimator - jah_voxel_cones.glsl's jahRayDiffuse, the card relight's, the bounce's and the
+	// no-ray route's screen integrate's, at kJahPixelDiffuseRays), radiance. It was the four diffuse cones, whose
+	// ESCAPE let the sky through a wall and whose coverage let the voxels' light behind it through. Under a field this
+	// runs from JahIfd's post hook, and only where the field's fallback weight is above zero (SPEED-GPU, audit PH-2).
+	// `posLS` is the pixel's cone start (jahVctPixelStart: one cell of cascade 0 off the surface along the normal).
 	INLINE void jahVctDiffuse( OGRE_INOUT_REF( float3, outDiffuse ),
 							   float3 posLS, float4 jahOrigin, float3x3 TBN, VctProbeParams probeParams )
 	{
-		float3 light;
-		float3 jahEnvD;
-		jahDiffuseCones( posLS, jahOrigin, TBN, light, jahEnvD );
-		const float blend = 1.0f;
-		float blendWeight = probeParams.blendFade * blend;
-		// The voxels' share and the environment's are both radiance (PHOTON-7 stage 1: no decode multiplier).
-		outDiffuse.xyz += light.xyz * blendWeight + jahEnvD * ( probeParams.blendFade * blend );
+		const float3 biasDirLS = jahConeBiasDir( jahCubeToVctProbeSpaceDir( TBN[2], probeParams ) );
+		const float eps = JAH_VOX_INVRES( 0 ).x;
+		const float3 surfLS = posLS - biasDirLS * eps;
+		outDiffuse.xyz += jahRayDiffuse( surfLS, biasDirLS, TBN, kJahPixelDiffuseRays, 0.0, eps, int4( 0, 0, 0, 0 ), 0.0,
+										 probeParams.rayLastShell ) * probeParams.blendFade;
 	}
 	@end
 

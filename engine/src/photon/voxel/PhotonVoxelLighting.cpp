@@ -2356,7 +2356,8 @@ namespace Ogre
         // float specSdfMaxMip;
         // float specularSdfFactor;
         // float blendFade;
-        // float padding0; (PHOTON-7 stage 1: it was the decode multiplier D_max / pi - the voxels hold radiance)
+        // float rayLastShell; (PHOTON-7 stage 10, 10-1: the diffuse rays' last world shell in cascade 0's normalised
+        // units - setCacheRays; the slot was the decode multiplier D_max / pi until stage 1)
         *passBufferPtr++ = 7.0f + mipDiff;
         // Where did 0.1875f & 0.3125f come from? Empirically obtained.
         // At 128x128x128, values in range [24; 40] gave good results.
@@ -2365,7 +2366,10 @@ namespace Ogre
         // Thus 24 / 128 and 40 / 128 = 0.1875f and 0.3125f
         *passBufferPtr++ = Math::lerp( 0.1875f, 0.3125f, mSpecularSdfQuality ) * smallestRes;
         *passBufferPtr++ = 1.0f;
-        *passBufferPtr++ = 0.0f;
+        {
+            const Vector3 size = mVoxelizer->getVoxelSize();
+            *passBufferPtr++ = size.x > 0.0f ? mCacheRayShell / size.x : 0.0f;
+        }
 
         Matrix4 xform, invXForm;
         xform.makeTransform( -mVoxelizer->getVoxelOrigin() / mVoxelizer->getVoxelSize(),

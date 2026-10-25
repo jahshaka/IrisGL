@@ -96,7 +96,7 @@ struct ScreenGiParams
 	vec4 chainFromPrev[14];
 	vec4 volumeOrigin;	// xyz = cascade 0's volume origin, world
 	vec4 volumeInvSize;	// xyz = 1 / its size, world
-	vec4 counts;		// x = cascades, y = the specular SDF's max mip, z = its factor
+	vec4 counts;		// x = cascades, y = the specular SDF's max mip, z = its factor, w = the rays' last world shell
 	vec4 envGainMips;	// xyz = the Sky Light's gain on the cube, w = its mips
 	vec4 envSh[9];		// the environment's nine SH coefficients, world axes
 	// THE IRRADIANCE FIELD for an IDENTITY view (PhotonIrradianceField::fillConstBufferData: three rows world to grid,
@@ -175,9 +175,14 @@ layout( local_size_x = @value( threads_per_group_x ),
 	@end
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	@insertpiece( JahVoxelRay )
 	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * p.volumeInvSize.xyz )
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )
+
+	// THE DIFFUSE THE FIELD DOES NOT COVER IS GATHERED BY THE WORLD CACHES' RAYS (PHOTON-7 stage 10, 10-1; the refresh's
+	// path 4; L5: one estimator, jah_voxel_cones.glsl's jahRayDiffuse at kJahPixelDiffuseRays): it was the four-cone set,
+	// whose ESCAPE let the sky through a wall and whose coverage let the voxels' light behind it through too.
 @end
 
 @property( jah_si_field )
@@ -234,8 +239,9 @@ void main()
 	vec4 specular = vec4( 0.0, 0.0, 0.0, 1.0 );
 	float hitT = 0.0;
 @property( hlms_num_vct_cascades )
-	// THE CONE START (PhotonVct_piece_ps.any's jahVctPixelStart, in world space)
-	vec3 posLS = ( P - p.volumeOrigin.xyz ) * p.volumeInvSize.xyz;
+	// THE CONE START (PhotonVct_piece_ps.any's jahVctPixelStart, in world space) - the surface point kept for the rays
+	const vec3 surfLS = ( P - p.volumeOrigin.xyz ) * p.volumeInvSize.xyz;
+	vec3 posLS = surfLS;
 	const vec3 biasDirLS = jahConeBiasDir( normalize( N * p.volumeInvSize.xyz ) );
 	posLS = jahConeStart( posLS, biasDirLS );
 	const vec4 origin = jahConeOrigin( posLS, biasDirLS );
@@ -258,15 +264,11 @@ void main()
 		diffuse = a.irradiance;
 		const float fallback = 1.0 - a.confidence;
 	@property( hlms_num_vct_cascades > 1 )
-		// UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3): the cones, marched only
+		// UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3): the rays, traced only
 		// where the field's confidence leaves them a weight (SPEED-GPU, audit PH-2)
 		if( fallback > 0.0 )
-		{
-			vec3 light;
-			vec3 envD;
-			jahDiffuseCones( posLS, origin, basis, light, envD );
-			diffuse += ( light + envD ) * fallback;
-		}
+			diffuse += jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, 0.0, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
+									  p.counts.w ) * fallback;
 	@else
 		// ...UNDER A SINGLE VOLUME, the environment's diffuse (what an unoccluded surface had before the field)
 		if( fallback > 0.0 )
@@ -275,12 +277,8 @@ void main()
 	}
 @else
 	@property( hlms_num_vct_cascades )
-	{
-		vec3 light;
-		vec3 envD;
-		jahDiffuseCones( posLS, origin, basis, light, envD );
-		diffuse = light + envD;
-	}
+		diffuse = jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, 0.0, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
+								 p.counts.w );
 	@else
 		// NO VOLUME BUILT YET (the chain's first frames): the environment's diffuse
 		diffuse = jahEnvIrradiance( N );
