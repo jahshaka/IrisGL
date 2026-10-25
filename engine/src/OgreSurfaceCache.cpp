@@ -1170,9 +1170,14 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     // landed past the rest's completion (the period + the lag + the issue frame's one: owed_rows.py's bound). A reader
     // with no rest (none in view, or one that cannot rest) counts its stamps since the change.
     if (!demandOpen && !view.demandChanged && !mRestDecided && !mRestDue && view.readersRestComplete) {
+        // (THE WINDOW'S FIRST STAMP: the readers' rest length is as of their last record, a frame late - its n rest frames
+        // are the cache frames mFrame - n .. mFrame - 1, each stamped with its own (this frame's stamp is uploaded below,
+        // after the plan). One frame earlier took the last SETTLING frame's reads into the rest demand: measured on
+        // gi.card_residency (8), pillar 29's top card read at 573 in both held runs, its rest starting at 574 in one and
+        // 581 in the other - kept in one, drained in the other, the resident sets one card apart and 18.8 codes.)
         for (unsigned r = 0; r < kDemandReaders; ++r) {
             const unsigned long long n = view.readerRestFrames[r];
-            mRestStart[r] = n ? (mFrame > n + 1ull ? mFrame - n - 1ull : 1ull) : mDemandChangeFrame + 1ull;
+            mRestStart[r] = n ? (mFrame > n ? mFrame - n : 1ull) : mDemandChangeFrame + 1ull;
         }
         Ogre::RenderSystem *rsd = Ogre::Root::getSingleton().getRenderSystem();
         Ogre::VaoManager *vaod = rsd ? rsd->getVaoManager() : nullptr;
