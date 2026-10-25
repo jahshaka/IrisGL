@@ -1637,6 +1637,11 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (PHOTON-7 stage 5's read W3, gi.card_residency (5)): while set to N, the cache drops the GATHER's "
       "demand stamps (its cards' reads and its face marks) made within N frames of each demand change - the gather "
       "reads for the first time N frames after the change, a late first reader. 0 = shipped." },
+    { ArmId::CardForce, 0.0, -1.0e9, 1.0e9,
+      "A TEST DOOR (PHOTON-7 stage 10, L1's law in gi.card_residency): +(node x 64 + card) holds that card RESIDENT whatever "
+      "its demand (admitted as soon as its instance is offered, never drained or evicted); -(node x 64 + card) holds it "
+      "ABSENT (never admitted, evicted if resident). A card's presence must move its readers by under a code: the voxel "
+      "answer and the card agree for the same surface. 0 = shipped." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

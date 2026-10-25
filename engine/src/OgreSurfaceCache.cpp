@@ -1218,18 +1218,23 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                         twice[b] = twice[b] || (mFacePrev[k] && mFacePrev[k] + mDemandWindow >= mDemandNewest[r]);
                     }
                 }
-        if (!any) continue;
+        // (THE TEST DOOR cards.force: a card held resident arrives whatever its demand; its instance's other cards keep the
+        // rules)
+        const bool forcedNode = view.forcedCardMode > 0 && cand.node == view.forcedCardNode;
+        bool eligible = any;
+        if (!any && !forcedNode) continue;
         // CLOSED (CardSceneView::demandChanged): a moved instance's own cards come back - and AT THE REST'S ONE DECISION
         // (R3 (b)) a face the readers marked AT THIS POSE (since the demand's last change: the whole rest's demand) takes
         // FREE room, never displacing one: what the decision's drain freed goes to the pose's own demand, so the
         // resident set at rest is the pose's
-        if (!demandOpen && mv == moved.end()) {
-            if (!decide) continue;   // closed: nothing arrives but at the rest's one decision (R3 (b))
+        if (eligible && !demandOpen && mv == moved.end()) {
+            // closed: nothing arrives but at the rest's one decision (R3 (b))
             bool here = false;
             for (unsigned r = 0; r < kDemandReaders && !here; ++r)
                 for (unsigned b = 0; b < 6u && !here; ++b) here = inRest(r, marks[r][b]);
-            if (!here) continue;
+            eligible = decide && here;
         }
+        if (!eligible && !forcedNode) continue;
         layoutCards(cand, layout);
         auto it = mByNode.find(cand.node);
         const std::vector<CardRec> *have = it != mByNode.end() ? &per[it->second] : nullptr;
@@ -1237,6 +1242,20 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             if (have && std::any_of(have->begin(), have->end(),
                                     [&c](const CardRec &h) { return h.size && h.index == c.index; }))
                 continue;
+            const bool held = view.forcedCardMode && cand.node == view.forcedCardNode && c.index == view.forcedCardIndex;
+            if (held && view.forcedCardMode < 0) continue;   // held absent
+            if (held) {   // held resident: arrives now, persistent
+                Arrival a;
+                a.cand = &cand;
+                a.card = c;
+                a.card.lastRead = mFrame;
+                a.mark = mFrame;
+                a.persistent = true;
+                a.size = projectedSize(c, view.viewerPos);
+                arriving.push_back(a);
+                continue;
+            }
+            if (!eligible) continue;
             // each reader's mark of this face (a moved instance's card: what each reader had read it at, or its clock now)
             unsigned long long by[2] = { marks[0][c.bucket], marks[1][c.bucket] };
             bool kept = false;
@@ -1314,10 +1333,25 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     const bool windowDrain = !demandOpen && !view.demandChanged && !mWindowDrained;
     if (windowDrain) mWindowDrained = true;
     bool drained = false;
+    const auto heldCard = [&](size_t inst, const CardRec &c) {
+        return view.forcedCardMode && inst < mInstances.size() && mInstances[inst].node == view.forcedCardNode &&
+               c.index == view.forcedCardIndex;
+    };
+    if (view.forcedCardMode < 0)
+        for (size_t i = 0; i < per.size(); ++i)
+            for (CardRec &c : per[i])
+                if (c.size && heldCard(i, c)) {   // (cards.force: held absent)
+                    freeRect(c.atlasX, c.atlasY, c.size);
+                    c.size = 0u;
+                    ++mEvicted;
+                    changed = true;
+                    mDeparted = true;
+                }
     if (decide || windowDrain) {
-        for (std::vector<CardRec> &list : per)
-            for (CardRec &c : list) {
+        for (size_t i = 0; i < per.size(); ++i)
+            for (CardRec &c : per[i]) {
                 if (!c.size || !c.lastUpdated) continue;   // (one waiting for its capture arrived at this pose)
+                if (view.forcedCardMode > 0 && heldCard(i, c)) continue;   // (cards.force: held resident)
                 if (decide ? (inRest(0u, c.readBy[0]) || inRest(1u, c.readBy[1]))   // read in the rest: it stays
                            : std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame)   // read in the window
                     continue;
@@ -1357,6 +1391,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             // evicted while waiting, the rule above; measured, gi.card_residency (4)'s crowded arrival evicted 36 cards
             // its own compaction had just moved, the move wasted - PHOTON-7 stage 5's read W5)
             if (!gone.size || !gone.lastUpdated) continue;
+            if (view.forcedCardMode > 0 && heldCard(e.inst, gone)) continue;   // (cards.force: held resident)
             freeRect(gone.atlasX, gone.atlasY, gone.size);
             gone.size = 0u;
             ++mEvicted;
