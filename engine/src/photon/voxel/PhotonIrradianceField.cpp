@@ -489,6 +489,7 @@ namespace Ogre
                 *b = 0;
             }
         }
+        mProbeRecordsDelta.reset( nullptr );
         mMarkClusterCapacity = 0u;
     }
     //-------------------------------------------------------------------------
@@ -910,10 +911,15 @@ namespace Ogre
             rec[slot * 8u + 2u] = p.z;
             memcpy( &rec[slot * 8u + 3u], &slot, sizeof( slot ) );
         }
+        // (the CHANGED records only - a window follow moves the entered slab's probes, every other slot keeps its
+        // probe: DeltaUpload, PHOTON-7's walk hitch)
         if( !mProbeRecords )
+        {
             mProbeRecords = vaoManager->createUavBuffer( size_t( probes ) * 2u, 16u, 0, rec.data(), false );
+            mProbeRecordsDelta.reset( mProbeRecords, rec.data(), rec.size() * sizeof( float ) );
+        }
         else
-            mProbeRecords->upload( rec.data(), 0u, size_t( probes ) * 2u );
+            mProbeRecordsDelta.upload( mProbeRecords, rec.data(), 0u, size_t( probes ) * 2u );
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::accumulateMoves( UavBufferPacked *brickState, const uint32 dims[3],

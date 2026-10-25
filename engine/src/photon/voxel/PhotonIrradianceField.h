@@ -39,6 +39,8 @@ THE SOFTWARE.
 #include "OgreSharedPtr.h"
 #include "Vao/OgreAsyncTicket.h"
 
+#include "GpuUploadDelta.h"
+
 #include "ogrestd/vector.h"
 
 #include "OgreHeaderPrefix.h"
@@ -274,6 +276,8 @@ namespace Ogre
         /// the moved bricks' clusters (the accumulation's reduce) - and the reports in flight.
         uint32 mMarkStart = 0u;
         UavBufferPacked *mProbeRecords = nullptr;
+        /// ...what it last received (the changed records only: PHOTON-7's walk hitch).
+        jahshaka::engine::detail::DeltaUpload mProbeRecordsDelta;
         UavBufferPacked *mMarkReport = nullptr;
         UavBufferPacked *mMarkCluster = nullptr;
         uint32 mMarkClusterCapacity = 0u;

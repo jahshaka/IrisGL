@@ -593,6 +593,9 @@ void SurfaceCache::destroyAll() {
                                     : nullptr) {
         if (mCardBuffer) { vao->destroyUavBuffer(mCardBuffer); mCardBuffer = nullptr; }
         if (mInstanceBuffer) { vao->destroyUavBuffer(mInstanceBuffer); mInstanceBuffer = nullptr; }
+        mCardDelta.reset(nullptr);
+        mInstanceDelta.reset(nullptr);
+        mCardBoxDelta.reset(nullptr);
         if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
         if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
         if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
@@ -2299,6 +2302,7 @@ bool SurfaceCache::ensureIndirectBuffers() {
     if (!mCardBoxBuffer) {
         std::vector<float> zeros(size_t(kCardRecordCeiling) * 8u, 0.0f);
         mCardBoxBuffer = vao->createUavBuffer(size_t(kCardRecordCeiling) * 2u, 16u, 0, zeros.data(), false);
+        mCardBoxDelta.reset(mCardBoxBuffer, zeros.data(), zeros.size() * sizeof(float));
     }
     if (!mCardSlotState) {
         std::vector<Ogre::uint32> zeros(size_t(kCardSlots) * 4u, 0u);
@@ -3335,7 +3339,7 @@ bool SurfaceCache::syncBuffers() {
         b[4] = ext.x; b[5] = ext.y; b[6] = ext.z;
         mSlotCard[slot] = int(i);
     }
-    if (ensureIndirectBuffers()) mCardBoxBuffer->upload(mCardBoxCpu.data(), 0, size_t(kCardRecordCeiling) * 2u);
+    if (ensureIndirectBuffers()) mCardBoxDelta.upload(mCardBoxBuffer, mCardBoxCpu.data(), 0, size_t(kCardRecordCeiling) * 2u);
 
     // THE INSTANCE TABLE, indexed by the item slot. A slot with no cards reads
     // (0, 0) and the shader takes the voxel path it always took — which is why
@@ -3351,6 +3355,7 @@ bool SurfaceCache::syncBuffers() {
         // and are dropped (their stamps are re-written by the next frame's hits).
         vao->destroyUavBuffer(mInstanceBuffer);
         mInstanceBuffer = nullptr;
+        mInstanceDelta.reset(nullptr);
         for (DemandTicket &t : mDemandReadings) t.ticket.reset();
         mDemandNextIssue = mDemandNextTake = 0u;
     }
@@ -3365,16 +3370,22 @@ bool SurfaceCache::syncBuffers() {
         e[1] = inst.cardCount;
     }
 
-    if (!mCardBuffer)
+    // (the tables' CHANGED rows only: DeltaUpload, PHOTON-7's walk hitch)
+    if (!mCardBuffer) {
         mCardBuffer = vao->createUavBuffer(kCardRecordCeiling, sizeof(CardGpuRec), 0,
                                            mCardBufferCpu.data(), false);
-    else
-        mCardBuffer->upload(mCardBufferCpu.data(), 0, kCardRecordCeiling);
-    if (!mInstanceBuffer)
+        mCardDelta.reset(mCardBuffer, mCardBufferCpu.data(), size_t(kCardRecordCeiling) * sizeof(CardGpuRec));
+    } else {
+        mCardDelta.upload(mCardBuffer, mCardBufferCpu.data(), 0, kCardRecordCeiling);
+    }
+    if (!mInstanceBuffer) {
         mInstanceBuffer = vao->createUavBuffer(size_t(slots) + demandEntries(slots), 4u * sizeof(unsigned), 0,
                                                mInstanceBufferCpu.data(), false);
-    else
-        mInstanceBuffer->upload(mInstanceBufferCpu.data(), 0, slots);
+        // (the slot entries only: the demand region after them is the GPU's)
+        mInstanceDelta.reset(mInstanceBuffer, mInstanceBufferCpu.data(), size_t(slots) * 4u * sizeof(unsigned));
+    } else {
+        mInstanceDelta.upload(mInstanceBuffer, mInstanceBufferCpu.data(), 0, slots);
+    }
     uploadDemandHead();
     return true;
 }

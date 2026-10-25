@@ -70,6 +70,7 @@
 #pragma once
 
 #include "jahshaka/engine/Types.h"
+#include "GpuUploadDelta.h"
 
 #include <Compositor/OgreCompositorWorkspaceListener.h>
 #include <Math/Simple/OgreAabb.h>
@@ -846,6 +847,9 @@ private:
     /// changes, so the buffers are allocated once and never churn.
     std::vector<float> mCardBufferCpu;      ///< 24 floats a record
     std::vector<unsigned> mInstanceBufferCpu;
+    /// THE TABLES' CHANGED ROWS ONLY (PHOTON-7's walk hitch): what each table last received, so an allocation change
+    /// uploads the records it moved, never the 590 KB card table, the 128 KB box table and the instance table whole.
+    detail::DeltaUpload mCardDelta, mCardBoxDelta, mInstanceDelta;
     bool mTableDirty = false;
 
     /// ONE capture camera per pass of the batch, bound for life.
