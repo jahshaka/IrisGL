@@ -1094,6 +1094,8 @@ GiStatus PhotonComponent::giStatus() const {
             shape.resolution = int(c.resolution);
             shape.stepCells  = c.stepCells;
             cs.guaranteedRadius = giCascadeGuaranteedRadius(shape);
+            cs.hitLevelRadius = giHitLevelRadius(
+                shape, giHitLevelMarginCells(mEngine ? mEngine->armRegistry().value(ArmId::GiHitLevelMargin) : -1.0));
             cs.centre     = toV(c.centre);
             cs.builtCam   = toV(c.builtCam);
             cs.rebuilds   = c.rebuilds;

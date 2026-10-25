@@ -7404,7 +7404,22 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         out.voxelOrigin[c][0] = og.x; out.voxelOrigin[c][1] = og.y; out.voxelOrigin[c][2] = og.z;
         out.voxelSize[c][0] = sz.x;   out.voxelSize[c][1] = sz.y;   out.voxelSize[c][2] = sz.z;
         out.voxelCell[c] = std::max(std::max(cl.x, cl.y), cl.z);
+        // THE LEVEL BY THE CAMERA (PHOTON-7 stage 10, 10-2e; the lead's ruling): cascade c answers a hit only within its
+        // GUARANTEED RADIUS (half - step - cell: its box covers that much around the camera at every placement it can
+        // reach, CascadeStatus::guaranteedRadius) less M cells - the bounce's reach, an edge difference spreading inward
+        // (MEASURED: kGiHitLevelMarginCells) - from the camera, blending out over the hand-over band below it. Walk and
+        // teleport then read the same level from the same cells (the grid is world-anchored), whatever the placement.
+        {
+            const float marginCells = giHitLevelMarginCells(mArms ? mArms->value(ArmId::GiHitLevelMargin) : -1.0);
+            out.levelRadius[c] = giHitLevelRadius(v.shape, marginCells);
+            out.levelBand[c] = kGiHitLevelBandCells * v.cell;
+        }
         ++out.cascadeCount;
+    }
+    {
+        Ogre::Vector3 cam;
+        out.levelOn = scene->photon().giCameraPos(cam);
+        out.levelCam[0] = cam.x; out.levelCam[1] = cam.y; out.levelCam[2] = cam.z;
     }
     // ---- THE ONE ENVIRONMENT (PHOTON-ENV-1): the Sky Light's cube and gain, or the flat environment when there is no
     // cube (OgreScene::rayEnvironment). NO VOXELS IS NOT "NO RAYS": an escaping ray still reads the sky.

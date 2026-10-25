@@ -3420,6 +3420,21 @@ inline float giCascadeGuaranteedRadius(const GiParams::GiCascadeDesc &c)
     return c.halfSize - c.stepCells * cell - cell;
 }
 
+/// THE HIT READ'S LEVEL (PHOTON-7 stage 10, 10-2e; the lead's ruling): a TLAS hit reads cascade c only within its
+/// LEVEL RADIUS of the GI camera (max-norm) - its guaranteed radius (above: covered by its box at every placement it can
+/// reach) less a MARGIN of M of its cells, the bounce's reach (an edge difference spreads inward attenuated by albedo per
+/// bounce) - blending out over the hand-over band below it; the outermost by its box. M is MEASURED: the fewest cells at
+/// which gi.field_oracle_shells (6b) - two placements at the reachable extremes, the bounce on - and gi.card_residency
+/// (3) - walk = teleport - both read within a code (the measuring door gi.hitLevelMargin sets it; -1 = this default).
+/// THE PRICE per level: the usable range lost, step + cell + M cells off the half size.
+constexpr float kGiHitLevelMarginCells = 8.0f;
+constexpr float kGiHitLevelBandCells = 6.0f;
+inline float giHitLevelMarginCells(double armValue) { return armValue >= 0.0 ? float(armValue) : kGiHitLevelMarginCells; }
+inline float giHitLevelRadius(const GiParams::GiCascadeDesc &c, float marginCells)
+{
+    return giCascadeGuaranteedRadius(c) - marginCells * giCascadeCell(c);
+}
+
 /// THE WALKING PACE a scroll is sized for: 1.4 m/s at the engine's fixed 1/60 s frame.
 inline constexpr float kGiWalkMetresPerFrame = 1.4f / 60.0f;
 /// THE FASTEST CAMERA A SCROLL'S SCRATCH IS SIZED FOR (PHOTON-7 stage 2): 0.25 m a frame (15 m/s, a fly). A cascade's
@@ -4777,6 +4792,10 @@ struct GiStatus {
         /// assertable form (gi.cascades cases 16a and 16b, and
         /// scripting.e2e.world_modes over both columns).
         float guaranteedRadius = 0.0f;
+        /// THE HIT READ'S LEVEL RADIUS (10-2e, giHitLevelRadius): a TLAS hit reads this cascade within it of the GI
+        /// camera (max-norm); the guaranteed radius less GiStatus::hitLevelMarginCells of its cells (the outermost reads
+        /// by its box).
+        float hitLevelRadius = 0.0f;
         /// The world-space centre it is currently built at (quantised to its
         /// own lattice, so it is NOT the camera position).
         Vec3  centre;

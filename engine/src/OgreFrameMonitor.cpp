@@ -1399,6 +1399,10 @@ constexpr ArmDef kArms[] = {
       "from their direct terms (a whole injection), and every frame while it is set EVERY brick of them runs the "
       "feedback's pass (no stop): F frames set = F Jacobi passes from the direct term; the cascades outside them hold "
       "their state. 0 = shipped." },
+    { ArmId::GiHitLevelMargin, -1.0, -1.0, 64.0,
+      "A MEASURING DOOR (PHOTON-7 stage 10, 10-2e): the hit read's LEVEL MARGIN - a TLAS hit reads cascade L only "
+      "within L's guaranteed radius (half - step - cell) less M cells of L from the GI camera - set to M cells; "
+      "-1 = the measured default (kGiHitLevelMarginCells)." },
     { ArmId::GiFeedbackCarriedRoute, 0.0, 0.0, 1.0,
       "A TEST DOOR (PHOTON-7 stage 5's read A2 (i), gi.bounce_series (7)): while set, the feedback's selection never "
       "passes a brick whose injection moved it this frame - it is carried - and the stopped bricks accumulate the "

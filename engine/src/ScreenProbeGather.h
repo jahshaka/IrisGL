@@ -95,6 +95,7 @@ inline bool isCameraCut(const float *prevPos, const float *prevRight, const floa
 /// HOW MANY CASCADES THE HIT SHADING READS — the shaders' `kMaxCascades`, and
 /// the two must agree.
 constexpr unsigned kGatherMaxCascades = 4u;
+
 /// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the front, X, Y, Z, coverage +/-,
 /// position +/-, the back, the normal, the direct term's front and its back (PHOTON-7 stage 7).
 constexpr unsigned kGatherVoxelKinds = 12u;
@@ -216,6 +217,13 @@ struct HitSetSources {
     /// ...each cascade's cell, its largest side (metres).
     float voxelCell[kGatherMaxCascades] = {};
     unsigned cascadeCount = 0u;
+    /// THE LEVEL BY THE CAMERA (PHOTON-7 stage 10, 10-2e, the lead's ruling): a hit reads cascade c only within
+    /// `levelRadius[c]` of the GI camera (max-norm, metres) - its guaranteed radius less the margin - blending out over
+    /// `levelBand[c]` below it; the outermost by its box. `levelOn` false: no camera known (the box rule alone).
+    float levelCam[3] = {};
+    float levelRadius[kGatherMaxCascades] = {};
+    float levelBand[kGatherMaxCascades] = {};
+    bool levelOn = false;
     /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the Sky Light's cube (null: the flat colour).
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
@@ -279,8 +287,10 @@ struct HitSetParams {
     float surface[4] = {};     ///< the texture pool bound, the cloud field bound
     float cloudMap[4] = {};
     float cloudSun[4] = {};
+    float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule on (w)
+    float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres)
 };
-static_assert(sizeof(HitSetParams) == 18u * 16u, "JahHitParams is eighteen vec4s");
+static_assert(sizeof(HitSetParams) == 23u * 16u, "JahHitParams is twenty-three vec4s");
 /// Fills `out` from the hit set; `geomSlots` = the per-slot row entries the job's own copy holds this frame (0: none).
 void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out);
 

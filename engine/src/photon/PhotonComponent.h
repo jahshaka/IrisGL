@@ -159,7 +159,13 @@ public:
     struct Volume {
         Ogre::PhotonVoxelLighting *lighting = nullptr;
         Ogre::PhotonVoxelizer *voxelizer = nullptr;
+        /// THE HIT READ'S LEVEL (PHOTON-7 stage 10, 10-2e): the cascade's shape (its guaranteed radius's inputs) and cell
+        GiParams::GiCascadeDesc shape;
+        float cell = 0.0f;
     };
+    /// THE CAMERA THE CASCADES TRACK (the authoritative one, noteGiCamera): the hit read's level is chosen by a hit's
+    /// distance to it (10-2e); false before any view tracked.
+    bool giCameraPos(Ogre::Vector3 &out) const { out = mGiCamPos; return mGiCamPosKnown; }
     /// THE BACK-REFERENCE: the scene that holds the component, and the four scene facts
     /// every Photon path reads, bound BY REFERENCE to the scene's own members (never a
     /// copy: the manager pointer goes null in OgreScene::destroy, the engine is set after

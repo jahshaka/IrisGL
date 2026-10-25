@@ -16,7 +16,8 @@
 #error "name the job's JahHitParams member as JAH_HIT_PARAMS before including jah_rq_hit_params.glsl"
 #endif
 
-/// std140, vec4s only (HitSetParams is its C++ mirror). Four cascades (the hit set's kGatherMaxCascades).
+/// std140, vec4s only (HitSetParams is its C++ mirror). Four cascades (the hit set's kGatherMaxCascades). Twenty-three
+/// vec4s.
 struct JahHitParams
 {
 	vec4 voxelOrigin[4];    // per cascade: its box's corner (world, xyz; w 0) - past the chain's length the last's
@@ -31,6 +32,8 @@ struct JahHitParams
 	vec4 surface;           // x the voxeliser's texture pool bound, y the cloud field bound
 	vec4 cloudMap;          // the cloud layer's 1 / tile, strength, scroll x, z
 	vec4 cloudSun;          // ...its sun throw x, z, altitude, 1 / mu_s
+	vec4 levelCam;          // THE LEVEL BY THE CAMERA (10-2e): the GI camera (xyz), the rule on (w)
+	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera)
 };
 
 #define JAH_VOX_COUNT        int( JAH_HIT_PARAMS.counts.x )
@@ -56,5 +59,8 @@ struct JahHitParams
 #define JAH_HIT_CLOUD_MAP    JAH_HIT_PARAMS.cloudMap
 #define JAH_HIT_CLOUD_SUN    JAH_HIT_PARAMS.cloudSun
 #define JAH_HIT_MOVERS_ON    ( JAH_HIT_PARAMS.counts.w > 0.5 )
+#define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 )
+#define JAH_VOX_LEVEL_CAM    JAH_HIT_PARAMS.levelCam.xyz
+#define JAH_VOX_LEVEL( c )   JAH_HIT_PARAMS.level[c]
 
 #endif   // JAH_RQ_HIT_PARAMS_GLSL
