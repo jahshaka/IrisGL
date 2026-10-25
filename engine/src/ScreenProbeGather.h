@@ -230,6 +230,16 @@ struct HitSetSources {
     Ogre::TextureGpu *cardView[SurfaceCache::kViewLayers] = {};
     unsigned cardSlots = 0u, cardRecords = 0u;
     bool cardsBound() const { return cardSlots > 0u; }
+    /// THE CACHE UNBOUND (the stand-ins, zero slots: every hit reads the voxels) - a reader the cards themselves read
+    /// (the voxel sides' TLAS gather, PHOTON-7 stage 10 R1) never reads a card: one order, no loop
+    void withoutCards() {
+        cardTable = nullptr;
+        cardInstances = nullptr;
+        cardDepth = nullptr;
+        cardRadiance = nullptr;
+        for (Ogre::TextureGpu *&t : cardView) t = nullptr;
+        cardSlots = cardRecords = 0u;
+    }
     /// THE HIT'S GEOMETRIC NORMAL: the per-slot geometry-row table the scene's TLAS was written with (a job copies it
     /// per frame in flight into its own buffer) and the GPU scene's rows, FLUSHED by the tier this frame (a row staged
     /// but not uploaded is a zero address: the trap file's GPU SCENE TABLES rule). Null = none: the card pick faces
