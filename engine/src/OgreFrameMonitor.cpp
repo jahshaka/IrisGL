@@ -1640,8 +1640,14 @@ constexpr ArmDef kArms[] = {
     { ArmId::CardForce, 0.0, -1.0e9, 1.0e9,
       "A TEST DOOR (PHOTON-7 stage 10, L1's law in gi.card_residency): +(node x 64 + card) holds that card RESIDENT whatever "
       "its demand (admitted as soon as its instance is offered, never drained or evicted); -(node x 64 + card) holds it "
-      "ABSENT (never admitted, evicted if resident). A card's presence must move its readers by under a code: the voxel "
-      "answer and the card agree for the same surface. 0 = shipped." },
+      "ABSENT (never admitted, evicted if resident); card 63 names EVERY card of the node (gi.card_truth holds a lit "
+      "wall's cards absent so its hits read the voxels). A card's presence moves its readers by at most the face's "
+      "card-voxel disagreement (gi.card_residency (8)). 0 = shipped." },
+    { ArmId::GiTruthRays, 0.0, 0.0, 4096.0,
+      "A MEASURING DOOR (PHOTON-7 stage 10, (8)'s truth): the cards' indirect gather (rq_card_gather.comp) and the voxel "
+      "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
+      "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
+      "0 = shipped." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
