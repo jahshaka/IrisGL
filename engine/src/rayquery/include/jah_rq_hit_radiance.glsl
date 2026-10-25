@@ -134,7 +134,7 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 			return card;
 		}
 	}
-	const vec3 voxel = jahVoxelRadiance( hitPos, dir, footprint, mirror, ok );
+	const vec3 voxel = jahVoxelRadiance( hitPos, dir, hitNormal, footprint, mirror, ok );
 	source = ok ? 2u : 0u;
 	// THE ONE RULE (FAR-SUN-2): the direct light at the hit, the store's bounce part beside it -
 	// gated by the movers above the hit exactly as the store's non-direct share was

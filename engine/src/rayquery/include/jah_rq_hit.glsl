@@ -217,7 +217,7 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 #endif
 
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
-/// the cascade chain's light volumes.
+/// the cascade chain's light volumes - the side the ray hit, by `hitNormal`.
 ///
 /// `footprint` is how wide, in world units, the thing that asked is: a mip
 /// exists for exactly that width and reading the finest one aliases. `mirror`
@@ -226,8 +226,20 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 /// blurred. `ok` is false when no bound cascade holds anything there: the hit
 /// is then a record for the visibility-buffer decode (jah_rq_hit_record.glsl,
 /// PHOTON-HIT-SHADE-1) in both callers.
-vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out bool ok )
+vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint, bool mirror, out bool ok )
 {
+	// THE READ IS ANCHORED TO THE HIT'S NORMAL, NEVER TO THE RAY (PHOTON-7 stage 10, the lead's ruling on card_residency
+	// (3)): a surface's radiance toward a ray is the radiance of the side the ray HIT, so the texel pair, the side, the
+	// directional level and the read point are all taken from -n (the direction that meets the face head-on, oriented
+	// along the ray). Along the ray, a far or grazing hit on a narrow object's face read the object's OTHER faces at the
+	// footprint's level - room B's pillar: the lamp-lit -z face (2.23) into the +x face's answer (0.56), its readers 98
+	// codes apart with the face's card resident or not; the card, which reads the face itself, was right.
+	vec3 dir = rayDir;
+	if( dot( hitNormal, hitNormal ) > 0.0 )
+	{
+		const vec3 nn = normalize( hitNormal );
+		dir = dot( nn, rayDir ) <= 0.0 ? -nn : nn;
+	}
 	ok = false;
 	jahVoxelAnswerCascade = -1;
 	jahVoxelBounceOut = vec3( 0.0 );
