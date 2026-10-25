@@ -245,6 +245,12 @@ struct CardRec {
     bool stillPending = false;
     unsigned long long stillPendingSince = 0ull;
     float sunLift = 0.0f;
+    /// THE ROOTS OF ITS PENDING WORK (PHOTON-7 stage 10, R3 (c), the lead's ruling: each round names its parent move):
+    /// the moves it traces to, as bits of the cache's root ring (SurfaceCache::mRoots: an arrival, the rest's one
+    /// decision, a region or any other cause), and its ROUND - 0 its root's own capture, n listed card to card by a move
+    /// of round n - 1. Cleared once its work is done (both halves relit).
+    unsigned long long roots = 0ull;
+    unsigned round = 0u;
 };
 
 /// WHAT THE CACHE IS HANDED EACH FRAME, and the reason it is handed anything at
@@ -280,6 +286,13 @@ struct CardSceneView {
     /// photon-glass's (gi.walk).
     bool demandChanged = false;
     unsigned demandSettleFrames = 10u;
+    /// THE VIEW READERS' REST DEMAND COMPLETE (PHOTON-7 stage 10, R3 (b); OgreScene::cardReadersRestComplete): every
+    /// reader of the cards that can rest has finished its rest sample sequence (a frame late). With the demand closed
+    /// the cache takes its rest's ONE residency decision then - once per change.
+    bool readersRestComplete = true;
+    /// ...and each reader's rest length so far, reader frames (0 the reflection, 1 the gather; 0: it has no rest): its
+    /// rest sequence's start, whose stamps the decision reads.
+    unsigned readerRestFrames[2] = { 0u, 0u };
     /// THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: change drives work, never a serial): the
     /// frame's LAMP regions (a lamp's old and new spheres: a card whose box meets one has a stale DIRECT half - the
     /// lamp's light is exact by its range, JahCardLight_cs.glsl), its SLAB regions (a commit's entering and leaving
@@ -690,7 +703,7 @@ private:
     /// THE ATLAS MADE TO FIT (5-2's compaction): the least-used sub-cut page whose cards the other pages cutting its
     /// size can hold is emptied into them (each moved card re-captured where it lands), so a set whose page demand fits
     /// fits. False when no page can be freed that way.
-    bool compactOnePage(std::vector<std::vector<CardRec>> &cards);
+    bool compactOnePage(std::vector<std::vector<CardRec>> &cards, unsigned long long roots);
     /// The demand read-back: issued every kDemandReadEvery frames, taken a fixed lag later; and the head (the frame's
     /// stamp, the count arm) uploaded every frame.
     void issueDemandRead();
@@ -720,6 +733,8 @@ private:
     /// True when the TABLES were written (the allocation changed); false when only the frame's demand stamp was (the
     /// at-rest constant) - the monitor's cards.tables rows file on the first (PHOTON-7's naming step).
     bool syncBuffers();
+    /// The tables need no write this frame (nothing dirty, the slots covered): syncBuffers would only stamp the demand.
+    bool tablesCurrent() const;
 
     Ogre::SceneManager *mSceneMgr = nullptr;
     bool mBuilt = false;
@@ -774,8 +789,36 @@ private:
     unsigned long long mGatherWaits = 0ull;
     /// the indirect listings card to card (10-2c), and those an overflowed read list's geometric bound took part in
     unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
-    /// the cards the rest's drain removed (10-2d: read by no view reader at the pose once the window closed)
+    /// ...and the listings a later march had answered already (R3: dropped, never a re-march)
+    unsigned long long mIndirectAnswered = 0ull;
+    /// the cards the rest's drain removed (10-2d: read by no view reader at the pose; R3 (b): at the rest's one decision)
     unsigned long long mRestDrained = 0ull;
+    /// THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b)): taken for the current demand change, and how many were taken.
+    bool mRestDecided = false;
+    unsigned long long mRestDecisions = 0ull;
+    /// THE REST DEMAND'S WINDOW: each reader's rest start in cache frames (0: since the change) and the frame its stamps
+    /// have landed by (a read-back's period + lag + 1 past the rest's completion; 0: not complete yet).
+    unsigned long long mRestStart[2] = { 0ull, 0ull }, mRestDue = 0ull;
+    /// THE WINDOW'S ONE DRAIN (R3, the lead's Q2): taken for the current change (the cards no reader read in the S-frame
+    /// window leave once, when it closes), and how many drained a card.
+    bool mWindowDrained = false;
+    unsigned long long mWindowDrains = 0ull;
+    /// A CARD LEFT since the cards were last all re-marched (an eviction or a drain): its readers read the voxels there
+    /// now, so at the window's drain and at the rest's decision every resident card's indirect is re-marched once.
+    bool mDeparted = false;
+    /// THE ROOT RING (R3 (c)): the moves the cards' work traces to - kind ('a' an arrival, 'd' the rest's decision, 'v' the
+    /// voxel store's move, 'r' a region, an overflow, a material or any other cause) and the cache frame it was born at. A card holds a bit per
+    /// root; a slot is reborn after 64 births (the roots name the work for the judge - the monitor's - and decide
+    /// nothing). Each plan frame's relit cards' roots and deepest round are kept for the accumulation that reads their
+    /// moves (harvestIndirectReports: a fixed lag later), and the last plan's are published (CardCacheStatus::workRoots).
+    struct Root { char kind = 0; unsigned long long frame = 0ull; };
+    Root mRoots[64];
+    unsigned mRootNext = 0u;
+    unsigned rootBit(char kind, unsigned long long frame);
+    struct FrameRoots { unsigned long long frame = ~0ull, roots = 0ull; unsigned round = 0u; };
+    FrameRoots mFrameRoots[512];
+    unsigned long long mPlanRoots = 0ull;
+    unsigned mPlanRound = 0u;
     bool mGatherByRays = false;
     CardMoverHooks mMoverHooks;
     /// Each mover's footprint box as last traced (its OLD footprint when it
@@ -864,6 +907,7 @@ private:
     struct ReportTicket {
         Ogre::AsyncTicketPtr ticket;
         unsigned long long frame = 0ull;
+        unsigned long long cacheFrame = 0ull;   ///< the cache's own frame of the issue (the roots' clock, R3 (c))
     };
     static constexpr unsigned kReportSlots = 8u;
     ReportTicket mReportReadings[kReportSlots];

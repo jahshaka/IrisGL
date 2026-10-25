@@ -598,23 +598,24 @@ void main()
 	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
 @property( jah_card_gather )
 	{
-		// THE MOVE (10-2c, the lead's ruling: "more than its quantum" accumulated from the LAST REPORTED value, never frame
-		// to frame): the texel's stored radiance (the store's own conversion read back), its largest channel against the
-		// value it last REPORTED (the Gather layer's a) - reported when they differ by more than one step of the store
-		// there (the largest channel's own mantissa: a rounding to nearest flips by one step at most, so the report's
-		// hysteresis is the store's step and a slow fade reports once it has accumulated past it). A report sets the
-		// reference and moves the card's word by the accumulated difference; no report moves nothing.
+		// THE MOVE (10-2c, the lead's ruling: accumulated from the LAST REPORTED value, never frame to frame): the texel's
+		// stored radiance (the store's own conversion read back), its largest channel against the value it last REPORTED
+		// (the Gather layer's a) - reported when they differ by more than ONE CODE (PHOTON-7 stage 10, R3 (a): the DISPLAY
+		// quantum - 1 % of the larger of the two, over the store's floor - where it was the store's own step, its 10-bit
+		// mantissa, ten times finer: a move under a code cannot move the picture by a code, so its readers' rounds after
+		// the stop were work for nothing, at the indirect budget a frame for as long as the window lasted; a slow fade still
+		// reports once it has accumulated past a code). A report sets the reference and moves the card's word by the
+		// accumulated difference; no report moves nothing.
 		const vec3 now = imageLoad( cardRadiance, at ).xyz;
 		const float S = max( max( now.x, now.y ), now.z );
 		const vec4 g = imageLoad( cardGather, at );
 		const bool refOk = ( floatBitsToUint( g.w ) & 0x7F800000u ) != 0x7F800000u && g.w >= 0.0;
 		const float d = refOk ? abs( S - g.w ) : 3.0e38;
-		const float bits = 10.0;   // the RGBA16F radiance store's mantissa (10-2d)
-		const float quantum = exp2( floor( log2( max( max( S, refOk ? g.w : 0.0 ), 6.1035156e-5 ) ) ) - bits );
+		const float code = 0.01 * max( max( S, refOk ? g.w : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
 		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
 		// (the accumulation's arrivals, through the geometric bound)
 		const bool fresh = ( mode & 8u ) != 0u;
-		if( fresh || d > quantum )
+		if( fresh || d > code )
 		{
 			imageStore( cardGather, at, vec4( g.xyz, S ) );
 			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );

@@ -3044,11 +3044,11 @@ struct GiQualityFacts {
     /// land, inside this budget, and a light write relights the resident set
     /// over as many frames as it takes.
     unsigned cardLightTexels = 131072u;
-    /// THE INDIRECT HALF'S BUDGET, texels a frame: the voxel march (the four-cone
-    /// set over the chain, the sky on the sixteen-cone quadrature) per texel, spent when a card is captured and when the
-    /// chain re-injects. Lumen's own indirect budget, 512 square, is the
-    /// ceiling; the rows are a quarter / an eighth / a sixteenth of it, NOT YET
-    /// MEASURED in GPU milliseconds (locked clocks — the lead's measurement).
+    /// THE INDIRECT HALF'S BUDGET, texels a frame (L7: a COUNT PER TIER): the cards' indirect gather (the TLAS rays at the
+    /// ray tier, the voxel rays elsewhere) spent on a card's capture, its listing by a move and a region. THE RULE
+    /// (PHOTON-7 stage 10, R3): the smallest count whose card-to-card rounds converge a lamp step inside 120 frames, priced
+    /// in the card frame's ms from the monitor (the tier rows say the measurement); Lumen's own indirect budget, 512
+    /// square, is the ceiling.
     unsigned cardIndirectTexels = 32768u;
     /// THE INDIRECT HALF'S RAYS A TEXEL (PHOTON-7 stage 10, 10-1; L9): the card's indirect is gathered by this many
     /// fixed, world-keyed, cosine-distributed occupancy rays through the voxel chain (jah_voxel_ray.glsl) - a hit reads
@@ -3224,7 +3224,12 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
-        f.cardIndirectTexels = 65536u;  // 4 pages a frame (Lumen's 512^2 / 4)
+        // 8 pages a frame (PHOTON-7 stage 10, R3, the lead's L7 ruling: the smallest count whose card-to-card rounds
+        // converge a lamp step inside 120 frames - photon-room's 8 -> 12 at High: 4 pages held at 201, 8 at 119, 12 and
+        // more at 101 (the field's own); the card frame at 8 pages 3.48 ms, +0.75 over 4's 2.73 - almost all of it the
+        // TLAS gather's ~2.5 ns a ray, the relight's own ~0.15 ms. Epic the same: 6 held at 142, 8 at 119, 3.55 ms. Medium
+        // and Low hold the step at 114 and 98 at any count: no card-to-card rounds there)
+        f.cardIndirectTexels = 131072u;
         f.gather = { 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
@@ -4231,9 +4236,22 @@ struct CardCacheStatus {
     /// THE CARD-TO-CARD RE-LISTING (10-2c): the indirect listings a moved card read by the listed one made, and those an
     /// overflowed read list's geometric bound took part in (both inside indirectReported).
     unsigned long long indirectByCards = 0ull, indirectByBound = 0ull;
-    /// THE REST'S DRAIN (10-2d): cards removed once the demand window closed because no view reader read them at the pose
-    /// (inside `evicted`).
-    unsigned long long restDrained = 0ull;
+    /// THE REST'S DRAIN (10-2d): cards removed because no view reader read them at the pose (inside `evicted`) - at the
+    /// rest's one decision (R3 (b)), counted in `restDecisions` (one a demand change, at most).
+    unsigned long long restDrained = 0ull, restDecisions = 0ull;
+    /// ...and the window's one drain a change (R3, the lead's Q2: the cards no reader read in the S-frame window leave
+    /// once when it closes), counted when it drained a card.
+    unsigned long long windowDrains = 0ull;
+    /// THE ROOTS OF THE LAST PLAN'S WORK (PHOTON-7 stage 10, R3 (c): each round names its parent move): the moves the
+    /// frame's relights trace to - `kind` 'a' a demand arrival, 'd' the rest's one decision, 'w' the window's one drain
+    /// (its re-march of every resident card when one left), 'v' the voxel store's move
+    /// (a card listed by the bricks it reads), 'h' moves older than the root ring (born at its horizon: older still), 'r'
+    /// a region, an overflow, a material or a relight no root named - each by the cache frame it was born at, and the
+    /// deepest round
+    /// among them (0: a root's own captures; n: listed card to card by a round n - 1 move).
+    struct WorkRoot { char kind = 0; unsigned long long frame = 0ull; };
+    std::vector<WorkRoot> workRoots;
+    unsigned workRound = 0u;
     unsigned long long demandHits[4] = { 0ull, 0ull, 0ull, 0ull };
     /// The queue: cards waiting for a capture, and the texel budget a frame
     /// spends on them.

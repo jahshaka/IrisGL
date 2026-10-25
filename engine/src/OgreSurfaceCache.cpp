@@ -898,7 +898,7 @@ void SurfaceCache::layoutCards(const CardSceneView::Candidate &cand, std::vector
     }
 }
 
-bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards) {
+bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsigned long long roots) {
     const unsigned perSide = kCardAtlasSize / kCardPageSize;
     // THE PAGE TO EMPTY: the sub-cut page with the fewest cards whose cards the OTHER pages cutting its size have free
     // slots for (lowest index among equals) - deterministic, and a page freed whole.
@@ -937,6 +937,7 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards) {
             c.indirectValid = false;
             c.relight = true;
             c.relightIndirect = true;
+            c.roots |= roots;   // (moved for the arrival that needed the room: its root's work)
             c.moverTraced = false;
             ++mCompactionMoves;
         }
@@ -1116,8 +1117,11 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // the candidate's material again.
         if (inst.material != cand.material) {
             inst.material = cand.material;
-            for (unsigned c = 0; c < inst.cardCount; ++c)
+            const unsigned long long root = 1ull << rootBit('r', mFrame);
+            for (unsigned c = 0; c < inst.cardCount; ++c) {
                 mCards[inst.firstCard + c].queued = true;
+                mCards[inst.firstCard + c].roots |= root;
+            }
             ++mInvalidMaterial;
         }
     }
@@ -1141,12 +1145,45 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     if (view.demandChanged) {
         mDemandChangeFrame = mFrame;
         mDemandFirst[0] = mDemandFirst[1] = 0ull;
+        mRestDecided = false;   // a change reopens the window: the next rest takes its own decision
+        mRestDue = 0ull;
+        mWindowDrained = false;
     }
     const unsigned long long settleS = view.demandSettleFrames;
     bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1];
     for (unsigned r = 0; r < kDemandReaders && !demandOpen; ++r)
         demandOpen = mDemandFirst[r] && mDemandFirst[r] < mDemandChangeFrame + settleS + kDemandReadEvery &&
                      mDemandNewest[r] < mDemandFirst[r] + settleS;
+    // THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b), the lead's ruling): with the demand closed, NOTHING ARRIVES
+    // AND NOTHING LEAVES until the view readers' REST DEMAND IS COMPLETE (each has finished its rest sample sequence:
+    // CardSceneView::readersRestComplete) - then, ONCE per change, the cards no view reader read over the rest are
+    // drained (4b) and the faces they read over it that are not resident are admitted (step 3, free room) - so a walk
+    // and a teleport resting at one pose, gathering the same rest demand, hold the same set. Its captures and their
+    // card-to-card rounds are OWED (the decision is the root move, CardRec::roots), and the readers' hold waits on that
+    // work (the queue and the relights are their inputs: gatherInputsBusy, the rest keys); a reader whose rest the
+    // decision's own arrivals restarted completes its rest but never triggers a second decision - only a change
+    // reopens the window. (Deleted with it: 10-2d's per-frame drain once closed and its closed-window "at this pose,
+    // free room" admission - together the evict/re-admit cycle, ~700 of them in the crowded room's rest.)
+    // ITS DEMAND IS THE REST SEQUENCE'S: the stamps each reader wrote from its own rest's start (the readers sample by
+    // direction alone, so a walk and a teleport resting at one pose run the same rest sequence over the same geometry
+    // and stamp the same faces - the settling frames before it sample by their path), read once a read-back has
+    // landed past the rest's completion (the period + the lag + the issue frame's one: owed_rows.py's bound). A reader
+    // with no rest (none in view, or one that cannot rest) counts its stamps since the change.
+    if (!demandOpen && !view.demandChanged && !mRestDecided && !mRestDue && view.readersRestComplete) {
+        for (unsigned r = 0; r < kDemandReaders; ++r) {
+            const unsigned long long n = view.readerRestFrames[r];
+            mRestStart[r] = n ? (mFrame > n + 1ull ? mFrame - n - 1ull : 1ull) : mDemandChangeFrame + 1ull;
+        }
+        Ogre::RenderSystem *rsd = Ogre::Root::getSingleton().getRenderSystem();
+        Ogre::VaoManager *vaod = rsd ? rsd->getVaoManager() : nullptr;
+        mRestDue = mFrame + kDemandReadEvery + (vaod ? vaod->getDynamicBufferMultiplier() + 1u : 1u) + 1u;
+    }
+    const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided;
+    if (decide) {
+        mRestDecided = true;
+        ++mRestDecisions;
+    }
+    const auto inRest = [this](unsigned r, unsigned long long stamp) { return stamp && stamp >= mRestStart[r]; };
     // 2. THE CARDS, PER INSTANCE, while the set changes (flattened back once at the end; a card's `size` 0 = evicted).
     std::vector<std::vector<CardRec>> per(mInstances.size());
     for (size_t i = 0; i < mInstances.size(); ++i)
@@ -1182,13 +1219,15 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     }
                 }
         if (!any) continue;
-        // CLOSED (CardSceneView::demandChanged): a moved instance's own cards come back - and (PHOTON-7 stage 10, 10-2d) a
-        // face the readers marked AT THIS POSE (since the demand's last change) takes FREE room, never displacing one:
-        // what the drain below freed at rest goes to the pose's own demand, so the resident set at rest is the pose's
+        // CLOSED (CardSceneView::demandChanged): a moved instance's own cards come back - and AT THE REST'S ONE DECISION
+        // (R3 (b)) a face the readers marked AT THIS POSE (since the demand's last change: the whole rest's demand) takes
+        // FREE room, never displacing one: what the decision's drain freed goes to the pose's own demand, so the
+        // resident set at rest is the pose's
         if (!demandOpen && mv == moved.end()) {
+            if (!decide) continue;   // closed: nothing arrives but at the rest's one decision (R3 (b))
             bool here = false;
             for (unsigned r = 0; r < kDemandReaders && !here; ++r)
-                for (unsigned b = 0; b < 6u && !here; ++b) here = marks[r][b] > mDemandChangeFrame;
+                for (unsigned b = 0; b < 6u && !here; ++b) here = inRest(r, marks[r][b]);
             if (!here) continue;
         }
         layoutCards(cand, layout);
@@ -1211,7 +1250,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             // (a moved card no reader had read yet - admitted, waiting - comes back all the same)
             const unsigned long long mark = std::max({ by[0], by[1], kept ? 1ull : 0ull });
             if (!mark) continue;
-            if (!demandOpen && !kept && mark <= mDemandChangeFrame) continue;   // (closed: the pose's marks alone)
+            if (!demandOpen && !kept && !inRest(0u, by[0]) && !inRest(1u, by[1])) continue;   // (closed: the rest's marks alone)
             Arrival a;
             a.cand = &cand;
             a.card = c;
@@ -1262,25 +1301,36 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     });
 
     // 4b. AT REST, THE POSE'S DEMAND ALONE (PHOTON-7 stage 10, 10-2d; the lead's ruling - residency is path-independent
-    //     at rest): once the demand window closes, a captured card NO VIEW READER read since the demand's last change
-    //     (the gather, the reflection, the pixel at THIS pose - the cache's own gather is no demand: its reads
+    //     at rest): AT THE REST'S ONE DECISION (R3 (b)), a captured card NO VIEW READER read since the demand's last
+    //     change (the gather, the reflection, the pixel at THIS pose - the cache's own gather is no demand: its reads
     //     self-sustain and fill the atlas, measured) LEAVES, even with free room. Since cards read cards, an answer
     //     depends on which cards are resident, and a walk kept the cards it read on its way while there was room (the
     //     walk 264, the teleport 248: gi.card_residency (6) RED, 93.5 codes with the placement pinned); the drain and
-    //     the closed admission of the pose's own marks (step 3) give both paths the pose's set. No thrash while moving:
-    //     it acts only once the window closed.
-    if (!demandOpen && !view.demandChanged) {
+    //     the decision's admission of the pose's own marks (step 3) give both paths the pose's set.
+    //     AND ONCE BEFORE IT, WHEN THE WINDOW CLOSES (R3, the lead's Q2): the cards no view reader read in the S-frame
+    //     window since the change leave - once, never per frame - so the motion's unread cards stop working before the
+    //     rest; the decision still drains and admits on the rest's demand, and the final set is the pose's alone (a card
+    //     this drops and the rest re-admits costs one re-capture).
+    const bool windowDrain = !demandOpen && !view.demandChanged && !mWindowDrained;
+    if (windowDrain) mWindowDrained = true;
+    bool drained = false;
+    if (decide || windowDrain) {
         for (std::vector<CardRec> &list : per)
             for (CardRec &c : list) {
                 if (!c.size || !c.lastUpdated) continue;   // (one waiting for its capture arrived at this pose)
-                if (std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame) continue;
+                if (decide ? (inRest(0u, c.readBy[0]) || inRest(1u, c.readBy[1]))   // read in the rest: it stays
+                           : std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame)   // read in the window
+                    continue;
                 freeRect(c.atlasX, c.atlasY, c.size);
                 c.size = 0u;
                 ++mEvicted;
                 ++mRestDrained;
                 changed = true;
+                drained = true;
+                mDeparted = true;
             }
     }
+    if (windowDrain && drained) ++mWindowDrains;
 
     // 5. THE ARRIVALS, in order. Free room takes any wanted face at its first mark (the fill is the readers' first
     //    frames). A face that finds none MAKES room - the atlas compacted, then the evictable evicted, until it fits or
@@ -1291,11 +1341,15 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //    once the demand closes - a still pose over a still world, CardSceneView::demandChanged - nothing arrives.)
     size_t nextEvict = 0;
     mArrivalMarkNewest = 0ull;
+    // THE ARRIVALS' ROOT (R3 (c)): this update's arrivals are one move - the rest's decision's, or an arrival's
+    const unsigned long long arrivalRoot = arriving.empty() ? 0ull : 1ull << rootBit(decide ? 'd' : 'a', mFrame);
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
+        c.roots = arrivalRoot;
+        c.round = 0u;
         bool placed = allocRect(c.size, c.atlasX, c.atlasY);
         while (!placed && a.persistent) {
-            if (compactOnePage(per)) { placed = allocRect(c.size, c.atlasX, c.atlasY); continue; }
+            if (compactOnePage(per, arrivalRoot)) { placed = allocRect(c.size, c.atlasX, c.atlasY); continue; }
             if (nextEvict >= evictable.size()) break;
             const Evictable &e = evictable[nextEvict++];
             CardRec &gone = per[e.inst][e.pos];
@@ -1307,6 +1361,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             gone.size = 0u;
             ++mEvicted;
             changed = true;
+            mDeparted = true;
             placed = allocRect(c.size, c.atlasX, c.atlasY);
         }
         if (!placed) continue;
@@ -1368,6 +1423,19 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mCards.swap(keptCards);
         mTableDirty = true;
         ++mPhotonGeneration;
+    }
+    // THE DEPARTED CARDS' READERS (R3: residency path-independent at rest): a card that left takes its light from what
+    // read it - they read the voxels there now - and no move reports a departure, so at the window's drain and at the
+    // rest's decision every resident card's indirect is re-marched ONCE (named by that drain's root) when any card left
+    // since the last time: the rounds after it converge on the final set's own light, whatever path filled it.
+    if ((decide || windowDrain) && mDeparted) {
+        mDeparted = false;
+        const unsigned long long root = 1ull << rootBit(decide ? 'd' : 'w', mFrame);
+        for (CardRec &c : mCards)
+            if (c.size && c.indirectValid) {
+                c.relightIndirect = true;
+                c.roots |= root;
+            }
     }
     unsigned pagesUsed = 0u;
     for (unsigned char o : mPageOwner) pagesUsed += (o != 0u) ? 1u : 0u;
@@ -1666,6 +1734,7 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
             return Ogre::Aabb(c.centre, ext);
         };
         bool direct = view.allDirect, indirect = view.allIndirect;
+        unsigned long long regionRoot = 0ull;   // (R3 (c): a region's or an overflow's work is its own root's)
         for (CardRec &c : mCards) {
             bool d = view.allDirect, n = view.allIndirect;
             if (!d || !n) {
@@ -1673,8 +1742,9 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
                 for (size_t k = 0; !d && k < view.directBoxes.size(); ++k) d = box.intersects(view.directBoxes[k]);
                 for (size_t k = 0; !n && k < view.indirectBoxes.size(); ++k) n = box.intersects(view.indirectBoxes[k]);
             }
-            if (d) { c.relight = true; direct = true; }
-            if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; }
+            if ((d || n) && !regionRoot) regionRoot = 1ull << rootBit('r', mFrame);
+            if (d) { c.relight = true; direct = true; c.roots |= regionRoot; }
+            if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; c.roots |= regionRoot; }
         }
         if (direct && !mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
         mRadianceMovingLastFrame = direct;
@@ -1790,6 +1860,20 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
 }
 
 void SurfaceCache::relightCards() {
+    // THE FRAME'S ROOTS (R3 (c)): what its relights - the plan's and the sun traces' - trace to, and their deepest round:
+    // the moves they report carry them into the accumulation's listings (harvestIndirectReports), and the last frame's
+    // are published (CardCacheStatus::workRoots). A relight no root names (none was given it) is named 'r' here: work
+    // the judge reads as no owed move's.
+    mPlanRoots = 0ull;
+    mPlanRound = 0u;
+    for (size_t ri = 0; ri < mRelight.size(); ++ri) {
+        const unsigned idx = mRelight[ri];
+        CardRec &c = mCards[idx];
+        if (!c.roots) c.roots = 1ull << rootBit('r', mFrame);
+        mPlanRoots |= c.roots;
+        mPlanRound = std::max(mPlanRound, c.round);
+    }
+    mFrameRoots[mFrame % 512u] = FrameRoots{ mFrame, mPlanRoots, mPlanRound };
     if (mRelight.empty() || !mRadiance) { mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
@@ -2402,6 +2486,10 @@ void SurfaceCache::relightCards() {
             ++mIndirectLastFrame;
             mIndirectTexelsLastFrame += c.size * c.size;
         }
+        if (!c.relight && !c.relightIndirect) {   // its work done: its roots answered (R3 (c))
+            c.roots = 0ull;
+            c.round = 0u;
+        }
     }
     mRelight.clear();
     mRelightMode.clear();
@@ -2499,9 +2587,11 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
         mAccumJob->setNumThreadGroups((kCardSlots + 63u) / 64u, 1u, 1u);
         detail::photonDispatch(hc, mAccumJob, rs);
     } else if (cardsRead) {
-        // A MOVE THAT COULD NOT BE MEASURED (the job building): every card's indirect is listed (the overflow rule)
+        // A MOVE THAT COULD NOT BE MEASURED (the job building): every card's indirect is listed (the overflow rule; its
+        // work no owed move's, 'r')
+        const unsigned long long root = 1ull << rootBit('r', mFrame);
         for (CardRec &c : mCards)
-            if (c.indirectValid) c.relightIndirect = true;
+            if (c.indirectValid) { c.relightIndirect = true; c.roots |= root; }
         ++mIndirectOverflows;
     }
     const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -2616,8 +2706,9 @@ void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const u
     // A MOVE THAT COULD NOT BE MEASURED (the job not built yet, or a cascade past the cluster table): every card's
     // indirect is listed - the region list's overflow rule (a stale set never misses a change it cannot bound)
     if (!shaderReady || clustersOver) {
+        const unsigned long long root = 1ull << rootBit('r', mFrame);   // (R3 (c): no owed move's)
         for (CardRec &c : mCards)
-            if (c.indirectValid) c.relightIndirect = true;
+            if (c.indirectValid) { c.relightIndirect = true; c.roots |= root; }
         ++mIndirectOverflows;
     }
     const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
@@ -2631,6 +2722,7 @@ void SurfaceCache::endIndirectFrame(unsigned long long frame) {
     if (r.ticket.get()) return;   // every slot in flight: a later frame's list answers (the cards stay listed)
     r.ticket = mCardReport->readRequest(0u, 1u + kReportCapacity, /*accurateTracking=*/false);
     r.frame = frame;
+    r.cacheFrame = mFrame;
     mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
 }
 
@@ -2649,7 +2741,35 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             // (bit 30: listed card to card, bit 31: the overflowed list's geometric bound took part - 10-2c)
             const Ogre::uint32 word = w[1u + k], slot = word & 0x3FFFFFFFu;
             if (slot >= mSlotCard.size() || mSlotCard[slot] < 0) continue;   // freed since: nothing to relight
-            mCards[size_t(mSlotCard[slot])].relightIndirect = true;
+            CardRec &listed = mCards[size_t(mSlotCard[slot])];
+            // ANSWERED ALREADY (PHOTON-7 stage 10, R3): a listing of moves older than the card's own last march - the
+            // march, a frame or more after them, read what they moved - is no work (re-marching it made a round for
+            // nothing, and that round's moves the next)
+            if (listed.lastIndirect && r.cacheFrame < listed.lastIndirect) { ++mIndirectAnswered; continue; }
+            listed.relightIndirect = true;
+            // ITS PARENTS (R3 (c)): listed by the VOXELS (no card-to-card bit: the bricks it reads moved) - the voxel
+            // store's own move, 'v' at the report's frame; listed CARD TO CARD - the moves its accumulation summed since
+            // its last march: every frame's relights in [its march, the report's frame], their roots and the deepest
+            // round (frames the ring no longer holds are named by its horizon, 'h')
+            if (!(word & 0x40000000u)) {
+                listed.roots |= 1ull << rootBit('v', mFrame);
+            } else {
+                // (inclusive of its own march's frame: a move landed in the dispatch that marched it, read before it)
+                const unsigned long long from = listed.lastIndirect ? listed.lastIndirect : listed.since,
+                                         to = r.cacheFrame;
+                unsigned long long roots = 0ull;
+                unsigned round = 0u;
+                for (unsigned long long f = to; f >= from && f > 0ull && to - f < 512ull; --f) {
+                    const FrameRoots &fr = mFrameRoots[f % 512u];
+                    if (fr.frame != f) continue;
+                    roots |= fr.roots;
+                    round = std::max(round, fr.round);
+                }
+                // (moves older than the ring: named by its horizon, 'h' at the oldest frame it holds - they are older)
+                if (to > from + 511ull) roots |= 1ull << rootBit('h', to - 511ull);
+                listed.roots |= roots;
+                listed.round = std::max(listed.round, round + 1u);
+            }
             ++mIndirectReported;
             if (word & 0x40000000u) ++mIndirectByCards;
             if (word & 0x80000000u) ++mIndirectByBound;
@@ -3501,6 +3621,12 @@ void SurfaceCache::traceSun() {
 // TLAS instance's `instanceCustomIndex` (it reads the GPU scene's table, whose
 // index IS that slot), so "which cards belong to this hit" is one indexed
 // fetch of `mInstanceBuffer` and no lookup at all.
+bool SurfaceCache::tablesCurrent() const {
+    unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
+    while (mItemSlots > slotsWanted) slotsWanted *= 2u;
+    return !mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots;
+}
+
 bool SurfaceCache::syncBuffers() {
     Ogre::VaoManager *vao = Ogre::Root::getSingleton().getRenderSystem()->getVaoManager();
     if (!vao) return false;
@@ -3508,7 +3634,7 @@ bool SurfaceCache::syncBuffers() {
     // into the instance table, are what makes a card resident at all; the table covers every item slot of the scene.
     unsigned slotsWanted = std::max(kInstanceSlotsInitial, mInstanceSlots);
     while (mItemSlots > slotsWanted) slotsWanted *= 2u;
-    if (!mTableDirty && mInstanceBuffer && mCardBuffer && slotsWanted == mInstanceSlots) {
+    if (tablesCurrent()) {
         uploadDemandHead();
         return false;
     }
@@ -3667,11 +3793,17 @@ void SurfaceCache::update(const CardSceneView &view) {
     // ONE ROW (PHOTON-7's naming step): the tables' uploads are GPU copies before the capture that no pass holds -
     // cards.tables times them, filed when the tables were written or the uploads submitted (the frame's demand stamp
     // and the periodic read-back are the at-rest constants: a still frame files no card row, the stillness door's law).
-    {
+    // THE ROW IS THE TABLES' WRITE ALONE (PHOTON-7 stage 10, R3): the frame's demand stamp and the read-back's request are
+    // the at-rest constants and file no row - now and then they submit the staging blocks, and inside the row that filed
+    // a card row at rest with no table written (gi.hold_after_stop (1)'s room walk: a "cards.tables:0" 109 frames after
+    // the stop; photon-glass 63 frames into its hold).
+    if (tablesCurrent()) {
+        uploadDemandHead();
+    } else {
         detail::monitor::PhaseScope tables("cards.tables", Ogre::Root::getSingleton().getRenderSystem());
         if (syncBuffers()) tables.noteWork();
-        issueDemandRead();
     }
+    issueDemandRead();
 
     // NO LIGHT RE-QUEUES A CAPTURE (ATOM-S3-CARDCAP): a capture holds albedo,
     // normal, depth, emissive and roughness — no light quantity at all. The sun's
@@ -3719,12 +3851,24 @@ void SurfaceCache::update(const CardSceneView &view) {
     planRelights(view);
 }
 
+unsigned SurfaceCache::rootBit(char kind, unsigned long long frame) {
+    for (unsigned k = 0; k < 64u; ++k)
+        if (mRoots[k].kind == kind && mRoots[k].frame == frame) return k;   // one root a cause a frame
+    const unsigned b = mRootNext;
+    mRoots[b] = Root{ kind, frame };
+    mRootNext = (mRootNext + 1u) % 64u;
+    return b;
+}
+
 void SurfaceCache::noteMaterialChanged(MaterialId material) {
     bool any = false;
     for (const InstanceRec &inst : mInstances) {
         if (!inst.cardCount || inst.material != material) continue;
-        for (unsigned c = 0; c < inst.cardCount; ++c)
+        const unsigned long long root = 1ull << rootBit('r', mFrame);
+        for (unsigned c = 0; c < inst.cardCount; ++c) {
             mCards[inst.firstCard + c].queued = true;
+            mCards[inst.firstCard + c].roots |= root;
+        }
         any = true;
     }
     if (any) ++mInvalidMaterial;
@@ -3835,6 +3979,12 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.gatherWaits = mGatherWaits;
     out.indirectByCards = mIndirectByCards;
     out.restDrained = mRestDrained;
+    out.restDecisions = mRestDecisions;
+    out.windowDrains = mWindowDrains;
+    out.workRoots.clear();
+    for (unsigned k = 0; k < 64u; ++k)
+        if (mPlanRoots & (1ull << k)) out.workRoots.push_back(CardCacheStatus::WorkRoot{ mRoots[k].kind, mRoots[k].frame });
+    out.workRound = mPlanRound;
     out.indirectByBound = mIndirectByBound;
     out.gatherByRays = mGatherByRays;
     out.areaStrata = mAreaStrata;

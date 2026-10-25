@@ -1016,6 +1016,33 @@ void ScreenProbeGather::close() {
     mPlaceLayout = mTraceLayout = mFilterLayout = mIntegrateLayout = VK_NULL_HANDLE;
 }
 
+unsigned ScreenProbeGather::shippedRestLength() {
+    return restLengthOf(GatherTuning(), historyFramesOf(GatherTuning()));
+}
+
+bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey,
+                                           unsigned &restFrames, unsigned &restLength) const {
+    restFrames = 0u;
+    restLength = shippedRestLength();
+    const View *latest = nullptr;
+    for (const auto &kv : mViews) {
+        const View &v = kv.second;
+        if (v.scene != scene || !v.targetsReady) continue;
+        if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
+    }
+    if (!latest) return true;
+    for (const auto &kv : mViews) {
+        const View &o = kv.second;
+        if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
+        const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
+        const unsigned n = restLengthOf(o.tuningLast, o.historyFramesLast);
+        restFrames = restFrames ? std::min(restFrames, rest) : rest;
+        restLength = std::max(restLength, n);
+        if (rest < n) return false;
+    }
+    return true;
+}
+
 void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                                   unsigned long long restartKey, GatherStatus &out) const {
     out.error = mLastError;
@@ -1407,6 +1434,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                            in.restKey == v.restKey && in.chainKey == v.chainKey && !in.inputsBusy &&
                            photon == v.photonLast && !in.hitsReadback;
         v.photonLast = photon;
+        v.restableLast = temporal && !in.tuning.restOff && !in.stereo;
         if (in.restKey != v.restKey) ++v.keyMoves;
         v.inputsBusyLast = in.inputsBusy;
         v.restKey = in.restKey;
