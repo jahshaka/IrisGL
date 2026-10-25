@@ -5,9 +5,10 @@
 // reflection listener's hook — after the SSR prepass (whose depth and normals
 // are the probes' surfaces) and before the opaque pass that shades:
 //
-//   rq_probe_place.comp      one thread per cell: the probe's jittered pixel,
+//   rq_probe_place.comp      one workgroup per cell: the probe's jittered pixel,
 //                            its world position and normal, and the adaptive
-//                            probe the cell wants where one is not enough.
+//                            probe the cell wants where the grid does not
+//                            answer one of its pixels (every pixel tested).
 //   rq_probe_gather.comp     one WORKGROUP per probe, one ray per thread, one
 //                            ray per octahedral texel; dispatched INDIRECTLY
 //                            because the adaptive probes' count is the GPU's.
@@ -2006,7 +2007,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlacePipeLayout, 0, 1,
                                 &v.placeSets[ring], 0, nullptr);
         JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
-        vkCmdDispatch(cmd, (v.gridW + 7u) / 8u, (v.gridH + 7u) / 8u, 1u);
+        vkCmdDispatch(cmd, v.gridW, v.gridH, 1u);   // ONE WORKGROUP PER CELL: every pixel of it tested (PHOTON-7 stage 10)
         // ...AND THE SECOND PASS: the cells that asked for a second probe, ranked in a
         // fixed order, the first `cap` of them given one (rq_probe_place.comp's header).
         {
