@@ -6210,7 +6210,6 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             const double reach = (0.5 + double(kStepHysteresis)) * double(step);
             for (int a = 0; a < 3 && !moved; ++a)
                 moved = std::fabs(double(cam[a]) - double(centre[a])) > reach;
-            }
         }
         // THE TWO DIRTY_ALL GUARDS (Godot's, and S1 §4.4's three GPU losses are
         // why they are a prerequisite rather than an improvement).
