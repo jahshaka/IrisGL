@@ -8562,10 +8562,14 @@ struct FramePass {
     /// scene pass's children) — the rows whose gpuMs add up to the frame's.
     bool        topLevel = false;
     /// ITS OWN TIME (PHOTON-7's naming step): gpuMs less its DIRECT children's (the passes and rows whose pairs it
-    /// encloses) - the work no child names; NEGATIVE when unmeasured. `selfSubmitted`: the render system SUBMITTED inside
-    /// the row's own stretches (outside its children), so its own time holds the GPU's wait for the CPU (a bubble) - not
-    /// unnamed GPU work. CacheWork carries the same two.
-    float       selfGpuMs = -1.0f;
+    /// encloses) - the work no child names; valid when `selfMeasured`. Within the timestamps' rounding (kSelfEpsilonMs)
+    /// of 0 it reads 0; MORE NEGATIVE means the children sum past their parent - an overlap or a double count - and it is
+    /// REPORTED as it stands, never clamped. `selfSubmitted`: the render system SUBMITTED inside the row's own stretches
+    /// (outside its children), so its own time holds the GPU's wait for the CPU (a bubble) - not unnamed GPU work.
+    /// CacheWork carries the same three.
+    static constexpr float kSelfEpsilonMs = 1e-3f;
+    float       selfGpuMs = 0.0f;
+    bool        selfMeasured = false;
     bool        selfSubmitted = false;
     /// THE PASS READS THE GI (ENGINE-UPGRADE-ASYNC-3 stage 2; the engine's passReadsGi: a scene pass that
     /// is not a caster pass, or a custom pass, whose definition is not marked as sampling none). The
@@ -8652,8 +8656,9 @@ struct CacheWork {
     /// dispatched inside a compositor pass (the reflection's filter in its resolve pass) is inside that pass's time,
     /// so a frame's GPU is the TOP-LEVEL passes and rows summed (`jahlab monitor`, PHOTON-7).
     bool       topLevel = false;
-    /// ...and its own time and whether it submitted inside it (FramePass::selfGpuMs, selfSubmitted).
-    float      selfGpuMs = -1.0f;
+    /// ...and its own time and whether it submitted inside it (FramePass::selfGpuMs, selfMeasured, selfSubmitted).
+    float      selfGpuMs = 0.0f;
+    bool       selfMeasured = false;
     bool       selfSubmitted = false;
 };
 

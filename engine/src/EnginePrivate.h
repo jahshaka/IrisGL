@@ -2479,7 +2479,7 @@ public:
     unsigned mOpenRowSamples = 0u;
     /// THE ROWS' NESTING (PHOTON-7's naming step): the open rows innermost last, each with the submission tag its own
     /// stretch began at; a row's parent sample (0 = none) and whether its own stretches crossed a submission - read at
-    /// the retire into FramePass / CacheWork selfGpuMs and selfSubmitted.
+    /// the retire into FramePass / CacheWork selfGpuMs, selfMeasured and selfSubmitted.
     struct OpenRow {
         unsigned id = 0u; std::uintptr_t tag = 0u; bool submitted = false; bool aggregate = false;
         bool childSubmitted = false;   ///< a row inside it submitted (CacheScope::submittedInside)

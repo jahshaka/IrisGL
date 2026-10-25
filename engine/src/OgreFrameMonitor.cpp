@@ -392,23 +392,26 @@ void FrameMonitor::retirePending(bool all) {
                 addChild(pf.passSampleIds[i], pf.rec.passes[i].gpuMs);
             for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
                 addChild(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs);
-            const auto own = [&](unsigned id, float ms, float &self, bool &submitted) {
+            const auto own = [&](unsigned id, float ms, float &self, bool &measured, bool &submitted) {
                 if (!id) return;
                 if (ms >= 0.0f) {
-                    // (never below 0: the children's pairs lie inside the row's, so a negative is the timestamps'
-                    // rounding - and a negative reads "unmeasured")
+                    // The children's pairs lie inside the row's: a negative within the rounding (kSelfEpsilonMs) is 0;
+                    // past it the children overrun their parent (an overlap or a double count) - REPORTED as it stands.
                     const auto c = childMs.find(id);
-                    self = float(std::max(0.0, double(ms) - (c != childMs.end() ? c->second : 0.0)));
+                    double d = double(ms) - (c != childMs.end() ? c->second : 0.0);
+                    if (d < 0.0 && d > -double(FramePass::kSelfEpsilonMs)) d = 0.0;
+                    self = float(d);
+                    measured = true;
                 }
                 const auto s = mRowSubmitted.find(id);
                 submitted = s != mRowSubmitted.end() && s->second;
             };
             for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
                 own(pf.passSampleIds[i], pf.rec.passes[i].gpuMs, pf.rec.passes[i].selfGpuMs,
-                    pf.rec.passes[i].selfSubmitted);
+                    pf.rec.passes[i].selfMeasured, pf.rec.passes[i].selfSubmitted);
             for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
                 own(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs, pf.rec.cacheWork[i].selfGpuMs,
-                    pf.rec.cacheWork[i].selfSubmitted);
+                    pf.rec.cacheWork[i].selfMeasured, pf.rec.cacheWork[i].selfSubmitted);
             for (unsigned id : pf.passSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
             for (unsigned id : pf.cacheSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); }
         }
