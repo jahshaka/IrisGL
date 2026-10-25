@@ -20,6 +20,7 @@
 #include "SurfaceCache.h"   // SURFACE-CACHE phase 2: giStatus copies the Component's counters
 #include "photon/voxel/PhotonVoxelMaterial.h"
 #include "photon/voxel/PhotonVoxelScroll.h"
+#include "photon/PhotonInjectBoxes.h"
 
 #include <algorithm>
 #include <array>
@@ -5107,8 +5108,9 @@ static const char *const kScrollCopyRowNames[8] = { "vct.scrollCopy0", "vct.scro
 // Every region grows by a cell of idx and of j (the march's samples and the voxel's own extent), is cut to j's box and
 // aligned to the injection's 4^3 groups; past the injection's box count the regions fold into their union (a bound). The
 // injection marches each group once (LightInjection's union).
+
 bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector<Ogre::Aabb> &changed,
-                                         Ogre::PhotonCommitLight &light, std::vector<Ogre::Aabb> &world) {
+                                         Ogre::PhotonCommitLight &light, std::vector<Ogre::Aabb> &world, size_t reserve) {
     const VctCascade &outer = mVctCascades[idx];
     const VctCascade &inner = mVctCascades[j];
     const bool outermost = idx + 1 >= mVctCascades.size();
@@ -5217,15 +5219,9 @@ bool PhotonComponent::innerRemarchRegion(size_t idx, size_t j, const std::vector
         if (!empty) cells.push_back(c);
     }
     if (cells.empty()) { light.numInjectBoxes = 0u; return false; }
-    if (cells.size() > Ogre::PhotonCommitLight::kMaxInjectBoxes) {   // past the count: their union (a bound)
-        std::array<int, 6> u = cells[0];
-        for (const auto &c : cells)
-            for (int a = 0; a < 3; ++a) {
-                u[size_t(a)] = std::min(u[size_t(a)], c[size_t(a)]);
-                u[size_t(a) + 3u] = std::max(u[size_t(a) + 3u], c[size_t(a) + 3u]);
-            }
-        cells.assign(1u, u);
-    }
+    // past the count: folded (a bound; foldInjectBoxes), leaving room for the boxes the caller adds (an own commit's slabs)
+    foldInjectBoxes(cells, Ogre::PhotonCommitLight::kMaxInjectBoxes > reserve
+                               ? Ogre::PhotonCommitLight::kMaxInjectBoxes - reserve : 1u);
     light.numInjectBoxes = 0u;
     for (const auto &c : cells) {
         const Ogre::uint32 n = light.numInjectBoxes++;
@@ -5391,16 +5387,27 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
                 // voxels (a kept voxel's march reading another cascade's cells: the placement's dependence, L1 - stage
                 // 10's) are in the sweep by construction: their march met a moved face.
                 std::vector<Ogre::Aabb> ownWorld;
-                innerRemarchRegion(idx, idx, movedFaces, commitLight, ownWorld);
+                const size_t slabs = std::min<size_t>(c.scroll.slabs.size(), Ogre::PhotonCommitLight::kMaxInjectBoxes - 1u);
+                innerRemarchRegion(idx, idx, movedFaces, commitLight, ownWorld, slabs);   // (room left for the slabs)
+                std::vector<std::array<int, 6>> boxes;
+                for (Ogre::uint32 b = 0; b < commitLight.numInjectBoxes; ++b)
+                    boxes.push_back({ int(commitLight.injectLo[b][0]), int(commitLight.injectLo[b][1]), int(commitLight.injectLo[b][2]),
+                                      int(commitLight.injectHi[b][0]), int(commitLight.injectHi[b][1]), int(commitLight.injectHi[b][2]) });
                 for (const VctCascade::Scroll::Slab &sl : c.scroll.slabs) {
-                    if (commitLight.numInjectBoxes >= Ogre::PhotonCommitLight::kMaxInjectBoxes) {
-                        commitLight.numInjectBoxes = 0u;   // past the count: the whole volume (a bound)
-                        break;
+                    std::array<int, 6> b{};
+                    for (int a = 0; a < 3; ++a) {
+                        b[size_t(a)] = int(sl.lo[a] / 4u * 4u);
+                        b[size_t(a) + 3u] = int(std::min(Ogre::uint32(c.resolution), (sl.hi[a] + 3u) / 4u * 4u));
                     }
+                    boxes.push_back(b);
+                }
+                foldInjectBoxes(boxes, Ogre::PhotonCommitLight::kMaxInjectBoxes);   // (past the count: folded, a bound)
+                commitLight.numInjectBoxes = 0u;
+                for (const auto &b : boxes) {
                     const Ogre::uint32 n = commitLight.numInjectBoxes++;
                     for (int a = 0; a < 3; ++a) {
-                        commitLight.injectLo[n][a] = sl.lo[a] / 4u * 4u;
-                        commitLight.injectHi[n][a] = std::min(Ogre::uint32(c.resolution), (sl.hi[a] + 3u) / 4u * 4u);
+                        commitLight.injectLo[n][a] = Ogre::uint32(b[size_t(a)]);
+                        commitLight.injectHi[n][a] = Ogre::uint32(b[size_t(a) + 3u]);
                     }
                 }
             }

@@ -1227,9 +1227,10 @@ private:
     /// THE INNER RE-MARCH'S REGION (PHOTON-7 stage 4's read R4): the boxes of inner cascade `j`'s cells whose direct
     /// visibility march can read a change of outer cascade `idx` inside the world boxes `changed` (a commit's moved
     /// faces, a whole rebuild's edit) - into `light` (a delta, its boxes) and `world` (the same boxes in the world).
-    /// False when no voxel of `j` can read one: nothing to march.
+    /// False when no voxel of `j` can read one: nothing to march. `reserve`: boxes the caller adds after (an own commit's
+    /// slabs) - the regions fold to the injection's count less them.
     bool innerRemarchRegion(size_t idx, size_t j, const std::vector<Ogre::Aabb> &changed, Ogre::PhotonCommitLight &light,
-                            std::vector<Ogre::Aabb> &world);
+                            std::vector<Ogre::Aabb> &world, size_t reserve = 0u);
     /// Whether cascade `i` was injected in the
     /// current writer frame.
     bool injectedThisFrame(size_t i) const;
