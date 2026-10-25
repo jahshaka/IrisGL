@@ -118,6 +118,92 @@ int jahVoxelAnswerCascade = -1;
 /// A hit whose direct light is computed at the hit adds this, and nothing else of the store.
 vec3 jahVoxelBounceOut = vec3( 0.0 );
 
+#ifdef JAH_VOX_SAMPLE_DIRECT
+/// THE STORE'S QUANTUM at a value's level, per channel: the half's 2^-10 of the value, 2^-24 under its smallest normal.
+vec3 jahStoreQuantum( vec3 v )
+{
+	return exp2( floor( log2( max( abs( v ), vec3( 6.1035156e-5 ) ) ) ) - 10.0 );
+}
+
+/// THE BOUNCE SHARE BY PRECISION (PHOTON-7 stage 10, the lead's ruling (B)). The share ( T - D ) / T of a read is a
+/// QUOTIENT of two store values; carried onto the read `rad` its quantum is rad x ( q(T) + q(D) ) / T. It is taken only
+/// where that is within a code at the read's own level (1 % of the read over the store's floor, kGiBrickFloor); a
+/// level-0 texel holding a quantum or two is not (measured on the TLAS route: one subnormal quantum of T made the share
+/// 1 and none made it 0 - a coarse read of 4.3e-4 then toggled the hit's bounce whole, and two voxels at a convex edge
+/// orbited at period 2, 230-1725 store steps). An empty texel (T = 0) under a read that holds light is not precise
+/// either; a read of 0 always is (the share multiplies nothing).
+bool jahSharePrecise( vec3 t, vec3 q, vec3 rad )
+{
+	const vec3 code = 0.01 * max( rad, vec3( 5.9604645e-6 ) );
+	for( int k = 0; k < 3; ++k )
+	{
+		if( !( rad[k] > 0.0 ) )
+			continue;
+		if( !( t[k] > 0.0 ) || rad[k] * q[k] > code[k] * t[k] )
+			return false;
+	}
+	return true;
+}
+
+/// THE SHARE'S FOOTPRINT GROWS, deterministically and WORLD-ANCHORED (the ruling): where the pick texel's share is not
+/// precise, the cells of the SAME SURFACE (the voxeliser's normal within 25 degrees of the pick's; any, where the pick
+/// holds no normal) in rings of the plane across the pick's axis, at level 0 - the cell grid, never a position's
+/// fraction: the same cells for every ray that reads this surface here - summed, T and D alike (Sum ( T - D ) / Sum T:
+/// a coverage-weighted mean, no floor, no bias), ring by ring until precise, up to the read's own texel (its level's
+/// cells, at least one ring, at most three; the T store has no levels of its own). Returns the summed T and D, and
+/// whether they carry the share: a footprint that never does holds too little of the read's light at level 0 to say
+/// what of it is bounce - THE EMPTY TEXEL'S RULE (share 0, below) - so a quantum more or less of T there never moves the
+/// answer (with the share taken anyway, T = 0 gave 0 and T = one quantum gave 1: two fixed points, the walk resting on
+/// one and the teleport and the Jacobi re-solve on the other, gi.card_residency (7)'s convex edge).
+bool jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, inout vec4 tIso, inout vec4 dIso )
+{
+	vec3 q = jahStoreQuantum( tIso.xyz ) + jahStoreQuantum( dIso.xyz );
+	if( jahSharePrecise( tIso.xyz, q, rad ) )
+		return true;
+	const vec3 ir = JAH_VOX_INVRES( c );
+	const int ax = jahVoxelAxis( dir, ir );
+	const int a1 = ax == 0 ? 1 : 0;
+	const int a2 = ax == 2 ? 1 : 2;
+	const vec3 cell0 = floor( lsPick / ir );
+#ifdef JAH_VOX_SAMPLE_NRM
+	const vec3 n0 = JAH_VOX_SAMPLE_NRM( c, ( cell0 + 0.5 ) * ir, 0.0 ).xyz * 2.0 - 1.0;
+	const bool n0Known = dot( n0, n0 ) > 0.25;
+#endif
+	const int rings = clamp( int( exp2( floor( max( lod, 0.0 ) ) ) ), 1, 3 );
+	for( int ring = 1; ring <= rings; ++ring )
+	{
+		for( int du = -ring; du <= ring; ++du )
+			for( int dv = -ring; dv <= ring; ++dv )
+			{
+				if( max( abs( du ), abs( dv ) ) != ring )
+					continue;   // the ring's own cells
+				vec3 cc = cell0;
+				cc[a1] += float( du );
+				cc[a2] += float( dv );
+				const vec3 u = ( cc + 0.5 ) * ir;
+				if( any( lessThan( u, vec3( 0.0 ) ) ) || any( greaterThan( u, vec3( 1.0 ) ) ) )
+					continue;
+#ifdef JAH_VOX_SAMPLE_NRM
+				if( n0Known )
+				{
+					const vec3 n = JAH_VOX_SAMPLE_NRM( c, u, 0.0 ).xyz * 2.0 - 1.0;
+					if( !( dot( n, n0 ) > 0.906 * sqrt( dot( n, n ) * dot( n0, n0 ) ) ) )
+						continue;   // another surface
+				}
+#endif
+				const vec4 t = 0.5 * ( JAH_VOX_SAMPLE_ISO( c, u, 0.0 ) + JAH_VOX_SAMPLE_BACK( c, u, 0.0 ) );
+				const vec4 d = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, u, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, u, 0.0 ) );
+				tIso += t;
+				dIso += d;
+				q += jahStoreQuantum( t.xyz ) + jahStoreQuantum( d.xyz );
+			}
+		if( jahSharePrecise( tIso.xyz, q, rad ) )
+			return true;
+	}
+	return false;
+}
+#endif
+
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
 /// the cascade chain's light volumes.
 ///
@@ -211,13 +297,18 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 dir, float footprint, bool mirror, out 
 			// alike - a share read at a coarser level was 2 % of the lit floor's light on shaded
 			// faces with no bounce in the store (spikes/far-sun-2/NOTES.md section 10).
 			// THE SIDES' MEANS (PHOTON-7 stage 7: the store and the direct store hold the two sides).
-			const vec4 tIso = 0.5 * ( JAH_VOX_SAMPLE_ISO( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_BACK( c, lsPick, 0.0 ) );
-			const vec4 dIso = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, lsPick, 0.0 ) );
+			vec4 tIso = 0.5 * ( JAH_VOX_SAMPLE_ISO( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_BACK( c, lsPick, 0.0 ) );
+			vec4 dIso = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, lsPick, 0.0 ) );
+			// (THE SHARE BY PRECISION, the ruling (B): its footprint grows where the pick texel cannot carry it; one that
+			// never can is the empty texel's case)
+			const bool sharePrecise = jahVoxelShareFootprint( c, lsPick, dir, rad, lod, tIso, dIso );
 			// ( T - D ) / T, NOT 1 - D / T: at an EMPTY texel (T = D = 0 - the texel picked along
 			// the ray holds nothing and the read's light came through the kernel's other axes) the
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
 			// shaded faces at bounces 0; spikes/far-sun-2/NOTES.md section 16).
-			const vec3 share = clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
+			const vec3 share = sharePrecise
+								   ? clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) )
+								   : vec3( 0.0 );
 			accBounce += rad * share * w;
 		}
 		// MOVER-OCCLUSION-1: THE SHARE A MOVER ABOVE THE HIT OCCLUDES. The store holds the
