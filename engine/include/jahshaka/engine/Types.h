@@ -5048,11 +5048,12 @@ struct GiStatus {
     /// THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b; rq_voxel_sides.comp): the life of the scene's
     /// counts, read back a fixed number of frames after each dispatch - the dispatches (a cascade's pass each), the rays
     /// and what answered each (a card, a cascade, a back face, no sample, the sky), the sides gathered and those with no
-    /// sample; `waits` = passes whose structure was not there (the voxel rays that pass). THE e = 0 COUNTER at the ray
-    /// tier: inside a watertight room `sky` stays 0.
+    /// sample; `waits` = passes whose structure was not there (the voxel rays that pass); `routeChanges` = passes on
+    /// another route than their cascade's last (each resumes the whole cascade). THE e = 0 COUNTER at the ray tier:
+    /// inside a watertight room `sky` stays 0.
     struct VoxelSideCounts {
         unsigned long long dispatches = 0ull, rays = 0ull, card = 0ull, voxel = 0ull, backFaces = 0ull,
-                           noSample = 0ull, sky = 0ull, sides = 0ull, emptySides = 0ull, waits = 0ull;
+                           noSample = 0ull, sky = 0ull, sides = 0ull, emptySides = 0ull, waits = 0ull, routeChanges = 0ull;
     } voxelSides;
 };
 

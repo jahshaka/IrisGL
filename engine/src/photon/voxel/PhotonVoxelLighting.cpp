@@ -1283,6 +1283,12 @@ namespace Ogre
                 traced = mSideTracer( job ) == 1;
             }
             const int32 want = traced ? 1 : 0;
+            if( mSideRoute >= 0 && int32( mSideRoute ) != want )
+            {
+                mSideRouteChanged = true;   // another estimator: every brick resumes (takeSideRouteChange)
+                ++mSideRouteChanges;
+            }
+            mSideRoute = int8( want );
             if( mLightVctBounceInject->getProperty( "jah_vct_tlas" ) != want )
                 mLightVctBounceInject->setProperty( "jah_vct_tlas", want );
             mLightVctBounceInject->setNumUavUnits( traced ? 6u : 5u );
@@ -1399,7 +1405,10 @@ namespace Ogre
                     boxHi[4u * b + a] = activation->hi[b][a];
                 }
         }
-        flags[2] = outer ? 1u : 0u;
+        // (ACCUM's skip of the source's bricks inside this cascade's box holds for a COARSER source alone: inside its own
+        // box a cascade never reads an outer one. A FINER source - the TLAS route's, whose hits read the finest cascade
+        // at their point (10-2b) - is read inside this box: every brick of it counts.)
+        flags[2] = outer && source->mVoxelizer->getVoxelCellSize().x > mVoxelizer->getVoxelCellSize().x ? 1u : 0u;
         flags[3] = mode == 3u && !outer ? 1u : 0u;
         if( mode == 5u && select )
         {

@@ -929,6 +929,8 @@ GiStatus PhotonComponent::giStatus() const {
     // every scene with the card row off.
     if (mSurfaceCache) mSurfaceCache->fillStatus(st.cards);
     mScene.voxelSideCounts(st.voxelSides);   // (10-2b: the ray tier's counts; zero elsewhere)
+    for (const VctCascade &c : mVctCascades)
+        if (c.lighting) st.voxelSides.routeChanges += c.lighting->sideRouteChanges();
     // THE CHANGED-REGION LIST as it last closed (PHOTON-7 stage 3): counters the component holds, no Ogre object.
     st.regionFrame = mRegionsClosed.frame;
     st.regionCount = unsigned(mRegionsClosed.regions.size());
@@ -6561,9 +6563,10 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
 // (2) THE FEEDBACK, OUTERMOST FIRST: one bounce pass over each cascade's ACTIVE bricks (PhotonVoxelLighting::feedbackSelect:
 //     the bricks whose direct term changed this frame, the ones a listed lamp or edit meets, every brick after a whole
 //     injection or a sky change - plus those still converging), then each cascade's stopped bricks accumulate what this
-//     frame's moves - its own and every outer cascade's that ran - could move them by, and the stop and resume rules run
-//     (feedbackEnd). A cascade owes a frame while an activation is unanswered by a landed reading or its last reading
-//     counts active bricks; every cascade inside one that ran runs its accumulation and rules too (its cones read it).
+//     frame's moves - its own and every outer cascade's that ran, and at the TLAS route every inner one's too - could move
+//     them by, and the stop and resume rules run (feedbackEnd). A cascade owes a frame while an activation is unanswered
+//     by a landed reading or its last reading counts active bricks; every cascade inside one that ran runs its
+//     accumulation and rules too (its cones read it), and at the TLAS route every one outside it (its hits read it).
 static const char *const kRelightRowNames[8] = { "vct.relight0", "vct.relight1", "vct.relight2", "vct.relight3",
                                                  "vct.relight4", "vct.relight5", "vct.relight6", "vct.relight7" };
 static const char *const kFeedbackRowNames[8] = { "vct.feedback0", "vct.feedback1", "vct.feedback2", "vct.feedback3",
@@ -6834,6 +6837,21 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         ran[i] = 1;
         outerRan = true;
     }
+    // (a') THE TLAS ROUTE READS INWARD TOO (10-2b): a cascade whose sides gather by TLAS rays reads every hit at the finest
+    //      cascade there - an INNER one inside its box - so an inner cascade that passes is a source of each outer cascade on
+    //      that route, which owes its accumulation (c) whatever its own bricks owe (the voxel rays read outward alone: an
+    //      outer cascade there never reads an inner one). Without it a fresh build's outer bricks stopped against inner
+    //      values still rising and never resumed: gi.field_oracle_marks (3) came to rest with cascade 1's store 323840 codes
+    //      off its rebuild (the outside of two sealed rooms lit by a step, 0 in the rebuild; room B, unchanged, 6 % off).
+    {
+        bool innerRan = false;
+        for (size_t i = 0; i < n; ++i) {
+            VctCascade &c = mVctCascades[i];
+            if (!c.lighting || !c.built) continue;
+            if (!ran[i] && innerRan && c.lighting->sideRoute() == 1) ran[i] = 1;
+            innerRan = innerRan || ran[i] != 0;
+        }
+    }
     // (b) THE FRAME'S LISTS UNDER ITS COUNT, OUTERMOST FIRST (GiQualityFacts::lightWorkFrames: the chain's bricks over
     //     that many frames, a brick-pass each): each selection lists its active bricks from its cursor while the chain's
     //     budget lasts and carries the rest (PhotonBrickFeedback_cs.glsl SELECT, on the GPU - the host never knows a
@@ -6908,7 +6926,9 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
                                     kFeedbackRowNames[std::min(i, size_t(7))], mRoot->getRenderSystem());
             c.lighting->feedbackRun();
         }
-        c.fbForce = false;
+        // (a pass on another route than the last - the TLAS rays or the voxel rays, 10-2b - is another input: the next
+        // pass runs the whole cascade)
+        c.fbForce = c.lighting->takeSideRouteChange();
         ++c.fbPasses;
     }
     for (size_t i = n; i-- > 0;) {
@@ -6917,6 +6937,9 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         c.lighting->feedbackAccumulate(c.lighting);
         for (size_t s = i + 1; s < n; ++s)
             if (ran[s]) c.lighting->feedbackAccumulate(mVctCascades[s].lighting);
+        if (c.lighting->sideRoute() == 1)   // (a'): the TLAS route's hits read the inner cascades too
+            for (size_t s = 0; s < i; ++s)
+                if (ran[s]) c.lighting->feedbackAccumulate(mVctCascades[s].lighting);
     }
     // THE CARDS' INDIRECT (PHOTON-7 stage 5, 5-1): every cascade that moved this frame - a pass, an injection - adds its
     // bricks' moves into the resident cards' would-move, BEFORE the stop and resume rules clear the passed bits.

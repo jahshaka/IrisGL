@@ -207,6 +207,14 @@ namespace Ogre
         UavBufferPacked *mSideGather = nullptr;
         uint32           mSideGatherBricks = 0u;
         std::function<int( const PhotonVoxelSideTrace & )> mSideTracer;
+        /// THE ROUTE THE LAST PASS GATHERED BY (10-2b): -1 none yet, 0 the voxel rays, 1 the TLAS rays. The two are two
+        /// estimators of one gather - two fixed points - so a pass whose route differs from the last one's CHANGES THE
+        /// INPUT: every brick of the cascade resumes (takeSideRouteChange: PhotonGi forces the next pass whole), or a brick
+        /// stopped under the first route keeps its answer under the second (a pass whose structure is not there - the
+        /// tracer's wait - runs the voxel rays). Counted: GiStatus::voxelSides.routeChanges.
+        int8             mSideRoute = -1;
+        bool             mSideRouteChanged = false;
+        uint32           mSideRouteChanges = 0u;
         /// the chain's innermost cascade, as the frame's selection named it (feedbackSelect): its scratch is the one bound
         PhotonVoxelLighting *mFeedbackChain = nullptr;
 
@@ -509,6 +517,18 @@ namespace Ogre
         /// the chain's side-gather scratch for at least `bricks` listed bricks (the back scratch's count; grown once a
         /// frame BEFORE the selections, on the innermost cascade)
         void ensureSideGather( uint32 bricks );
+        /// true once after a pass whose route (the TLAS rays or the voxel rays) differs from the last pass's: the caller
+        /// resumes every brick (the input changed); the count, the cascade's every change since its creation
+        bool takeSideRouteChange()
+        {
+            const bool changed = mSideRouteChanged;
+            mSideRouteChanged = false;
+            return changed;
+        }
+        uint32 sideRouteChanges() const { return mSideRouteChanges; }
+        /// the route the last pass gathered by: -1 none yet, 0 the voxel rays, 1 the TLAS rays (whose hits read the
+        /// finest cascade at their point - an INNER one inside this box: PhotonGi accumulates the inner cascades' moves)
+        int sideRoute() const { return mSideRoute; }
         UavBufferPacked *sideGather() const
         {
             return mFeedbackChain && mFeedbackChain->mSideGather ? mFeedbackChain->mSideGather : mSideGather;
