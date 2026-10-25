@@ -3,14 +3,15 @@
 // (GATHER-1a; the plane-weighted SH integrate PHOTON-GATHER-1b item 3,
 // SPECS/photon/C2_GATHER_FILTERED_DEFAULT_ON_DESIGN.md section 1.3).
 //
-// ONE THREAD PER PIXEL. The pixel reads the FOUR uniform probes around it —
-// bilinear in probe space, the cells whose centres bracket the pixel — plus its
-// own cell's ADAPTIVE twin, and weighs each by THE PLANE TEST (the pixel's
+// ONE THREAD PER PIXEL. The pixel reads the FOUR cells around it — bilinear in
+// probe space, the cells whose centres bracket the pixel — each by its uniform
+// probe or, where the cell has one and it agrees better, its ADAPTIVE twin
+// (Lumen's corner rule), and weighs each by THE PLANE TEST (the pixel's
 // distance off the probe's plane as a fraction of its own view distance, and
 // the two normals' dot — jahPlaneWeight, the tolerances the placement job's
 // adaptive test uses, as ramps). Each probe answers with its SH EVALUATED AT
 // THE PIXEL'S OWN NORMAL, so the irradiance follows the surface the pixel is
-// on, not the one the probe sat on. The twin carries its cell's bilinear share.
+// on, not the one the probe sat on. A twin carries its corner's bilinear share.
 //
 // WHAT THE PLANE WEIGHT DECIDES. A cell's probes describe the surfaces they
 // sit on; a pixel belongs to the ones whose plane it lies in. Weighing by
@@ -332,11 +333,14 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 
 /// THE BILINEAR READ'S TAPS (GATHER-1a; one text for the diffuse's own read and the rough specular's lobe, 7-3): the
 /// four uniform probes whose cells bracket the pixel (the bracket's weights; a cell off the grid clamps onto the border
-/// cell), then the pixel's own cell's ADAPTIVE TWIN at that cell's bilinear share - it exists because the cell holds a
-/// surface its uniform probe is not on - each weighed by THE PLANE TEST and kept only where the probe is SEEN FROM THE
-/// PIXEL ALONG ITS SURFACE (no light through a wall: a floor that runs on under a thin partition is one plane on both
-/// sides), in that ONE FIXED ORDER. `starved`: a probe with a positive share had no sample this frame (its ray records
-/// dropped by a full hit list, rq_probe_filter.comp's irradiance.w -1).
+/// cell), each weighed by THE PLANE TEST and kept only where the probe is SEEN FROM THE PIXEL ALONG ITS SURFACE (no
+/// light through a wall: a floor that runs on under a thin partition is one plane on both sides) - and A CORNER'S
+/// ADAPTIVE TWIN (Lumen's GetAdaptiveProbeInterpolationWeight; PHOTON-7 stage 10): where the corner cell has one (it
+/// holds a surface its uniform probe is not on), the twin under the same bracket weight and the same two tests, and
+/// the corner takes the BETTER of the two. A sliver's pixels then blend the twins of the cells around them as any pixel
+/// blends its uniform four (it read only its own cell's twin: one probe's noise, 4.4 x its neighbours' on the
+/// residency row's 1-px floor sliver). In that ONE FIXED ORDER. `starved`: a probe with a positive share had no sample
+/// this frame (its ray records dropped by a full hit list, rq_probe_filter.comp's irradiance.w -1).
 int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2 gridEye, ivec2 grid, vec3 pixelWorld,
 				  vec3 pixelNormal, float pixelDist, vec2 local, JahEye thisEye, int eye, vec2 eyeSize,
 				  out uint tapIdx[5], out float tapW[5], out bool starved )
@@ -348,44 +352,38 @@ int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2
 		tapIdx[t] = 0u;
 		tapW[t] = 0.0;
 	}
-	float ownCellWeight = 0.0;
 	for( int k = 0; k < 4; ++k )
 	{
 		const ivec2 o = ivec2( k & 1, k >> 1 );
 		const ivec2 c = clamp( c0 + o, ivec2( 0 ), gridEye - 1 ) + cellOff;
 		const float wb = ( o.x == 1 ? f.x : 1.0 - f.x ) * ( o.y == 1 ? f.y : 1.0 - f.y );
-		if( c == cell )
-			ownCellWeight += wb;
+		if( wb <= 0.0 )
+			continue;
 		const uint probeIndex = uint( c.y * grid.x + c.x );
-		const vec4 posW = records.r[probeIndex].posW;
-		starved = starved || ( posW.w > 0.5 && wb > 0.0 && records.r[probeIndex].irradiance.w < -0.5 );
-		if( posW.w < 0.5 || records.r[probeIndex].irradiance.w < 0.5 || wb <= 0.0 )
-			continue;
-		const float w = wb * jahPlaneWeight( posW.xyz, records.r[probeIndex].normalW.xyz, pixelWorld,
-											 pixelNormal, pixelDist );
-		if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-			continue;
-		tapIdx[n] = probeIndex;
-		tapW[n] = w;
-		++n;
-	}
-	const float link = records.r[index].normalW.w;
-	if( link > 0.5 && ownCellWeight > 0.0 )
-	{
-		const uint twin = uint( link ) - 1u;
-		const vec4 posW = records.r[twin].posW;
-		starved = starved || ( posW.w > 0.5 && records.r[twin].irradiance.w < -0.5 );
-		if( posW.w > 0.5 && records.r[twin].irradiance.w > 0.5 )
+		float best = 0.0;
+		uint bestIdx = 0u;
+		// the corner's uniform probe, then its twin; the twin is read only where the uniform is not a perfect answer
+		const float link = records.r[probeIndex].normalW.w;
+		for( int m = 0; m < 2; ++m )
 		{
-			const float w = ownCellWeight * jahPlaneWeight( posW.xyz, records.r[twin].normalW.xyz,
-															pixelWorld, pixelNormal, pixelDist );
-			if( w > 0.0 && seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
-			{
-				tapIdx[n] = twin;
-				tapW[n] = w;
-				++n;
-			}
+			if( m == 1 && ( link < 0.5 || best >= wb ) )
+				break;
+			const uint pi = m == 0 ? probeIndex : uint( link ) - 1u;
+			const vec4 posW = records.r[pi].posW;
+			starved = starved || ( posW.w > 0.5 && records.r[pi].irradiance.w < -0.5 );
+			if( posW.w < 0.5 || records.r[pi].irradiance.w < 0.5 )
+				continue;
+			const float w = wb * jahPlaneWeight( posW.xyz, records.r[pi].normalW.xyz, pixelWorld, pixelNormal, pixelDist );
+			if( w <= best || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
+				continue;
+			best = w;
+			bestIdx = pi;
 		}
+		if( best <= 0.0 )
+			continue;
+		tapIdx[n] = bestIdx;
+		tapW[n] = best;
+		++n;
 	}
 	return n;
 }
@@ -735,7 +733,7 @@ void main()
 	}
 	else
 	{
-		// THE BILINEAR FOUR AND THE OWN CELL'S TWIN (bilinearTaps), summed in its one fixed order
+		// THE BILINEAR FOUR, EACH CORNER ITS UNIFORM PROBE OR ITS TWIN (bilinearTaps), summed in its one fixed order
 		nTap = bilinearTaps( c0, f, cell, index, cellOff, gridEye, grid, pixelWorld, pixelNormal, pixelDist, local,
 							 thisEye, eye, eyeSize, tapIdx, tapW, starved );
 		tapsRead = true;
