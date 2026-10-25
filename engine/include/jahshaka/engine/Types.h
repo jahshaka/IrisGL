@@ -2950,9 +2950,16 @@ enum class GiViewProfile {
 /// Low's coarser grid keeps the 8x8 map, because 6x6 at 32 would idle 28 of the
 /// trace's 64-thread workgroup (rays per probe are one workgroup, probe count is
 /// what fills the card); an 8x8 octahedral map (64 rays) at Low, High and Epic,
-/// 6x6 (36) at Medium; the adaptive second
-/// probes capped at a quarter of the grid (Lumen's budget is a fixed
-/// allocation of the same order, and a flat scene spends none of it).
+/// 6x6 (36) at Medium; the adaptive second probes (one a cell at most) capped
+/// at HALF the grid at Medium, High and Epic - Lumen's
+/// AdaptiveProbeAllocationFraction - and at THE GRID ITSELF at Low (PHOTON-7
+/// stage 10, L7: derived from the twins the per-pixel test asks on Bistro
+/// Exterior and Interior at 1920 x 1080 - Low 0.58 / 0.66 of its cells, Medium
+/// and High 0.46 / 0.49, Epic 0.29 / 0.30; a quarter served a busy scene's
+/// slivers on every second frame, the flicker back where scenes are richest).
+/// A CAP, not a target: a flat scene spends none of it; the allocation is
+/// ~1.46 KB a probe (+3.0 MB at High for the half, +11.8 MB at Epic, +2.2 MB at
+/// Low for the grid).
 ///
 /// THE VR COLUMN IS THE DESKTOP'S ROW (PHOTON-GA-VR, decided by arithmetic): a
 /// stereo target gathers per EYE (each eye's layer its own grid, each eye through
@@ -2975,8 +2982,8 @@ struct GiGatherFacts {
     /// texel (at most 8 — one ray is one thread of the trace's 8x8 workgroup).
     unsigned octRes = 8u;
     /// The adaptive probes a frame may add, as the uniform grid's count divided
-    /// by this (4 = a quarter of the grid).
-    unsigned adaptiveCapDivisor = 4u;
+    /// by this (2 = half the grid; 1 = the grid: every asking cell served).
+    unsigned adaptiveCapDivisor = 2u;
 };
 
 struct GiQualityFacts {
@@ -3207,7 +3214,8 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 65536u;     // 4 pages a frame
         f.cardIndirectTexels = 16384u;  // 1 page a frame
         f.cardAreaStrata = 4u;          // 16 rays a texel an area light: 1 / 4 at a parallel edge
-        f.gather = { 32u, 8u, 4u };   // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density)
+        // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density); the twins capped at THE GRID (GiGatherFacts)
+        f.gather = { 32u, 8u, 1u };
         f.probeGridBudgetBytes = 64ull << 20;
         break;
     case GiQuality::High:
@@ -3230,7 +3238,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         // TLAS gather's ~2.5 ns a ray, the relight's own ~0.15 ms. Epic the same: 6 held at 142, 8 at 119, 3.55 ms. Medium
         // and Low hold the step at 114 and 98 at any count: no card-to-card rounds there)
         f.cardIndirectTexels = 131072u;
-        f.gather = { 16u, 8u, 4u };   // 64 rays a probe, a probe per 16x16
+        f.gather = { 16u, 8u, 2u };   // 64 rays a probe, a probe per 16x16; the twins capped at half the grid
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
         f.reflectRestRays = 4u;
@@ -3247,7 +3255,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.cardLightTexels = 131072u;    // 8 pages a frame
         f.cardIndirectTexels = 32768u;  // 2 pages a frame
         f.cardAreaStrata = 6u;          // 36 rays a texel an area light: 1 / 6 at a parallel edge
-        f.gather = { 16u, 6u, 4u };   // 36 rays a probe (T-A)
+        f.gather = { 16u, 6u, 2u };   // 36 rays a probe (T-A); the twins capped at half the grid
         f.probeGridBudgetBytes = 128ull << 20;
         break;
     }

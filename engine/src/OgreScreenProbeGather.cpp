@@ -1338,7 +1338,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     const unsigned gridW = in.stereo ? 2u * eyeGridW : eyeGridW;
     const unsigned gridH = (in.height + stride - 1u) / stride;
     // HOW MANY ADAPTIVE PROBES A FRAME MAY ADD: the table's share of the grid (a
-    // quarter). A CAP rather than a target — a flat scene spends none of it. The
+    // half; the grid at Low - GiGatherFacts). A CAP rather than a target — a flat scene spends none of it. The
     // cap is part of the allocation (the atlas and the record buffer are sized
     // for the worst case, resident, never per frame — the 0071 lesson), so it
     // cannot be a per-frame decision.
