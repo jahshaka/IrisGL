@@ -40,10 +40,11 @@
 // read lists: the read card's slot and the largest share of one texel's rays it answered) times that card's MOVE this
 // frame (the relight's largest change of its radiance, JahCardLight_cs.glsl) bounds the change of every texel of the
 // reader (a texel's gather is the mean of its rays: a read card moved by m moves it by at most m times its share), times
-// the reader's sensitivity, into its would-move - the same accumulator and the same listing as the voxels' moves. A
-// block that overflowed (more cards read than it holds) takes the frame's largest move whole. The Jacobi iteration of
-// the cards' bounces, stopped by the code: a card relists while what it read moved a code of it. A list that overflowed
-// takes every other moved card through the geometric bound (below).
+// the reader's sensitivity, into its would-move - the same accumulator and the same listing as the voxels' moves, the
+// list's terms summed IN THE KEYS' ORDER (a key's place in the block is its insertion's, an atomic's order). The Jacobi
+// iteration of the cards' bounces, stopped by the code: a card relists while what it read moved a code of it. A list
+// that overflowed (more cards read than it holds: WHICH cards it holds is an atomic's order) takes EVERY moved card
+// through the geometric bound (below), its held ones too.
 // CLEAR THE MOVES (mode 4): every slot's move, after mode 3 read them (a move is one frame's).
 // THE FIELD'S VARIANT (jah_field_mark, Jahshaka/FieldAccumulate; PHOTON-7 stage 5, 5-4): the receivers are the irradiance
 // field's probes (points: zero half extents; the state is the field's marks, its sensitivity the generation job's), and
@@ -269,21 +270,40 @@ void main()
 		reportBits = 0x40000000u;
 		const uint slotB = floatBitsToUint( c0.w );
 		const uint base = slotB * 65u;
-		for( uint e = 0u; e < 32u; ++e )
+		const bool overflowed = ( caState[base] & 1u ) != 0u;
+		// THE LIST IN ITS KEYS' ORDER, never the block's: a key's place in the block is where its insertion probed (an
+		// atomic's order under a collision), and a float sum over an atomic's order put a borderline listing on another
+		// frame in another process (gi.walk's glass, L2: the arms 1585 px apart at the hold) - the voxels' own rule
+		// (PhotonBrickFeedback_cs.glsl ACCUM)
+		uint last = 0u;
+		for( uint n = 0u; n < 32u && !overflowed; ++n )
 		{
-			const uint key = caState[base + 1u + 2u * e];
-			if( key == 0u || key > 16384u )
+			uint key = 0xFFFFFFFFu, at = 0u;
+			for( uint e = 0u; e < 32u; ++e )
+			{
+				const uint k = caState[base + 1u + 2u * e];
+				if( k > last && k < key )
+				{
+					key = k;
+					at = e;
+				}
+			}
+			if( key == 0xFFFFFFFFu )
+				break;
+			last = key;
+			if( key > 16384u )
 				continue;
 			const float m = uintBitsToFloat( caCluster[key - 1u] );
 			if( !( m > 0.0 ) )
 				continue;
-			sum += sens * m * ( float( caState[base + 2u + 2u * e] ) * ( 1.0 / 65535.0 ) );
+			sum += sens * m * ( float( caState[base + 2u + 2u * at] ) * ( 1.0 / 65535.0 ) );
 		}
-		// AN OVERFLOWED LIST (the lead's ruling: the GEOMETRIC BOUND, the voxels' own): every moved card the list does
-		// not hold, its move times min( 1, S / ( pi d^2 ) ) - S its box's largest silhouette, d the gap between the two
-		// boxes (occlusion ignored): a cosine-weighted mean's share of a box is at most its solid angle over pi, so the
-		// sum bounds the change of every texel's integral and never misses a move
-		if( ( caState[base] & 1u ) != 0u )
+		// AN OVERFLOWED LIST (the lead's ruling: the GEOMETRIC BOUND, the voxels' own): EVERY moved card - the list's held
+		// ones too: WHICH cards it holds is an atomic's order - its move times min( 1, S / ( pi d^2 ) ), S its box's
+		// largest silhouette, d the gap between the two boxes (occlusion ignored): a cosine-weighted mean's share of a box
+		// is at most its solid angle over pi, so the sum bounds the change of every texel's integral, never misses a move
+		// and is the same in every process (the cards in the host's order)
+		if( overflowed )
 		{
 			float bound = 0.0;
 			for( uint j = 0u; j < caMode.y; ++j )
@@ -294,11 +314,6 @@ void main()
 					continue;
 				const float m = uintBitsToFloat( caCluster[slotA] );
 				if( !( m > 0.0 ) )
-					continue;
-				bool listed = false;
-				for( uint e = 0u; e < 32u && !listed; ++e )
-					listed = caState[base + 1u + 2u * e] == slotA + 1u;
-				if( listed )
 					continue;
 				const vec3 ext = 2.0 * a1.xyz;
 				const float area = ext.x * ext.y + ext.y * ext.z + ext.z * ext.x;
