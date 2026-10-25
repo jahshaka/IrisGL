@@ -2221,7 +2221,8 @@ private:
     X(GatherHistoryReadback, "gather.historyReadback") /* the gather's pixel-history COUNT copied to the host (the stillness door, PHOTON-2 stage 0) */ \
     X(ReflectHistoryReadback, "reflect.historyReadback") /* the reflection history's COUNT copied to the host (the stillness door, PHOTON-2 stage 0) */ \
     X(CardDemandCount, "cards.demandCount") /* the card readers count their carded and uncarded hits (a measuring arm, PHOTON-7 stage 5) */ \
-    X(CardGatherLate, "cards.gatherLate") /* the gather's demand stamps within N frames of a demand change dropped: a late first reader (a test door) */
+    X(CardGatherLate, "cards.gatherLate") /* the gather's demand stamps within N frames of a demand change dropped: a late first reader (a test door) */ \
+    X(CardForce, "cards.force") /* one card FORCED resident (+(node x 64 + card)) or absent (-(node x 64 + card)): L1's test door (PHOTON-7 stage 10) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,

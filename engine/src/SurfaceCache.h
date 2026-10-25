@@ -293,6 +293,11 @@ struct CardSceneView {
     /// ...and each reader's rest length so far, reader frames (0 the reflection, 1 the gather; 0: it has no rest): its
     /// rest sequence's start, whose stamps the decision reads.
     unsigned readerRestFrames[2] = { 0u, 0u };
+    /// THE TEST DOOR "cards.force": one card held resident (`forcedCardMode` +1) or absent (-1), by its node and its index
+    /// in the instance's layout (0: none).
+    NodeId forcedCardNode = 0;
+    unsigned forcedCardIndex = 0u;
+    int forcedCardMode = 0;
     /// THE STALE SET FROM THE CHANGED-REGION LIST (PHOTON-7 stage 5, 5-1; L2: change drives work, never a serial): the
     /// frame's LAMP regions (a lamp's old and new spheres: a card whose box meets one has a stale DIRECT half - the
     /// lamp's light is exact by its range, JahCardLight_cs.glsl), its SLAB regions (a commit's entering and leaving

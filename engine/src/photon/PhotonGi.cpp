@@ -8707,6 +8707,13 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // through the PBS change log).
     view.demandCount = mEngine && mEngine->armRegistry().on(ArmId::CardDemandCount);
     view.demandGatherLate = mEngine ? unsigned(std::max(0.0, mEngine->armRegistry().value(ArmId::CardGatherLate))) : 0u;
+    if (mEngine && mEngine->armRegistry().on(ArmId::CardForce)) {
+        const double f = mEngine->armRegistry().value(ArmId::CardForce);
+        const unsigned long long k = (unsigned long long)std::llround(std::fabs(f));
+        view.forcedCardNode = NodeId(k / 64ull);
+        view.forcedCardIndex = unsigned(k % 64ull);
+        view.forcedCardMode = f > 0.0 ? 1 : -1;
+    }
     // THE DEMAND'S CHANGE (CardSceneView::demandChanged): what the readers' rays can hit changed - AN EYE MOVED from the
     // reference pose (the poses at the last change) by more than one card texel (1/64 m: the residency's own density)
     // or TURNED by more than one pixel's angle of its projection, per eye (a tracked head never repeats a pose bit for
