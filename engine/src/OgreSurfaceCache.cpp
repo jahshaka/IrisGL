@@ -1332,7 +1332,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     //     this drops and the rest re-admits costs one re-capture).
     const bool windowDrain = !demandOpen && !view.demandChanged && !mWindowDrained;
     if (windowDrain) mWindowDrained = true;
-    bool drained = false;
+    bool drained = false, forcedLeft = false;
     const auto heldCard = [&](size_t inst, const CardRec &c) {
         return view.forcedCardMode && inst < mInstances.size() && mInstances[inst].node == view.forcedCardNode &&
                c.index == view.forcedCardIndex;
@@ -1346,6 +1346,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     ++mEvicted;
                     changed = true;
                     mDeparted = true;
+                    forcedLeft = true;
                 }
     if (decide || windowDrain) {
         for (size_t i = 0; i < per.size(); ++i)
@@ -1463,9 +1464,12 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     // read it - they read the voxels there now - and no move reports a departure, so at the window's drain and at the
     // rest's decision every resident card's indirect is re-marched ONCE (named by that drain's root) when any card left
     // since the last time: the rounds after it converge on the final set's own light, whatever path filled it.
-    if ((decide || windowDrain) && mDeparted) {
+    // ...and AT ONCE when the cards.force door holds a resident card absent (L1's test door models a REAL departure:
+    // its readers re-marched as a drain's are, root 'f' - a departure left to the next stop's decision kept them stale
+    // at rest, the no-pop row's 0 codes that measured nothing).
+    if (((decide || windowDrain) && mDeparted) || forcedLeft) {
         mDeparted = false;
-        const unsigned long long root = 1ull << rootBit(decide ? 'd' : 'w', mFrame);
+        const unsigned long long root = 1ull << rootBit(decide ? 'd' : windowDrain ? 'w' : 'f', mFrame);
         for (CardRec &c : mCards)
             if (c.size && c.indirectValid) {
                 c.relightIndirect = true;

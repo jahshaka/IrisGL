@@ -4244,11 +4244,11 @@ struct CardCacheStatus {
     unsigned long long windowDrains = 0ull;
     /// THE ROOTS OF THE LAST PLAN'S WORK (PHOTON-7 stage 10, R3 (c): each round names its parent move): the moves the
     /// frame's relights trace to - `kind` 'a' a demand arrival, 'd' the rest's one decision, 'w' the window's one drain
-    /// (its re-march of every resident card when one left), 'v' the voxel store's move
-    /// (a card listed by the bricks it reads), 'h' moves older than the root ring (born at its horizon: older still), 'r'
-    /// a region, an overflow, a material or a relight no root named - each by the cache frame it was born at, and the
-    /// deepest round
-    /// among them (0: a root's own captures; n: listed card to card by a round n - 1 move).
+    /// (its re-march of every resident card when one left), 'f' the cards.force door's departure (that re-march, at once),
+    /// 'v' the voxel store's move (a card listed by the bricks it reads), 'h' moves older than the root ring (born at its
+    /// horizon: older still), 'r' a region, an overflow, a material or a relight no root named - each by the cache frame
+    /// it was born at, and the deepest round among them (0: a root's own captures; n: listed card to card by a round
+    /// n - 1 move).
     struct WorkRoot { char kind = 0; unsigned long long frame = 0ull; };
     std::vector<WorkRoot> workRoots;
     unsigned workRound = 0u;
