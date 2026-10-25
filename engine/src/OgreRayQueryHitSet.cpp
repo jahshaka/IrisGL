@@ -196,6 +196,16 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         out.voxelInvSize[c][3] = n ? src.voxelCell[from] : 1.0f;
     }
     out.counts[0] = float(n);
+    // THE LEVEL BY THE CAMERA (10-2e): the GI camera and each cascade's radius and band (past the chain's length the
+    // last's: never read - the outermost reads by its box)
+    for (int k = 0; k < 3; ++k) out.levelCam[k] = src.levelCam[k];
+    out.levelCam[3] = src.levelOn && n ? 1.0f : 0.0f;
+    for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
+        const unsigned from = c < n ? c : (n ? n - 1u : 0u);
+        out.level[c][0] = n ? src.levelRadius[from] : 0.0f;
+        out.level[c][1] = n ? src.levelBand[from] : 0.0f;
+        out.level[c][2] = n ? src.levelMaxLod[from] : 0.0f;
+    }
     out.counts[1] = src.sky ? 1.0f : 0.0f;
     out.counts[2] = float(geomSlots);
     out.counts[3] = src.movers ? 1.0f : 0.0f;

@@ -2146,6 +2146,7 @@ private:
     X(GiRebuildCascade, "gi.rebuildCascade") /* cascade N rebuilt whole every frame while set (-1 = none; a measuring door) */ \
     X(GiRegenerateDirectional, "gi.regenerateDirectional") /* cascade N's directional levels regenerated whole from its level 0 every frame while set (-1 = none; a test door) */ \
     X(GiBounceJacobi, "gi.bounceJacobi") /* the bounces' JACOBI reference: the innermost N cascades restarted from their direct terms where the arm comes on (set to N), then every brick of them a pass every frame while set (a measuring door) */ \
+    X(GiHitLevelMargin, "gi.hitLevelMargin") /* the hit read's level margin M in cells past the step (-1 = the measured default; a measuring door, PHOTON-7 stage 10, 10-2e) */ \
     X(GiFeedbackCarriedRoute, "gi.feedbackCarriedRoute") /* a brick its injection moved this frame is carried, never passed; the stopped bricks accumulate the carried section alone (a test door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
     X(ShadowLightDepth, "shadow.lightDepth") /* a sun map's light-depth path: its pyramid, the late cut, the receiver grid (0: none of them built, the pre-U5 caster pass) */ \
