@@ -6942,8 +6942,15 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
     // (the test door gi.feedbackCarriedRoute: a brick its injection moved this frame is carried, never passed, and the
     // stopped bricks accumulate the carried section alone)
     const bool carriedRoute = mEngine && mEngine->armRegistry().value(ArmId::GiFeedbackCarriedRoute) >= 1.0;
+    // THE POOL'S ORDER: outermost first on the voxel-ray route (the dependency runs one way, above); INNERMOST FIRST on
+    // the TLAS route, where it runs both ways (a') - there an inner cascade's move resumes the outer bricks over it, and
+    // spent outermost first the pool went to them before the near field (gi.cascades_asan: a mover lit at a pose it had
+    // left, motion against rest max 40/255, was 6 before the inward rule)
+    bool tlasRoute = false;
+    for (const VctCascade &c : mVctCascades) tlasRoute = tlasRoute || (c.lighting && c.built && c.lighting->sideRoute() == 1);
     bool first = true;
-    for (size_t i = n; i-- > 0;) {
+    for (size_t k = 0; k < n; ++k) {
+        const size_t i = tlasRoute ? k : n - 1 - k;
         if (!ran[i]) continue;
         mVctCascades[i].lighting->setLightFrame(frame);
         mVctCascades[i].lighting->setCarriedRouteDoor(carriedRoute);
