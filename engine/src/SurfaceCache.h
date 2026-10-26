@@ -941,7 +941,7 @@ private:
         unsigned long long cacheFrame = 0ull;   ///< the cache's own frame of the issue (the roots' clock, R3 (c))
         bool carriesMoves = false;              ///< it carries its frame's relight move words (the readers' threshold)
     };
-    static constexpr unsigned kReportSlots = 32u;   // ARM (the stranded listings: no report dropped) - reverted next
+    static constexpr unsigned kReportSlots = 8u;
     ReportTicket mReportReadings[kReportSlots];
     unsigned mReportNextIssue = 0u, mReportNextTake = 0u;
     Ogre::HlmsComputeJob *mAccumJob = nullptr;
