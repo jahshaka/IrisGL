@@ -4869,6 +4869,8 @@ public:
     /// THE REFLECTION's REST PAST ITS HAND-OVER (RayQueryTier::reflectRestPastHandOver; GiStatus::giAtRest's term,
     /// PHOTON-7 stage 10-3 carrier 2). True without a ray tier.
     bool reflectRestPastHandOver() const;
+    /// ...and the gather's (RayQueryTier::gatherRestPastHandOver: N rest frames). True without a ray tier.
+    bool gatherRestPastHandOver() const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
     void setGatherTuning(const GatherTuning &t) override {

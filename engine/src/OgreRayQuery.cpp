@@ -1333,6 +1333,8 @@ public:
     /// last restart - every texel's composite is then its rest mean, a function of the pose and the rest index alone. A
     /// view that no longer records makes no demand (ScreenProbeGather::kReaderStaleFrames), nor one that cannot rest.
     bool reflectRestPastHandOver(const OgreScene *scene) const;
+    /// ...and the gather's (N rest frames: every view that drew the scene's latest frame and can rest, or none).
+    bool gatherRestPastHandOver(const OgreScene *scene) const;
     /// The readers' demand span L = N + the due, as cardReadersRestComplete last derived it (0: none yet - stamp always):
     /// a reader stamps its rest indices [1, L] alone (JAH_HIT_PARAMS.cards.z).
     mutable unsigned mDemandSpan = 0u;
@@ -7988,6 +7990,13 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     return complete;
 }
 
+bool RayQueryTier::gatherRestPastHandOver(const OgreScene *scene) const {
+    if (!mGather) return true;
+    unsigned restFrames = 0u, n = 0u;
+    bool active = false;
+    return mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames, n, 0u, active);
+}
+
 bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
@@ -11708,6 +11717,10 @@ bool OgreScene::reflectRestPastHandOver() const {
     return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->reflectRestPastHandOver(this);
 }
 
+bool OgreScene::gatherRestPastHandOver() const {
+    return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->gatherRestPastHandOver(this);
+}
+
 /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
 /// Storing it builds nothing; the view's chain re-checks its shape each frame.
 void PhotonComponent::setSunContact(const SunContactDesc &d) {
@@ -11955,6 +11968,7 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
     return true;
 }
 bool OgreScene::reflectRestPastHandOver() const { return true; }
+bool OgreScene::gatherRestPastHandOver() const { return true; }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
