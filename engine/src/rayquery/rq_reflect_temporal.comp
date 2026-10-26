@@ -438,6 +438,7 @@ void main()
 				const uint owe = need > v ? uint( min( need - v, 1048576.0 ) ) : 0u;
 				atomicAdd( jahHitBuf[8], owe );
 				atomicMax( jahHitBuf[9], uint( need ) );
+				if( need >= 50000.0 ) { jahHitBuf[10] = uint( tc.x ) | ( uint( tc.y ) << 16u ); jahHitBuf[11] = floatBitsToUint( share ); }   // MEASURING ARM 11-1c
 			}
 			return;
 		}

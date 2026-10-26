@@ -10955,6 +10955,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.restCapped = w[3];
             hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
+            if (w[9] > 0u) std::fprintf(stderr, "ARM11-1c need max %u owed %u texel %u,%u share %g\n", w[9], w[8], w[10] & 0xFFFFu, w[10] >> 16u, double(*reinterpret_cast<const float *>(&w[11])));   // MEASURING ARM 11-1c
             if (w[9] > 0u && pd.restTag != 0u) {
                 hv.boundOwed = w[8];
                 hv.boundNeedMax = w[9];
@@ -11062,7 +11063,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         // (every counter word but the rest bound's two, 8-9: the trace zeroes them up to the rest's 2N and they hold
         // the temporal pass' figures after it - PHOTON-7 11-1c)
         vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, 32u, 0u);
-        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset + 40u, kHitCounterBytes - 40u, 0u);
+        // vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset + 40u, kHitCounterBytes - 40u, 0u);   // MEASURING ARM 11-1c
         b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
