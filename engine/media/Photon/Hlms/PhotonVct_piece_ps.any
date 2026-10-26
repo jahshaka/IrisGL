@@ -205,7 +205,6 @@
 	(
 		OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float4, outSpecular ),
 		OGRE_INOUT_REF( float, outRoughOcclusion ),
-		OGRE_INOUT_REF( float3, outRoughVoxel ),
 		PixelData pixelData, float3 pos, float3x3 TBN,
 	@property( use_parallax_correct_cubemaps )
 		OGRE_INOUT_REF( float3, vctSpecPosVS ),
@@ -214,6 +213,7 @@
 		float jahFogSurfY, float jahFogEyeDist,
 	@end
 		bool jahSpecAnswered,
+		float4 jahFieldSpec,
 		VctProbeParams probeParams
 	)
 	{
@@ -248,128 +248,75 @@
 		}
 		else
 		{
-			float3 reflVecLS = toVctProbeSpaceDir( pixelData.reflDir, probeParams );
-			// THE MARCH IS ONE TEXT (PHOTON-7 stage 7, 7-6): jahSpecularCone (jah_voxel_cones.glsl, the piece
-			// JahVoxelCones) - the lobe's aperture, A LOBE WIDER THAN 45 DEGREES IS NOT A CONE (PHOTON-VOXEL-3: at tan > 1
-			// it is read in two shares, THE SKY'S - the prefiltered lobe times the share the voxels did not stop - and THE
-			// STOPPED ONE, what this march stopped on, handed out in outRoughVoxel and added by applyVctRoughSpecular,
-			// BISTRO-FIXES-3; the occlusion comes from this march CAPPED AT TAN 1 in outRoughOcclusion), the start on the
-			// reflection one cell above the surface aged by the stretch it skipped (jahSpecularConeStart), the share below
-			// the surface (jahConeBelow), and the rough lobe's above-horizon visibility. The screen integrate of the
-			// no-ray route runs the same function.
-			const JahSpecularCone jahSpec = jahSpecularCone( posLS, biasDirLS, jahOrigin, reflVecLS,
-															 float3( pixelData.reflDir ), float3( pixelData.normal ),
-															 float( pixelData.perceptualRoughness ),
-			@property( vct_enable_specular_sdf_quality )
-															 JAH_MARCH_SDF );
-			@else
-															 0u );
-			@end
-			const bool jahRoughLobe = jahSpec.roughLobe;
-			float4 jahSpecOrigin = jahOrigin;
-			jahSpecOrigin.w = jahSpec.below;
-			JahConeResult irrLight = jahSpec.march;
-			float specAlpha = jahSpec.specAlpha;
-
-			// THE FOG LAW ON THE VOXELS' SHARE (PHOTON-I-1: one law on every reflection
-			// path, jah_fog_along.glsl). The light the cone gathered crossed the medium
-			// from where it came — the opacity-weighted distance of the planes it took
-			// (takeAtC0 over alpha, cascade 0's normalised units, turned into metres
-			// along this direction by the volume's transform) — to this surface, then
-			// the eye's leg, which the colour hook fogs. Unpremultiplied for the law
-			// (its breakthrough reads the surface's own luminance), then the cone's
-			// coverage again. THE ESCAPE'S SKY SHARE STAYS UNFOGGED (ruled in PHOTON-I-1's
-			// round 2): it is the sky the probes and the split-sum read, unfogged, outside
-			// every volume; fogging it here alone would seam at the volume's edge.
-		@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
-			if( irrLight.alpha > 0.0f )
+			// THE LOBE, BY THE ROUGHNESS SPLIT (PHOTON-7 stage 10-3, R1; L9: the renderer follows the ray) - the no-ray
+			// screen integrate's law, one text (jah_voxel_cones.glsl): K(alpha) fixed GGX rays about R by the world
+			// caches' occupancy ray (jahRaySpecular; the mirror direction alone below 0.08), and above the measured
+			// crossing the irradiance field read along R (`jahFieldSpec`, the caller's: its cage on the surface's normal,
+			// the lookup along R). The stopped share's light goes to the specular; the OPEN share (the rays' escapes) is
+			// the environment's weight - the prefiltered lobe here, or the material's cube through jahGlobalEnvVisibility.
+			// It replaced the specular CONE: its colour mixed a wall's two faces in coarse cells and its escape share
+			// passed a wall's transmittance (the sealed box, gi.sealed_sky_noray).
+			const float3 jahRc = mul( float3( pixelData.reflDir ), passBuf.invViewMatCubemap );
+			const float3 jahNc = mul( float3( pixelData.normal ), passBuf.invViewMatCubemap );
+			const float jahEps = JAH_VOX_INVRES( 0 ).x;
+			const float3 jahSurfLS = posLS - biasDirLS * jahEps;
+			const float jahRough = float( pixelData.perceptualRoughness );
+			const float jahFieldShare = jahFieldSpec.w >= 0.0f ? jahSpecularFieldShare( jahRough ) : 0.0f;
+			float4 jahRays = float4( 0.0f, 0.0f, 0.0f, 0.0f );
+			float jahHitC0 = 2.0f;   // no hit: past cascade 0's box (the parallax-corrected probes' far point)
+			if( jahFieldShare < 1.0f || jahFieldSpec.w < 1.0f )
 			{
-				const float3 jahSpecLS = float3( dot( probeParams.xform_row0.xyz, pixelData.reflDir ),
-												 dot( probeParams.xform_row1.xyz, pixelData.reflDir ),
-												 dot( probeParams.xform_row2.xyz, pixelData.reflDir ) );
-				const float jahSpecAt = irrLight.takeAtC0 / irrLight.alpha / max( length( jahSpecLS ), 1e-6f );
-				irrLight.colour = irrLight.alpha *
-								  jahFogAlong( irrLight.colour / irrLight.alpha, jahFogSurfY,
-											   jahViewToWorldDir( float3( pixelData.reflDir ) ), jahSpecAt,
-											   jahFogEyeDist );
+				const JahRaySpecular jahRs = jahRaySpecular( jahSurfLS, biasDirLS, jahRc, jahNc, jahRough,
+															 jahSpecularRays( jahRough ), jahEps,
+															 probeParams.rayLastShell, true );
+				float3 jahHitLight = jahRs.radiance;
+			@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+				// THE FOG LAW ON THE HITS' LIGHT (PHOTON-I-1: one law on every reflection path, jah_fog_along.glsl): it
+				// crossed the medium from the hits (their mean distance along R, cascade 0's units into metres) to this
+				// surface; the eye's leg is the colour hook's. The open share's sky stays unfogged (PHOTON-I-1 round 2).
+				if( jahRs.hits > 0.0f )
+				{
+					const float3 jahSpecLS = float3( dot( probeParams.xform_row0.xyz, pixelData.reflDir ),
+													 dot( probeParams.xform_row1.xyz, pixelData.reflDir ),
+													 dot( probeParams.xform_row2.xyz, pixelData.reflDir ) );
+					jahHitLight = jahFogAlong( jahRs.radiance, jahFogSurfY, jahViewToWorldDir( float3( pixelData.reflDir ) ),
+											   jahRs.hitC0 / max( length( jahSpecLS ), 1e-6f ), jahFogEyeDist );
+				}
+			@end
+				jahRays = float4( jahHitLight, jahRs.open );
+				if( jahRs.hits > 0.0f )
+					jahHitC0 = jahRs.hitC0;
 			}
-		@end
+			// the field's answer (its irradiance already times its confidence; no open share: its probes saw the sky),
+			// the rays where its confidence is short
+			const float4 jahField = float4( jahFieldSpec.xyz, 0.0f ) + jahRays * ( 1.0f - saturate( jahFieldSpec.w ) );
+			const float4 jahLobe = lerp( jahRays, jahField, jahFieldShare );
+			const float specAlpha = jahLobe.w;
 
-			// THE SPECULAR CONE'S ESCAPE SEES THE ENVIRONMENT IN THE REFLECTED
-			// DIRECTION AT THE CONE'S OWN APERTURE (PHOTON-ENV-1) - the rule that
-			// fork 4d5fbef16+8f09c0cd4 (was 0048) used to apply downstream as a swap (the cone added a
-			// flat ambient, exported what it added, and the probe piece traded it
-			// for the sky). Radiance, weighted by the share of the cone the voxels
-			// did not stop, beside the voxels' own share (radiance, as the store
-			// holds it).
-			// AT THE SURFACE'S OWN ROUGHNESS, not at the cone's aperture: the
-			// prefiltered chain holds exactly this GGX lobe (jahEnvLobe), the mip
-			// the convolution stored this roughness at and HlmsPbs reads (audit F3).
-			//
-			// ONE SPECULAR ENVIRONMENT PER PIXEL. Where the datablock carries an
-			// environment cube and no probe array holds the slot (use_envprobe_map
-			// without parallax-corrected cubemaps), HlmsPbs's CubemapGlobal adds
-			// that cube to every pixel, the cone's included - so the escape adds
-			// NOTHING there (adding it counted the sky twice: 1.6-1.95x on an open
-			// metal plate, gi.env_cone). For a ROUGH lobe the cube is scaled by the
-			// share the occlusion query let through (jahGlobalEnvVisibility, below:
-			// the same weight as the escape's specAlpha here); a narrower lobe's
-			// cube stays unoccluded (the deferral below). Everywhere else - a probe-array
-			// pass, a material with no cube - the escape IS the specular
-			// environment, weighted by the share the voxels did not stop. (The
-			// escape as THE environment everywhere - occluded sky reflections inside
-			// rooms - waits for the specular walk to stop over-reading its own
-			// surface at a coarse mip: a gold dragon read (33,21,3) with the cube
-			// removed. REFLECT-1 / PCC-1, beside gi.volume_edge_spec_target.)
+			// THE OPEN SHARE SEES THE ENVIRONMENT IN THE REFLECTED DIRECTION (PHOTON-ENV-1) AT THE SURFACE'S OWN
+			// ROUGHNESS (the prefiltered chain holds this GGX lobe, jahEnvLobe; audit F3), along the lobe's dominant
+			// direction (ENV-RAY-MATCH). ONE SPECULAR ENVIRONMENT PER PIXEL: where the datablock carries an environment
+			// cube and no probe array holds the slot (use_envprobe_map without parallax-corrected cubemaps), HlmsPbs's
+			// CubemapGlobal lights the pixel and the open share adds NOTHING here (it counted the sky twice: gi.env_cone)
+			// - that cube is scaled by the open share instead (jahGlobalEnvVisibility, below), at EVERY lobe.
 		@property( use_envprobe_map && !use_parallax_correct_cubemaps )
 			float3 jahEnvS = float3( 0.0f, 0.0f, 0.0f );
 		@else
-			// ...ALONG THE LOBE'S DOMINANT DIRECTION, not the mirror one
-			// (ENV-RAY-MATCH: jahEnvDominantDir, the same fit at every reader).
 			float3 jahEnvS = jahEnvLobe( jahViewToWorldDir( jahEnvDominantDir(
 											 float3( pixelData.normal ), float3( pixelData.reflDir ),
 											 float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) ) ),
 										 float( pixelData.perceptualRoughness ) ) * specAlpha;
 		@end
 
-			// JAHSHAKA fork 8f09c0cd4+155a56bf8 (was 0077): THE FUDGE IS GONE, AT ITS CAUSE.
-			// Upstream's comment here read "0.31831 = 1 / PI, but I'm not sure why
-			// is it even needed. It's clearly overbrightened when it's not there".
-			// It was needed because the light injection stored PI times the
-			// surface's outgoing radiance (LightInjection_piece_cs.any: the direct
-			// term had no 1/PI), so every cone result -- diffuse and specular
-			// alike -- came back PI times too bright. The diffuse composite above
-			// never carried the correction and was therefore PI times too bright
-			// for as long as this line hid the same error on the specular one.
-			// With the injection fixed the voxel holds radiance, a specular cone
-			// returns radiance, and the pre-integrated BRDF downstream wants
-			// exactly that: no factor.
-			outSpecular += float4( ( jahRoughLobe ? float3( 0.0f, 0.0f, 0.0f )
-												  : irrLight.colour.xyz * blendWeight ) +
-								   jahEnvS * ( probeParams.blendFade * blend ), blend );
-			if( jahRoughLobe )
-			{
-				outRoughOcclusion = 1.0f - specAlpha;
-				// THE STOPPED SHARE'S LIGHT IS WHAT THE QUERY STOPPED ON (BISTRO-FIXES-3): the
-				// march's colour is the voxels' radiance it composited, premultiplied by their
-				// opacity, after the below-horizon share (colour 0) took 1 - below of it - so
-				// colour / (1 - below) is the above-horizon lobe's stopped radiance times its
-				// stopped share, jahAbove; at the occlusion the sky is weighted by, that is
-				// colour / (1 - below) x occlusion / jahAbove. The diffuse set's voxel light
-				// stood for it before and is the wrong integral twice over: weighted by the
-				// SET's occlusion (a facade filling a grazing lobe over an open hemisphere read
-				// 0.36x a uniform world, gi.rough_sky_once's wall arm) and averaged over the
-				// SET's directions (a red panel to the side lit a dark slab's underside,
-				// gi.gather_glass). Radiance as stored, like the cone's colour.
-				const float jahBelowR = jahSpecOrigin.w;
-				const float jahAboveR = saturate( ( irrLight.alpha - jahBelowR ) / max( 1.0f - jahBelowR, 1e-4f ) );
-				if( jahAboveR > 0.0f )
-					outRoughVoxel += irrLight.colour.xyz * blendWeight / max( 1.0f - jahBelowR, 1e-4f ) *
-									 ( outRoughOcclusion / jahAboveR );
-			}
+			// Radiance as the store holds it (the voxel holds radiance since fork 8f09c0cd4+155a56bf8, was 0077: no
+			// 1/PI fudge); the pre-integrated BRDF downstream applies the specular albedo.
+			outSpecular += float4( jahLobe.xyz * blendWeight + jahEnvS * ( probeParams.blendFade * blend ), blend );
+			// what the lobe's rays (or the field) stopped is not open to the material's cube
+			outRoughOcclusion = 1.0f - specAlpha;
 
 			@property( use_parallax_correct_cubemaps )
-				vctSpecPosVS = fromVctToViewSpace( irrLight.posLS.xyz, probeParams );
+				vctSpecPosVS = fromVctToViewSpace( jahSurfLS + normalize( jahCubeToVctProbeSpaceDir( jahRc, probeParams ) ) *
+												   jahHitC0, probeParams );
 			@end
 		}
 		@else
@@ -380,35 +327,15 @@
 @end
 
 
-// THE ROUGH LOBE'S SKY SHARE ON THE BOUND-CUBE PATH (BISTRO-FIXES-3). HlmsPbs's CubemapGlobal
-// reads the material's environment cube - the sky with nothing in the way - and multiplies the
-// sample by this piece (its hook, empty where no GI piece defines it). The query above stopped
-// vctRoughOcclusion of the lobe and applyVctRoughSpecular lights that share from the voxels, so
-// the cube lights only the rest: Lagarde and de Rousiers 2014's specular occlusion, which at these
-// roughnesses is the visibility itself. Without it the stopped share was lit twice - the full sky
-// AND the voxels' light (the Bistro's blue-white specks on shaded leaves; gi.rough_sky_once's
-// uniform enclosure read 1 + the occlusion). 0 for every lobe that marched and every answered
+// THE LOBE'S OPEN SHARE ON THE BOUND-CUBE PATH (BISTRO-FIXES-3; stage 10-3 at every lobe). HlmsPbs's
+// CubemapGlobal reads the material's environment cube - the sky with nothing in the way - and multiplies
+// the sample by this piece (its hook, empty where no GI piece defines it). computeVctProbe lit the
+// lobe's stopped share from what stopped it (the rays' hits, the field), so the cube lights only the
+// open rest: never a share twice, and never the sky through a wall (the sealed box's captured cube read
+// 199 % of the roof's light on a narrow lobe while only rough lobes were occluded). 0 for every answered
 // pixel: the sample is multiplied by exactly 1 there.
 @property( !vct_disable_specular )
 @piece( jahGlobalEnvVisibility )* midf_c( 1.0f - vctRoughOcclusion )@end
-@end
-
-@piece( applyVctRoughSpecular )
-	// THE ROUGH LOBE'S OCCLUDED SHARE (PHOTON-VOXEL-3/4, computeVctProbe's comment;
-	// BISTRO-FIXES-3): a lobe wider than tan 1 takes its sky share elsewhere (the
-	// prefiltered lobe times what the capped occlusion query let through: the escape's
-	// jahEnvS, or the material's cube times jahGlobalEnvVisibility); the share the query
-	// stopped is lit by WHAT THE QUERY STOPPED ON - computeVctProbe's vctRoughVoxel, the
-	// march's own colour at the same occlusion - so the two shares sum to one lobe. Two
-	// proxies stood for it before and both were the wrong integral: the DIFFUSE set's voxel
-	// light (weighted by the set's occlusion and averaged over the set's directions: a
-	// facade filling a grazing lobe over an open hemisphere read 0.36x a uniform world,
-	// gi.rough_sky_once's wall arm), and, under the field or the gather, their diffuse
-	// estimate minus the sky's unoccluded irradiance times the query's transmittance. The
-	// split-sum downstream applies the specular albedo. 0 for every lobe that marched.
-	@property( !vct_disable_specular )
-		pixelData.envColourS += vctRoughVoxel;
-	@end
 @end
 
 @piece( applyVoxelConeTracing )
@@ -460,8 +387,38 @@
 	float3 vctDiffuse = float3( 0, 0, 0 );
 	float4 vctSpecular = float4( 0, 0, 0, 0 );
 	float vctRoughOcclusion = 0.0f;
-	float3 vctRoughVoxel = float3( 0, 0, 0 );
-	computeVctProbe( vctDiffuse, vctSpecular, vctRoughOcclusion, vctRoughVoxel,
+	// THE FIELD ALONG THE REFLECTION (stage 10-3's split, the widest lobes): the cage on the surface's normal, the
+	// lookup along R (jahFieldReadDir); rgb its answer (times its confidence), w its confidence (-1: no field bound)
+	float4 jahFieldSpec = float4( 0.0f, 0.0f, 0.0f, -1.0f );
+	@property( irradiance_field && !vct_disable_specular )
+	if( !jahSpecAnswered && jahSpecularFieldShare( float( pixelData.perceptualRoughness ) ) > 0.0f )
+	{
+		const float3 jahFieldPos = transformPos3( inPs.pos.xyz, passBuf.irradianceField.viewToIrradianceFieldRow0,
+												  passBuf.irradianceField.viewToIrradianceFieldRow1,
+												  passBuf.irradianceField.viewToIrradianceFieldRow2 );
+		const float3 jahFieldN = normalize( transformDir3( pixelData.normal, passBuf.irradianceField.viewToIrradianceFieldRow0,
+														   passBuf.irradianceField.viewToIrradianceFieldRow1,
+														   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+		const float3 jahFieldR = normalize( transformDir3( pixelData.reflDir, passBuf.irradianceField.viewToIrradianceFieldRow0,
+														   passBuf.irradianceField.viewToIrradianceFieldRow1,
+														   passBuf.irradianceField.viewToIrradianceFieldRow2 ) );
+		const float3 jahFieldV = transformDir3( normalize( -inPs.pos.xyz ), passBuf.irradianceField.viewToIrradianceFieldRow0,
+												passBuf.irradianceField.viewToIrradianceFieldRow1,
+												passBuf.irradianceField.viewToIrradianceFieldRow2 );
+		const uint jahFieldWin = uint( passBuf.jahIfd.x + 0.5 );
+		const JahFieldAnswer jahFieldA = jahFieldReadDir(
+			jahFieldPos, jahFieldN, jahFieldV, jahFieldR,
+			float3( passBuf.irradianceField.numProbesAggregated.x, passBuf.jahIfd.y, passBuf.jahIfd.z ),
+			uint3( jahFieldWin & 127u, ( jahFieldWin >> 7u ) & 127u, ( jahFieldWin >> 14u ) & 127u ),
+			passBuf.irradianceField.numProbesAggregated.xy,
+			float4( passBuf.irradianceField.depthBorderedRes, passBuf.irradianceField.depthFullWidth,
+					passBuf.irradianceField.depthInvFullResolution ),
+			float4( passBuf.irradianceField.irradBorderedRes, passBuf.irradianceField.irradFullWidth,
+					passBuf.irradianceField.irradInvFullResolution ) );
+		jahFieldSpec = float4( jahFieldA.irradiance, jahFieldA.confidence );
+	}
+	@end
+	computeVctProbe( vctDiffuse, vctSpecular, vctRoughOcclusion,
 					 pixelData, inPs.pos, jahConeBasis,
 				@property( use_parallax_correct_cubemaps )
 					 vctSpecPosVS,
@@ -469,7 +426,7 @@
 				@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 					 inPs.jahFogWorldY, length( inPs.pos.xyz ),
 				@end
-					 jahSpecAnswered, passBuf.vctProbeParams );
+					 jahSpecAnswered, jahFieldSpec, passBuf.vctProbeParams );
 
 	@property( !vct_disable_diffuse )
 		@property( irradiance_field )

@@ -356,7 +356,6 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     prop("jah_si_field", ifd ? 1 : 0);
     prop("jah_si_fog", fogOn ? 1 : 0);
     prop("jah_si_air", fogOn && aerial ? 1 : 0);
-    prop("jah_si_sdf", numCascades && vct->shouldEnableSpecularSdfQuality() ? 1 : 0);
     // (a dispatch deferred while this permutation builds writes nothing: the opaque passes read the targets' last
     // answer - cleared to zero when the chain made them, OgreChain.cpp - never undefined VRAM; F2)
     coldKey(job);
