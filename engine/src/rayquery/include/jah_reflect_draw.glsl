@@ -87,6 +87,17 @@ float jahGgxVndfPdf( vec3 N, vec3 V, vec3 L, float alpha )
 	return D * G1 / ( 4.0 * NdotV );
 }
 
+/// THE FOLDED DRAW'S DENSITY q( L ) (the trace folds a draw below the geometric plane g about it, READ_A W4): pv( L ) +
+/// pv( R_g L ) above g, 0 below - the density the resolve reweights by and the NEE's balance weight takes (one text).
+float jahReflectFoldedPdf( vec3 N, vec3 g, vec3 V, vec3 L, float alpha )
+{
+	const float a = dot( L, g );
+	if( !( a > 0.0 ) )
+		return 0.0;
+	const float al = max( alpha, 1e-4 );
+	return jahGgxVndfPdf( N, V, L, al ) + jahGgxVndfPdf( N, V, L - 2.0 * a * g, al );
+}
+
 /// A UNIFORM POINT OF THE UNIT DISK (Shirley-Chiu's concentric map): the resolve's and the spatial filter's taps.
 vec2 jahConcentricDisk( vec2 u )
 {

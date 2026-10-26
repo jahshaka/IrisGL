@@ -5565,6 +5565,11 @@ struct RayQueryStatus {
         float radiance[3] = {};
     };
     std::vector<ReflectEmitter> reflectEmitterTable;
+    /// THE NEE's CONE HIT RATE (PHOTON-7 stage 11, 11-1b; the lead's condition on the cone strategy): the reflection's NEE
+    /// rays and those whose first hit was the target drawn, summed over the views' retired frames (read several frames
+    /// late). Their ratio is the cone's efficiency (a thin or edge-on emitter's falls; under ~25 % its cone is owed the
+    /// instance's oriented box).
+    unsigned long long reflectNeeRays = 0ull, reflectNeeHits = 0ull;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the

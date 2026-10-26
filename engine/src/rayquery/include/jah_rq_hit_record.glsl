@@ -32,9 +32,12 @@
 //                        denoiser space ran at and [6] its hand-over length N
 //                        (float bits, the trace's: the write-back folds a
 //                        texel's RECORD RUN in the same space), [7] = the run
-//                        records the decode left unshaded (their index lost);
-//                        then kJahHitAuxWords (SIX) WORDS PER RECORD from word
-//                        kJahHitAuxBase:
+//                        records the decode left unshaded (their index lost),
+//                        [8] / [9] the reflection's rest BOUND's two (PHOTON-7
+//                        11-1c), [10] the reflection's NEE rays and [11] those
+//                        whose first hit was the target drawn (11-1b: the cone's
+//                        hit rate); then kJahHitAuxWords (EIGHT) WORDS PER RECORD
+//                        from word kJahHitAuxBase (12):
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
 //                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
 //                        map, which covers the camera's frustum only), the ray's
@@ -57,9 +60,14 @@
 //                        distance ): THE SCREEN'S SHARE of a BLENDED sample
 //                        whose ray rides a rest run (the write-back folds the
 //                        whole sample, screen and ray, as ONE: the moments are
-//                        not linear in the parts); 0 on every other record.
-//                        2 words = 8 B a record: 2.3 MB at the list's capacity
-//                        at 1080p (291,840 records).
+//                        not linear in the parts); 0 on every other record;
+//                        [6] packHalf2x16( THE NEE DELTA's r, g ) and [7] its b
+//                        (PHOTON-7 11-1b, the preflight's gap G3): what the
+//                        write-back adds to the shaded sample - the NEE part less
+//                        the BRDF's share ( 1 - v ) ( 1 - w_b ) E T of the
+//                        emission its hit holds, signed; 0 on every other record.
+//                        Words 6-7 = 8 B a record: +2.3 MB at the list's
+//                        capacity at 1080p (291,840 records; 32 B a record).
 // WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and its
 // pass textures number into the fork's absolute-index table (NUM_BIND_TEXTURES;
 // the budget per family is OgreFog.cpp's). The read-only buffer slot it takes
@@ -101,8 +109,8 @@ const uint kJahHitFarBit = 1u << 27u;
 const uint kJahHitDiffuseOnlyBit = 1u << 28u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
-const uint kJahHitAuxBase = 8u;
-const uint kJahHitAuxWords = 6u;
+const uint kJahHitAuxBase = 12u;
+const uint kJahHitAuxWords = 8u;
 /// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
@@ -180,7 +188,7 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// other record).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare )
+				  vec4 screenShare, vec3 delta )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -195,6 +203,8 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 4u] = packHalf2x16( clamp( screenShare.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 5u] = packHalf2x16( clamp( screenShare.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 6u] = packHalf2x16( clamp( delta.xy, vec2( -65504.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 7u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), 0.0 ) );
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -202,7 +212,8 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 /// counted) or not bound this dispatch — the caller then treats the hit as the
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
-				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
+				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
+				   vec3 delta )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -213,7 +224,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ) );
+				 vec4( 0.0 ), delta );
 	return true;
 }
 

@@ -2193,6 +2193,7 @@ private:
     X(AtomMaskPyramid, "atom.maskPyramid") /* the cut-outs' masks sampled at the fragment's level (0: level 0 only, the silhouette rows' reference) */ \
     X(GatherHitsReadback, "gather.hitsReadback") /* every uniform probe's per-ray record read back (FAR-SUN-1) */ \
     X(ReflectMetalDecode, "reflect.metalDecode") /* the reflector roughness below which a metal hit decodes */ \
+    X(ReflectNee, "reflect.nee") /* the reflection's next-event estimation toward the emitter table (0: the BRDF-only estimator) */ \
     X(GiHitDirect, "gi.hitDirect") /* a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole) */ \
     X(GpuWalkWhole, "gpuscene.wholeWalk") /* the dirty scan walks every slot (the measuring arm; 0: the named slots) */ \
     X(GpuWalkParity, "gpuscene.walkParity") /* after every frame's compose, every slot checked against the table (the guard) */ \
