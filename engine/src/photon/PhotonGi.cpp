@@ -389,6 +389,11 @@ static const Ogre::uint32 kIfdTotalProbes = 8192u;
 // measurement attached, not a default to drift.
 static const Ogre::uint8 kIfdDepthRes  = 12u;
 static const Ogre::uint8 kIfdIrradRes  = 6u;
+// THE RADIANCE CACHE (PHOTON-7 stage 10-3, the lead's ruling (D)): every probe's octahedral radiance map at 32 x 32 and
+// its GGX chain (PhotonIrradianceField's generation job), the field read at a specular lobe's own width - the no-ray
+// tier's and the blended passes' rough specular, wall-tight by the field's own visibility. 32 serves lobes from
+// perceptual roughness 0.25 (a texel of about 6.4 degrees); the rays answer below (the integrate's law).
+static const Ogre::uint8 kIfdRadianceRes = 32u;
 // THE FIELD'S ESTIMATOR (PHOTON-FIELD-ROTATE-1). Ogre's field settings keep ONE ray
 // per depth texel (their default: 144 rays a probe at depthRes 12) in a spherical-
 // Fibonacci set rotated per integration, every texel integrating every ray (DDGI's
@@ -8022,6 +8027,7 @@ void PhotonComponent::buildIrradianceField() {
         if (mGi.updateBudget <= 0) targetSamples = 1u;
         settings.mDepthProbeResolution   = kIfdDepthRes;
         settings.mIrradianceResolution   = kIfdIrradRes;
+        settings.mRadianceResolution     = kIfdRadianceRes;
         // THE VOLUME: cascade 0's SIZE (the chain's rule 5: cascade 0 IS mVctVoxelizer/mVctLighting), CENTRED ON THE
         // EYE on the field's own world lattice (PHOTON-7 stage 5, 5-5: the window steps with the eye, decoupled from
         // cascade 0's commits - stepFieldWindow; a probe cascade 0's box does not hold starts its march in the

@@ -67,6 +67,14 @@ namespace Ogre
         /// Must be mIrradianceResolution <= mDepthProbeResolution
         /// mDepthProbeResolution must be multiple of mIrradianceResolution
         uint8 mIrradianceResolution;
+        /** Jahshaka (PHOTON-7 stage 10-3, THE RADIANCE CACHE): the square resolution of a probe's RADIANCE map,
+            level 0 (0: none). Each probe also holds an octahedral map of the radiance it sees - one ray a texel a
+            sample, its mean over the probe's samples like the irradiance - and a GGX chain prefiltered from it (levels
+            1-4 at half the resolution each), so a specular lobe reads the field at its own width (the reader's
+            jahFieldReadLobe). Only 32 is laid out (getRadianceFullResolution: a probe's five bordered tiles pack into
+            one 34 x 52 block).
+        */
+        uint8 mRadianceResolution;
 
         /// Number of probes in all three XYZ axes.
         /// Must be power of two
@@ -90,6 +98,10 @@ namespace Ogre
 
         void getDepthProbeFullResolution( uint32 &outWidth, uint32 &outHeight ) const;
         void getIrradProbeFullResolution( uint32 &outWidth, uint32 &outHeight ) const;
+        /// Jahshaka (THE RADIANCE CACHE): the radiance atlas - one 34 x 52 block a probe (level 0's 34 x 34 tile, then
+        /// levels 1-4's 18, 10, 6 and 4 below it, left to right, level 4 under level 3), blocks laid out as the other
+        /// atlases' tiles. 0 x 0 without a radiance map.
+        void getRadianceFullResolution( uint32 &outWidth, uint32 &outHeight ) const;
 
         /// Returns mIrradianceResolution + 2u, since we need to reserverve 1 pixel border
         /// around the probe for proper interpolation.
@@ -361,6 +373,8 @@ namespace Ogre
 
         TextureGpu *mIrradianceTex;
         TextureGpu *mDepthVarianceTex;
+        /// Jahshaka (THE RADIANCE CACHE): the probes' radiance maps and their GGX chains (null without one).
+        TextureGpu *mRadianceTex = nullptr;
 
         HlmsComputeJob      *mGenerationJob;
         HlmsComputeJob      *mDepthMirrorBorderJob;
@@ -657,6 +671,7 @@ namespace Ogre
 
         TextureGpu *getIrradianceTex() const { return mIrradianceTex; }
         TextureGpu *getDepthVarianceTex() const { return mDepthVarianceTex; }
+        TextureGpu *getRadianceTex() const { return mRadianceTex; }
         /// Jahshaka (OWN-GI-1): the textures a PBS pass reads (the two above).
         static constexpr uint32 kPassTextures = 2u;
     };

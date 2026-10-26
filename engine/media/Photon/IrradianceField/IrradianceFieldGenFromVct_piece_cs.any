@@ -138,6 +138,55 @@
 		return normalize( n );
 	}
 
+	// THE OCTAHEDRAL POINT of a map coordinate f in [-1, 1]^2 (Ogre's decode, jahIfdTexelDir's), NOT normalised: it
+	// lies on the octahedron |x| + |y| + |z| = 1, where a texel's solid angle is its area over |n|^3 (the radiance
+	// cache's prefilter weighs its source texels by it).
+	INLINE float3 jahIfdOctPoint( float2 f )
+	{
+		float3 n = float3( f.x, f.y, 1.0 - abs( f.x ) - abs( f.y ) );
+		float t = saturate( -n.z );
+		n.x += n.x >= 0.0 ? -t : t;
+		n.y += n.y >= 0.0 ? -t : t;
+		return n;
+	}
+
+@property( rad_resolution )
+	// THE RADIANCE CACHE (Jahshaka, PHOTON-7 stage 10-3). A probe's BLOCK in the radiance atlas is 34 x 52 texels:
+	// level 0's bordered tile (34 x 34) at the top, and under it level 1's (18), level 2's (10) and level 3's (6) side
+	// by side, level 4's (4) under level 3's (PhotonIrradianceFieldSettings::getRadianceFullResolution). Level k's
+	// interior is 32 >> k texels a side; every tile has the octahedral border (IrradianceFieldBorderMirror's pattern).
+	// THE CHAIN'S LOBES: level 0 is the texel mean (the reach, perceptual roughness 0.25); levels 1-4 are level 0
+	// prefiltered by the GGX lobe of roughness 0.4, 0.55, 0.75 and 1.0 (jah_field_read.glsl's jahFieldLobeLevel reads
+	// the same table).
+	INLINE uint2 jahIfdRadBlock( uint probeIdx )
+	{
+		return uint2( ( probeIdx * 34u ) % @value( rad_full_width )u, ( ( probeIdx * 34u ) / @value( rad_full_width )u ) * 52u );
+	}
+	INLINE uint2 jahIfdRadTile( uint level )
+	{
+		return level == 0u ? uint2( 0u, 0u ) : level == 1u ? uint2( 0u, 34u ) : level == 2u ? uint2( 18u, 34u )
+			 : level == 3u ? uint2( 28u, 34u ) : uint2( 28u, 40u );
+	}
+	INLINE float jahIfdRadLobeAlpha( uint level )
+	{
+		const float r = level == 1u ? 0.4 : level == 2u ? 0.55 : level == 3u ? 0.75 : 1.0;
+		return r * r;
+	}
+	// THE BORDER'S SOURCE: the interior texel a bordered tile's border texel (x, y) repeats (b the bordered width;
+	// IrradianceFieldBorderMirror's pattern: an edge mirrored along itself, a corner the opposite corner).
+	INLINE uint2 jahIfdBorderSource( uint2 xy, uint b )
+	{
+		const uint n = b - 2u;
+		if( xy.y == 0u || xy.y == b - 1u )
+		{
+			if( xy.x == 0u || xy.x == b - 1u )
+				return uint2( xy.x == 0u ? n : 1u, xy.y == 0u ? n : 1u );
+			return uint2( b - 1u - xy.x, xy.y == 0u ? 1u : n );
+		}
+		return uint2( xy.x == 0u ? 1u : n, b - 1u - xy.y );
+	}
+@end
+
 	// PCG hash (Jarzynski and Olano 2020, "Hash Functions for GPU Rendering").
 	INLINE uint jahIfdPcg( uint v )
 	{
@@ -489,4 +538,138 @@
 			atomicAdd( ifdVariance[JAH_IFD_STOPS], 1u );
 		}
 	}
+
+@property( rad_resolution )
+	// THE RADIANCE CACHE (Jahshaka, PHOTON-7 stage 10-3): the probe's radiance map and its GGX chain, from rays of its
+	// own - ONE RAY A LEVEL-0 TEXEL a sample, aimed inside the texel by a jitter hashed from the probe's world lattice
+	// point, the sample index and the texel (fixed in time: a converged map is a function of the world), the same
+	// occupancy ray over the chain as the irradiance's (wall-tight: L9), the sky only at an earned miss over the
+	// texel's own bin. The texel's value is the MEAN of its samples - the probe's history rule, the same blend as the
+	// irradiance's. A texel whose ray earned no sample (exhausted, or no cascade held it) takes the probe's
+	// cosine-weighted radiance about its direction from this sample's irradiance rays instead: never a hole.
+	{
+		const uint radRes = @value( rad_resolution )u;
+		const uint2 block = jahIfdRadBlock( probeIdx );
+		const uint3 lattice = p.latticeOrigin.xyz + probeLocal;
+		const uint seed = jahIfdPcg( lattice.x ^ jahIfdPcg( lattice.y ^ jahIfdPcg( lattice.z ^ jahIfdPcg( uint( history.x ) + 0x9E3779B9u ) ) ) );
+		// the texel's bin: the cone of solid angle 4 pi / texels (the irradiance rays' rule, coneAngleTan)
+		const float binCos = 1.0 - 2.0 / float( radRes * radRes );
+		const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+		for( uint t = lid; t < radRes * radRes; t += @value( threads_per_group_x )u )
+		{
+			const uint2 xy = uint2( t % radRes, t / radRes );
+			float2 jitter = float2( 0.5, 0.5 );
+			if( p.sweep.w != 0u )
+			{
+				const uint h = jahIfdPcg( seed ^ ( t * 0x85EBCA6Bu ) );
+				jitter = float2( float( h & 0xFFFFu ), float( h >> 16u ) ) * ( 1.0 / 65536.0 );
+			}
+			const float3 dir = normalize( jahIfdOctPoint( ( float2( xy ) + jitter ) * ( 2.0 / float( radRes ) ) - 1.0 ) );
+			float3 dirLS = dir;
+			if( any( notEqual( p.worldToVolumeDir.xyz, float3( 1.0, 1.0, 1.0 ) ) ) )
+				dirLS = normalize( dir * p.worldToVolumeDir.xyz );
+			const float3 startBias = dirLS * JAH_VOX_INVRES( 0 );
+			const JahVoxelRayResult ray = jahVoxelRay( posLS + startBias, dirLS, float3( 0, 0, 0 ), float3( 0, 0, 0 ), 0.0,
+													   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w, true );
+			const bool sampled = ray.exitReason == kJahRayHit || ray.exitReason == kJahRayEscaped;
+			float3 colour;
+			if( sampled )
+				colour = ray.radiance + ( ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, binTan ) : float3( 0, 0, 0 ) );
+			else
+			{
+				float4 acc = float4( 0, 0, 0, 0 );
+				for( uint r = 0u; r < @value( num_rays_per_probe )u; ++r )
+				{
+					const float w = max( 0.0, dot( dir, g_rayDir[r].xyz ) );
+					acc += w * float4( g_rayColourDepth[r].xyz, 1.0 );
+				}
+				colour = acc.w > 0.0 ? acc.xyz / acc.w : float3( 0, 0, 0 );
+			}
+			// (no non-finite sample enters the mean: the irradiance's rule, on the bits)
+			const uint3 bits = floatBitsToUint( colour ) & uint3( 0x7FFFFFFFu, 0x7FFFFFFFu, 0x7FFFFFFFu );
+			if( bits.x >= 0x7F800000u || bits.y >= 0x7F800000u || bits.z >= 0x7F800000u )
+				colour = float3( 0, 0, 0 );
+			const uint2 at = block + uint2( 1u, 1u ) + xy;
+			float3 value = colour;
+			if( blend < 1.0 )
+				value = lerp( OGRE_imageLoad2D( radianceField, at ).xyz, colour, blend );
+			OGRE_imageWrite2D4( radianceField, at, float4( value, 1.0 ) );
+			// the texel's solid angle, relative: its area on the map over |n|^3 (n its centre's octahedral point)
+			const float3 n = jahIfdOctPoint( ( float2( xy ) + 0.5 ) * ( 2.0 / float( radRes ) ) - 1.0 );
+			const float len = length( n );
+			g_rad[t] = float4( value, 1.0 / ( len * len * len ) );
+		}
+		__sharedOnlyBarrier;
+
+		// THE CHAIN: level k's texel is level 0 under the GGX lobe of level k's roughness about the texel's direction -
+		// the split-sum prefilter with the normal, the view and the reflection one direction d (Karis 2013): each
+		// source texel s weighs D( d . h ) ( d . s ) times its solid angle, h the half vector of d and s.
+		for( uint t = lid; t < 340u; t += @value( threads_per_group_x )u )
+		{
+			const uint level = t < 256u ? 1u : t < 320u ? 2u : t < 336u ? 3u : 4u;
+			const uint first = level == 1u ? 0u : level == 2u ? 256u : level == 3u ? 320u : 336u;
+			const uint res = radRes >> level;
+			const uint i = t - first;
+			const float3 d = normalize( jahIfdOctPoint( ( float2( float( i % res ), float( i / res ) ) + 0.5 ) *
+														( 2.0 / float( res ) ) - 1.0 ) );
+			const float a2 = jahIfdRadLobeAlpha( level ) * jahIfdRadLobeAlpha( level );
+			float4 acc = float4( 0, 0, 0, 0 );
+			for( uint sIdx = 0u; sIdx < radRes * radRes; ++sIdx )
+			{
+				const float3 sDir = normalize( jahIfdOctPoint(
+					( float2( float( sIdx % radRes ), float( sIdx / radRes ) ) + 0.5 ) * ( 2.0 / float( radRes ) ) - 1.0 ) );
+				const float cosL = dot( d, sDir );
+				if( cosL <= 0.0 )
+					continue;
+				const float cosH = sqrt( 0.5 + 0.5 * cosL );   // d . h, h = normalize( d + s )
+				const float q = cosH * cosH * ( a2 - 1.0 ) + 1.0;
+				const float w = cosL * g_rad[sIdx].w / ( q * q );
+				acc += float4( g_rad[sIdx].xyz * w, w );
+			}
+			g_radChain[t] = float4( acc.w > 0.0 ? acc.xyz / acc.w : float3( 0, 0, 0 ), 0.0 );
+		}
+		__sharedOnlyBarrier;
+
+		// THE BORDERS of every tile, and the chain's interiors: each a repeat of an interior texel (the pattern)
+		for( uint t = lid; t < 4u * 33u + 340u + 4u * ( 17u + 9u + 5u + 3u ); t += @value( threads_per_group_x )u )
+		{
+			if( t < 132u )
+			{
+				// level 0's border: 34 x 34, its 132 border texels walked round the edge
+				const uint b = 34u;
+				uint2 xy = t < 33u ? uint2( t, 0u ) : t < 66u ? uint2( b - 1u, t - 33u ) : t < 99u ? uint2( b - 1u - ( t - 66u ), b - 1u )
+						 : uint2( 0u, b - 1u - ( t - 99u ) );
+				const uint2 src = jahIfdBorderSource( xy, b ) - uint2( 1u, 1u );
+				OGRE_imageWrite2D4( radianceField, block + xy, float4( g_rad[src.x + src.y * radRes].xyz, 1.0 ) );
+				continue;
+			}
+			uint u = t - 132u;
+			if( u < 340u )
+			{
+				// a chain level's interior texel
+				const uint level = u < 256u ? 1u : u < 320u ? 2u : u < 336u ? 3u : 4u;
+				const uint first = level == 1u ? 0u : level == 2u ? 256u : level == 3u ? 320u : 336u;
+				const uint res = radRes >> level;
+				const uint i = u - first;
+				OGRE_imageWrite2D4( radianceField, block + jahIfdRadTile( level ) + uint2( 1u + i % res, 1u + i / res ),
+									float4( g_radChain[u].xyz, 1.0 ) );
+				continue;
+			}
+			u -= 340u;
+			// a chain level's border texel
+			const uint level = u < 68u ? 1u : u < 104u ? 2u : u < 124u ? 3u : 4u;
+			const uint firstB = level == 1u ? 0u : level == 2u ? 68u : level == 3u ? 104u : 124u;
+			const uint first = level == 1u ? 0u : level == 2u ? 256u : level == 3u ? 320u : 336u;
+			const uint res = radRes >> level;
+			const uint b = res + 2u;
+			const uint e = b - 1u;   // the texels on one side of the walk
+			const uint k = u - firstB;
+			uint2 xy = k < e ? uint2( k, 0u ) : k < 2u * e ? uint2( b - 1u, k - e ) : k < 3u * e ? uint2( b - 1u - ( k - 2u * e ), b - 1u )
+					 : uint2( 0u, b - 1u - ( k - 3u * e ) );
+			const uint2 src = jahIfdBorderSource( xy, b ) - uint2( 1u, 1u );
+			OGRE_imageWrite2D4( radianceField, block + jahIfdRadTile( level ) + xy,
+								float4( g_radChain[first + src.x + src.y * res].xyz, 1.0 ) );
+		}
+	}
+@end
 @end

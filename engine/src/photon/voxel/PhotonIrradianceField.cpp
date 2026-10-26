@@ -56,7 +56,8 @@ namespace Ogre
     PhotonIrradianceFieldSettings::PhotonIrradianceFieldSettings() :
         mNumRaysPerPixel( 1u ),
         mDepthProbeResolution( 12u ),
-        mIrradianceResolution( 6u )
+        mIrradianceResolution( 6u ),
+        mRadianceResolution( 0u )
     {
         for( size_t i = 0u; i < 3u; ++i )
             mNumProbes[i] = 32u;
@@ -92,6 +93,21 @@ namespace Ogre
         outHeight = borderedIrradResolution * ( 1u << ( exponent - ( exponent >> 1u ) ) );
         OGRE_ASSERT_LOW( outWidth * outHeight ==
                          totalNumProbes * borderedIrradResolution * borderedIrradResolution );
+    }
+    //-------------------------------------------------------------------------
+    void PhotonIrradianceFieldSettings::getRadianceFullResolution( uint32 &outWidth, uint32 &outHeight ) const
+    {
+        // A PROBE'S BLOCK (THE RADIANCE CACHE): level 0's bordered tile (34) wide, and that tile over level 1's (18)
+        // tall - levels 2 and 3 (10, 6) beside level 1, level 4 (4) under level 3. Only 32 packs so.
+        if( mRadianceResolution != 32u )
+        {
+            outWidth = outHeight = 0u;
+            return;
+        }
+        const uint32 totalNumProbes = getTotalNumProbes();
+        const uint32 exponent = Bitwise::ctz32( totalNumProbes );
+        outWidth = 34u * ( 1u << ( exponent >> 1u ) );
+        outHeight = 52u * ( 1u << ( exponent - ( exponent >> 1u ) ) );
     }
     //-------------------------------------------------------------------------
     uint8 PhotonIrradianceFieldSettings::getBorderedIrradResolution() const
@@ -288,6 +304,10 @@ namespace Ogre
         mGenerationJob->setProperty( "depth_resolution", static_cast<int32>( depthProbeRes ) );
         mGenerationJob->setProperty( "depth_full_width",
                                      static_cast<int32>( mDepthVarianceTex->getWidth() ) );
+        // THE RADIANCE CACHE: its level 0 resolution (0: none - the job compiles no radiance at all) and the atlas
+        mGenerationJob->setNumUavUnits( mRadianceTex ? 5u : 4u );
+        mGenerationJob->setProperty( "rad_resolution", mRadianceTex ? int32( mSettings.mRadianceResolution ) : 0 );
+        mGenerationJob->setProperty( "rad_full_width", mRadianceTex ? int32( mRadianceTex->getWidth() ) : 0 );
     }
     //-------------------------------------------------------------------------
     void PhotonIrradianceField::setupBorderMirrorParams( uint32 borderedRes, uint32 fullWidth,
@@ -393,6 +413,20 @@ namespace Ogre
         mIrradianceTex->scheduleTransitionTo( GpuResidency::Resident );
         mDepthVarianceTex->scheduleTransitionTo( GpuResidency::Resident );
 
+        // THE RADIANCE CACHE (Jahshaka, PHOTON-7 stage 10-3): the probes' radiance maps and their GGX chains, half
+        // floats like the irradiance (a lamp's radiance is far over 1).
+        uint32 radWidth, radHeight;
+        mSettings.getRadianceFullResolution( radWidth, radHeight );
+        if( radWidth )
+        {
+            mRadianceTex = textureManager->createTexture(
+                "IrradianceFieldRadiance" + StringConverter::toString( getId() ), GpuPageOutStrategy::Discard,
+                TextureFlags::Uav, TextureTypes::Type2D );
+            mRadianceTex->setResolution( radWidth, radHeight );
+            mRadianceTex->setPixelFormat( PFG_RGBA16_FLOAT );
+            mRadianceTex->scheduleTransitionTo( GpuResidency::Resident );
+        }
+
         VaoManager *vaoManager = textureManager->getVaoManager();
 
         setupBorderMirrorParams( mSettings.getBorderedDepthResolution(), mDepthVarianceTex->getWidth(),
@@ -466,6 +500,11 @@ namespace Ogre
         {
             textureManager->destroyTexture( mDepthVarianceTex );
             mDepthVarianceTex = 0;
+        }
+        if( mRadianceTex )
+        {
+            textureManager->destroyTexture( mRadianceTex );
+            mRadianceTex = nullptr;
         }
         VaoManager *vaoManager = textureManager->getVaoManager();
         if( mDirectionsBuffer )
@@ -1404,6 +1443,11 @@ namespace Ogre
         mGenerationJob->_setUavTexture( 0, uav );
         uav.texture = mDepthVarianceTex;
         mGenerationJob->_setUavTexture( 1, uav );
+        // ...and THE RADIANCE CACHE's atlas, where there is one (the job's slot 4; written whole, borders and chain
+        // included, by the probe's own group)
+        uav.texture = mRadianceTex;
+        if( mRadianceTex )
+            mGenerationJob->_setUavTexture( 4, uav );
         DescriptorSetUav::BufferSlot variance( DescriptorSetUav::BufferSlot::makeEmpty() );
         variance.buffer = mVarianceBuffer;
         variance.access = ResourceAccess::ReadWrite;
