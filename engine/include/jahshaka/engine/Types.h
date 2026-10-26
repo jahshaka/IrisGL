@@ -6474,6 +6474,12 @@ struct AsyncShaderStats {
     /// Shaders compiled on any OTHER thread (a frame waited): one counter, read in one load
     /// (the host's live-compile sentry reads this, never compiled - compiledInBackground).
     unsigned           compiledInForeground = 0;
+    /// Compute dispatches REFUSED because a pipeline's parameters did not fit its program
+    /// (the fork's HlmsCompute::getJahParamsMisfits, checked at a pipeline's first dispatch):
+    /// 0 on a sound build - shader.async_after_open asserts it (PHOTON-7 stage 5: two compile
+    /// threads built one shared program's parameter definitions at once, and a dispatch read
+    /// past its parameters until the GPU lost its context).
+    unsigned long long paramsMisfits = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk

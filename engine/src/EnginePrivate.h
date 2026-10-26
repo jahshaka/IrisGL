@@ -1961,6 +1961,7 @@ public:
     X(GiFieldSamples, "gi.fieldSamples") /* the field's sample target (0 = shipped) */ \
     X(GiFieldStatic, "gi.fieldStatic") /* the field's rays NOT rotated per frame */ \
     X(GiFieldStopOff, "gi.fieldStopOff") /* the field's per-probe variance stop off (every probe to the target) */ \
+    X(ShaderForceParamsMisfit, "shader.forceParamsMisfit") /* the next compute dispatch refused as a parameters misfit, each time it comes on (the counter's negative control) */ \
     X(GiRefuseGeometry, "gi.refuseGeometry") /* a voxel build with no geometry source (the refused device) */ \
     X(AtomDiscriminate, "atom.discriminate") /* the decode's failure colour codes (1), the chart (2) */ \
     X(AtomHitWorldLights, "atom.hitWorldLights") /* the hit decode's light list: 0 shipped, 1 off, 2 all */ \
@@ -9111,6 +9112,7 @@ private:
     std::unique_ptr<monitor::FrameMonitor> mMonitor;
     /// THE MEASUREMENT ARMS (lane TEST-1): latched at the top of every frame.
     ArmRegistry mArms;
+    bool mMisfitDoorArmed = false;   ///< the arm shader.forceParamsMisfit was on last frame (runFrame)
     /// Ogre's metrics recording when the capture started (F6 restores it).
     bool mMetricsBeforeCapture = false;
     /// Set for the NEXT frame only (FrameInput::cause, drained at the frame's head).

@@ -1040,6 +1040,14 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         mArms.latch();
         FogHlmsListener::setConeSkipArms(mArms.on(ArmId::DiffuseConeSkip),
                                          mArms.on(ArmId::SpecularConeSkip));
+        // THE MISFIT COUNTER'S NEGATIVE CONTROL (PHOTON-7 stage 5's read W5; the arm shader.forceParamsMisfit): each
+        // time the arm comes on, the fork refuses the next compute dispatch as a misfit (HlmsCompute::_jahForceParamsMisfits)
+        {
+            const bool on = mArms.on(ArmId::ShaderForceParamsMisfit);
+            if (on && !mMisfitDoorArmed)
+                if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) hc->_jahForceParamsMisfits(1u);
+            mMisfitDoorArmed = on;
+        }
         // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1), consumed exactly
         // like the cause and reset to `Complete` — so a caller that sets
         // nothing renders the frame it always did. Pushed to every scene here,
@@ -3503,6 +3511,8 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     mShaderCache.backgroundCompiles(background, foreground);
     out.compiledInBackground = background;
     out.compiledInForeground = foreground;
+    if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
+        out.paramsMisfits = hc->getJahParamsMisfits();
     return out;
 }
 

@@ -1186,6 +1186,10 @@ constexpr ArmDef kArms[] = {
     { ArmId::GiFieldStopOff, 0.0, 0.0, 1.0,
       "The irradiance field's per-probe variance stop OFF at its next build: every probe "
       "integrates to the target (the oracle gi.field_variance_stop compares the stop with)." },
+    { ArmId::ShaderForceParamsMisfit, 0.0, 0.0, 1.0,
+      "THE MISFIT COUNTER'S NEGATIVE CONTROL (PHOTON-7 stage 5's read W5; shader.async_after_open): each time the arm "
+      "comes on, the next compute dispatch is refused and counted as a parameters misfit (app.asyncShaders().paramsMisfits) - "
+      "the fork's door HlmsCompute::_jahForceParamsMisfits; the refused job dispatches the next frame." },
     { ArmId::GiRefuseGeometry, 0.0, 0.0, 1.0,
       "THE REFUSAL HOOK (a test door, gi.voxel_resident case 5): a voxel build runs with NO geometry "
       "source - the state of a device with no buffer device addresses - and must build an empty "
