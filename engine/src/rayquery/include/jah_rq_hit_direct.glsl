@@ -364,14 +364,19 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
 			spec += ( cosL * atten * vis * 0.318309886 ) * v1.xyz * ( metal.xyz * sa + metal.w * sb );
 #else
-			// A LAMP HAS A SIZE (PHOTON-7 stage 11): a point or spot light's glint is the lobe toward its sphere's
-			// representative point, widened by its angular size and renormalised (JahBrdf's jahSphereLightSpecDir - the
-			// pixel's BRDF_Default takes the same function); a directional or area light's as before
-			vec3 Ls = L;
+			// A LAMP HAS A SIZE (PHOTON-7 stage 11): a point or spot light's glint is the lobe widened by its sphere's
+			// angular size, its energy the point lobe's (JahBrdf's jahSphereLightWiden - the pixel's BRDF_Default takes the
+			// same function); a directional or area light's as before
+			float rS = roughness;
 			float sNorm = 1.0;
 			if( type == 1 || type == 2 )
-				Ls = jahSphereLightSpecDir( N, V, v0.xyz - P, v2.w, max( roughness * roughness, 0.001 ), sNorm );
-			spec += ( cosL * atten * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, Ls, V, roughness, metal.xyz, metal.w );
+			{
+				float aW;
+				sNorm = jahSphereLightWiden( max( roughness * roughness, 0.001 ), v2.w, dist, clamp( dot( N, L ), 0.0, 1.0 ),
+											 aW );
+				rS = sqrt( aW );
+			}
+			spec += ( cosL * atten * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, L, V, rS, metal.xyz, metal.w );
 #endif
 		}
 	}

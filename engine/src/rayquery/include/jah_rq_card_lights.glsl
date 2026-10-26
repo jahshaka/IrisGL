@@ -106,13 +106,17 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 		jahSpecularAlbedo( mu, r, sa, sb );
 		sum += ( mu * vis * 0.318309886 ) * v1.xyz * ( F0 * sa + w * sb );
 #else
-		// A LAMP HAS A SIZE (PHOTON-7 stage 11): a point or spot light's glint toward its sphere's representative point,
-		// widened and renormalised (JahBrdf's jahSphereLightSpecDir, the pixel's and the hit's one function)
-		vec3 Ls = L;
+		// A LAMP HAS A SIZE (PHOTON-7 stage 11): a point or spot light's glint widened by its sphere's angular size, its
+		// energy the point lobe's (JahBrdf's jahSphereLightWiden, the pixel's and the hit's one function)
+		float rS = r;
 		float sNorm = 1.0;
 		if( type == 1 || type == 2 )
-			Ls = jahSphereLightSpecDir( N, V, v0.xyz - P, v2.w, max( r * r, 0.001 ), sNorm );
-		sum += ( mu * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, Ls, V, r, F0, w );
+		{
+			float aW;
+			sNorm = jahSphereLightWiden( max( r * r, 0.001 ), v2.w, length( v0.xyz - P ), mu, aW );
+			rS = sqrt( aW );
+		}
+		sum += ( mu * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, L, V, rS, F0, w );
 #endif
 	}
 	return sum;
