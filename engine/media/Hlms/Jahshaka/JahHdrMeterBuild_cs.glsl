@@ -27,10 +27,10 @@
 //     bounds it is the METERING PATTERN below, and, for an authoring tool, the
 //     fact that Manual exposure is the editor default (EXPOSURE-1).
 //
-// THE SAMPLING. One texelFetch per thread on a grid of one sample per 4x4
-// pixels of the HDR target - 129,600 binned samples at 1920x1080 (a 480x272
-// invocation grid; the two rows past 1080 return at the bounds test), twice the ladder's
-// 65,536 (64x64 output texels x 16 taps). Unfiltered, deliberately: the
+// THE SAMPLING. EVERY PIXEL of the HDR target, one 4x4 BLOCK per thread binned as its
+// pixels' mean log-luminance (PHOTON-7 stage 11: one sample per block stepped the meter as
+// a small bright patch crossed it) - 129,600 binned blocks at 1920x1080 (a 480x272
+// invocation grid; the two rows past 1080 return at the bounds test). Unfiltered, deliberately: the
 // ladder's samples were BILINEAR, and a bilinear fetch that weights a +Inf
 // texel by zero is where HDR-1's `0 * Inf` NaNs came from. A texelFetch cannot
 // manufacture one; the only unusable values left are the ones the shading
@@ -170,37 +170,41 @@ void main()
 	// with the divisor read as "pixels per GROUP" the meter silently binned 256
 	// samples instead of 16,384 and still looked plausible. The probe that found
 	// it is why the total weight is worth being able to read back.)
-	const ivec2 px = ivec2( gl_GlobalInvocationID.xy ) * 4 + ivec2( 2, 2 );
-	if( px.x >= texSize.x || px.y >= texSize.y )
+	// EVERY PIXEL VOTES (PHOTON-7 stage 11, the lead's ruling: a light meter INTEGRATES the picture). The invocation is
+	// a 4x4 BLOCK, and it bins the MEAN of log( luminance ) over the block's usable pixels, weighted by how many of its
+	// 16 are usable - one sample per block, the block's centre, made the meter step whenever a small bright patch (a
+	// lamp's glint now has the lamp's size) crossed a sample: measured on hdr.drag_stable, 1.45 % of exposure a frame
+	// while a lamp drags over a mirror floor. A patch moving through a block now moves the block's mean by 1/16 a pixel.
+	const ivec2 block = ivec2( gl_GlobalInvocationID.xy ) * 4;
+	if( block.x >= texSize.x || block.y >= texSize.y )
 		return;
-
-	const vec3 rgb = jahHdrFetch( px ).xyz;
-	float lum = dot( rgb, c_luminanceCoeffs );
-
-	// AN UNUSABLE SAMPLE IS NOT BINNED - it does not vote, and nothing else in
-	// the frame moves because of it. That is the whole reason this is a
-	// histogram (see the header).
-	//
-	// THE TEST IS ON THE BITS, and that is not a style choice: measured on this
-	// stack (NVIDIA 595.84, Vulkan/SPIR-V, lane HDR-1) `x == x` is FOLDED TO
-	// TRUE by the shader compiler and never fires. A float is a NaN or an Inf
-	// exactly when the magnitude of its bit pattern reaches +Inf's, which is
-	// integer arithmetic no optimiser may remove.
-	const uint mag = floatBitsToUint( lum ) & 0x7FFFFFFFu;
-	if( mag >= 0x7F800000u )
-		return;											// NaN or +/-Inf
-	// A NEGATIVE luminance is not a luminance either. It happens: the scene
-	// target is a SUM of shading terms. Zero is a measurement (black) and takes
-	// the floor; below zero is not.
-	if( lum < 0.0 )
+	float sumL = 0.0;
+	uint usable = 0u;
+	for( int k = 0; k < 16; ++k )
+	{
+		const ivec2 q = block + ivec2( k & 3, k >> 2 );
+		if( q.x >= texSize.x || q.y >= texSize.y )
+			continue;
+		const vec3 rgb = jahHdrFetch( q ).xyz;
+		const float lumK = dot( rgb, c_luminanceCoeffs );
+		// AN UNUSABLE SAMPLE DOES NOT VOTE - the whole reason this is a histogram (see the header). THE TEST IS ON THE
+		// BITS, and that is not a style choice: measured on this stack (NVIDIA 595.84, Vulkan/SPIR-V, lane HDR-1)
+		// x == x is FOLDED TO TRUE by the shader compiler and never fires. A float is a NaN or an Inf exactly when the
+		// magnitude of its bit pattern reaches +Inf's. A NEGATIVE luminance is not a luminance either (the scene target
+		// is a SUM of shading terms); zero is a measurement (black) and takes the floor.
+		const uint mag = floatBitsToUint( lumK ) & 0x7FFFFFFFu;
+		if( mag >= 0x7F800000u || lumK < 0.0 )
+			continue;
+		sumL += log( max( lumK, c_minLuminance ) * 1024.0 );
+		++usable;
+	}
+	if( usable == 0u )
 		return;
+	const float L = sumL / float( usable );
 
-	lum = max( lum, c_minLuminance );
-	const float L = log( lum * 1024.0 );
-
-	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( texSize );
+	const vec2 uv = ( vec2( block ) + 2.0 ) / vec2( texSize );
 	const float aspect = float( texSize.x ) / float( texSize.y );
-	const float w = clamp( jahMeterWeight( uv, aspect ), 0.0, 1.0 );
+	const float w = clamp( jahMeterWeight( uv, aspect ), 0.0, 1.0 ) * ( float( usable ) / 16.0 );
 
 	const uint wq = uint( w * c_weightScale + 0.5 );
 	if( wq == 0u )
