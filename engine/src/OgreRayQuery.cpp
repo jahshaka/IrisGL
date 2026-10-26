@@ -9719,7 +9719,7 @@ static_assert(kCardGatherReadsBlock == kCardReadsBlock, "one read-list block");
 /// The records ring's capacity: the relight list's (kMaxRelights).
 constexpr unsigned kCardGatherMaxRecords = 1024u;
 constexpr unsigned kCardGatherRecordFloats = 36u;
-constexpr unsigned kCardGatherCounts = 9u;
+constexpr unsigned kCardGatherCounts = 10u;   // rq_card_gather.comp's kCountWords
 /// ...then each record's own sky rays (the e = 0 counter per card), one word a record
 constexpr unsigned kCardGatherCountWords = kCardGatherCounts + kCardGatherMaxRecords;
 /// THE HIT'S SUN RAY at a voxel-answered hit (jah_rq_hit_direct.glsl): the still casters alone (a cache holds no mover:
@@ -9795,6 +9795,7 @@ void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
         v.total.texels += w[6];
         v.total.emptyTexels += w[7];
         v.total.readsOverflowed += w[8];
+        v.total.buried += w[9];
         for (size_t k = 0; k < v.countsSlots[i].size(); ++k)
             v.skyDrain.emplace_back(v.countsSlots[i][k], w[kCardGatherCounts + k]);
         if (v.skyDrain.size() > 8u * kCardGatherMaxRecords)   // nobody drains (no cache asking): the newest kept
@@ -10132,6 +10133,7 @@ void RayQueryTier::foldVoxelSideCounts(VoxelSideView &v) {
         v.total.sky += w[5];
         v.total.sides += w[6];
         v.total.emptySides += w[7];
+        v.total.buried += w[8];
         ++v.total.dispatches;
         v.countsPending[i] = false;
     }

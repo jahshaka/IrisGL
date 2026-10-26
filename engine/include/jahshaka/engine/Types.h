@@ -4242,6 +4242,9 @@ struct CardCacheStatus {
         /// ...and the texels whose reads overflowed their card's read list (10-2c: the card then takes the frame's
         /// largest move whole)
         unsigned long long readsOverflowed = 0ull;
+        /// ...and the BURIED texels (PHOTON-7 stage 10-3: jahRayOriginBuried - the texel's lift crosses a front face, its
+        /// origin behind a surface): they gather nothing
+        unsigned long long buried = 0ull;
     } gather;
     unsigned long long gatherWaits = 0ull;
     bool gatherByRays = false;
@@ -5155,6 +5158,9 @@ struct GiStatus {
     struct VoxelSideCounts {
         unsigned long long dispatches = 0ull, rays = 0ull, card = 0ull, voxel = 0ull, backFaces = 0ull,
                            noSample = 0ull, sky = 0ull, sides = 0ull, emptySides = 0ull, waits = 0ull, routeChanges = 0ull;
+        /// THE BURIED SIDES (PHOTON-7 stage 10-3: jahRayOriginBuried - the side's lift crosses a front face, its origin
+        /// inside a solid, a two-sided cell's back at a wall's corner or a contact face): they gather nothing
+        unsigned long long buried = 0ull;
     } voxelSides;
 };
 

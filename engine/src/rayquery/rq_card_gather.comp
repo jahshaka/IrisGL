@@ -34,7 +34,8 @@
 // take the still casters (kRayMaskStillCaster) for the same reason.
 //
 // THE COUNTS (the e = 0 counter, the lead's 10-2a): per dispatch, the rays traced and each one's answer - a card, a
-// cascade, a back face, no sample, the sky - and the texels gathered, summed per subgroup into the job's counter
+// cascade, a back face, no sample, the sky - the texels gathered, and the BURIED texels (jahRayOriginBuried: their
+// lift crosses a front face, so they gather nothing; PHOTON-7 stage 10-3), summed per subgroup into the job's counter
 // buffer (one atomic a subgroup a count), read back by the ray tier a fixed number of frames later
 // (CardCacheStatus::gather).
 //
@@ -161,9 +162,13 @@ CardRec gnCard;
 #define JAH_GN_DRAWN( raw ) ( ( raw ) > 0.0 )
 #define JAH_GN_MANTISSA_BITS 10.0
 #include "jah_geometric_normal.glsl"
+// THE BURIED ORIGIN (jah_ray_origin.glsl's second part: after the hit table's functions)
+#define JAH_RAY_ORIGIN_BURIED
+#include "jah_ray_origin.glsl"
 
 const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
-		   kCountTexels = 6u, kCountEmpty = 7u, kCountReadsOver = 8u;
+		   kCountTexels = 6u, kCountEmpty = 7u, kCountReadsOver = 8u, kCountBuried = 9u;
+const uint kCountWords = 10u;   // then each record's own sky rays (OgreRayQuery.cpp kCardGatherCounts)
 
 void main()
 {
@@ -175,18 +180,30 @@ void main()
 	const float depth = inCard ? texelFetch( jahCardDepthLayer, at, 0 ).x : 0.0;
 	const int n = max( int( p.knobs.x ), 1 );
 
-	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	uint c[10] = uint[10]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	vec4 answer = vec4( 0.0 );
+	// THE TEXEL's POINT, ITS NORMAL AND ITS ORIGIN (the one law), then the BURIED test before any ray: a texel whose lift
+	// crosses a front face (jahRayOriginBuried - its origin behind a surface) gathers nothing; its point's error the
+	// depth layer's own quantum (R16F: half a step at the depth's binade) along the capture's axis
+	vec3 Ncone = vec3( 0.0, 0.0, 1.0 ), P = vec3( 0.0 ), Ng = vec3( 0.0, 0.0, 1.0 ), origin = vec3( 0.0 );
+	bool buried = false;
 	if( inCard && depth > 0.0 )
 	{
 		const vec3 nV = JAH_CARD_NORMAL( at ).xyz * 2.0 - 1.0;
 		const vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
 		const vec3 planeN = normalize( r.axisD.xyz );
-		const vec3 Ncone = dot( N, planeN ) > 0.99985 ? planeN : N;
-		const vec3 P = cardPoint( r, ivec2( t ), depth );
+		Ncone = dot( N, planeN ) > 0.99985 ? planeN : N;
+		P = cardPoint( r, ivec2( t ), depth );
 		gnCard = r;
-		const vec3 Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
-		const vec3 origin = jahRayOrigin( P, Ng, depth, r.rect.w );
+		Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
+		origin = jahRayOrigin( P, Ng, depth, r.rect.w );
+		buried = jahRayOriginBuried( P, Ng, origin, exp2( floor( log2( max( depth, 6.1035156e-5 ) ) ) - 11.0 ),
+									 uint( p.knobs.w ) );
+		if( buried )
+			++c[kCountBuried];
+	}
+	if( inCard && depth > 0.0 && !buried )
+	{
 		const mat3 basis = jahConeBasisWorld( Ncone );
 		// the bin's cone (the voxel ray's escape): a solid angle 2 pi / N
 		const float binCos = 1.0 - 1.0 / float( n );
@@ -305,7 +322,7 @@ void main()
 	if( inCard )
 		imageStore( cardGather, at, vec4( answer.xyz, imageLoad( cardGather, at ).w ) );
 	// THE COUNTS, one atomic a subgroup a count (every lane reaches here: no lane returned early)
-	for( uint k = 0u; k < 9u; ++k )
+	for( uint k = 0u; k < kCountWords; ++k )
 	{
 		const uint s = subgroupAdd( c[k] );
 		if( subgroupElect() && s != 0u )
@@ -315,6 +332,6 @@ void main()
 		// ...and this record's sky rays (a workgroup is one record's)
 		const uint s = subgroupAdd( c[kCountSky] );
 		if( subgroupElect() && s != 0u )
-			atomicAdd( counts[9u + gl_WorkGroupID.z], s );
+			atomicAdd( counts[kCountWords + gl_WorkGroupID.z], s );
 	}
 }

@@ -83,3 +83,45 @@ vec3 jahRayOrigin( vec3 surface, vec3 geomN, float carried, float surfaceBound )
 }
 
 #endif   // JAH_RAY_ORIGIN_GLSL
+
+// THE BURIED ORIGIN (PHOTON-7 stage 10-3, the lead's ruling; L9: a surface with solid on its normal side receives no
+// light) - defined where the includer asks for it (JAH_RAY_ORIGIN_BURIED) after its ray query, its hit table's wound
+// normal (jahHitWoundNormal) and flags (jahHitFlags) are declared: this file is included before them, so the includer
+// includes it once more for this part.
+#if defined( JAH_RAY_ORIGIN_BURIED ) && !defined( JAH_RAY_ORIGIN_BURIED_DONE )
+#define JAH_RAY_ORIGIN_BURIED_DONE
+/// A CACHE's ORIGIN IS BURIED when the lift from its surface point `surface` to its origin `origin` (jahRayOrigin's,
+/// along the unit `geomN`) CROSSES A FRONT FACE: the origin then lies behind a surface - inside a solid (a two-sided
+/// cell's back side at a wall's corner, a contact face between two solids: the sealed box's corner cells read the
+/// walls' sky-lit outside through their buried faces, gi.sealed_sky (3)) or past an occluder nearer than the lift
+/// (the refresh's path 17). Its rays would start in the wrong place: the caller takes NO SAMPLE (it gathers nothing).
+/// One ray over the segment (`mask` the caller's).
+///   THE BACK-FACE RULE: the segment starts BEHIND the surface by the point's own error - its float bound plus
+///     `pointError`, what its reconstruction adds (the caller's: a voxel side's stored position quantum, a card
+///     texel's depth quantum) - so a face lying ON the point (within its error) is crossed; the point's OWN face is
+///     crossed from behind, a back face, and is ignored. (Never a constant length: the error is the point's.)
+///   THIN GAPS: a surface facing this one across a gap WIDER than the lift is not crossed, so the origin samples; a
+///     gap THINNER than the lift is crossed, so no sample - its rays would start beyond the facing surface.
+///   WHO CALLS IT: every CACHE consumer - the voxel sides (rq_voxel_sides.comp) and the card gather
+///     (rq_card_gather.comp), whose points are the store's (a voxel side's mean position at its cell's centre across,
+///     a card texel's captured point). A VIEW reader never does: the surface it starts on is the one the view drew,
+///     visible by definition, so never buried.
+bool jahRayOriginBuried( vec3 surface, vec3 geomN, vec3 origin, float pointError, uint mask )
+{
+	const float behind = jahRayFloatBound( surface, 0.0 ) + max( pointError, 0.0 );
+	const float lift = length( origin - surface );
+	rayQueryEXT q;
+	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask, surface - geomN * behind, 0.0, geomN,
+						   behind + lift );
+	JAH_RQ_PROCEED( q )
+	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		return false;
+	vec3 wound;
+	const bool known =
+		jahHitWoundNormal( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) ),
+						   uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) ),
+						   uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) ),
+						   rayQueryGetIntersectionObjectToWorldEXT( q, true ), wound );
+	return known && dot( wound, geomN ) < 0.0;   // a front face crossed (a back face - the point's own - ignored)
+}
+#endif
