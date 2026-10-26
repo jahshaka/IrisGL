@@ -1479,12 +1479,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     // recompile globals (moved here with the step, U4 stage 3).
                     for (auto &s : mScenes)
                         if (drawnThisFrame(s.get())) {
-                            // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: it is a
-                            // `queryIsTransferDone` and, when the copy has landed, a map
-                            // and 6 x 1024 texels of integral. Never a wait — see
-                            // OgreScene::pollSkyShRead — and here rather than beside the
-                            // capture because a read issued inside a frame must not be
-                            // polled in that same frame.
+                            // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: at its DUE
+                            // frame, a map and 6 x 1024 texels of integral - never polled for
+                            // landing (OgreScene::skyReadDue: the frame it lands on is a
+                            // function of the frames) - and here rather than beside the
+                            // capture because a read is never due in the frame it was issued in.
                             s->pollSkyShRead();
                             // THE CLOUD LAYER'S FRAME (CLOUDS-2D-1): its clock, its scroll
                             // and its capture cadence — before the capture below it may ask for.

@@ -27,6 +27,7 @@
 #include <OgreShaderParams.h>
 #include <OgreStagingTexture.h>
 #include <OgreAsyncTextureTicket.h>
+#include <Vao/OgreVaoManager.h>
 #include <cstring>
 
 namespace jahshaka { namespace engine { namespace detail {
@@ -766,8 +767,9 @@ void OgreScene::applySkyAmbient(GiStaleReason why) {
 // all three land inside the capture's own frame (the capture runs before the
 // draw, the convolution is run right behind it, the first SH read is
 // synchronous), so the change frame already draws the whole new set. A drag's
-// SH read is deferred a frame (integrateSkyShFromCube), and its set lands at the
-// next frame's top when that read does — the previous set drawn meanwhile.
+// SH read is deferred (integrateSkyShFromCube), and its set lands when that read
+// does: at the read's due frame's top (skyReadDue) or at the next capture's forced
+// read, whichever comes first - the previous set drawn meanwhile.
 // THE ENVIRONMENT IS OWED while any part of the set is: the capture requested, the SH ticket in flight, the convolution
 // deferred to the background compiler, or a convolved cube / fresh SH not yet swapped in (landEnvironmentIfComplete).
 bool OgreScene::environmentPending() const {
@@ -1039,7 +1041,7 @@ void OgreScene::applyPendingSkyCapture() {
             applyPendingIbl();
         }
         // The whole set lands now when the SH read was synchronous; a deferred
-        // read lands it at the next frame's top (readSkyShTicket).
+        // read lands it at its due frame or the next capture (readSkyShTicket).
         landEnvironmentIfComplete();
         return;
     } catch (Ogre::Exception &e) {
@@ -1101,8 +1103,9 @@ void OgreScene::applyPendingSkyCapture() {
 //   * A DRAG is the hazard: a sun being dragged captures on EVERY frame, and
 //     that is where 1.4 ms of flush and wait per frame is a third of a 60 Hz
 //     budget spent doing nothing. From the second consecutive capture on, the
-//     read is deferred to the next frame's top and the ambient simply trails
-//     the sky by one more frame for as long as the gesture lasts.
+//     read is deferred - taken by the next capture, or at its due frame
+//     (skyReadDue) once the gesture stops - and the ambient simply trails the
+//     sky by a capture for as long as the gesture lasts.
 //
 // `mSkyCaptureIdleFrames` is how many drawn frames have passed since the last
 // capture, so "consecutive" is a property of the gesture and not of a timer.
@@ -1114,7 +1117,7 @@ void OgreScene::integrateSkyShFromCube(Ogre::TextureGpu *cube) {
     // cancel the read the frame before it issued).
     if (mSkyShTicket) readSkyShTicket(true);
     // ...AND A READ THAT ALREADY LANDED AT THIS FRAME'S TOP LANDS ITS SET NOW.
-    // pollSkyShRead maps a finished copy at the frame's top, but this capture was
+    // pollSkyShRead maps a DUE copy at the frame's top, but this capture was
     // already requested then (mSkyCapturePending), so landEnvironmentIfComplete
     // refused the swap as "a part is owed" — and the ticket this capture is about
     // to issue would refuse it again, and the next read would overwrite mSkySh
@@ -1152,49 +1155,67 @@ void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
         const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
         mSkyShTicket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
                                                     cube->getPixelFormat());
-        // accurateTracking FALSE: no fence, and `queryIsTransferDone` answers
-        // off the frame counter. It must not be polled in the frame it was
-        // issued in (the pin logs a warning and switches to a fence, which
-        // would flush) — and it never is: the poll runs at the top of a frame,
-        // this issue happens inside one.
+        // accurateTracking FALSE: no fence and no flush; the copy rides the
+        // frame's own submission and is taken at its DUE frame (skyReadDue).
         mSkyShTicket->download(cube, mip, false);
+        mSkyShTicketFrame = mSkyFrame;
         return;
     } JAH_CATCH(mError, );
     destroySkyShTicket();
 }
 
-// THE POLL, at the top of every frame of a scene being drawn. Non-blocking by
-// contract: `queryIsTransferDone` with inaccurate tracking is a frame-counter
-// comparison.
+// THE FRAME'S TOP, once per frame this scene is drawn in: the sky's frame
+// counted, then the deferred reads that are DUE taken.
 void OgreScene::pollSkyShRead() {
     reapRetiredReflections(false);   // the frame's top, before anything rebinds
     if (mSkyCaptureIdleFrames < 1000u) ++mSkyCaptureIdleFrames;   // the gesture's clock
+    ++mSkyFrame;
     readSkyShTicket(false);
     readCloudClearTicket(false);
 }
 
-// READ THE DEFERRED DOWNLOAD, or leave it for the next frame.
+// THE DUE FRAME OF A DEFERRED READ (PHOTON-7 stage 10-3, item 0; L1: the picture
+// at rest is a function of the frames, never of the GPU's pace). A read issued in
+// the sky's frame `issued` is taken at the top of the first frame past it by more
+// than the dynamic buffer multiplier: by then every frame in flight since the
+// issue has been waited on (Ogre fences a frame before it reuses its dynamic
+// buffers), so the map finds the copy done. It is never POLLED: an inaccurate
+// ticket's `queryIsTransferDone` asks the issuing frame's fence without a wait
+// (VulkanVaoManager::isFrameFinished), so a polled read landed 1 to 4 frames after
+// its issue by the device's pace, and the sky light it carries - an input of the
+// GI (landEnvironmentIfComplete; the sheet's ambient in the environment the GI
+// reads) - reached the cards and the voxels on a frame that differed from run to
+// run (the cards' reports and the field's readings keep the same rule).
+bool OgreScene::skyReadDue(unsigned long long issued) const {
+    Ogre::RenderSystem *rs = mRoot ? mRoot->getRenderSystem() : nullptr;
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    const unsigned long long lag = vao ? (unsigned long long)vao->getDynamicBufferMultiplier() : 1ull;
+    return mSkyFrame > issued && mSkyFrame - issued > lag;
+}
+
+// READ THE DEFERRED DOWNLOAD at its due frame, or leave it for a later one.
 //
-// `force` false — the frame's top — never waits: `queryIsTransferDone` with
-// inaccurate tracking is a frame-counter comparison, and a transfer that has not
-// landed is simply tried again next frame. The ticket is KEPT in that case, and
-// destroyed on every other exit.
+// `force` false - the frame's top - takes the read at its DUE frame (skyReadDue)
+// and only then; the map there waits if the copy is somehow not done, so the
+// frame it lands on never depends on the device. The ticket is KEPT before its
+// due, and destroyed on every other exit.
 //
-// `force` true — a new capture is about to replace it — maps unconditionally,
-// and that map is not a stall either: the download it is waiting for was
-// recorded in an EARLIER frame and submitted with that frame's own commit, so
-// the GPU has had a whole frame to do a 24 KB copy. MEASURED: over a 40-step sun
-// drag this path NEVER FIRED — every read had already landed at the frame top
-// before the next capture came — and the frame-top maps it stands in for cost
-// 0.002 ms mean, 0.004 worst (the integral that follows is 0.46 ms of CPU and is
-// the same work in both paths). It is here so that a scene capturing faster than
-// its copies land still TAKES the answer instead of dropping it: a dropped read
-// would freeze the sky's light for a whole gesture, because every frame of a
-// drag would cancel the read the frame before had issued.
+// `force` true - a new capture is about to replace it - maps unconditionally:
+// the capture's frame is the document's (a gesture's next step), so the frame
+// the answer lands on is still a function of the frames. In a DRAG this is now
+// the path every step takes (the due is past the next capture): it maps the copy
+// the previous frame issued, exactly where the frame-top read used to land it
+// (that landing was refused while the capture was pending, integrateSkyShFromCube),
+// and with the same wait - none once the device finished the previous frame, and
+// the remainder of it otherwise, which the forced map paid before as well.
+// MEASURED before (a 40-step sun drag): every copy had finished by the next
+// frame's top, so the forced map finds it done. It is here so that a scene
+// capturing faster than its copies land still TAKES the answer instead of
+// dropping it: a dropped read would freeze the sky's light for a whole gesture.
 void OgreScene::readSkyShTicket(bool force) {
     if (!mSkyShTicket) return;
     JAH_TRY {
-        if (!force && !mSkyShTicket->queryIsTransferDone()) return;   // next frame
+        if (!force && !skyReadDue(mSkyShTicketFrame)) return;   // a later frame: its due
         const Ogre::TextureBox box = mSkyShTicket->map(0);
         integrateSkyShFromBox(box);
         mSkyShTicket->unmap();
@@ -2530,8 +2551,9 @@ void OgreScene::captureCloudClearSky() {
         ticket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
                                               cube->getPixelFormat());
         if (mCloudClearValid && consecutive) {
-            ticket->download(cube, mip, false);   // read at the next frame's top
+            ticket->download(cube, mip, false);   // read at its due frame's top (skyReadDue)
             mCloudClearTicket = ticket;
+            mCloudClearTicketFrame = mSkyFrame;
             ticket = nullptr;
         } else {
             mRoot->getRenderSystem()->flushCommands();
@@ -2551,7 +2573,7 @@ void OgreScene::readCloudClearTicket(bool force) {
     if (!mCloudClearTicket) return;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     JAH_TRY {
-        if (!force && !mCloudClearTicket->queryIsTransferDone()) return;   // next frame
+        if (!force && !skyReadDue(mCloudClearTicketFrame)) return;   // a later frame: its due
         const Ogre::TextureBox box = mCloudClearTicket->map(0);
         float sh[27];
         integrateSkyShFromBox(box, sh);

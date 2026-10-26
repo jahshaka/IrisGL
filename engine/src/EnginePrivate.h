@@ -4289,8 +4289,9 @@ public:
     /// Now: the FIRST capture of a scene is synchronous (nothing valid to lag
     /// behind, and a thumbnail renders a handful of frames and asserts their
     /// colours), and every later one issues the download with INACCURATE
-    /// tracking and maps it on a later frame — `pollSkyShRead` at the frame's
-    /// top — with the previous coefficients staying valid meanwhile.
+    /// tracking and maps it at its DUE frame (`skyReadDue`, `pollSkyShRead` at
+    /// the frame's top) or at the next capture, with the previous coefficients
+    /// staying valid meanwhile.
     void integrateSkyShFromCube(Ogre::TextureGpu *cube);
     void integrateSkyShNow(Ogre::TextureGpu *cube);
     void issueSkyShRead(Ogre::TextureGpu *cube);
@@ -4299,9 +4300,12 @@ public:
     /// Renders the capture workspace into a new cube (OgreSky.cpp says who).
     Ogre::TextureGpu *renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips);
     /// Called at the top of every frame this scene is drawn in: counts the
-    /// gesture's clock and, if the pending read has landed, integrates it.
-    /// Never blocks.
+    /// gesture's clock and the sky's frame, and takes each deferred read that is
+    /// DUE (skyReadDue) - never one polled for landing.
     void pollSkyShRead();
+    /// A deferred read issued in the sky's frame `issued` is due once the sky's
+    /// frame is past it by more than the dynamic buffer multiplier (OgreSky.cpp).
+    bool skyReadDue(unsigned long long issued) const;
     /// Once per drawn frame (OgreEngine, beside pollSkyShRead): advances the
     /// layer's own clock by the frame delta the host pushed, writes the scroll
     /// into the layer, the disc and the ground shadow, and runs the capture
@@ -4316,8 +4320,13 @@ public:
     void readSkyShTicket(bool force);
     void destroySkyShTicket();
     /// The read in flight, or null. Owned; read (not dropped) by the next
-    /// capture, which is one frame later at worst and therefore free.
+    /// capture, or at its due frame.
     Ogre::AsyncTextureTicket *mSkyShTicket = nullptr;
+    /// The sky's frame (pollSkyShRead: one per frame this scene is drawn in), and
+    /// the frames the two deferred reads were issued in.
+    unsigned long long mSkyFrame = 0ull;
+    unsigned long long mSkyShTicketFrame = 0ull;
+    unsigned long long mCloudClearTicketFrame = 0ull;
     /// Drawn frames since the last sky capture — the gesture's clock. A capture
     /// within `kSkyCaptureDragFrames` of the previous one is a DRAG and defers
     /// its read; a lone change stays synchronous, so nothing that renders a
@@ -6153,8 +6162,8 @@ private:
     /// saturated copy of its own colour at a low sun): it reads a capture of
     /// the same sky with the sheet hidden — taken only when the SKY changes
     /// (never on the sheet's own edits or scroll), synchronously for a lone
-    /// change and through a ticket read at the next frame's top during a
-    /// gesture, exactly like the environment's own SH.
+    /// change and through a ticket read at its due frame (or the next capture)
+    /// during a gesture, exactly like the environment's own SH.
     void captureCloudClearSky();
     void readCloudClearTicket(bool force);
     void pushCloudAmbient();
