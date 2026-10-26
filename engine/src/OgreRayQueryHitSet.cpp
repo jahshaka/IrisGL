@@ -182,7 +182,7 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     return true;
 }
 
-void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out) {
+void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out, HitReader reader) {
     out = HitSetParams();
     out.cards[2] = 1.0f;   // (the readers' demand stamps on: a reader past its demand span turns them off - cards.z)
     // THE CASCADES, every slot a shader indexes: past the chain's length the last cascade's (none: the unit box)
@@ -197,10 +197,11 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         out.voxelInvSize[c][3] = n ? src.voxelCell[from] : 1.0f;
     }
     out.counts[0] = float(n);
-    // THE LEVEL BY THE CAMERA (10-2e): the GI camera and each cascade's radius and band (past the chain's length the
-    // last's: never read - the outermost reads by its box)
+    // THE LEVEL RULE (HitReader): a view's by the GI camera (10-2e: the camera and each cascade's radius and band, past
+    // the chain's length the last's - never read, the outermost reads by its box); a cache's by its ray's footprint
+    // (each cascade's K), whatever the camera
     for (int k = 0; k < 3; ++k) out.levelCam[k] = src.levelCam[k];
-    out.levelCam[3] = src.levelOn && n ? 1.0f : 0.0f;
+    out.levelCam[3] = !n ? 0.0f : reader == HitReader::Cache ? 2.0f : src.levelOn ? 1.0f : 0.0f;
     for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
         const unsigned from = c < n ? c : (n ? n - 1u : 0u);
         out.level[c][0] = n ? src.levelRadius[from] : 0.0f;

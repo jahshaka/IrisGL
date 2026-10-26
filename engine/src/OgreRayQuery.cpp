@@ -6454,7 +6454,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     // THE HIT SET'S UNIFORMS (the one function: the cascades, the sky, the cards' counts, the geometric normal's rows,
     // the hit list and its sun ray, the tables, the hit's own surface)
-    hitSetParams(hs, geomSlots, pp.hit);
+    hitSetParams(hs, geomSlots, pp.hit, HitReader::View);
     // THE ARM THAT RE-MEASURES THE CLAIM (the shape of "reflect.monoEyes" beside it):
     // the arm "reflect.motion" = 0 switches EVERY branch of REFLECT-MOVERS-1 off at once —
     // the id image withheld (a surface's own motion), motion.w = 0 (a hit's motion,
@@ -9880,7 +9880,7 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against the
     // still casters to the cards' sun range, no mover gate (rq_card_gather.comp's mask law)
     CardGatherParams pp{};
-    hitSetParams(hs, geomSlots, pp.hit);
+    hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
     pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
@@ -10211,7 +10211,7 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against the still casters, no mover
     // gate (rq_voxel_sides.comp's mask law, the cards' gather's)
     VoxelSideParams pp{};
-    hitSetParams(hs, geomSlots, pp.hit);
+    hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
     pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;

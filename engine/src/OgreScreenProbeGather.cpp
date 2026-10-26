@@ -1644,7 +1644,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
     // THE HIT SET'S UNIFORMS (the one function: the cascades, the sky, the cards' counts, the geometric normal's rows,
     // the hit list and its sun ray, the tables, the hit's own surface)
-    hitSetParams(in.hits, geomSlots, pp.hit);
+    hitSetParams(in.hits, geomSlots, pp.hit, HitReader::View);
     // THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): the view stamps the cards it reads at its rest
     // indices [1, N + the due] alone - moving (rest 0) it always stamps - so its demand is the same span in every run
     if (in.demandDue) {

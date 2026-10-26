@@ -290,12 +290,24 @@ struct HitSetParams {
     float surface[4] = {};     ///< the texture pool bound, the cloud field bound
     float cloudMap[4] = {};
     float cloudSun[4] = {};
-    float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule on (w)
+    float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule (w: HitReader's code)
     float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres), its K
 };
 static_assert(sizeof(HitSetParams) == 23u * 16u, "JahHitParams is twenty-three vec4s");
-/// Fills `out` from the hit set; `geomSlots` = the per-slot row entries the job's own copy holds this frame (0: none).
-void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out);
+/// WHO READS THE HITS (PHOTON-7 stage 10-3, the lead's ruling on the teleport window): the level a hit is read at.
+///  - View: a VIEW reader (the gather, the reflection) reads the level by the GI CAMERA (10-2e): its picture may depend
+///    on its pose, and two placements the engine can reach at one pose read one level (levelCam.w = 1; 0 without a
+///    camera: the box rule).
+///  - Cache: a CACHE's rays (the cards' gather, the voxel sides) read a level that is CAMERA-INDEPENDENT - the ray's
+///    own footprint at the hit (the clipmap law: a cascade's world-anchored levels up to K carry it, fading out between
+///    K - 1 and K to the next one out), in the finest box holding the hit, its edge blend (levelCam.w = 2). A cache's
+///    store is a world function: under the camera's level it was a function of where the camera stood (the sealed
+///    box's c1 cells inside held 0.040 at the outside pose and 0.0029 at the inside rest) and a teleport read the stale
+///    part through the walls for a hundred frames (gi.sealed_sky (8)).
+enum class HitReader { View, Cache };
+/// Fills `out` from the hit set for `reader`; `geomSlots` = the per-slot row entries the job's own copy holds this frame
+/// (0: none).
+void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out, HitReader reader);
 
 /// WHERE A JOB'S SET HOLDS THE HIT SET: the binding of each input (its shader's layout). Every one is bound.
 struct HitSetSlots {

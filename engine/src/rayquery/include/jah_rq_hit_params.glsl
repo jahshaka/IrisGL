@@ -33,7 +33,8 @@ struct JahHitParams
 	vec4 surface;           // x the voxeliser's texture pool bound, y the cloud field bound
 	vec4 cloudMap;          // the cloud layer's 1 / tile, strength, scroll x, z
 	vec4 cloudSun;          // ...its sun throw x, z, altitude, 1 / mu_s
-	vec4 levelCam;          // THE LEVEL BY THE CAMERA (10-2e): the GI camera (xyz), the rule on (w)
+	vec4 levelCam;          // THE LEVEL RULE: the GI camera (xyz); w 1 a view's level by the camera (10-2e), 2 a cache's
+	                        // by its ray's footprint (10-3: camera-independent), 0 the box rule (HitReader, C++)
 	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera),
 	                        // z its coarsest footprint level K (its placement quantum's)
 };
@@ -61,7 +62,8 @@ struct JahHitParams
 #define JAH_HIT_CLOUD_MAP    JAH_HIT_PARAMS.cloudMap
 #define JAH_HIT_CLOUD_SUN    JAH_HIT_PARAMS.cloudSun
 #define JAH_HIT_MOVERS_ON    ( JAH_HIT_PARAMS.counts.w > 0.5 )
-#define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 )
+#define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 && JAH_HIT_PARAMS.levelCam.w < 1.5 )
+#define JAH_VOX_LEVEL_FOOTPRINT ( JAH_HIT_PARAMS.levelCam.w > 1.5 )
 #define JAH_VOX_LEVEL_CAM    JAH_HIT_PARAMS.levelCam.xyz
 #define JAH_VOX_LEVEL( c )   JAH_HIT_PARAMS.level[c]
 
