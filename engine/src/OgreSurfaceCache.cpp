@@ -1169,9 +1169,18 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     const unsigned long long readLag = (vaow ? vaow->getDynamicBufferMultiplier() + 1u : 1u) + 1u;
     bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1] &&
                       mFrame < mDemandChangeFrame + settleS + kDemandReadEvery + readLag;
+    // ...AND A READER's WINDOW CLOSES IN THE CACHE's FRAMES TOO (PHOTON-7 stage 10-3, the liveness fix): "its clock has
+    // not passed its first by S" read the reader's clock - its newest stamp - and a reader that grazes the cards once
+    // and never again (a shot's gather over a near-empty view: one carded hit 5 frames after the change, none after; or
+    // a reader past its stamping span) froze its clock below first + S, held the demand OPEN for ever, the rest
+    // decision never came, the cards owed their hold and giAtRest stayed false: a screenshot taken at once after a
+    // 5 cm camera move ran to its 2,002-frame cap (scripting.e2e.change_then_shot). Its stamps have all landed by the
+    // read-back's period and lag past first + S, so the window is closed then, read or not - the same frame a reader
+    // stamping every frame closes it at.
     for (unsigned r = 0; r < kDemandReaders && !demandOpen; ++r)
         demandOpen = mDemandFirst[r] && mDemandFirst[r] < mDemandChangeFrame + settleS + kDemandReadEvery &&
-                     mDemandNewest[r] < mDemandFirst[r] + settleS;
+                     mDemandNewest[r] < mDemandFirst[r] + settleS &&
+                     mFrame < mDemandFirst[r] + settleS + kDemandReadEvery + readLag;
     // THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b), the lead's ruling): with the demand closed, NOTHING ARRIVES
     // AND NOTHING LEAVES until the view readers' REST DEMAND IS COMPLETE (each has finished its rest sample sequence:
     // CardSceneView::readersRestComplete) - then, ONCE per change, the cards no view reader read over the rest are
