@@ -826,7 +826,6 @@ private:
     unsigned long long mRestDrained = 0ull;
     /// THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b)): taken for the current demand change, and how many were taken.
     bool mRestDecided = false;
-    bool mArmRemarch = false;   // ARM (the stale early gathers) - reverted next
     unsigned long long mRestDecisions = 0ull;
     /// THE REST DEMAND'S WINDOW: each reader's rest start in cache frames (0: since the change) and the frame its stamps
     /// have landed by (a read-back's period + lag + 1 past the rest's completion; 0: not complete yet).
