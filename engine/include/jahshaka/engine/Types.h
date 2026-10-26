@@ -3253,7 +3253,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
         f.reflectRestRays = 4u;
-        f.reflectEmitters = 64u;   // PHOTON-7 11-1d: the pick's walk priced on the fixtures (the stage's evidence)
+        // THE EMITTER CAP (PHOTON-7 11-1d), MEASURED on two scenes (spikes/photon-7/stage11/11-1d): Bistro Exterior's table
+        // holds 59 emissive traced instances, Bistro Interior's 18 - 64 keeps every one of both (none over). Its price:
+        // each NEE sample walks the table three times (W, the pick, p_l of the drawn direction); at 59 targets the
+        // trace moved 0.230 -> 0.251 ms (1080p Epic, ABBA, Bistro Exterior's walk). Past 64 the dimmest by power are
+        // counted over (reflectEmittersOver) and stay the BRDF's alone - many emitters is the many-lights problem whose
+        // general answer (reservoirs) is out of this stage.
+        f.reflectEmitters = 64u;
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
