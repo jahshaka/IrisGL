@@ -162,9 +162,6 @@ void VideoReadback::record(Slot &slot) {
         // monitor is off.
         monitor::CacheScope scope(CacheKind::Video, WorkReason::Request, 0, "video.nv12", rs);
         rs->endRenderPassDescriptor();
-        // The copy encoder of a previous frame's download, closed so the solver
-        // reasons about a texture nothing else owns (OgreSky.cpp's rule).
-        rs->endCopyEncoder();
         Ogre::DescriptorSetTexture2::TextureSlot in(Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty());
         in.texture = src;
         job->setTexture(0u, in, nullptr);
