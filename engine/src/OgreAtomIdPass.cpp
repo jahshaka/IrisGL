@@ -53,9 +53,6 @@
 #include <OgreRenderPassDescriptor.h>
 #include <OgreRenderSystem.h>
 #include <OgreResourceTransition.h>
-#include <OgreLogManager.h>
-#include <Compositor/OgreCompositorWorkspace.h>
-#include <Compositor/OgreCompositorWorkspaceDef.h>
 #include <OgreRoot.h>
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreUavBufferPacked.h>
@@ -85,10 +82,6 @@
 namespace jahshaka {
 namespace engine {
 namespace detail {
-extern bool gJahArmLogTransitions;
-extern bool gJahArmLogLines;
-void jahArmLogTransitions(const char *where, const Ogre::ResourceTransitionArray &rt);
-
 
 /// THE PYRAMID'S ARRIVAL COUNTER (JahHzbBuild_cs, UAV slot kHzbCounterSlot): one
 /// engine-lifetime buffer, ZERO at creation and put back to zero by the last workgroup of
@@ -202,7 +195,6 @@ bool recordPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::Textur
     {
         Ogre::ResourceTransitionArray &rt = rs->getBarrierSolver().getNewResourceTransitionsArrayTmp();
         job->analyzeBarriers(rt);
-        if (gJahArmLogTransitions && gJahArmLogLines) jahArmLogTransitions("pyramid", rt);
         rs->executeResourceTransition(rt);
         hc->dispatch(job, nullptr, nullptr);
     }
@@ -217,21 +209,6 @@ bool recordPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::Textur
     return true;
 }
 }  // namespace
-
-bool gJahArmLogTransitions = false;   // MEASURING ARM (BUGFIX-MAIN-1 stage 2), reverted
-bool gJahArmLogLines = false;
-void jahArmLogTransitions(const char *where, const Ogre::ResourceTransitionArray &rt) {
-    std::string line = std::string("JAHARM transitions ") + where + " n=" + std::to_string(rt.size());
-    for (const Ogre::ResourceTransition &t : rt) {
-        if (!t.resource || !t.resource->isTextureGpu()) { line += " | buffer"; continue; }
-        auto *tex = static_cast<Ogre::TextureGpu *>(t.resource);
-        line += " | " + tex->getNameStr() + " ptr=" + std::to_string(reinterpret_cast<uintptr_t>(tex)) + " " +
-                std::to_string(int(t.oldLayout)) + "->" + std::to_string(int(t.newLayout)) + " acc " +
-                std::to_string(int(t.oldAccess)) + "->" + std::to_string(int(t.newAccess)) + " st " +
-                std::to_string(int(t.oldStageMask)) + "->" + std::to_string(int(t.newStageMask));
-    }
-    Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
-}
 
 bool recordOcclusionPyramid(Ogre::RenderSystem *rs, Ogre::TextureGpu *depth, Ogre::TextureGpu *hzb) {
     return recordPyramid(rs, depth, hzb, nullptr);
@@ -1117,17 +1094,6 @@ void recordIdPass(AtomPassContext &ctx, bool late) {
 void recordHistoryPass(AtomPassContext &ctx) {
     auto *pass = static_cast<AtomPass *>(ctx.pass);
     OgreView *view = pass ? atomViewOfPass(pass) : nullptr;
-    {
-        const Ogre::RenderPassDescriptor *rpd = pass ? pass->getRenderPassDesc() : nullptr;
-        Ogre::TextureGpu *rd = rpd ? rpd->mDepth.texture : nullptr;
-        int why = !view ? 1 : !view->chainAtomOcclusion() ? 2 : !view->atomFirstTested() ? 3
-                : view->isCaptureWorkspace(pass->getParentNode()->getWorkspace()) ? 4
-                : (view->mEngine && !view->mEngine->armRegistry().on(ArmId::AtomHistoryRebuild)) ? 5
-                : !view->atomOcclusionHistory().valid ? 6 : 0;
-        Ogre::LogManager::getSingleton().logMessage(
-            "JAHARM history enter rtvDepth " + (rd ? rd->getNameStr() : std::string("none")) + " return " +
-                std::to_string(why), Ogre::LML_CRITICAL);
-    }
     if (!view || !view->chainAtomOcclusion() || !view->atomFirstTested()) return;
     if (view->isCaptureWorkspace(pass->getParentNode()->getWorkspace())) return;
     if (view->mEngine && !view->mEngine->armRegistry().on(ArmId::AtomHistoryRebuild)) return;
@@ -1143,30 +1109,11 @@ void recordHistoryPass(AtomPassContext &ctx) {
     if (!hzb || !depth || hist.width != hzb->getWidth() || hist.height != hzb->getHeight() ||
         hist.levels != hzb->getNumMipmaps())
         return;
-    static int jahArmCalls = 0;
-    const bool jahArm = jahArmCalls++ < 100000;
-    gJahArmLogLines = jahArm;
-    if (jahArm) {
-        const Ogre::RenderPassDescriptor *rpd = pass->getRenderPassDesc();
-        Ogre::TextureGpu *rd = rpd ? rpd->mDepth.texture : nullptr;
-        Ogre::LogManager::getSingleton().logMessage(
-            "JAHARM history call " + std::to_string(jahArmCalls) + " depth " + depth->getNameStr() + " ptr=" +
-                std::to_string(reinterpret_cast<uintptr_t>(depth)) + " rpdDepth ptr=" +
-                std::to_string(reinterpret_cast<uintptr_t>(rd)) + " depthCurLayout " +
-                std::to_string(int(depth->getCurrentLayout())) + " node " +
-                pass->getParentNode()->getName().getFriendlyText(),
-            Ogre::LML_CRITICAL);
-    }
-    gJahArmLogTransitions = true;   // the begin's label on every call; the log lines on the first twelve
     recordOcclusionPyramid(ctx.renderSystem, depth, hzb);
     // THE DEPTH GOES BACK TO ITS ATTACHMENT LAYOUT through Ogre's own render pass over this pass's RTV (the late pass's
     // order: its pyramid, then its begin): the build read the depth as a texture, and the next pass's barriers were
     // planned for the attachment this pass names (app.engine_selftest_validation: VUID-VkImageMemoryBarrier-oldLayout).
-    const bool jahBegun = pass->beginRenderPass();
-    if (jahArm)
-        Ogre::LogManager::getSingleton().logMessage("JAHARM history begun " + std::to_string(int(jahBegun)),
-                                                    Ogre::LML_CRITICAL);
-    gJahArmLogTransitions = false;
+    pass->beginRenderPass();
 }
 
 }  // namespace
