@@ -141,7 +141,7 @@ JahCardPick jahCardPick( uint slot, vec3 hitPos, vec3 facingDir )
 
 #ifdef JAH_CARD_DEMAND
 /// THE READERS' DEMAND (PHOTON-7 stage 5, 5-2; jah_rq_card_bindings.glsl's layout): the hit's read stamps the card it
-/// read, or - when no card of the instance answered - the instance's face bucket the hit faces, with the frame's stamp
+/// read, and - EVERY hit, answered or not (PHOTON-7 stage 10-3, F3) - the instance's face bucket the hit faces, with the frame's stamp
 /// (a plain store of one value: every writer writes the same, so the race is benign, and the read first keeps a hot
 /// card to one store a frame). The host reads them back and makes resident what the readers read.
 uint jahCardBucket( vec3 n )
@@ -171,7 +171,10 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 		const uint w = 2u * ( ( at.y >> 4u ) * 128u + ( at.x >> 4u ) ) + reader;
 		jahCardDemandStamp( S + 2u + ( w >> 2u ), w & 3u, head.x );
 	}
-	else if( stamps )
+	// THE FACE BUCKET ON EVERY HIT, ANSWERED OR NOT (PHOTON-7 stage 10-3, F3): the rest's demand is the faces the rays
+	// HIT. A mark written only when no card answered made it follow the cache's state - a resident card not yet
+	// (re)captured answers nothing, so whether a face was marked followed the capture queue's history.
+	if( stamps )
 	{
 		const uint w = 8u * reader + jahCardBucket( facing );
 		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );

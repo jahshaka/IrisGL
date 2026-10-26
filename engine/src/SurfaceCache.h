@@ -200,7 +200,7 @@ struct CardRec {
     unsigned atlasX = 0u, atlasY = 0u, size = 0u;
     /// ITS PLACE IN ITS INSTANCE'S LAYOUT (every card the mesh's list cuts, resident or not: PHOTON-7 stage 5, 5-2 -
     /// an instance holds the faces its readers read) and the FACE BUCKET its outward axis falls in (the axis of its
-    /// largest component and its sign, jah_rq_card.glsl's jahCardBucket) - the key a hit that found no card marks.
+    /// largest component and its sign, jah_rq_card.glsl's jahCardBucket) - the key every hit marks (F3: the rest set).
     unsigned short index = 0u;
     unsigned char bucket = 0u;
     /// Lumen's priority pair. `lastRead` is THE READERS' (the newest frame a ray's hit read the card, from the GPU's
@@ -1067,6 +1067,11 @@ private:
     unsigned mDemandNextIssue = 0u, mDemandNextTake = 0u;
     std::vector<unsigned long long> mFaceMarks;   ///< 16 a slot: 8 per reader, the 6 buckets
     std::vector<unsigned long long> mFacePrev;    ///< ...and each one's mark before (a demand that persists: two)
+    /// ...and each one's last kFaceRing read-backs that carried a new mark (the stamps: PHOTON-7 stage 10-3, F3's fit -
+    /// the decision ranks a face by how many of its rest span's read-backs marked it, a count of the frames' hits alone)
+    static constexpr unsigned kFaceRing = 8u;
+    std::vector<uint32_t> mFaceRing;
+    std::vector<unsigned char> mFaceRingHead;
     /// THE MEASURING ARM cards.demandCount: each face's hits (the marks' layout), cumulative - and the GPU's last word,
     /// whose moves they add; and the node at each item slot (the candidates', the faces' identity while none is resident)
     std::vector<unsigned long long> mFaceHits;
