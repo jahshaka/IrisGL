@@ -149,12 +149,18 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 	o.hits = 0.0;
 	const int n = max( rays, 1 );
 	const float a = max( perceptualRoughness * perceptualRoughness, 1e-4 );
-	const mat3 basis = jahConeBasisWorld( R );
+	// THE SET IS BUILT IN THE WORLD, whatever the caller's space: the screen integrate (world) and the pixel (the
+	// cubemap frame, the world's z mirrored) draw the SAME directions, so the two routes are one estimator to the bit
+	// of their inputs (gi.screen_integrate). JAH_CONES_TO_WORLD is an involution in every caller (identity, or the z
+	// flip), so it also takes a world direction back to the caller's space.
+	const vec3 Rw = normalize( JAH_CONES_TO_WORLD( R ) );
+	const vec3 Nw = normalize( JAH_CONES_TO_WORLD( N ) );
+	const mat3 basis = jahConeBasisWorld( Rw );
 	const vec3 startLS = surfLS + nLS * epsC0;
 	float wSum = 0.0, wOpen = 0.0;
 	for( int i = 0; i < n; ++i )
 	{
-		vec3 L = R;
+		vec3 L = Rw;
 		if( n > 1 )
 		{
 			const float u1 = ( float( i ) + 0.5 ) / float( n );
@@ -162,18 +168,18 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 			const float sinT = sqrt( max( 1.0 - cosT * cosT, 0.0 ) );
 			const float phi = 6.2831853 * jahRadicalInverse2( uint( i ) );
 			const vec3 H = normalize( basis * vec3( sinT * cos( phi ), sinT * sin( phi ), cosT ) );
-			L = normalize( 2.0 * dot( R, H ) * H - R );
+			L = normalize( 2.0 * dot( Rw, H ) * H - Rw );
 		}
-		const float w = max( dot( R, L ), 0.0 );
+		const float w = max( dot( Rw, L ), 0.0 );
 		if( !( w > 0.0 ) )
 			continue;
-		if( dot( N, L ) <= 0.0 )
+		if( dot( Nw, L ) <= 0.0 )
 		{
 			wSum += w;   // stopped by the surface itself
 			continue;
 		}
-		const JahVoxelRayResult r =
-			jahVoxelRay( startLS, JAH_CONES_TO_LS( L ), surfLS, nLS, epsC0, ivec4( 0 ), 0.0, lastShellC0, planeTest0 );
+		const JahVoxelRayResult r = jahVoxelRay( startLS, JAH_CONES_TO_LS( JAH_CONES_TO_WORLD( L ) ), surfLS, nLS, epsC0,
+												 ivec4( 0 ), 0.0, lastShellC0, planeTest0 );
 		if( r.exitReason == kJahRayHit )
 		{
 			o.radiance += r.radiance * w;
