@@ -3754,8 +3754,9 @@ struct GiVoxelDigests {
     std::atomic<bool> ready{ false };
 };
 
-/// An offscreen view's declared contract (View::setOffscreenContract).
-enum class OffscreenContract { Undeclared, StillPicture, Live };
+/// An offscreen view's declared contract, a REQUIRED parameter of Engine::createOffscreenView (PHOTON-7 stage 10-3: no
+/// frame ever sees an offscreen view without one; View::setOffscreenContract changes it later). See the setter.
+enum class OffscreenContract { StillPicture, Live };
 
 /// Where a view's one-shot readback of its own presented frame stands
 /// (View::requestFrameCapture, CLOSE-SHOT-2). Idle = nothing asked; Armed = the

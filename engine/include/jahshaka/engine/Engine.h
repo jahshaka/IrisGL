@@ -1690,11 +1690,14 @@ public:
     ///     gather runs, and the CALLER waits for GiStatus::giAtRest before it
     ///     reads the pixels (the screenshot verbs' rule, one predicate);
     ///   * Live — a view drawn every frame for a person (a preview widget, an
-    ///     eye control): the gather is pinned OFF and the view takes the field's
-    ///     (or the cones') answer, the price of a live frame unchanged.
-    /// An offscreen view that declares NEITHER refuses the gather and says so
-    /// once in the log. Ignored on an on-screen view, which always gathers where
-    /// its scene does. Graph shape (the prepass): set it once, at creation.
+    ///     eye control), or any picture that is not a settled still (a test's
+    ///     fixed-frame render): the gather is pinned OFF and the view takes the
+    ///     field's (or the cones') answer, the price of a live frame unchanged.
+    /// It is declared at creation (Engine::createOffscreenView's required
+    /// parameter); this setter CHANGES it - a view that switches purpose, and the
+    /// host's posted value applied by the render thread's drain. Ignored on an
+    /// on-screen view, which always gathers where its scene does. Graph shape
+    /// (the prepass): a change rebuilds the view's workspace.
     virtual void setOffscreenContract(OffscreenContract) = 0;
 
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
@@ -2021,9 +2024,13 @@ public:
                               const Colour &background) = 0;
     /// An offscreen View: renders to a texture instead of a window. Needs no native
     /// handle, so it works headless. Used for thumbnails, asset previews and tests.
+    /// `contract` (View::setOffscreenContract: StillPicture or Live) is REQUIRED and is the view's from its first
+    /// frame (PHOTON-7 stage 10-3: the view is adopted by the render thread through a MESSAGE and a later setter's
+    /// value travels as a frame FIELD, so a frame could draw the view between the two, refusing the gather, on a
+    /// thread race - a screenshot's history then started differently).
     virtual View  *createOffscreenView(const std::string &name,
                                        unsigned width, unsigned height,
-                                       const Colour &background) = 0;
+                                       const Colour &background, OffscreenContract contract) = 0;
     /// Releases the View's window/texture and camera. Any Scene it showed survives.
     /// Null or unknown pointers are ignored.
     virtual void   destroyView(View *) = 0;

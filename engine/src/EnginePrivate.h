@@ -7754,6 +7754,9 @@ public:
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     void setOffscreenContract(OffscreenContract c) override;
+    /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
+    /// frame, no workspace yet - so no rebuild and no posted field).
+    void initOffscreenContract(OffscreenContract c) { mOffscreenContract = c; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;
@@ -8349,9 +8352,9 @@ private:
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
     bool                       mLodHysteresisOffscreen = false;
-    /// View::setOffscreenContract; `mSaidNoContract` = the refusal was logged.
-    OffscreenContract          mOffscreenContract = OffscreenContract::Undeclared;
-    mutable bool               mSaidNoContract = false;
+    /// The declared contract (Engine::createOffscreenView's required parameter; View::setOffscreenContract). Its
+    /// default is never seen by a frame: creation sets it before the view is adopted.
+    OffscreenContract          mOffscreenContract = OffscreenContract::Live;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
     /// on the chain it builds, once; 0 = nothing owed.
@@ -8516,14 +8519,14 @@ public:
                      const Colour &background) override;
 
     View *createOffscreenView(const std::string &name, unsigned width, unsigned height,
-                              const Colour &background) override;
+                              const Colour &background, OffscreenContract contract) override;
     /// THE VR SESSION'S EYE PAIR (LAYERED-STEREO-1): an offscreen view whose target
     /// is BORN a two-layer array (one eye per layer, `eyeW` x `eyeH`), so the
     /// session's setStereo has nothing to re-create. Its width() is the pair's.
     OgreView *createStereoPairView(const std::string &name, unsigned eyeW, unsigned eyeH,
                                    const Colour &background);
     OgreView *createOffscreen(const std::string &name, unsigned width, unsigned height,
-                              const Colour &background, unsigned layers);
+                              const Colour &background, unsigned layers, OffscreenContract contract);
 
     void destroyView(View *view) override;
 

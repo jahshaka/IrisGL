@@ -737,7 +737,7 @@ View *OgreEngine::createView(const std::string &name,
 }
 
 View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, unsigned height,
-                                      const Colour &background) {
+                                      const Colour &background, OffscreenContract contract) {
     // THE HOST'S CREATE IS A MESSAGE (U3 stage 4a, decision 39 b): the view is the host's handle at once (its id, name,
     // size); its target and chain are made at the drain (adoptOffscreenView), before the view's own record part.
     if (hostPosts()) {
@@ -752,10 +752,13 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
             new OgreView(OgreView::HostShell{}, mRoot, name, width, height, background, mLastError));
         OgreView *raw = holder->get();
         raw->mEngine = this;
+        // THE CONTRACT BEFORE THE ADOPTION (PHOTON-7 stage 10-3): the view is the render thread's from the message
+        // below, and no frame may see it without its contract (a setter's value would arrive as a later frame field).
+        raw->initOffscreenContract(contract);
         postedAsMessage([holder](OgreEngine &e) { return e.adoptOffscreenView(std::move(*holder)); });
         return raw;
     }
-    return createOffscreen(name, width, height, background, 1u);
+    return createOffscreen(name, width, height, background, 1u, contract);
 }
 
 bool OgreEngine::adoptOffscreenView(std::unique_ptr<OgreView> view) {
@@ -777,13 +780,13 @@ bool OgreEngine::adoptOffscreenView(std::unique_ptr<OgreView> view) {
 
 OgreView *OgreEngine::createStereoPairView(const std::string &name, unsigned eyeW,
                                            unsigned eyeH, const Colour &background) {
-    return createOffscreen(name, eyeW * 2u, eyeH, background, 2u);
+    return createOffscreen(name, eyeW * 2u, eyeH, background, 2u, OffscreenContract::Live);   // (a stereo pair presents)
 }
 
 /// `width` is the view's (for a layered pair, the PAIR's); `layers` > 1 makes the
 /// target a Type2DArray of width / layers per layer (OgreView::createRtt).
 OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, unsigned height,
-                                      const Colour &background, unsigned layers) {
+                                      const Colour &background, unsigned layers, OffscreenContract contract) {
     if (viewNameTaken(name)) return nullptr;
     if (!width || !height) { mLastError = "createOffscreenView: zero size"; return nullptr; }
     if (mHeadless) {
@@ -814,6 +817,8 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
                                          background, mLastError));
         syncHostViews();
         mViews.back()->mEngine = this;
+        // (the engine's own thread: no frame runs between these lines; the contract's graph shape, applied at once)
+        mViews.back()->setOffscreenContract(contract);
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
 }

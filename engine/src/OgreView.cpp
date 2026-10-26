@@ -203,9 +203,9 @@ ChainDesc OgreView::chainDesc() const {
     // target per eye, each eye's layer its own grid; the row itself (the tier
     // table's VR column) decides whether a headset runs it.
     // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
-    // View::setOffscreenContract): a still picture gathers and its caller waits
-    // for giAtRest; a live one takes the field's answer; an undeclared one
-    // refuses, once, out loud. A VIEW THAT PRESENTS TO A PERSON — a window, or
+    // View::setOffscreenContract; declared at creation, Engine::createOffscreenView): a still picture gathers and
+    // its caller waits for giAtRest; a live one takes the field's answer - there is no undeclared view (PHOTON-7
+    // stage 10-3: one could draw a frame before its contract landed). A VIEW THAT PRESENTS TO A PERSON — a window, or
     // the headset's eye pair (a stereo view: an offscreen target only because
     // the runtime's swapchains take a copy of it) — declares nothing and
     // gathers by its row: the contract is a property of the pictures an editor
@@ -213,14 +213,6 @@ ChainDesc OgreView::chainDesc() const {
     const bool wantsGather = mScene && mScene->probeGatherWanted();
     const bool presents = !isOffscreen() || mStereo;
     bool contractAllows = presents || mOffscreenContract == OffscreenContract::StillPicture;
-    if (wantsGather && !presents && mOffscreenContract == OffscreenContract::Undeclared &&
-        !mSaidNoContract) {
-        mSaidNoContract = true;
-        Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: offscreen view '" + mIdentityName + "' declares no contract "
-            "(View::setOffscreenContract: StillPicture or Live) — it refuses the screen-probe "
-            "gather and takes the field's diffuse");
-    }
     d.probeGather    = wantsGather && contractAllows;
     // ...AND WHERE IT DOES NOT, THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6): the same screen products
     // from the irradiance field and the cones, so a view's opaque passes read no world cache whatever the machine, the
@@ -1601,7 +1593,6 @@ void OgreView::setOffscreenContract(OffscreenContract c) {
     if (postedAsField([&](FrameInputView &p) { p.offscreenContract = c; })) return;   // the host's: a field (U3 4a)
     if (c == mOffscreenContract) return;
     mOffscreenContract = c;
-    mSaidNoContract = false;
     // The gather decides the prepass: graph shape, like the flags above.
     rebuildWorkspaceDef();
 }
