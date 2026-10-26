@@ -256,10 +256,10 @@ void deviceFaultDump(Ogre::VulkanDevice *d) {
     std::snprintf(line, sizeof(line),
                   "Jahshaka device fault (VK_EXT_device_fault, result %d): '%s' - %u address(es), %u vendor record(s), "
                   "%llu vendor binary bytes (deviceFaultVendorBinary %s); %zu bindings recorded "
-                  "(VK_EXT_device_address_binding_report %s)",
+                  "(VK_EXT_device_address_binding_report %s; VK_NV_device_diagnostics_config %s)",
                   int(r), info.description, counts.addressInfoCount, counts.vendorInfoCount,
                   (unsigned long long)counts.vendorBinarySize, d->mJahDeviceFaultVendorBinary ? "on" : "OFF",
-                  gBindings.size(), d->mJahAddressBindingReport ? "on" : "OFF");
+                  gBindings.size(), d->mJahAddressBindingReport ? "on" : "OFF", d->mJahDiagnosticsConfig ? "on" : "OFF");
     faultLine(line);
     for (uint32_t i = 0; i < counts.addressInfoCount; ++i) {
         const VkDeviceFaultAddressInfoEXT &a = addresses[i];
@@ -302,6 +302,13 @@ const char *stageName(VkPipelineStageFlagBits s) {
     }
 }
 
+/// One of OUR marks (a slot of gRing), or a marker the driver made itself (VK_NV_device_diagnostics_config's automatic
+/// checkpoints: an opaque value per draw / dispatch / copy, never ours to dereference).
+const Mark *ourMark(const void *p) {
+    const char *c = static_cast<const char *>(p), *b = reinterpret_cast<const char *>(gRing);
+    return c >= b && c < b + sizeof(gRing) && (size_t(c - b) % sizeof(Mark)) == 0u ? static_cast<const Mark *>(p) : nullptr;
+}
+
 void dumpQueue(const char *which, VkQueue q) {
     if (!q) return;
     uint32_t n = 0u;
@@ -317,12 +324,19 @@ void dumpQueue(const char *which, VkQueue q) {
     Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
     std::fprintf(stderr, "%s\n", line);
     for (const VkCheckpointDataNV &c : data) {
-        const Mark *m = static_cast<const Mark *>(c.pCheckpointMarker);
-        const char *nm = m && m->name ? m->name : "?";
+        const Mark *m = ourMark(c.pCheckpointMarker);
+        if (!m) {   // the driver's automatic checkpoint (diagnostics config): its raw value
+            std::snprintf(line, sizeof(line), "  %s (0x%x): a DRIVER checkpoint, marker 0x%llx", stageName(c.stage),
+                          unsigned(c.stage), (unsigned long long)reinterpret_cast<uintptr_t>(c.pCheckpointMarker));
+            Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
+            std::fprintf(stderr, "%s\n", line);
+            continue;
+        }
+        const char *nm = m->name ? m->name : "?";
         if (std::strstr(nm, ".cpp:"))   // a raw site's __FILE__:line - its file name (a job's name keeps its slashes)
             if (const char *slash = std::strrchr(nm, '/')) nm = slash + 1;
         std::snprintf(line, sizeof(line), "  %s (0x%x): '%s' frame %llu mark %llu", stageName(c.stage), unsigned(c.stage),
-                      nm, m ? m->frame : 0ull, m ? m->seq : 0ull);
+                      nm, m->frame, m->seq);
         Ogre::LogManager::getSingleton().logMessage(line, Ogre::LML_CRITICAL);
         std::fprintf(stderr, "%s\n", line);
     }
@@ -330,7 +344,7 @@ void dumpQueue(const char *which, VkQueue q) {
     // hung dispatch with its neighbours
     unsigned long long newest = 0ull;
     for (const VkCheckpointDataNV &c : data)
-        if (const Mark *m = static_cast<const Mark *>(c.pCheckpointMarker)) newest = std::max(newest, m->seq);
+        if (const Mark *m = ourMark(c.pCheckpointMarker)) newest = std::max(newest, m->seq);
     if (!data.empty()) {
         const unsigned long long last = gSeq.load();
         for (unsigned long long q = newest > 12ull ? newest - 12ull : 0ull; q < std::min(last, newest + 7ull); ++q) {
