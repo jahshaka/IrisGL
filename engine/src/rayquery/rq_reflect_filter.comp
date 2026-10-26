@@ -165,6 +165,13 @@ Answer answerAt( ivec2 t )
 	if( !hasH && !( v > 0.0 ) )
 		return a;
 	const float N = max( p.stereo.w, 1.0 );
+	// A TEXEL WITH NO REST SAMPLE PAST THE HAND-OVER IS NO SAMPLE (PHOTON-7 stage 10-3; L8 R2, L1: the gather's law at
+	// the hold, rq_probe_integrate.comp): its frozen moving history H is the PATH's estimate - which frames traced before
+	// the rest began, set by the scene's rest timing and so by another view's state (the resize history's row: the glossy
+	// floor's reflection, 14,978 px) - so once the rest is past its hand-over length (the rest frame p.knobs2.x, one
+	// sample a frame) a texel still holding none answers nothing: the composite's weight 0, the probe or the sky answers.
+	if( !( v > 0.0 ) && p.knobs2.x >= jahRestHandOverLength( N ) )
+		return a;
 	const vec3 answer = jahRestAnswer( hasH ? Hr.xyz : vec3( 0.0 ), hasH, M.xyz, v, N );
 	if( !finite3( answer ) )
 		return a;
