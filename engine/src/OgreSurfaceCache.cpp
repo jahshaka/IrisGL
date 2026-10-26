@@ -568,6 +568,8 @@ void SurfaceCache::destroyAll() {
     mByNode.clear();
     mFaceMarks.clear();
     mFacePrev.clear();
+    mFaceRing.clear();
+    mFaceRingHead.clear();
     mDemandNewest[0] = mDemandNewest[1] = 0ull;
     mDemandChangeFrame = 0ull;
     mQueue.clear();
@@ -756,8 +758,9 @@ void SurfaceCache::freeRect(unsigned x, unsigned y, unsigned size) {
 // ---------------------------------------------------------------------------
 //
 // A CARD IS RESIDENT BECAUSE A READER READ IT. Every reader of a card is a ray's hit (the reflection, the gather:
-// jah_rq_card.glsl), and each hit stamps what it read into the instance table's demand region - the card's atlas cell,
-// or, when no card of the instance answered, the instance's FACE BUCKET it faced (jah_rq_card_bindings.glsl's layout).
+// jah_rq_card.glsl), and each hit stamps what it read into the instance table's demand region - the card's atlas cell
+// when a card answered, and on EVERY hit the instance's FACE BUCKET it faced (jah_rq_card_bindings.glsl's layout; F3,
+// PHOTON-7 stage 10-3: the rest decision's set is the cards of the buckets hit in the rest span).
 // The stamps come back at a fixed lag of the cache's frames (takeDemand), PER READER (the reflection, the gather): a
 // card's `readBy` is each reader's newest; a face marked within the WINDOW of its reader's clock is WANTED, and
 // its cards (the layout's cards in that bucket) arrive. An arrival that finds no room takes it from the cards no reader
@@ -1031,11 +1034,16 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
         if (mFaceMarks.size() < size_t(t.slots) * 16u) {
             mFaceMarks.resize(size_t(t.slots) * 16u, 0ull);
             mFacePrev.resize(size_t(t.slots) * 16u, 0ull);
+            mFaceRing.resize(size_t(t.slots) * 16u * kFaceRing, 0u);
+            mFaceRingHead.resize(size_t(t.slots) * 16u, 0u);
         }
         for (size_t k = 0; k < size_t(t.slots) * 16u; ++k)
             if (face[k] > mFaceMarks[k] && counted(unsigned((k % 16u) / 8u), face[k])) {
                 mFacePrev[k] = mFaceMarks[k];
                 mFaceMarks[k] = face[k];
+                // (the face's last read-backs that carried a new mark: the decision's span read count, F3's rank)
+                mFaceRing[k * kFaceRing + mFaceRingHead[k]] = face[k];
+                mFaceRingHead[k] = (unsigned char)((mFaceRingHead[k] + 1u) % kFaceRing);
             }
         // THE FACES' HITS (the measuring arm cards.demandCount): every read of a face, resident or not - the GPU's
         // counts are cumulative per buffer, so the host adds each word's move (a grown table's new buffer starts at 0)
@@ -1057,12 +1065,16 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
     // 2. THE SLOTS TO OFFER: the resident instances', and every slot a face of which was marked within the window.
     for (const InstanceRec &inst : mInstances)
         if (inst.cardCount && inst.itemSlot != size_t(-1)) slots.push_back(uint32_t(inst.itemSlot));
+    // ...AND WHILE THE REST's DECISION IS PENDING, every slot a face of which was marked in its rest span (F3: the
+    //    decision's set is every hit face's cards, kept and arriving alike - a face read early in the span is offered
+    //    as one read late is, never only within the window of its reader's clock)
+    const bool restPending = mRestDue && !mRestDecided;
     for (size_t s = 0; s * 16u < mFaceMarks.size(); ++s) {
         bool wanted = false;
         for (unsigned r = 0; r < kDemandReaders && !wanted; ++r)
             for (unsigned b = 0; b < 6u && !wanted; ++b) {
                 const unsigned long long m = mFaceMarks[s * 16u + 8u * r + b];
-                wanted = m && m + mDemandWindow >= mDemandNewest[r];
+                wanted = m && (m + mDemandWindow >= mDemandNewest[r] || (restPending && m >= mRestStart[r]));
             }
         if (wanted) slots.push_back(uint32_t(s));
     }
@@ -1250,6 +1262,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     std::vector<Arrival> arriving;
     std::vector<CardRec> layout;
     for (const CardSceneView::Candidate &cand : view.candidates) {
+        if (decide) break;   // (the decision's set is its fit's: 4c)
         if (!cand.item || !cand.cards || cand.cards->empty()) continue;
         auto mv = moved.find(cand.node);
         unsigned long long marks[2][6] = {};
@@ -1402,14 +1415,12 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     mDeparted = true;
                     forcedLeft = true;
                 }
-    if (decide || windowDrain) {
+    if (windowDrain && !decide) {
         for (size_t i = 0; i < per.size(); ++i)
             for (CardRec &c : per[i]) {
                 if (!c.size || !c.lastUpdated) continue;   // (one waiting for its capture arrived at this pose)
                 if (view.forcedCardMode > 0 && heldCard(i, c)) continue;   // (cards.force: held resident)
-                if (decide ? (inRest(0u, c.readBy[0]) || inRest(1u, c.readBy[1]))   // read in the rest: it stays
-                           : std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame)   // read in the window
-                    continue;
+                if (std::max(c.readBy[0], c.readBy[1]) > mDemandChangeFrame) continue;   // read in the window
                 freeRect(c.atlasX, c.atlasY, c.size);
                 c.size = 0u;
                 ++mEvicted;
@@ -1420,6 +1431,129 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             }
     }
     if (windowDrain && drained) ++mWindowDrains;
+
+    // 4c. THE DECISION's SET (PHOTON-7 stage 10-3, F3 and its fit, the lead's ruling): THE CARDS OF THE FACE BUCKETS HIT
+    //     IN THE REST SPAN, kept and arriving alike - every hit marks its bucket, answered or not (jah_rq_card.glsl), so
+    //     the set is a function of the rays' hits at the pose and the rest index, never of which cards were resident or
+    //     captured. RANKED by one run-independent key - the bucket's span read count (the rest span's read-backs that
+    //     carried a new mark of it, both readers summed: mFaceRing), descending, then the card's size (larger first),
+    //     the node id and the card index - and THE SET IS THE LONGEST PREFIX THAT FITS. NOT AREA: a page holds cards of
+    //     ONE size (allocRect cuts a page to a single power of two), so a set whose area fits can still not pack; the
+    //     fit is the packer's own deterministic count, sum over sizes of ceil(cards / slots a page), against the pages -
+    //     exact once the pages are compacted (compactOnePage empties a page of a size into the others' free slots, so a
+    //     size's cards end in ceil(n / slots) pages). Resident cards outside the prefix leave; the prefix's others arrive
+    //     (compacting when a rect is short, never evicting). Never "free room only": with the atlas full that made the
+    //     set follow the history of what was resident.
+    struct Want {
+        const CardSceneView::Candidate *cand = nullptr;
+        CardRec card;
+        unsigned count = 0u;
+        size_t inst = size_t(-1), pos = 0;   // resident: its place in `per`
+        bool held = false;
+    };
+    std::vector<Want> wants;
+    if (decide) {
+        const auto spanCount = [this](size_t slot, unsigned bucket) {
+            unsigned n = 0u;
+            if (slot == size_t(-1) || (slot + 1u) * 16u > mFaceMarks.size()) return n;
+            for (unsigned r = 0; r < kDemandReaders; ++r) {
+                const size_t k = slot * 16u + 8u * r + bucket;
+                for (unsigned e = 0; e < kFaceRing; ++e) {
+                    const uint32_t m = mFaceRing[k * kFaceRing + e];
+                    n += (m && m >= mRestStart[r]) ? 1u : 0u;
+                }
+            }
+            return n;
+        };
+        std::vector<CardRec> lay;
+        for (const CardSceneView::Candidate &cand : view.candidates) {
+            if (!cand.item || !cand.cards || cand.cards->empty()) continue;
+            unsigned counts[6] = {};
+            bool anyHit = false;
+            for (unsigned b = 0; b < 6u; ++b) {
+                counts[b] = spanCount(cand.itemSlot, b);
+                anyHit = anyHit || counts[b] > 0u;
+            }
+            const bool forcedNode = view.forcedCardMode > 0 && cand.node == view.forcedCardNode;
+            if (!anyHit && !forcedNode) continue;
+            layoutCards(cand, lay);
+            auto it = mByNode.find(cand.node);
+            const size_t inst = it != mByNode.end() ? it->second : size_t(-1);
+            for (const CardRec &c : lay) {
+                const bool forcedCard = cand.node == view.forcedCardNode &&
+                                        (c.index == view.forcedCardIndex || view.forcedCardIndex == 63u);
+                if (view.forcedCardMode < 0 && forcedCard) continue;   // (cards.force: held absent)
+                const bool held = forcedNode && forcedCard;
+                if (!held && counts[c.bucket] == 0u) continue;
+                Want w;
+                w.cand = &cand;
+                w.card = c;
+                w.count = counts[c.bucket];
+                w.held = held;
+                if (inst != size_t(-1))
+                    for (size_t k = 0; k < per[inst].size(); ++k)
+                        if (per[inst][k].size && per[inst][k].index == c.index) { w.inst = inst; w.pos = k; break; }
+                wants.push_back(w);
+            }
+        }
+        std::sort(wants.begin(), wants.end(), [](const Want &a, const Want &b) {
+            if (a.held != b.held) return a.held;
+            if (a.count != b.count) return a.count > b.count;
+            if (a.card.size != b.card.size) return a.card.size > b.card.size;
+            if (a.cand->node != b.cand->node) return a.cand->node < b.cand->node;
+            return a.card.index < b.card.index;
+        });
+        // THE FIT: the longest prefix whose pages, size by size, fit the atlas
+        const size_t pages = mPageOwner.size();
+        unsigned bySize[8] = {};   // log2(size / kCardMinSize)
+        size_t fit = 0;
+        for (; fit < wants.size(); ++fit) {
+            unsigned s = 0u;
+            while ((kCardMinSize << s) < wants[fit].card.size && s < 7u) ++s;
+            ++bySize[s];
+            size_t need = 0;
+            for (unsigned q = 0; q < 8u; ++q) {
+                const unsigned side = kCardPageSize / std::max(kCardMinSize << q, 1u);
+                const unsigned slots = side ? side * side : 1u;
+                need += (bySize[q] + slots - 1u) / slots;
+            }
+            if (need > pages) { --bySize[s]; break; }
+        }
+        // the residents outside the prefix leave (a held one stays)
+        std::vector<std::vector<char>> keep(per.size());
+        for (size_t i = 0; i < per.size(); ++i) keep[i].assign(per[i].size(), 0);
+        for (size_t k = 0; k < fit; ++k)
+            if (wants[k].inst != size_t(-1)) keep[wants[k].inst][wants[k].pos] = 1;
+        for (size_t i = 0; i < per.size(); ++i)
+            for (size_t k = 0; k < per[i].size(); ++k) {
+                CardRec &c = per[i][k];
+                if (!c.size || keep[i][k] || (view.forcedCardMode > 0 && heldCard(i, c))) continue;
+                freeRect(c.atlasX, c.atlasY, c.size);
+                c.size = 0u;
+                ++mEvicted;
+                ++mRestDrained;
+                changed = true;
+                mDeparted = true;
+            }
+        // ...and the prefix's others arrive, in rank order (placed below: compaction, never eviction)
+        arriving.clear();
+        for (size_t k = 0; k < fit; ++k) {
+            if (wants[k].inst != size_t(-1)) continue;
+            Arrival a;
+            a.cand = wants[k].cand;
+            a.card = wants[k].card;
+            a.card.lastRead = mFrame;
+            a.mark = mFrame;
+            a.persistent = true;
+            a.size = projectedSize(wants[k].card, view.viewerPos);
+            arriving.push_back(a);
+        }
+        mDecisionRefusedCards.clear();
+        mDecisionRefused = unsigned(wants.size() - fit);
+        for (size_t k = fit; k < wants.size(); ++k)
+            mDecisionRefusedCards.push_back({ wants[k].cand->node, wants[k].card.index, wants[k].card.size,
+                                              (unsigned long long)wants[k].count });
+    }
 
     // 5. THE ARRIVALS, in order. Free room takes any wanted face at its first mark (the fill is the readers' first
     //    frames). A face that finds none MAKES room - the atlas compacted, then the evictable evicted, until it fits or
@@ -1439,8 +1573,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (const CardRec &c : cards) used += c.size ? (unsigned long long)c.size * c.size : 0ull;
         mDecisionUsed = used;
         mDecisionFree = (unsigned long long)kCardAtlasSize * kCardAtlasSize - used;
-        mDecisionAdmitted = mDecisionRefused = 0u;
-        mDecisionRefusedCards.clear();
+        mDecisionAdmitted = 0u;   // (its refusals are the fit's: 4c)
     }
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
@@ -1449,6 +1582,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         bool placed = allocRect(c.size, c.atlasX, c.atlasY);
         while (!placed && a.persistent) {
             if (compactOnePage(per, arrivalRoot)) { placed = allocRect(c.size, c.atlasX, c.atlasY); continue; }
+            if (decide) break;   // (the decision's set fits by its count: it compacts, it never evicts)
             if (nextEvict >= evictable.size()) break;
             const Evictable &e = evictable[nextEvict++];
             CardRec &gone = per[e.inst][e.pos];
