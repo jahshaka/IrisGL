@@ -73,8 +73,13 @@ vec2 jahFieldAtlasXY( vec3 dir, uint probeIdx, vec4 atlas )
 	return retVal;
 }
 
-JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, vec3 counts, uvec3 windowOffset,
-							 vec2 numProbesAggregated, vec4 depthAtlas, vec4 irradAtlas )
+/// THE READ ALONG A LOOKUP DIRECTION OF ITS OWN (PHOTON-7 stage 10-3, the no-ray specular's rough lobe): the cage, its
+/// sample point's bias and its back-face and front-share tests on the SURFACE's normal `gridNormal`, the atlas read along
+/// `lookupDir` (the reflection R: the probes' cosine lobe about it). Read with R as the normal, the bias moved the sample
+/// point through the wall behind a grazing reflection and the cage took the probes beyond it (the sealed box's panel
+/// borders read 128 % of the roof's light, measured).
+JahFieldAnswer jahFieldReadDir( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, vec3 lookupDir, vec3 counts,
+								uvec3 windowOffset, vec2 numProbesAggregated, vec4 depthAtlas, vec4 irradAtlas )
 {
 	// ---- THE SAMPLE POINT (ENGINE-6 item 1; FIELD-EDGE-1): off the surface, in probe spacings -------------------
 	// The cage looked up AT the shaded point evaluates the Chebyshev test on its own knife edge (a wall's two faces a
@@ -160,7 +165,7 @@ JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, ve
 
 			weight *= trilinear.x * trilinear.y * trilinear.z;
 
-			const vec2 ifdColourUV = jahFieldAtlasXY( gridNormal, probeIdx, irradAtlas );
+			const vec2 ifdColourUV = jahFieldAtlasXY( lookupDir, probeIdx, irradAtlas );
 			const vec4 irrSample = JAH_FIELD_IRRAD( ifdColourUV );
 			sumIfdWeight += weight;
 			// A PROBE NO INTEGRATION HAS REACHED HAS NO SAY (PHOTON-FIELD-ROTATE-1): the atlas's alpha is the probe's sample
@@ -212,4 +217,12 @@ JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, ve
 		answer.irradiance = ifdIrradiance * ( ifdIrradianceScale / sumIfdValidWeight );
 	}
 	return answer;
+}
+
+/// THE DIFFUSE'S READ: the lookup along the surface's own normal.
+JahFieldAnswer jahFieldRead( vec3 gridPos, vec3 gridNormal, vec3 gridViewDir, vec3 counts, uvec3 windowOffset,
+							 vec2 numProbesAggregated, vec4 depthAtlas, vec4 irradAtlas )
+{
+	return jahFieldReadDir( gridPos, gridNormal, gridViewDir, gridNormal, counts, windowOffset, numProbesAggregated,
+							depthAtlas, irradAtlas );
 }

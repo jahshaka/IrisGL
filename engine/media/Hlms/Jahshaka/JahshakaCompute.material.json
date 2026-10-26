@@ -315,8 +315,7 @@
 				"jah_env" : 0,
 				"jah_si_field" : 0,
 				"jah_si_air" : 0,
-				"jah_si_fog" : 0,
-				"jah_si_sdf" : 0
+				"jah_si_fog" : 0
 			}
 		},
 		"Jahshaka/ScreenAreaVis" :

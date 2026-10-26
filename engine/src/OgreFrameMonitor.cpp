@@ -1519,7 +1519,8 @@ constexpr ArmDef kArms[] = {
       "1 = off (the picture before the list), 2 = all (every hit the world list, no Forward+ cell). "
       "gi.hit_shade. Was JAHSHAKA_HIT_WORLD_LIGHTS (a per-pass read)." },
     { ArmId::AtomHitVctSpecular, 1.0, 0.0, 1.0,
-      "The VCT specular cone in the ray-hit decode. 0 = compiled out (vct_disable_specular). "
+      "The voxel specular (the roughness split: K(alpha) rays and the field along R) in the ray-hit decode. 0 = "
+      "compiled out (vct_disable_specular). "
       "gi.hit_shade. Was JAHSHAKA_HIT_VCT_SPECULAR (a per-pass read)." },
     { ArmId::AtomMaskPyramid, 1.0, 0.0, 1.0,
       "THE CUT-OUTS' MASK PYRAMID (ATOM-3 stage 2): 1 = shipped, the id pass and the caster cut sample each "

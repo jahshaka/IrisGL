@@ -2189,7 +2189,7 @@ private:
     X(GiRefuseGeometry, "gi.refuseGeometry") /* a voxel build with no geometry source (the refused device) */ \
     X(AtomDiscriminate, "atom.discriminate") /* the decode's failure colour codes (1), the chart (2) */ \
     X(AtomHitWorldLights, "atom.hitWorldLights") /* the hit decode's light list: 0 shipped, 1 off, 2 all */ \
-    X(AtomHitVctSpecular, "atom.hitVctSpecular") /* the hit decode's VCT specular cone (0: compiled out) */ \
+    X(AtomHitVctSpecular, "atom.hitVctSpecular") /* the hit decode's voxel specular, the roughness split (0: compiled out) */ \
     X(AtomMaskPyramid, "atom.maskPyramid") /* the cut-outs' masks sampled at the fragment's level (0: level 0 only, the silhouette rows' reference) */ \
     X(GatherHitsReadback, "gather.hitsReadback") /* every uniform probe's per-ray record read back (FAR-SUN-1) */ \
     X(ReflectMetalDecode, "reflect.metalDecode") /* the reflector roughness below which a metal hit decodes */ \

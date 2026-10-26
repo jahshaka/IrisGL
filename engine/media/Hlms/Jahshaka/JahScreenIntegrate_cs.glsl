@@ -10,11 +10,12 @@
 //       fades, its fallback - the cone diffuse x (1 - confidence) under a cascade chain, the environment's diffuse x
 //       (1 - confidence) under a single volume (JahIfd_piece_ps.any's two regimes; the cones are marched only where
 //       that weight is above zero) - or, with no field, the cone diffuse (the four-cone set, JahVoxelCones);
-//   jahRoughSpec (u1, RGBA16F) - THE CONE'S SPECULAR: rgb the voxels' share (the narrow lobe's march colour, fogged
-//       along its leg by the one fog law; the rough lobe's stopped share), w the share of the lobe the voxels did not
-//       stop - JahScreenCone_piece_ps.any composes the environment's share by the MATERIAL's rule in the pixel;
-//   jahConeHit (u2, R16F) - the cone's hit distance along the reflection, metres (the parallax-corrected probes'
-//       hybrid weight, the fork's forwardPlusDoCubemaps under jah_screen_cone).
+//   jahRoughSpec (u1, RGBA16F) - THE SPECULAR (stage 10-3's roughness split): rgb the lobe's light from what stopped it
+//       - the K(alpha) rays' hits (fogged along their leg by the one fog law) and, for the widest lobes, the irradiance
+//       field read along R - w the lobe's OPEN share (the rays' escapes) - JahScreenCone_piece_ps.any composes the
+//       environment's share by the MATERIAL's rule in the pixel;
+//   jahConeHit (u2, R16F) - the rays' mean hit distance along the reflection, metres (1000: none - the parallax-corrected
+//       probes' hybrid weight, the fork's forwardPlusDoCubemaps under jah_screen_cone).
 // IN WORLD SPACE, the card job's construction (JahCardLight_cs.glsl): a world point reaches cascade 0's normalised
 // space through the volume's box, the cone frame is jahConeBasisWorld( N ), the environment is read in world axes.
 // THE SURFACE is the prepass's: its SHADING normal (the voxel route built the diffuse frame on the geometric one - they
@@ -169,10 +170,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_MAXLOD( c ) p.chainInvRes[c].w
 	#define JAH_VOX_FROM_PREV_SCALE( c ) p.chainFromPrev[( (c) - 1 ) * 2]
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) p.chainFromPrev[( (c) - 1 ) * 2 + 1]
-	@property( jah_si_sdf )
-		#define JAH_VOX_SDF_MAXMIP p.counts.y
-		#define JAH_VOX_SDF_FACTOR p.counts.z
-	@end
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
 	@insertpiece( JahVoxelRay )
@@ -241,10 +238,7 @@ void main()
 @property( hlms_num_vct_cascades )
 	// THE CONE START (PhotonVct_piece_ps.any's jahVctPixelStart, in world space) - the surface point kept for the rays
 	const vec3 surfLS = ( P - p.volumeOrigin.xyz ) * p.volumeInvSize.xyz;
-	vec3 posLS = surfLS;
 	const vec3 biasDirLS = jahConeBiasDir( normalize( N * p.volumeInvSize.xyz ) );
-	posLS = jahConeStart( posLS, biasDirLS );
-	const vec4 origin = jahConeOrigin( posLS, biasDirLS );
 	const mat3 basis = jahConeBasisWorld( N );
 @end
 
@@ -285,39 +279,63 @@ void main()
 	@end
 @end
 
-	// ---- THE CONE'S SPECULAR ----------------------------------------------------------------------------------------
+	// ---- THE SPECULAR: THE ROUGHNESS SPLIT (PHOTON-7 stage 10-3, R1; L9: the renderer follows the ray) --------------
+	// The lobe by K(alpha) fixed GGX rays (jah_voxel_cones.glsl's jahSpecularRays: the mirror direction alone below 0.08)
+	// and, above the measured crossing, the irradiance field read along R (jahSpecularFieldShare, 0.62 - 0.76): each
+	// answer wall-tight by the ray or by the field's own visibility. w is the lobe's OPEN share, the composite's
+	// environment weight (JahScreenCone_piece_ps.any): the rays' escapes, none for the field (its probes saw the sky).
 @property( hlms_num_vct_cascades )
 	{
-		const vec3 reflVecLS = normalize( R * p.volumeInvSize.xyz );
-		const JahSpecularCone sc = jahSpecularCone( posLS, biasDirLS, origin, reflVecLS, R, N, roughness,
-	@property( jah_si_sdf )
-													JAH_MARCH_SDF );
+	@property( jah_si_field )
+		const float fieldShare = jahSpecularFieldShare( roughness );
 	@else
-													0u );
+		const float fieldShare = 0.0;   // no field bound: the rays take every lobe
 	@end
-		JahConeResult m = sc.march;
-	@property( jah_si_fog )
-		// THE FOG LAW ON THE VOXELS' SHARE: the light the cone gathered crossed the medium from where it came (the
-		// opacity-weighted distance of the planes it took, cascade 0's units turned into metres along R) to this
-		// surface; the eye's leg is the colour pass's. Unpremultiplied for the law, then the coverage again.
-		if( m.alpha > 0.0 && p.fog[3].w > 0.5 )
+		vec4 rays = vec4( 0.0, 0.0, 0.0, 0.0 );
+		hitT = 1000.0;
+		if( fieldShare < 1.0 )
 		{
-			const float at = m.takeAtC0 / m.alpha / max( length( R * p.volumeInvSize.xyz ), 1e-6 );
-			m.colour = m.alpha * jahFogAlong( m.colour / m.alpha, P.y, R, at, eyeDist );
+			const JahRaySpecular rs = jahRaySpecular( surfLS, biasDirLS, R, N, roughness, jahSpecularRays( roughness ),
+													  JAH_VOX_INVRES( 0 ).x, p.counts.w, true );
+			const float metres = 1.0 / max( length( R * p.volumeInvSize.xyz ), 1e-6 );
+			vec3 hitLight = rs.radiance;
+		@property( jah_si_fog )
+			// THE FOG LAW ON THE HITS' LIGHT: it crossed the medium from the hits (their mean distance along R) to this
+			// surface; the eye's leg is the colour pass's
+			if( rs.hits > 0.0 && p.fog[3].w > 0.5 )
+				hitLight = jahFogAlong( rs.radiance, P.y, R, rs.hitC0 * metres, eyeDist );
+		@end
+			rays = vec4( hitLight, rs.open );
+			if( rs.hits > 0.0 )
+				hitT = rs.hitC0 * metres;
+		}
+		vec4 field = rays;
+	@property( jah_si_field )
+		if( fieldShare > 0.0 )
+		{
+			const vec3 gridPos = vec3( dot( p.fieldRow0, vec4( P, 1.0 ) ), dot( p.fieldRow1, vec4( P, 1.0 ) ),
+									   dot( p.fieldRow2, vec4( P, 1.0 ) ) );
+			const vec3 gridNormal = normalize( vec3( dot( p.fieldRow0.xyz, N ), dot( p.fieldRow1.xyz, N ),
+													 dot( p.fieldRow2.xyz, N ) ) );
+			const vec3 gridR = normalize( vec3( dot( p.fieldRow0.xyz, R ), dot( p.fieldRow1.xyz, R ),
+												dot( p.fieldRow2.xyz, R ) ) );
+			const vec3 gridView = vec3( dot( p.fieldRow0.xyz, V ), dot( p.fieldRow1.xyz, V ), dot( p.fieldRow2.xyz, V ) );
+			const uint packed = uint( p.fieldWin.x + 0.5 );
+			const JahFieldAnswer a = jahFieldReadDir( gridPos, gridNormal, gridView, gridR,
+													  vec3( p.fieldProbes.x, p.fieldWin.y, p.fieldWin.z ),
+													  uvec3( packed & 127u, ( packed >> 7u ) & 127u, ( packed >> 14u ) & 127u ),
+													  p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
+			// where the field's confidence is short, the rays (traced here only if the band left them a share)
+			if( a.confidence < 1.0 && fieldShare >= 1.0 )
+			{
+				const JahRaySpecular rs = jahRaySpecular( surfLS, biasDirLS, R, N, roughness, jahSpecularRays( roughness ),
+														  JAH_VOX_INVRES( 0 ).x, p.counts.w, true );
+				rays = vec4( rs.radiance, rs.open );
+			}
+			field = vec4( a.irradiance, 0.0 ) + rays * ( 1.0 - a.confidence );
 		}
 	@end
-		vec3 voxelShare = sc.roughLobe ? vec3( 0.0 ) : m.colour;
-		if( sc.roughLobe )
-		{
-			// THE STOPPED SHARE'S LIGHT IS WHAT THE QUERY STOPPED ON (BISTRO-FIXES-3)
-			const float occlusion = 1.0 - sc.specAlpha;
-			const float above = clamp( ( m.alpha - sc.below ) / max( 1.0 - sc.below, 1e-4 ), 0.0, 1.0 );
-			if( above > 0.0 )
-				voxelShare += m.colour / max( 1.0 - sc.below, 1e-4 ) * ( occlusion / above );
-		}
-		specular = vec4( voxelShare, sc.specAlpha );
-		// THE HIT: how far along the reflection the march read, cascade 0's units into metres
-		hitT = m.travelledC0 / max( length( R * p.volumeInvSize.xyz ), 1e-6 );
+		specular = mix( rays, field, fieldShare );
 	}
 @end
 

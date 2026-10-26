@@ -1,21 +1,21 @@
 #include "/media/matias/Datos/SyntaxHighlightingMisc.h"
 
-// THE NO-RAY ROUTE'S CONE SPECULAR, FROM THE SCREEN (PHOTON-7 stage 7, 7-6; L4 on every chain).
+// THE NO-RAY ROUTE'S SPECULAR, FROM THE SCREEN (PHOTON-7 stage 7, 7-6; L4 on every chain; the roughness split since
+// stage 10-3).
 //
 // On a chain that does not gather (no ray device, the project's ray row off, a Live or undeclared offscreen view) the
 // opaque passes bind no voxel volume: the screen integrate (Jahshaka/ScreenIntegrate, JahScreenIntegrate_cs.glsl)
-// marched each pixel's cones from the prepass and wrote the SAME screen products a gathering chain reads - the diffuse
-// into jahProbeIrradiance (read by JahProbeGather_piece_ps.any's diffuse read, as on a gathering chain) and the cone's
-// SPECULAR into jahRoughSpec (rgb: the voxels' share - the narrow lobe's march colour, the rough lobe's stopped share;
-// w: the share of the lobe the voxels did not stop, the escape's) beside jahConeHit (the cone's hit distance along the
-// reflection, metres). This file rebuilds from them, in the pixel, exactly the three things the cone handed the rest of
+// gathered each pixel's light from the prepass and wrote the SAME screen products a gathering chain reads - the diffuse
+// into jahProbeIrradiance (read by JahProbeGather_piece_ps.any's diffuse read, as on a gathering chain) and the
+// SPECULAR into jahRoughSpec (rgb: the lobe's light from what stopped it - the K(alpha) rays' hits, the field along R for
+// the widest lobes; w: the lobe's open share, the rays' escapes) beside jahConeHit (the rays' mean hit distance along
+// the reflection, metres). This file rebuilds from them, in the pixel, the three things the voxel route hands the rest of
 // the shader on the voxel route (PhotonVct_piece_ps.any's computeVctProbe):
-//   vctSpecular   the voxels' share plus the environment's escape share at the surface's own roughness (zero for a
+//   vctSpecular   the stopped share's light plus the environment's open share at the surface's own roughness (zero for a
 //                 material whose own cube lights the unoccluded share, CubemapGlobal - the voxel route's rule), and the
 //                 coverage 1 (the voxel route's blend is one everywhere);
-//   vctRoughOcclusion  the rough lobe's stopped share (1 - w where the lobe is wider than tan 1, else 0) - the cube's
-//                 visibility hook below;
-//   vctSpecPosVS  the cone's hit, back along the pixel's reflection - the parallax-corrected probes' hybrid weight
+//   vctRoughOcclusion  the lobe's stopped share, 1 - w at every lobe - the cube's visibility hook below;
+//   vctSpecPosVS  the rays' hit, back along the pixel's reflection - the parallax-corrected probes' hybrid weight
 //                 (the fork's forwardPlusDoCubemaps, under the pass property jah_screen_cone, runs UNCHANGED).
 // The pass property jah_screen_cone is set by the Hlms listener with the screen products' registration (OgreFog.cpp);
 // the guard is the gather read's six terms (JahProbeGather_piece_ps.any says why each).
@@ -35,22 +35,21 @@
 @piece( applyVoxelConeTracing )
 	float4 jahConeTexel = OGRE_LoadScreen2D( jahRoughSpec, iFragCoord, 0 ).xyzw;
 	@property( use_parallax_correct_cubemaps )
-		// the cone's hit, back along this pixel's reflection (view space, metres)
+		// the rays' hit, back along this pixel's reflection (view space, metres)
 		float3 vctSpecPosVS = inPs.pos + float3( pixelData.reflDir ) * OGRE_LoadScreen2D( jahConeHit, iFragCoord, 0 ).x;
 	@end
 	// THE FOOTPRINT'S ROUGHNESS (PHOTON-7 stage 7's read, F4): the fork's geometric specular anti-aliasing widens a
 	// normal-mapped surface's alpha (pixelData.roughness) and the G-buffer carries the widened one - the integrate
-	// decides its lobe from it, so this read decides from the same value, never the material's unwidened one (a
-	// widened lobe over tan 1 was written as the rough one and read as a narrow cone's: the sky's cube through walls)
+	// decides its lobe from it, so this read decides from the same value, never the material's unwidened one
 	@property( perceptual_roughness )
 		const float jahFootprintRoughness = sqrt( float( pixelData.roughness ) );
 	@else
 		const float jahFootprintRoughness = float( pixelData.roughness );
 	@end
-	// THE ROUGH LOBE'S RULE, the cone's own (jahSpecularCone): a lobe wider than tan 1 is read as an occlusion query
-	const float jahConeRoughness = ( jahFootprintRoughness - 0.02f ) * 1.020408163f;
-	const bool jahConeRoughLobe = max( 0.0f, tan( jahConeRoughness * 0.5f * 3.141592654f * 0.99f ) ) > 1.0f;
-	const float vctRoughOcclusion = jahConeRoughLobe ? 1.0f - jahConeTexel.w : 0.0f;
+	// THE LOBE'S STOPPED SHARE, AT EVERY LOBE (stage 10-3's split): what the rays met (or the field answered) is not
+	// open to the global cube - the cube lights only the share no geometry stopped. The rough-lobe-only rule let the
+	// captured sky's cube light a narrow lobe through a wall (the sealed box's cube case: 199 % of the roof's light).
+	const float vctRoughOcclusion = 1.0f - jahConeTexel.w;
 	@property( use_envprobe_map && !use_parallax_correct_cubemaps )
 		const float3 jahEnvS = float3( 0.0f, 0.0f, 0.0f );
 	@else
