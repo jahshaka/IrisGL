@@ -889,9 +889,11 @@ private:
         fold(gs.slotCount());
         fold(gs.meshSetSerial());
         fold(sa.skinUse.size());
-        // THE EMITTER SET (PHOTON-7 11-1a): the NEE targets' slots and radiance (never their bounds - a move is the
-        // per-texel test's), so a set the sampling changes restarts the rest exactly as a material edit does.
-        fold(sa.st.reflectEmitterSetSerial);
+        // (NOT the emitter table's set serial, PHOTON-7 11-1a: every change of the SET is already here - an emissive
+        // edit the material edits, a row the rows' serial, a slot born or dead the slot count. The serial alone moves
+        // a frame later where a slot's material word arrives after its row, and a rest restarted there for a change
+        // of the NEE's sampling distribution alone, which biases nothing: each sample of the rest is unbiased under
+        // either table. Measured: the fold restarted the selftest's fixture B rest once, 65 -> 75 frames.)
         return key;
     }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
@@ -7273,7 +7275,8 @@ constexpr uint32_t kEmitterWords = 8u;
 /// bounding sphere of the instance's world box (the cone the NEE ray is drawn in: any emitter shape, the sample's pdf
 /// exact from the table alone) and the row's radiance (the pick's weight; the E a ray takes is the hit's own row and map).
 /// ORDERED BY SLOT (never by a container's or a pointer's order: a run repeats). The SET's serial (slots and radiance -
-/// never the bounds: a moving emitter is a mover, which the rest follows per texel) folds into the rest key.
+/// never the bounds: a moving emitter is a mover, which the rest follows per texel) is published; it is NOT in the rest
+/// key, whose material edits, rows and slot count already carry every change of the set (reflectRestKey says why).
 /// Re-derived only when its inputs moved (the GPU scene's writes, its slot count and mesh set, the rows, the edits,
 /// the cap); the hit table re-writes only when the section's words changed.
 void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
