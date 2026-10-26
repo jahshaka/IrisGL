@@ -525,7 +525,7 @@ void main()
 	}
 	caSlot[s + 1u] = acc;
 	// A CODE OR MORE: listed once
-	if( acc >= 1u )   // ARM (c): the re-list threshold 0 - reverted next
+	if( acc >= uint( CA_ONE ) )
 	{
 		const uint at = atomicAdd( caReport[0], 1u );
 		if( at < caMode.z )
