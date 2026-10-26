@@ -4344,6 +4344,10 @@ struct CardCacheStatus {
     /// commit's entering or leaving slab), cumulative; and the frames whose moves could not be measured (the job not
     /// built yet, or a cascade past the cluster table), each of which listed every card.
     unsigned long long indirectReported = 0ull, indirectByRegion = 0ull, indirectOverflows = 0ull;
+    /// ...the listings skipped as ANSWERED (older than the listed card's own last march, R3), and the reports never
+    /// read because every read-back slot was in flight (PHOTON-7 stage 10, the listing diagnosis): a listed card's GPU
+    /// flag stays set until its next march, so a report never read can strand it
+    unsigned long long indirectAnswered = 0ull, reportsDropped = 0ull;
     bool indirectOn = false;
     /// THE RELIGHT'S LIGHTS (P1C-LIGHT-LIST), selected from the scene's one light
     /// list at the last relight: the directional, point and spot lights whose range

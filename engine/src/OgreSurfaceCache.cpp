@@ -2827,7 +2827,7 @@ void SurfaceCache::endIndirectFrame(unsigned long long frame) {
     if (!mAccumRan || !mCardReport) return;
     mAccumRan = false;
     ReportTicket &r = mReportReadings[mReportNextIssue];
-    if (r.ticket.get()) return;   // every slot in flight: a later frame's list answers (the cards stay listed)
+    if (r.ticket.get()) { ++mReportsDropped; return; }   // every slot in flight: a later frame's list answers (the cards stay listed)
     r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
     r.frame = frame;
     r.cacheFrame = mFrame;
@@ -4108,6 +4108,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     if (mMoverHooks.gatherCounts) mMoverHooks.gatherCounts(out.gather);
     out.gatherWaits = mGatherWaits;
     out.indirectByCards = mIndirectByCards;
+    out.indirectAnswered = mIndirectAnswered;
+    out.reportsDropped = mReportsDropped;
     out.visibleRelights = mVisibleRelights;
     out.readersHoldOwed = restHoldOwed();
     out.subQuantumRelights = mSubQuantumRelights;

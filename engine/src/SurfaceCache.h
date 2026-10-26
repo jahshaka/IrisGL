@@ -807,7 +807,7 @@ private:
     /// the indirect listings card to card (10-2c), and those an overflowed read list's geometric bound took part in
     unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
     /// ...and the listings a later march had answered already (R3: dropped, never a re-march)
-    unsigned long long mIndirectAnswered = 0ull;
+    unsigned long long mIndirectAnswered = 0ull, mReportsDropped = 0ull;
     /// THE READERS' THRESHOLD (PHOTON-7 stage 10, R3 (a) applied to every reader): the relight frames that moved a texel
     /// by a code since its last report (JahCardLight_cs.glsl's frame word, read back with the report) or could not be
     /// measured (counted at once: a relight with no gather layer bound, a report not issued) - `mVisibleRelights`; those
