@@ -1400,12 +1400,6 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             }
     }
     if (windowDrain && drained) ++mWindowDrains;
-    if (decide) {   // ARM (the stale early gathers): every resident card's indirect re-marched once at the decision - reverted next
-        const unsigned long long root = 1ull << rootBit('d', mFrame);
-        for (size_t i = 0; i < per.size(); ++i)
-            for (CardRec &c : per[i])
-                if (c.size && c.lastUpdated) { c.relightIndirect = true; c.roots |= root; }
-    }
 
     // 5. THE ARRIVALS, in order. Free room takes any wanted face at its first mark (the fill is the readers' first
     //    frames). A face that finds none MAKES room - the atlas compacted, then the evictable evicted, until it fits or
