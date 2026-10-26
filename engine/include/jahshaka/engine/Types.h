@@ -4985,15 +4985,14 @@ struct GiStatus {
         /// Nothing on the CPU walks the scene to produce them.
         ///
         /// How many GI items this cascade's LAST GATHER put into its box: the
-        /// ones with at least one partition inside it that are big enough to
-        /// fill half a voxel of it — so it follows the cascade as it scrolls,
-        /// and reads 0 for one standing in empty space. A coarse cascade
-        /// declines sub-voxel objects: it cannot represent them.
+        /// ones with at least one partition inside it — so it follows the
+        /// cascade as it scrolls, and reads 0 for one standing in empty space.
+        /// Every size is kept at every cascade (a small object by its coverage).
         int   items = 0;
         /// How many GI items passed every predicate of that gather — the attach
-        /// set: the GI channel, rule 2's size floor and, with an instance budget
+        /// set: the GI channel and, with an instance budget
         /// (`GiParams::cascadeInstanceCap` > 0), the budget's pick. Without a
-        /// budget that is the whole size-filtered scene and `items` is the part
+        /// budget that is the whole GI scene and `items` is the part
         /// of it this cascade's box reached.
         int   attached = 0;
         /// CPU milliseconds of that same rebuild (the submission cost on the

@@ -245,7 +245,6 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *v
     p.caps[2] = Ogre::PhotonVoxelizer::kIndicesPerPartition;
     p.lod[0] = in.cell;
     p.lod[1] = in.tolerance;
-    p.lod[2] = in.minExtent;
     for (uint32_t o = 0; o < numOctants; ++o) {
         const Ogre::Aabb &box = voxelizer->getOctantRegion(o);
         const Ogre::Vector3 mn = box.getMinimum(), mx = box.getMaximum();

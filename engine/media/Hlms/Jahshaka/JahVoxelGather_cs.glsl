@@ -26,7 +26,7 @@ struct VoxelGatherParams
 {
 	uvec4 counts;       // x instance slots, y octants, z material buckets, w flags
 	uvec4 caps;         // x record capacity, y range count, z indices per partition
-	vec4  lod;          // x cell, y tolerance, z rule 2's minimum extent
+	vec4  lod;          // x cell, y tolerance, z w unused
 	vec4  octMin[8];
 	vec4  octMax[8];
 };
@@ -156,10 +156,6 @@ void main()
 	uint bucket = word >> 16u;
 	uint matSlot = word & 0xFFFFu;
 	if( bucket >= params.counts.z )
-		return;
-	// RULE 2: a coarse cascade declines what cannot fill half a voxel of it.
-	vec3 ext = bMax.xyz - bMin.xyz;
-	if( max( max( ext.x, ext.y ), ext.z ) < params.lod.z )
 		return;
 	if( ( params.counts.w & JAH_FLAG_BUDGETED ) != 0u &&
 		( ( budgetMask[slot >> 5u] >> ( slot & 31u ) ) & 1u ) == 0u )

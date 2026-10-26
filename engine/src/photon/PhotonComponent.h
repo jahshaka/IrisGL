@@ -308,7 +308,6 @@ public:
     struct VoxelGatherInputs {
         float cell = 0.0f;          ///< the volume's cell, metres (the level rule's sample)
         float tolerance = 0.0f;     ///< kCascadeLodCellFraction; 0 = level 0 always
-        float minExtent = 0.0f;     ///< rule 2's floor; 0 = keep everything
         bool  lod = false;          ///< walk the level rule
         const std::vector<uint32_t> *budgetMask = nullptr;   ///< the budget's pick, or none
     };
@@ -1315,7 +1314,7 @@ private:
     /// cells, distance) is a partial sort, and a GPU top-K was not in this lane.
     void budgetMaskFor(const VctCascade &c, const Ogre::Vector3 &centre,
                        std::vector<uint32_t> &mask) const;
-    /// What one cascade's gather is asked: rule 2's floor, the level rule's terms,
+    /// What one cascade's gather is asked: the level rule's terms,
     /// the budget's pick (filled into `mask` when a budget is on).
     /// `centre`: the box the budget ranks for - the live one, or a scroll's target (the slab is
     /// gathered from the TARGET box's set, filtered by the chunks).

@@ -4984,30 +4984,19 @@ void PhotonComponent::recentreCascadeAt(VctCascade &c, const long long lattice[3
 // no rule any more: the gather writes no records and build() clears the volume.
 // RULE 1 - attach once, never re-select - is gone with the attached set.)
 //
-// RULE 2 — A COARSE CASCADE DECLINES SUB-VOXEL OBJECTS. The raster voxeliser's
-// price is the GEOMETRY INSIDE THE REGION, not the region (measured: in a
-// 16-item room one whole build is a flat 2.7-5.3 ms from a 16 m3 box to a
-// 1.7 million m3 one; on the lattice it goes 17.5 / 61.6 / 108 ms as the box
-// grows 5 / 10 / 20 m, i.e. ~13 us per enclosed instance). An outer cascade
-// encloses the most instances and resolves the least — the sample set's
-// outermost cell is 1.875 m — so anything that cannot fill half a voxel of it
-// is a smear the grid cannot represent. Declining it is not an approximation of
-// the picture, it is declining to compute something the grid cannot hold, and
-// it needs nothing from Ogre: the gather applies it per instance. Cascade 0 keeps
-// everything by construction (its cell is the finest).
-//
-// THE TRADEOFF, stated: a scene whose distant light comes from MANY small
-// objects (a field of lamps, a forest of leaves) loses their far bounce.
-// `GiStatus::cascades[].items` reports what each cascade kept, so it is visible
-// rather than mysterious. NOT PROVEN ON THE MEASURED SCENES: neither Showroom 2
-// nor the lattice has sub-voxel geometry (the lattice's cubes sit exactly on
-// the threshold), so this rule fired on nothing there and the numbers above are
-// its cost, not its benefit.
-static const float kCascadeSubVoxelFactor = 0.5f;
+// EVERY INSTANCE AT EVERY CASCADE (PHOTON-7 stage 10-3; L9 is physics: the renderer follows the ray). A small object
+// is geometry at every level: a coarse cell holds it by its coverage (the voxeliser's triangle-box test marks the cell,
+// the coverage and the merge weigh it), exactly as the finer cascades already did. RULE 2 - "a coarse cascade declines
+// what cannot fill half a voxel of it" (an instance's longest extent under half the cell: 0.234 m at High's c2, 0.94 m
+// at c3) - is DELETED: a voxel ray reads cascade j over its shell (c2 from 1.875 m, c3 from 5.6 m), so every ray past
+// 1.9 m passed through a lamp's bulb, a post or a shade - measured: the court's 0.20 m emitter was in no reflection,
+// its c2 store 0 (spikes/photon-7/stage10/10-3/r2/emitters). Its cost, measured on Bistro Exterior at High in six ABBA
+// blocks (spikes/photon-7/stage10/10-3/r2/rule2): c2 +35 instances (+0.5 % triangles), c3 +280 (+12.7 %), the cascades'
+// GPU work within the blocks' noise (under 0.2 ms a frame on a walk).
 
 // AND THE LOD FRACTION IS A DIFFERENT NUMBER, MEASURED (ATOM-3 A2, the render
-// audit's A2). Until this lane the ONE constant above answered two unrelated
-// questions — "is this whole object too small for the grid" (rule 2) and "how
+// audit's A2). Until that lane ONE constant answered two unrelated questions —
+// "is this whole object too small for the grid" (the deleted rule 2) and "how
 // coarse a baked level may stand in for this mesh" — and the second answer was
 // wrong by two orders of magnitude.
 //
@@ -5086,12 +5075,10 @@ static const float kCascadeSubVoxelFactor = 0.5f;
 // already ship; it is not an error bound against light transport.
 static const float kCascadeLodCellFraction = 1.0f / 256.0f;
 
-// WHAT A CASCADE'S GATHER IS ASKED (ATOM P4b). The two rules above and the level
-// rule are no longer CPU walks: they are three numbers handed to the gather job,
-// which applies them to every instance on the device (JahVoxelGather_cs.glsl).
+// WHAT A CASCADE'S GATHER IS ASKED (ATOM P4b). The level rule is no CPU walk: its
+// terms are handed to the gather job, which applies them to every instance on the
+// device (JahVoxelGather_cs.glsl).
 //
-//   * RULE 2's floor, `cell * kCascadeSubVoxelFactor`, against the instance's world
-//     AABB's longest extent - the same test `selectCascadeItems` made per item.
 //   * THE LEVEL RULE: `allowedWorldError(kCascadeLodCellFraction, cell, scale)` and
 //     the coarsest baked level whose bound is below it - `cascadeVoxelLod`'s rule,
 //     word for word, walking the level table's bounds (GpuMeshLevel::bound), which
@@ -5108,7 +5095,6 @@ PhotonComponent::VoxelGatherInputs PhotonComponent::cascadeGatherInputs(const Vc
     VoxelGatherInputs in;
     in.cell = c.cell();
     in.tolerance = kCascadeLodCellFraction;
-    in.minExtent = c.cell() * kCascadeSubVoxelFactor;
     // ONE applied answer: the document's request met with the run-wide latch
     // (`GiStatus::cascadeVoxelLod` reports it).
     in.lod = mCascadeVoxelLod;
@@ -5134,7 +5120,6 @@ PhotonComponent::VoxelGatherInputs PhotonComponent::cascadeGatherInputs(const Vc
 void PhotonComponent::budgetMaskFor(const VctCascade &c, const Ogre::Vector3 &centre,
                                     std::vector<uint32_t> &mask) const {
     const float cell = c.cell();
-    const float minExtent = cell * kCascadeSubVoxelFactor;
     const int cap = std::max(0, mGi.cascadeInstanceCap);
     mask.assign((mScene.itemNodes().size() + 31u) / 32u, 0u);
     if (!cap) return;
@@ -5151,7 +5136,6 @@ void PhotonComponent::budgetMaskFor(const VctCascade &c, const Ogre::Vector3 &ce
         const Ogre::Aabb wa = item->getWorldAabb();
         const Ogre::Vector3 h = wa.mHalfSize;
         const float extent = std::max(std::max(h.x, h.y), h.z) * 2.0f;
-        if (extent < minExtent) continue;                                     // rule 2
         const Ogre::Vector3 d = wa.mCenter - centre;
         ranked.push_back({ reachBox.intersects(wa), extent / cell, d.dotProduct(d), np->itemSlot });
     }
@@ -5847,18 +5831,15 @@ bool PhotonComponent::planScroll(size_t idx, const Ogre::Vector3 &eyePos) {
     }
 
     // THE INSTANCES THE ESTIMATE WALKS: the gather's own predicates that the CPU can read (the GI
-    // channel, a live slot, rule 2's size floor), in the target's cell coordinates.
+    // channel, a live slot), in the target's cell coordinates.
     struct Inst { float mn[3] = {}, mx[3] = {}; double tris = 0.0, perGroup = 0.0, groups = 0.0; };
     std::vector<Inst> insts;
     if (!slabs.empty()) {
-        const float minExtent = cell * kCascadeSubVoxelFactor;
         std::unordered_map<const Ogre::Mesh *, double> meshTris;
         for (const auto *np : mScene.itemNodes()) {
             Ogre::Item *item = np->item;
             if (!item || !(item->getVisibilityFlags() & kGiGeometryBit) || np->itemSlot == size_t(-1)) continue;
             const Ogre::Aabb wa = item->getWorldAabb();
-            const Ogre::Vector3 h = wa.mHalfSize;
-            if (std::max(std::max(h.x, h.y), h.z) * 2.0f < minExtent) continue;
             Inst in;
             bool inside = true;
             const Ogre::Vector3 wmn = wa.getMinimum(), wmx = wa.getMaximum();

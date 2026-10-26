@@ -9,7 +9,7 @@
 // rebuild is a 304-byte request and three dispatches:
 //
 //   1. Jahshaka/VoxelGatherCount — ONE THREAD PER INSTANCE SLOT: the predicates
-//      (GI-visible, a mesh, a converted material, rule 2's sub-voxel extent, the
+//      (GI-visible, a mesh, a converted material, the
 //      budget), the LEVEL (the cascade's case of the quality currency, walked over
 //      the level table's measured bounds), and per partition of that level its
 //      world AABB against each octant — an atomic count per (octant, bucket).
@@ -58,7 +58,7 @@ namespace detail {
 struct VoxelGatherParams {
     uint32_t counts[4] = {};   ///< x instance slots, y octants, z material buckets, w flags
     uint32_t caps[4] = {};     ///< x record capacity, y range count, z, w unused
-    float    lod[4] = {};      ///< x cell (m), y tolerance (samples), z rule 2's minimum extent, w unused
+    float    lod[4] = {};      ///< x cell (m), y tolerance (samples), z w unused
     float    octMin[8][4] = {};///< the octants' world boxes (the engine divides 1x1x1)
     float    octMax[8][4] = {};
 };
