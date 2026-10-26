@@ -972,7 +972,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			neePart = ( 1.0 - neeVouch ) * ElT * ( neeQL / ( neeQL + nee.pdfL ) );
 		}
 		// THE CONE'S HIT RATE (the lead's condition): the NEE rays, and those whose first hit is the target drawn
-		if( JAH_HIT_ON )
+		if( JAH_HIT_ON && p.knobs2.x <= 2.0 * max( p.stereo.w, 1.0 ) + 0.5 )   // MEASURING ARM 11-1c (2)
 		{
 			const uint nRays = subgroupAdd( 1u );
 			const uint nHits = subgroupAdd( neeHit && !neeFar && nSlot == nee.slot ? 1u : 0u );
