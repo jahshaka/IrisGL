@@ -9,6 +9,7 @@
 #include <OgreRenderSystem.h>
 #include <OgreRenderPassDescriptor.h>
 #include <OgreSceneManager.h>
+#include <OgreResourceTransition.h>
 
 #include <limits>
 
@@ -22,6 +23,9 @@ namespace jahshaka {
 namespace engine {
 namespace detail {
 
+extern bool gJahArmLogTransitions;
+extern bool gJahArmLogLines;
+void jahArmLogTransitions(const char *where, const Ogre::ResourceTransitionArray &rt);
 namespace {
 /// A process-lifetime object, not a heap one: CompositorManager2 does not own its
 /// provider, and a static outlives every workspace that could still reference it.
@@ -68,8 +72,11 @@ bool AtomPass::beginRenderPass() {
     // analyzeBarriers: every colour attachment and the depth to their
     // render-target layouts), executed here — after the recorder's compute,
     // which resolved its own buffers through the same solver.
+    if (gJahArmLogTransitions) rs->debugAnnotationPush(Ogre::String("JAHARM begin barrier"));
     analyzeBarriers();
+    if (gJahArmLogTransitions && gJahArmLogLines) jahArmLogTransitions("begin", mResourceTransitions);
     executeResourceTransitions();
+    if (gJahArmLogTransitions) rs->debugAnnotationPop();
     setRenderPassDescToCurrent();
     rs->executeRenderPassDescriptorDelayedActions();
     return true;
