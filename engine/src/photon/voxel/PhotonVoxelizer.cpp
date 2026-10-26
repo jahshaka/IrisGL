@@ -70,7 +70,9 @@ namespace Ogre
         /// THE MERGE ACCUMULATOR'S TEXELS PER VOXEL (VoxelMerge_piece_cs.any, voxelMergeUvw's
         /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
-        constexpr uint32 kMergeAccumTexels = 26u;
+        // (27 since PHOTON-7 stage 10-3, R2: channel 26 holds the voxel's brightest emissive contribution - the
+        // emissive sum's shared exponent)
+        constexpr uint32 kMergeAccumTexels = 27u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -152,22 +154,25 @@ namespace Ogre
         }
     }  // namespace
 
-    static const uint32 c_numVctProperties = 2u;
+    static const uint32 c_numVctProperties = 3u;
 
     struct PhotonVoxelizerProp
     {
         static const IdString HasDiffuseTex;
         static const IdString HasEmissiveTex;
+        static const IdString EmissiveMax;
 
         static const IdString *AllProps[c_numVctProperties];
     };
 
     const IdString PhotonVoxelizerProp::HasDiffuseTex = IdString( "has_diffuse_tex" );
     const IdString PhotonVoxelizerProp::HasEmissiveTex = IdString( "has_emissive_tex" );
+    const IdString PhotonVoxelizerProp::EmissiveMax = IdString( "voxel_emissive_max" );
 
     const IdString *PhotonVoxelizerProp::AllProps[c_numVctProperties] = {
         &PhotonVoxelizerProp::HasDiffuseTex,
         &PhotonVoxelizerProp::HasEmissiveTex,
+        &PhotonVoxelizerProp::EmissiveMax,
     };
     //-------------------------------------------------------------------------
     PhotonVoxelizer::PhotonVoxelizer( IdType id, RenderSystem *renderSystem, HlmsManager *hlmsManager,
@@ -993,6 +998,14 @@ namespace Ogre
 
         OgreProfileGpuBegin( "VCT Voxelization Jobs" );
 
+        // THE EMISSIVE'S MAX PRE-PASS FIRST (PHOTON-7 stage 10-3, R2: energy is conserved): every (octant, bucket)
+        // whose rows emit, the job's EmissiveMax variant - each voxel's brightest emissive contribution into the merge
+        // accumulator's channel 26 (an atomicMax: order-free), which the sum pass below quantises the emissive
+        // relative to. The clamp at 16 it replaces cut every emitter over 16 (gi.emitter_energy). Its cost: one more
+        // dispatch per emitting bucket and octant (most scenes: a few), none for a scene without emitters.
+        for( uint32 pass = 0u; pass < 2u; ++pass )
+        {
+        const bool maxPass = pass == 0u;
         // ONE DISPATCH PER (octant, bucket), where a bucket is one of the STORE's
         // material pools. The order is the store's bucket order, which is a stable
         // order; fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065)'s order-independent merge means it decides nothing about
@@ -1003,9 +1016,11 @@ namespace Ogre
             const Octant &octant = mOctants[octantIdx];
             for( uint32 bucketIdx = 0u; bucketIdx < numBuckets; ++bucketIdx )
             {
+                if( maxPass && !mVctMaterial->getBucketAnyEmission( bucketIdx ) )
+                    continue;
                 const bool hasDiffuse = mVctMaterial->getBucketHasDiffuse( bucketIdx );
                 const bool hasEmissive = mVctMaterial->getBucketHasEmissive( bucketIdx );
-                uint32 variant = 0u;
+                uint32 variant = maxPass ? uint32( PhotonVoxelizerJobSetting::EmissiveMax ) : 0u;
                 if( hasDiffuse )
                     variant |= PhotonVoxelizerJobSetting::HasDiffuseTex;
                 if( hasEmissive )
@@ -1021,7 +1036,7 @@ namespace Ogre
 
                 job->setConstBuffer( 0, mVctMaterial->getBucketBuffer( bucketIdx ) );
 
-                if( variant )
+                if( variant & ( PhotonVoxelizerJobSetting::HasDiffuseTex | PhotonVoxelizerJobSetting::HasEmissiveTex ) )
                 {
                     DescriptorSetTexture2::TextureSlot texSlot(
                         DescriptorSetTexture2::TextureSlot::makeEmpty() );
@@ -1054,8 +1069,10 @@ namespace Ogre
                 shaderParams.setDirty();
 
                 jahshaka::engine::detail::photonDispatch( hlmsCompute, job, mRenderSystem );
-                ++mLastDispatchCount;
+                if( !maxPass )
+                    ++mLastDispatchCount;   // (the voxelisation's own dispatches; the pre-pass's are its overhead)
             }
+        }
         }
 
         OgreProfileGpuEnd( "VCT Voxelization Jobs" );
@@ -1203,7 +1220,7 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
-        // size lives: width * height * depth * 26 * 4 bytes (27.3 MB at 64^3, 218 MB at
+        // size lives: width * height * depth * 27 * 4 bytes (28.3 MB at 64^3, 226 MB at
         // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         generateMips();

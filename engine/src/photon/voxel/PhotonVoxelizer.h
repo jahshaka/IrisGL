@@ -55,6 +55,10 @@ namespace Ogre
         {
             HasDiffuseTex = 1u << 0u,
             HasEmissiveTex = 1u << 1u,
+            /// Jahshaka (PHOTON-7 stage 10-3, R2): the emissive's MAX PRE-PASS - each voxel's brightest emissive
+            /// contribution into the merge accumulator's channel 26, nothing else (VoxelMerge_piece_cs.any, THE
+            /// EMISSIVE PER VOXEL SHARED EXPONENT).
+            EmissiveMax = 1u << 2u,
         };
     }
 
@@ -246,7 +250,7 @@ namespace Ogre
         ///
         /// However the way we will be using may abuse the cache too much, thus we pre-set
         /// all variants as long as the number of variants is manageable.
-        HlmsComputeJob *mComputeJobs[1u << 2u];
+        HlmsComputeJob *mComputeJobs[1u << 3u];
 
         /// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) — THE ORDER-INDEPENDENT MERGE'S ACCUMULATOR.
         ///

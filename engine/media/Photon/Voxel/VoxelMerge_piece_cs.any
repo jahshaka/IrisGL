@@ -39,8 +39,8 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY-SIX ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
-	/// z*26+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
+	/// ONE VOXEL'S TWENTY-SEVEN ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// z*27+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
 	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
 	/// RAW normal sum at +4..6 (xyz, two's complement),
 	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz), the
@@ -51,7 +51,8 @@
 	/// below), and the CASTERS' COVERAGE into +18 and +19 (FAR-SUN-1, THE CASTER SHARE
 	/// below), and the metal's three, and THE EMITTERS' COVERAGE per half packed into +23 (looking
 	/// +a) and +24 (-a) with THE EMITTERS' WEIGHT at +25 (JUNCTION-NORMAL-1, THE EMISSIVE PER HALF
-	/// below): twenty-six, because only those carry anything — a
+	/// below), and THE EMISSIVE'S SHARED EXPONENT at +26 (PHOTON-7 stage 10-3, R2: the voxel's brightest emissive
+	/// contribution, the max pre-pass's): twenty-seven, because only those carry anything — a
 	/// fourth channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
@@ -75,7 +76,7 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 26u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 27u + chan );
 	}
 
 
@@ -475,9 +476,21 @@
 	// fourteenth sum, the materials' perceptual roughness per triangle), which the
 	// light injection and the bounce read to make the voxel emit what its surface
 	// renders. Nothing read the old constant 0 in .w.
-	INLINE float4 voxelMergeEmissive( uint4 sumEmissive, uint sumRoughness, uint totalWeight )
+	/// THE EMISSIVE PER VOXEL SHARED EXPONENT (PHOTON-7 stage 10-3, R2: energy is conserved). Every other material
+	/// property sits in [0, 1] and takes VOXEL_MERGE_CLAMP's grid; the emissive is a RADIANCE, unbounded, and its
+	/// contributions were clamped to 16 - an emitter of 20 entered the voxels at 16, one of 1000 at 16 (gi.emitter_energy,
+	/// red before). It is now quantised RELATIVE TO THE VOXEL'S OWN BRIGHTEST CONTRIBUTION `vmax` (the max pre-pass:
+	/// voxel_emissive_max, the accumulator's channel 26): q = v / vmax on a 2^18 grid, so q w (w at most 2^13) stays
+	/// inside a uint, every voxel keeps 2^-18 of its own light whatever the scene's brightest emitter, and the sums stay
+	/// exact integers (the max is an atomicMax and the sums integer adds: order-free).
+	INLINE uint3 voxelMergeEmissiveQuantize( float3 v, float vmax )
 	{
-		return float4( float3( sumEmissive.xyz ) * voxelMergeInvMean( totalWeight ),
+		return vmax > 0.0f ? uint3( clamp( v / vmax, 0.0f, 1.0f ) * 262144.0f + 0.5f ) : uint3( 0u, 0u, 0u );
+	}
+	/// ...and the mean back: sum / W is ( v / vmax ) 2^18 / 2^12 = 64 v / vmax.
+	INLINE float4 voxelMergeEmissive( uint4 sumEmissive, uint sumRoughness, uint totalWeight, float vmax )
+	{
+		return float4( float3( sumEmissive.xyz ) * voxelMergeInvMean( totalWeight ) * ( vmax * ( 1.0f / 64.0f ) ),
 					   float( sumRoughness ) * voxelMergeInvMean( totalWeight ) );
 	}
 

@@ -146,6 +146,10 @@ namespace Ogre
             }
             for( size_t i = 0; i < 3; ++i )
                 shaderMaterial.emissive[i] = emissiveCol[i];
+            // THE BUCKET EMITS (R2: the voxeliser's emissive max pre-pass runs over it)
+            if( emissiveCol.r > 0.0f || emissiveCol.g > 0.0f || emissiveCol.b > 0.0f ||
+                datablock->getEmissiveTexture() != 0 )
+                bucket.anyEmission = true;
 
             shaderMaterial.diffuse[3] = std::max( diffuseCol.a, emissiveCol.a );
         }

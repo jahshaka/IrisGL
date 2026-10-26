@@ -76,6 +76,10 @@ namespace Ogre
             ConstBufferPacked *buffer = nullptr;
             bool               hasDiffuse = false;
             bool               hasEmissive = false;
+            /// Jahshaka (PHOTON-7 stage 10-3, R2): a row of the bucket emits (an emissive colour above zero, or an
+            /// emissive map) - the voxeliser runs the emissive's max pre-pass over its triangles. Sticky: a row that
+            /// stops emitting costs one pre-pass dispatch that finds nothing, never a wrong voxel.
+            bool               anyEmission = false;
             HlmsDatablockSet   datablocks;
         };
         typedef vector<MaterialBucket>::type BucketVec;
@@ -179,6 +183,7 @@ namespace Ogre
         ConstBufferPacked *getBucketBuffer( size_t idx ) const { return mBuckets[idx].buffer; }
         bool getBucketHasDiffuse( size_t idx ) const { return mBuckets[idx].hasDiffuse; }
         bool getBucketHasEmissive( size_t idx ) const { return mBuckets[idx].hasEmissive; }
+        bool getBucketAnyEmission( size_t idx ) const { return mBuckets[idx].anyEmission; }
         /// JAHSHAKA fork ad452604a+0338ca7f2+c4c80b5f7 (was 0081): FORGET A DATABLOCK THAT IS ABOUT TO DIE. The
         /// conversion cache is keyed by the raw datablock pointer across builds,
         /// so a datablock destroyed and another created at the same address

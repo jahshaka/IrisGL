@@ -456,8 +456,18 @@
 												weight );
 				cMetal		= voxelMergeWeigh4( voxelMergeQuantize4( float4( specRel, specW ) ),
 												weight );
-				cEmissive		= voxelMergeWeigh3( voxelMergeQuantize3( finalEmissive ),
+			@property( voxel_emissive_max )
+				// THE MAX PRE-PASS (R2): the voxel's brightest emissive contribution, nothing else
+				{
+					const float jahEmit = max( max( finalEmissive.x, finalEmissive.y ), finalEmissive.z );
+					if( jahEmit > 0.0f && ( floatBitsToUint( jahEmit ) & 0x7FFFFFFFu ) < 0x7F800000u )
+						atomicMax( g_voxelEmissiveMax[uint( vx + 4 * vy + 16 * vz )], floatBitsToUint( jahEmit ) );
+				}
+			@else
+				cEmissive		= voxelMergeWeigh3( voxelMergeEmissiveQuantize( finalEmissive,
+													 uintBitsToFloat( g_voxelEmissiveMax[uint( vx + 4 * vy + 16 * vz )] ) ),
 													 weight );
+			@end
 				cRoughness	= voxelMergeWeigh3( voxelMergeQuantize3(
 									   float3( material.roughness, 0.0f, 0.0f ) ),
 									   weight ).x;
@@ -641,6 +651,15 @@
 	@foreach( 43, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
+	// THE EMISSIVE'S SHARED EXPONENT (R2): the max pre-pass gathers it from nothing; the sum pass reads what it gathered
+	@property( voxel_emissive_max )
+		g_voxelEmissiveMax[gl_LocalInvocationIndex] = 0u;
+	@else
+		g_voxelEmissiveMax[gl_LocalInvocationIndex] = voxelInBounds
+			? OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( uint3( gl_GlobalInvocationID.xyz ) +
+																 uint3( p_voxelPixelOrigin ), 26u ) ).x
+			: 0u;
+	@end
 	__sharedOnlyBarrier;
 	const float3 groupLo = p_voxelOrigin + 4.0f * p_voxelCellSize * float3( gl_WorkGroupID.xyz );
 	for( uint i=instanceRange.x; i<instanceRange.x + instanceRange.y; ++i )
@@ -754,6 +773,15 @@
 		}
 	}
 	__sharedOnlyBarrier;
+	@property( voxel_emissive_max )
+		// THE MAX PRE-PASS ENDS HERE (R2): the group's voxels' brightest emissive into the accumulator's channel 26 (an
+		// atomicMax: every dispatch of the build that touches the voxel, in any order), and no sum, no resolve
+		if( voxelInBounds && g_voxelEmissiveMax[gl_LocalInvocationIndex] != 0u )
+			imageAtomicMax( voxelMergeAccum,
+							ivec3( voxelMergeUvw( uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin ), 26u ) ),
+							g_voxelEmissiveMax[gl_LocalInvocationIndex] );
+		return;
+	@end
 	// THIS LANE'S VOXEL'S SUMS, as its own loop used to leave them.
 	{
 		const uint v = gl_LocalInvocationIndex;
@@ -913,7 +941,8 @@
 		float3 voxelCoverage	= max( voxelCoverageP, voxelCoverageN );
 		float4 voxelAlbedo		= voxelMergeAlbedo( sumAlbedo, totalWeight, voxelCoverage );
 		float4 voxelNormal		= voxelMergeNormal( sumNormal, sumFolded, totalWeight );
-		float4 voxelEmissive	= voxelMergeEmissive( sumEmissive, sumRoughness, totalWeight );
+		float4 voxelEmissive	= voxelMergeEmissive( sumEmissive, sumRoughness, totalWeight,
+												  uintBitsToFloat( g_voxelEmissiveMax[gl_LocalInvocationIndex] ) );
 		float4 voxelMetal		= voxelMergeMetal( sumMetal, totalWeight );
 
 		@property( syntax != hlsl || typed_uav_load )
