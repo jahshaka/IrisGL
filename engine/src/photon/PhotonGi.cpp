@@ -6986,6 +6986,10 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         {
             monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, (unsigned long long)i,
                                     kFeedbackRowNames[std::min(i, size_t(7))], mRoot->getRenderSystem());
+            // AN AGGREGATE (PHOTON-7 stage 10, lab.monitor's nesting law): the pass's every dispatch through the Photon
+            // door files its own row by its job's name - the bounce's injection, the copy-back, the anisotropic mips -
+            // beside the sides' TLAS gather (voxel.sides), so the pass's own time is its barriers' alone
+            row.markAggregate();
             c.lighting->feedbackRun();
         }
         // (a pass on another route than the last - the TLAS rays or the voxel rays, 10-2b - is another input: the next
