@@ -192,6 +192,9 @@ struct StillnessFrame {
     /// unmeasured ones inside), those read back SUB-QUANTUM, and the newest reading's largest move in codes (-1: not
     /// finite) - lab.stillness_control's every-restart-has-a-cause law reads them
     unsigned long long cardsRelights = 0, cardsCaptures = 0, cardsVisible = 0, cardsSubQuantum = 0, cardsUnmeasured = 0;
+    /// ...and the cache's reports never read for want of a ring slot (CardCacheStatus::reportsDropped): a defect if
+    /// seen at all (lab.stillness_control's law)
+    unsigned long long cardsReportsDropped = 0;
     float cardsMoveCodes = 0.0f;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
