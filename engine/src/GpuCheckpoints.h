@@ -23,7 +23,11 @@ bool gpuCheckpointsOn();
 void gpuCheckpoint(const char *name);
 /// ...on the command buffer `vkCommandBuffer` (a VkCommandBuffer) a raw-Vulkan pass records into.
 void gpuCheckpointOn(void *vkCommandBuffer, const char *name);
-/// After a device loss: every queue's last marks, logged (the engine log, critical, and stderr). Once.
+/// After a device loss: every queue's last marks, logged (the engine log, critical, and stderr), then THE DEVICE FAULT
+/// REPORT (PHOTON-7 stage 10-3; the same switch): the driver's fault record (VK_EXT_device_fault: its description,
+/// faulting addresses and vendor records; the vendor binary written to JAHSHAKA_GPU_FAULT_BINARY when set), each
+/// faulting address mapped to the binding events that held it (VK_EXT_device_address_binding_report, recorded from the
+/// first bind through the fork's VulkanInstance::msJahAddressBindingCallback). Once.
 void gpuCheckpointsDump();
 /// The compositor passes' marks: a pass listener on the manager (`compositorManager2`: an Ogre::CompositorManager2),
 /// installed after Root (nothing when the checkpoints are off) and removed before it.
