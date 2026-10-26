@@ -1246,7 +1246,7 @@ Ogre::CompositorPassSceneDef *addAtomDecodePass(Ogre::CompositorNodeDef *n, cons
     rtv->depthAttachment.textureName = kAtomMaterialDepth;
     rtv->preferDepthTexture = true;
     Ogre::CompositorTargetDef *t = n->addTargetPass(rtvName);
-    t->setNumPasses(1);
+    t->setNumPasses(keepDepth ? 2 : 1);
     auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
     p->mFirstRQ = classify ? kScreenClassifyRenderQueue : kScreenDecodeRenderQueue;
     p->mLastRQ = Ogre::uint8(kScreenDecodeRenderQueue + 1u);
@@ -1262,6 +1262,29 @@ Ogre::CompositorPassSceneDef *addAtomDecodePass(Ogre::CompositorNodeDef *n, cons
     p->mUpdateLodLists = false;
     p->mIdentifier = kScreenDecodePassIdentifier;
     p->mProfilingId = profilingId;
+    // THE KEPT DEPTH IS WRITTEN BY A DRAW BEFORE ITS FIRST READ-ONLY LOAD (PHOTON-7 stage 10-3, R0: the second-project
+    // device loss). A later decode pass of the frame LOADS this depth read-only. When the classify queue draws nothing -
+    // a new target's first frame, a project whose items are not classified yet - the depth's only write was the load-op
+    // CLEAR, and a read-only load of a new D32 written only by a render-pass clear RESET the 3D engine on driver 595.x
+    // (Xid 13 with no shader active and no page fault - Nsight Aftermath; legal Vulkan, a driver defect, reported). One
+    // draw of the far depth (the clear's own value: the content does not change) cures it; a transfer clear
+    // (vkCmdClearDepthStencilImage) does not (measured, spikes/photon-7/stage10/10-3/devloss). So the target's first
+    // frame seeds its depth with that draw - ONCE (mNumInitialPasses), the colour history's rule - and never again.
+    if (keepDepth) {
+        Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+        auto *seed = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
+        seed->mMaterialName = rs && rs->isReverseDepth() ? "Jahshaka/DepthSeedRev" : "Jahshaka/DepthSeed";
+        seed->mNumInitialPasses = 1u;
+        seed->mLoadActionDepth = Ogre::LoadAction::Load;
+        seed->mStoreActionDepth = Ogre::StoreAction::Store;
+        seed->mLoadActionStencil = Ogre::LoadAction::DontCare;
+        seed->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        for (size_t i = 0; i < OGRE_MAX_MULTIPLE_RENDER_TARGETS; ++i) {
+            seed->mLoadActionColour[i] = Ogre::LoadAction::Load;
+            seed->mStoreActionColour[i] = Ogre::StoreAction::Store;
+        }
+        seed->mProfilingId = std::string(profilingId) + " depth seed";
+    }
     return p;
 }
 

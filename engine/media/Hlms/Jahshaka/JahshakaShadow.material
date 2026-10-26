@@ -81,3 +81,53 @@ material Jahshaka/ShadowMapClearRev
 		}
 	}
 }
+
+// THE KEPT DEPTH'S SEED (PHOTON-7 stage 10-3, R0; OgreChain.cpp addAtomDecodePass): the far depth written by ONE draw in
+// a target's first frame, so a depth the next pass loads read-only has been written by a draw (a new D32 written only by
+// a render-pass clear and then loaded read-only reset the 3D engine on driver 595.x). The clear's own value, and only
+// where the depth still holds it (depth_func equal: a texel the classify pass drew keeps its depth); no colour.
+material Jahshaka/DepthSeed
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func equal
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowMapClear_ps
+			{
+			}
+		}
+	}
+}
+
+material Jahshaka/DepthSeedRev
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func equal
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowMapClearRev_ps
+			{
+			}
+		}
+	}
+}
