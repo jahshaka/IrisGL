@@ -615,7 +615,7 @@ void main()
 		const vec4 g = imageLoad( cardGather, at );
 		const bool refOk = ( floatBitsToUint( g.w ) & 0x7F800000u ) != 0x7F800000u && g.w >= 0.0;
 		const float d = refOk ? abs( S - g.w ) : 3.0e38;
-		const float code = exp2( floor( log2( max( max( S, refOk ? g.w : 0.0 ), 6.1035156e-5 ) ) ) - 10.0 );   // ARM (the truncation): the store's step - reverted next
+		const float code = 0.01 * max( max( S, refOk ? g.w : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
 		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
 		// (the accumulation's arrivals, through the geometric bound)
 		const bool fresh = ( mode & 8u ) != 0u;
