@@ -958,6 +958,26 @@ bool ScreenProbeGather::holdLast(const void *key, unsigned w, unsigned h, unsign
 void ScreenProbeGather::forget(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return;
+    {
+        // THE LAST TRACED FRAME's STARVED COUNTS, folded now (a screenshot's shot: destroyed right after its readback,
+        // which waited for the device - its newest traced slot is finished though it has not retired)
+        View &v = it->second;
+        if (v.readbackMapped) {
+            uint32_t newest = 0u;
+            bool any = false;
+            for (unsigned i = 0; i < kFramesInFlight; ++i) {
+                if (!v.pending[i].live || v.pending[i].held) continue;
+                if (any && int32_t(v.pending[i].frame - newest) <= 0) continue;
+                uint32_t starved[2] = { 0u, 0u };
+                std::memcpy(starved, static_cast<const char *>(v.readbackMapped) + i * 16u + 8u, sizeof(starved));
+                v.starvedDiffuse = starved[0];
+                v.starvedRough = starved[1];
+                newest = v.pending[i].frame;
+                any = true;
+            }
+        }
+        if (v.scene) mForgottenStarved[v.scene] = { v.starvedDiffuse, v.starvedRough };
+    }
     // ...AND THE SHADER'S REGISTRATION WITH IT: this view's irradiance texture
     // is about to be retired, and the Hlms listener holds a raw pointer to it
     // keyed by the scene's manager (GATHER-0's D1).
@@ -1141,6 +1161,14 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     }
     if (out.restFrames == ~0u) out.restFrames = 0u;
     if (out.sinceRestart == ~0u) out.sinceRestart = 0u;
+    // (and the last destroyed view's starved counts - a screenshot's shot; mForgottenStarved)
+    {
+        auto f = mForgottenStarved.find(scene);
+        if (f != mForgottenStarved.end()) {
+            out.starvedDiffuse = std::max(out.starvedDiffuse, f->second.first);
+            out.starvedRough = std::max(out.starvedRough, f->second.second);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

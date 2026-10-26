@@ -779,6 +779,11 @@ private:
 
     GatherHost &mHost;
     std::unordered_map<const void *, View> mViews;
+    /// THE LAST DESTROYED VIEW'S STARVED COUNTS per scene (PHOTON-7 stage 10-3): a screenshot's shot view is destroyed
+    /// right after its pixel readback, before its hold frame's counter slot would retire - `forget` folds that slot
+    /// (the device finished it: the readback waited) and keeps the counts here, which statsInto reports beside the live
+    /// views' (the most either counted).
+    std::unordered_map<const detail::OgreScene *, std::pair<unsigned, unsigned>> mForgottenStarved;
 
     VkDescriptorSetLayout mPlaceLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout mTraceLayout = VK_NULL_HANDLE;
