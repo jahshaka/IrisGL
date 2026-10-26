@@ -156,7 +156,8 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
-    /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7): the gather's rest key moved, or its inputs owed work.
+    /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7): the gather's rest key moved, or its inputs owed work, or
+    /// (PHOTON-7 stage 10, R3's contract) the surface cache owed the readers their hold (CardCacheStatus::readersHoldOwed).
     bool               holdKey = false;
     /// THE FIELD'S GRANT AND ITS SPEND this frame (PHOTON-7 stage 5, 5-4; GiStatus::ifdGrantLastFrame /
     /// ifdDispatchedLastFrame, integrations), the restarts and refinements it owes after it, and the voxel store's own
@@ -199,6 +200,9 @@ struct StillnessFrame {
     /// THE VIEW HELD (PHOTON-7 stage 10): every reader held - the gather (GatherStatus::held) and, where the reflection
     /// traces, the reflection (reflHeld below). The door's hold frame (StillnessWindow::holdFrame) is the first such.
     bool               held = false;
+    /// ...and THE GATHER's OWN HOLD (GatherStatus::held, the running gather's): its settle law reads it apart from the
+    /// view's (StillnessWindow::gatherHoldFrame).
+    bool               gatherHeld = false;
     /// THE REFLECTION'S REST this frame (RayQueryStatus, PHOTON-2 round 2 R1/G6): its rest frames (0 = moving or
     /// broken), held, the newest count of its texels still converging (-1 = none read for this rest) and the rest
     /// frames so far on which a moved instance crossed it.
@@ -266,6 +270,9 @@ struct StillnessWindow {
     std::vector<int> settleFromLastGiRow;
     std::vector<unsigned> visiblePixels;   ///< per class: the counted pixels
     int holdFrame = -1;                           ///< the first window frame the VIEW held - every reader (StillnessFrame::held; -1: never)
+    /// ...and each reader's own first held frame (-1: never): the gather's (StillnessFrame::gatherHeld) and the
+    /// reflection's (reflHeld) - the view's hold is at or after both.
+    int gatherHoldFrame = -1, reflHoldFrame = -1;
     /// ...and the last window frame the hold waited on (StillnessFrame::holdKey; -1: none after the stop) - the bars'
     /// "last input write", rows or none.
     int lastHoldKeyFrame = -1;

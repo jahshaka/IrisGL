@@ -4254,6 +4254,10 @@ struct CardCacheStatus {
     /// (`subQuantumRelights`). The newest reading's largest move IN CODES (-1: a non-finite move) and the cache frame it
     /// was relit at (a reading arrives at the report's fixed lag).
     unsigned long long visibleRelights = 0ull, subQuantumRelights = 0ull, unmeasuredRelights = 0ull;
+    /// THE READERS' HOLD IS OWED (SurfaceCache::restHoldOwed; PhotonComponent::readersHoldOwed): the stop's one decision
+    /// not yet taken, its captures, relights or card-to-card rounds still to run, or a report in flight - neither reader
+    /// holds, and GiStatus::giAtRest is false, while it is.
+    bool readersHoldOwed = false;
     float moveCodesLast = 0.0f;
     unsigned long long moveCodesFrame = 0ull;
     /// THE REST'S DRAIN (10-2d): cards removed because no view reader read them at the pose (inside `evicted`) - at the

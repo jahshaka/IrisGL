@@ -4075,6 +4075,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.gatherWaits = mGatherWaits;
     out.indirectByCards = mIndirectByCards;
     out.visibleRelights = mVisibleRelights;
+    out.readersHoldOwed = restHoldOwed();
     out.subQuantumRelights = mSubQuantumRelights;
     out.unmeasuredRelights = mUnmeasuredRelights;
     out.moveCodesLast = mMoveCodesLast;

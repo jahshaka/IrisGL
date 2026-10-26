@@ -648,6 +648,8 @@ struct StillnessRun::Impl {
         w.lastGiRowFrame = -1;
         w.lastHoldKeyFrame = -1;
         w.holdFrame = -1;
+        w.gatherHoldFrame = -1;
+        w.reflHoldFrame = -1;
         for (StillnessFrame &f : w.trail) {
             if (const auto ss = slowStages.find(f.engineFrame); ss != slowStages.end()) f.slowStage = ss->second;
             if (const auto gr = gpuRowsByFrame.find(f.engineFrame); gr != gpuRowsByFrame.end()) f.gpuRows = gr->second;
@@ -678,6 +680,8 @@ struct StillnessRun::Impl {
             if (i > 0 && f.giRowCount) w.lastGiRowFrame = int(i);
             if (i > 0 && f.holdKey) w.lastHoldKeyFrame = int(i);
             if (w.holdFrame < 0 && f.held) w.holdFrame = int(i);
+            if (w.gatherHoldFrame < 0 && f.gatherHeld) w.gatherHoldFrame = int(i);
+            if (w.reflHoldFrame < 0 && f.reflHeld) w.reflHoldFrame = int(i);
         }
         for (unsigned k = 0; k <= n; ++k) {
             if (!w.frames.empty()) w.visiblePixels[k] = w.frames.size() > 1 ? w.frames[1].classes[k].pixels : 0u;
@@ -920,7 +924,9 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
+        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
+        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1046,7 +1052,9 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy;
+        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
+        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
+        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1092,6 +1100,7 @@ bool StillnessRun::frameDone(std::string &err)
         // pixels, and the door's hold was blind to it (Showroom 2: 29-56 codes a frame for 100+ frames after the
         // gather's hold, past the canary)
         f.held = g.running && g.held && (!pub.rayQuery.reflect || pub.rayQuery.reflectHeld);
+        f.gatherHeld = g.running && g.held;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
         if (pub.rayQuery.reflectFrame > m.lastTraced) {
@@ -1288,7 +1297,7 @@ std::string StillnessReport::tsv() const
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
       << "\trefl_sources"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1322,7 +1331,7 @@ std::string StillnessReport::tsv() const
               << f.cardsPageSize << "\t" << f.cardsSettleFrames << "\t" << f.cardsRoots << "\t" << f.cardsRound << "\t"
               << f.cardsDecisions << "\t" << f.cardsWindowDrains << "\t" << f.cardsIndirectRelit << "\t" << f.cardsRelights
               << "\t" << f.cardsCaptures << "\t" << f.cardsVisible << "\t" << f.cardsSubQuantum << "\t" << f.cardsUnmeasured
-              << "\t" << f.cardsMoveCodes << "\n";
+              << "\t" << f.cardsMoveCodes << "\t" << (f.gatherHeld ? 1 : 0) << "\n";
         }
     return o.str();
 }
