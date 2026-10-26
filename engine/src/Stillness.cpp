@@ -683,6 +683,7 @@ struct StillnessRun::Impl {
             if (w.gatherHoldFrame < 0 && f.gatherHeld) w.gatherHoldFrame = int(i);
             if (w.reflHoldFrame < 0 && f.reflHeld) w.reflHoldFrame = int(i);
         }
+        stillnessDeriveLiveness(w);
         for (unsigned k = 0; k <= n; ++k) {
             if (!w.frames.empty()) w.visiblePixels[k] = w.frames.size() > 1 ? w.frames[1].classes[k].pixels : 0u;
             int last = 0;
@@ -693,6 +694,42 @@ struct StillnessRun::Impl {
         }
     }
 };
+
+// THE HOLD's DERIVED BOUND, ONE FORMULA (PHOTON-7 stage 10, R3's design - lab.stillness_control (3) wrote it; stage 10-3
+// moved it here so scripting.e2e.world_stillness reads the same: StillnessWindow::holdBound). From the readers' FIRST REST
+// frame the first hold comes within
+//     (N + due)  the readers' DEMAND SPAN L = N + the due: each reader's rest indices [1, L] (the per-reader snapshot)
+//   + due        the read-back's due after it (the period + the ring + the issue frame's one + 1)
+//   + W          the decision's own work: its captures and card-to-card rounds, from the decision to its last GI row
+//   + N + 1      the re-rest after that work, and the hold's own frame
+// with N the gather's settle (StillnessFrame::settleFrames) and the due the cards' demand due (the record's period + lag +
+// 1); and W'S PACE: W <= ceil(the work's pages / the tier's indirect pages a frame) + due (the rounds pipelined: one due
+// covers the chain), the pages the frames' own indirect texels relit over a page. A window without a decision derives none.
+void stillnessDeriveLiveness(StillnessWindow &w) {
+    w.firstRestFrame = w.decisionFrame = w.decisionWorkEnd = w.holdBound = w.workPace = -1;
+    w.workPages = 0.0;
+    const size_t n = w.frames.size();
+    for (size_t i = 0; i < n && w.firstRestFrame < 0; ++i)
+        if (w.frames[i].restFrames >= 1u) w.firstRestFrame = int(i);
+    for (size_t i = 1; i < n && w.decisionFrame < 0; ++i)
+        if (w.frames[i].cardsDecisions > w.frames[i - 1].cardsDecisions) w.decisionFrame = int(i);
+    if (w.decisionFrame < 0) return;
+    w.decisionWorkEnd = w.decisionFrame;
+    for (size_t i = size_t(w.decisionFrame); i < n; ++i)
+        if (w.frames[i].giRowCount) w.decisionWorkEnd = int(i);
+    const StillnessFrame &d = w.frames[size_t(w.decisionFrame)];
+    const unsigned N = d.settleFrames;
+    const unsigned due = d.cardsDemandEvery + d.cardsDemandLag + 1u;
+    const int W = w.decisionWorkEnd - w.decisionFrame;
+    w.holdBound = int(N + due) + int(due) + W + int(N) + 1;
+    const double page = double(d.cardsPageSize) * double(d.cardsPageSize);
+    const double P = page > 0.0 ? double(d.cardsIndirectTexels) / page : 0.0;
+    for (int i = w.decisionFrame; i <= w.decisionWorkEnd; ++i) {
+        const StillnessFrame &f = w.frames[size_t(i)];
+        if (f.giRowCount && page > 0.0) w.workPages += double(f.cardsIndirectRelit) / page;   // (every round, 0 included)
+    }
+    if (P > 0.0) w.workPace = int(std::ceil(w.workPages / P)) + int(due);
+}
 
 StillnessRun::StillnessRun(Engine &engine, Scene &scene, View &view) : d(new Impl(engine, scene, view)) {}
 
@@ -707,7 +744,7 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
 {
     Impl &m = *d;
     if (m.begun) { err = "stillness: begin twice"; return false; }
-    if (spec.frames < 2) { err = "stillness: the window needs at least 2 frames"; return false; }
+    if (spec.frames < 2 || spec.teleportFrames == 1u) { err = "stillness: a window needs at least 2 frames"; return false; }
     if (spec.visibleAge < 1 || spec.visibleAge > 15) { err = "stillness: visibleAge is 1..15 (the count's four bits)"; return false; }
     if (!spec.classes.empty() && spec.classes.size() != size_t(spec.classW) * spec.classH) {
         err = "stillness: the class image is not classW x classH";
@@ -744,7 +781,7 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
         }
     }
     // the script's last frame IS the stop (window frame 0)
-    const auto addWindow = [&](const char *name) {
+    const auto addWindow = [&](const char *name, unsigned count) {
         StillnessWindow w;
         w.name = name;
         w.eye = eye;
@@ -753,21 +790,21 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
         m.plan.back().part = Impl::Part::Window;
         m.plan.back().window = win;
         m.plan.back().index = 0;
-        for (unsigned i = 1; i <= m.spec.frames; ++i) m.plan.push_back({ eye, target, Impl::Part::Window, win, i });
-        w.frames.resize(m.spec.frames + 1);
-        for (unsigned i = 0; i <= m.spec.frames; ++i) {
+        for (unsigned i = 1; i <= count; ++i) m.plan.push_back({ eye, target, Impl::Part::Window, win, i });
+        w.frames.resize(count + 1);
+        for (unsigned i = 0; i <= count; ++i) {
             w.frames[i].index = i;
             w.frames[i].classes.resize(m.report.classNames.size() + 1);
         }
         m.report.windows.push_back(std::move(w));
     };
-    addWindow("walk");
+    addWindow("walk", m.spec.frames);
     if (spec.path) {
         const Vec3 far(eye.x + kFarTeleportMetres, eye.y, eye.z);
         const Vec3 farT(target.x + kFarTeleportMetres, target.y, target.z);
         for (unsigned i = 0; i < kFarFrames; ++i) m.plan.push_back({ far, farT, Impl::Part::Bridge, -1, 0 });
         m.plan.push_back({ eye, target, Impl::Part::Move, -1, 0 });
-        addWindow("teleport");
+        addWindow("teleport", m.spec.teleportFrames ? m.spec.teleportFrames : m.spec.frames);
     }
     {
         int nextWin = -1;
@@ -1161,7 +1198,7 @@ bool StillnessRun::frameDone(std::string &err)
             m.queued.push_back(std::move(q));
         }
         m.prev = std::move(pic);
-        if (p.index == m.spec.frames) m.snapshotWindow(w, size_t(p.window), m.prev);
+        if (p.index + 1u == w.frames.size()) m.snapshotWindow(w, size_t(p.window), m.prev);   // (the window's last frame)
     }
     m.lastKeyMoves = g.keyMoves;
     m.lastFoliageRule = g.foliageRuleAccepts;
@@ -1361,6 +1398,8 @@ std::string StillnessReport::summary() const
         o << "STILLNESS " << w.name << " stop=(" << w.eye.x << "," << w.eye.y << "," << w.eye.z << ") frames="
           << (w.frames.empty() ? 0 : w.frames.size() - 1) << " visible="
           << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " lastHoldKey=" << w.lastHoldKeyFrame << " hold=" << w.holdFrame
+          << " firstRest=" << w.firstRestFrame << " decision=" << w.decisionFrame << " workEnd=" << w.decisionWorkEnd
+          << " holdBound=" << w.holdBound << " pace=" << w.workPace << " pages=" << w.workPages
           << " | frames to <1 code (from stop / from last GI row; = the window: never):";
         for (size_t k = 0; k < names.size() && k < w.settleFromStop.size(); ++k)
             o << " " << names[k] << "=" << w.settleFromStop[k] << "/" << w.settleFromLastGiRow[k] << "("

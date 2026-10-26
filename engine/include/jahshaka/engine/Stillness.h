@@ -83,6 +83,9 @@ bool stillnessFinalPose(const std::vector<StillnessMove> &moves, Vec3 &eye, Vec3
 struct StillnessSpec {
     std::string script;            ///< the move (the grammar above)
     unsigned    frames = 120;      ///< the window: frames measured after the stop
+    /// ...and the TELEPORT window's own (PHOTON-7 stage 10-3: the path's window takes as many frames as its law needs to
+    /// be observed; 0 = `frames`)
+    unsigned    teleportFrames = 0;
     /// THE CARDS' DEMAND SETTLE S of the scene's tier (GiQualityFacts::cardDemandSettleFrames), written into every
     /// frame's record for a law after a stop (stage 5's rule (a): a reader's stamp within S of the change is
     /// legitimate demand). The host that set the tier passes it; 0 = not known (the record says 0).
@@ -284,6 +287,14 @@ struct StillnessWindow {
     /// ...and the last window frame the hold waited on (StillnessFrame::holdKey; -1: none after the stop) - the bars'
     /// "last input write", rows or none.
     int lastHoldKeyFrame = -1;
+    /// THE HOLD's DERIVED BOUND (PHOTON-7 stage 10, R3's design; ONE formula, stillnessDeriveLiveness - lab.stillness_control
+    /// and scripting.e2e.world_stillness both read it): the readers' FIRST REST frame (rest frames >= 1), the stop's one
+    /// rest DECISION's frame (the cache's decisions moving) and its WORK's end (its last GI row), and the first hold's
+    /// bound from the first rest: (N + due) + due + W + N + 1 - the readers' demand span (N + the due), the read-back's
+    /// due after it, W = the decision's work (workEnd - decision), the re-rest after it, the hold's own frame; W's PACE:
+    /// ceil(the work's pages / the tier's pages a frame) + due. -1 where the window has no such frame.
+    int firstRestFrame = -1, decisionFrame = -1, decisionWorkEnd = -1, holdBound = -1, workPace = -1;
+    double workPages = 0.0;
     /// THE MOVE BEFORE THE STOP: the GI rows that fired on its frames ("name:frames/units", ',' joined) and how
     /// many frames before the stop the last of them landed (-1: none) — a commit that lands inside the move is the
     /// origin of every debt the window then pays.
@@ -300,6 +311,10 @@ struct StillnessWindow {
     std::vector<Vec3>        cascadeBuiltCam;   ///< the placements' cameras (the pin the teleport window takes)
     Vec3                     fieldOrigin;       ///< the irradiance field's window (GiStatus::ifdMin)
 };
+
+/// THE HOLD's DERIVED BOUND, ONE FORMULA (Stillness.cpp says the terms): fills the window's firstRestFrame, decisionFrame,
+/// decisionWorkEnd, holdBound, workPace and workPages from its frames. The door calls it on every window.
+void stillnessDeriveLiveness(StillnessWindow &w);
 
 /// The run's report.
 struct StillnessReport {
