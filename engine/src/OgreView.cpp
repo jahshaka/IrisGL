@@ -287,7 +287,6 @@ ChainDesc OgreView::chainDesc() const {
     // comparable in the way the control exists to be). Below the offscreen early-out for that reason.
     // @see PostFxDesc::reflectSources.
     d.reflectSources = mPostFx.reflectSources;
-    if (const char *armS = std::getenv("JAH_S11_SOURCES")) d.reflectSources = ReflectSources(std::atoi(armS));   // MEASURING ARM 11-0
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrSteps = mPostFx.ssrSteps;
     d.ssrMarchPhase = mPostFx.ssrMarchPhase;
