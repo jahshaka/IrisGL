@@ -8711,6 +8711,15 @@ struct FramePass {
     /// ...and the UPLOAD STAGING submitted inside its own stretches (a staging buffer fenced or waited: MonitorRecord's
     /// staging counts) - the submission's cause, not only its place.
     bool        selfStaging = false;
+    /// THE MEASURED BUBBLE (PHOTON-7 stage 10, urgent #64; the fork's JahGpuBubbleResults): the GPU's idle across
+    /// the submissions made while the row was open, from each flush's own timestamp pair (the flushed buffer's last
+    /// BOTTOM_OF_PIPE to the next buffer's first TOP_OF_PIPE, never below 0) - `bubbleGpuMs` the whole row's,
+    /// `selfBubbleGpuMs` its own stretches' (the whole less its direct children's). EXACTLY 0 where no flush crossed
+    /// it; NEGATIVE = a bubble the fork could not measure (no query room, a pair never completed), never faked as 0.
+    /// `insideSubmitted`: a submission anywhere inside the row (its own stretches or a child's, any depth).
+    float       bubbleGpuMs = 0.0f;
+    float       selfBubbleGpuMs = 0.0f;
+    bool        insideSubmitted = false;
     /// THE PASS READS THE GI (ENGINE-UPGRADE-ASYNC-3 stage 2; the engine's passReadsGi: a scene pass that
     /// is not a caster pass, or a custom pass, whose definition is not marked as sampling none). The
     /// frame's first and last such row bound the async compute window.
@@ -8801,6 +8810,9 @@ struct CacheWork {
     bool       selfMeasured = false;
     bool       selfSubmitted = false;
     bool       selfStaging = false;   ///< (FramePass::selfStaging)
+    float      bubbleGpuMs = 0.0f;       ///< (FramePass::bubbleGpuMs)
+    float      selfBubbleGpuMs = 0.0f;   ///< (FramePass::selfBubbleGpuMs)
+    bool       insideSubmitted = false;  ///< (FramePass::insideSubmitted)
 };
 
 /// One stage of the frame, exclusive of its children.

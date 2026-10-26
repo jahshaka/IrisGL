@@ -2518,6 +2518,13 @@ public:
     std::unordered_map<unsigned, unsigned> mRowParent;
     std::unordered_map<unsigned, bool> mRowSubmitted;
     std::unordered_map<unsigned, bool> mRowStaging;
+    std::unordered_map<unsigned, bool> mRowChildSubmitted;   ///< a submission inside one of its children (any depth)
+    /// THE MEASURED BUBBLE (PHOTON-7 stage 10, urgent #64): the fork's JahGpuBubbleResults per row, summed in DOUBLE
+    /// (the same float credits summed in a row and in its child cancel exactly) - absent = no flush crossed it; < 0 = a
+    /// bubble the fork could not measure.
+    std::unordered_map<unsigned, double> mRowBubble;
+    /// Forgets a row's nesting, submission and bubble entries (its retire, a cancel, a turnover).
+    void forgetRow(unsigned id);
     /// THE UPLOAD STAGING's COUNTERS (the fork's VulkanStagingBuffer::msJahCounters, JahStagingCounters): asked once per
     /// capture; the frame's deltas go to the record at the frame's close (noteStaging), and a row's own stretch reads
     /// the submissions (fence flushes + the waits that submitted).
@@ -2549,6 +2556,9 @@ public:
     /// Files a GPU result against the pass that asked for it. Unknown ids (a
     /// frame that already aged out) are dropped.
     void noteGpuSample(unsigned sampleId, float ms);
+    /// Files one flush's measured bubble against a row open across it (the fork's JahGpuBubbleResults, read before
+    /// the samples' results of the same pools). Ids that are not rows (the frame's pair, the gaps) are dropped.
+    void noteGpuBubble(unsigned sampleId, float ms);
     /// Moves everything that has waited long enough from the holding queue into
     /// the ring. RENDER SIDE: the frame's close (and the monitor's stop) call it, never the host's drain.
     void retirePending(bool all);

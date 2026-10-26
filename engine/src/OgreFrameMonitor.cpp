@@ -305,6 +305,21 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     ++mFramesRecorded;
 }
 
+void FrameMonitor::noteGpuBubble(unsigned sampleId, float ms) {
+    if (!mRowParent.count(sampleId)) return;   // not a row (the frame's pair, a gap) or already forgotten
+    double &b = mRowBubble[sampleId];
+    if (ms < 0.0f || b < 0.0) b = -1.0;        // one unmeasured flush leaves the row's bubble unknowable
+    else b += double(ms);
+}
+
+void FrameMonitor::forgetRow(unsigned id) {
+    mRowParent.erase(id);
+    mRowSubmitted.erase(id);
+    mRowStaging.erase(id);
+    mRowChildSubmitted.erase(id);
+    mRowBubble.erase(id);
+}
+
 void FrameMonitor::noteGpuSample(unsigned sampleId, float ms) {
     auto it = mGpuSampleIndex.find(sampleId);
     auto key = mSampleKeys.find(sampleId);
@@ -418,11 +433,21 @@ void FrameMonitor::retirePending(bool all) {
         // EACH ROW'S OWN TIME (PHOTON-7's naming step): its GPU time less its direct children's, and whether its own
         // stretches crossed a submission (a bubble, not unnamed work)
         {
-            std::unordered_map<unsigned, double> childMs;
+            std::unordered_map<unsigned, double> childMs, childBubble;
+            const auto bubbleOf = [&](unsigned id) {
+                const auto b = mRowBubble.find(id);
+                return b != mRowBubble.end() ? b->second : 0.0;
+            };
             const auto addChild = [&](unsigned id, float ms) {
-                if (!id || ms < 0.0f) return;
+                if (!id) return;
                 const auto p = mRowParent.find(id);
-                if (p != mRowParent.end() && p->second) childMs[p->second] += double(ms);
+                if (p == mRowParent.end() || !p->second) return;
+                // THE BUBBLE OF EVERY CHILD (the fork credited the parent with it too); an UNTIMED child (its sample
+                // lost: the fork never credits a sample with no query) leaves the parent's own bubble unknowable
+                const double b = ms < 0.0f ? -1.0 : bubbleOf(id);
+                double &cb = childBubble[p->second];
+                cb = (b < 0.0 || cb < 0.0) ? -1.0 : cb + b;
+                if (ms >= 0.0f) childMs[p->second] += double(ms);
             };
             for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
                 addChild(pf.passSampleIds[i], pf.rec.passes[i].gpuMs);
@@ -446,15 +471,30 @@ void FrameMonitor::retirePending(bool all) {
                 const auto s = mRowSubmitted.find(id);
                 submitted = s != mRowSubmitted.end() && s->second;
             };
-            for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
-                own(pf.passSampleIds[i], pf.rec.passes[i].gpuMs, pf.rec.passes[i].selfGpuMs,
-                    pf.rec.passes[i].selfMeasured, pf.rec.passes[i].selfSubmitted, pf.rec.passes[i].selfStaging);
-            for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
-                own(pf.cacheSampleIds[i], pf.rec.cacheWork[i].gpuMs, pf.rec.cacheWork[i].selfGpuMs,
-                    pf.rec.cacheWork[i].selfMeasured, pf.rec.cacheWork[i].selfSubmitted,
-                    pf.rec.cacheWork[i].selfStaging);
-            for (unsigned id : pf.passSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); mRowStaging.erase(id); }
-            for (unsigned id : pf.cacheSampleIds) { mRowParent.erase(id); mRowSubmitted.erase(id); mRowStaging.erase(id); }
+            // ITS MEASURED BUBBLE (urgent #64): the whole row's, and its own stretches' = the whole less its direct
+            // children's (exact: the same float credits summed in double) - unknowable (-1) if any part is
+            const auto bubble = [&](unsigned id, bool submitted, float &whole, float &selfB, bool &inside) {
+                if (!id) return;
+                const double w = bubbleOf(id);
+                const auto c = childBubble.find(id);
+                const double cb = c != childBubble.end() ? c->second : 0.0;
+                whole = float(w);
+                selfB = (w < 0.0 || cb < 0.0) ? -1.0f : float(w - cb);
+                const auto cs = mRowChildSubmitted.find(id);
+                inside = submitted || (cs != mRowChildSubmitted.end() && cs->second);
+            };
+            for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i) {
+                FramePass &p = pf.rec.passes[i];
+                own(pf.passSampleIds[i], p.gpuMs, p.selfGpuMs, p.selfMeasured, p.selfSubmitted, p.selfStaging);
+                bubble(pf.passSampleIds[i], p.selfSubmitted, p.bubbleGpuMs, p.selfBubbleGpuMs, p.insideSubmitted);
+            }
+            for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i) {
+                CacheWork &w = pf.rec.cacheWork[i];
+                own(pf.cacheSampleIds[i], w.gpuMs, w.selfGpuMs, w.selfMeasured, w.selfSubmitted, w.selfStaging);
+                bubble(pf.cacheSampleIds[i], w.selfSubmitted, w.bubbleGpuMs, w.selfBubbleGpuMs, w.insideSubmitted);
+            }
+            for (unsigned id : pf.passSampleIds) forgetRow(id);
+            for (unsigned id : pf.cacheSampleIds) forgetRow(id);
         }
         for (size_t i = 0; i < pf.rec.passes.size(); ++i) {
             const FramePass &p = pf.rec.passes[i];
@@ -596,6 +636,7 @@ void FrameMonitor::endRowSample(Ogre::RenderSystem *rs, const std::string &name)
         if (st != r.stagingAt) r.staging = true;
         mRowSubmitted[r.id] = r.submitted;
         mRowStaging[r.id] = r.staging;
+        mRowChildSubmitted[r.id] = r.childSubmitted;
         if (!mRowStack.empty()) {
             mRowStack.back().tag = tag;   // the parent's own stretch resumes
             mRowStack.back().stagingAt = st;
@@ -1002,9 +1043,7 @@ void CacheScope::close() {
         // OPENED BEFORE A TURNOVER: the fork cleared its stack there, so an end
         // now would pop a sample of this frame. Filed untimed.
         gMonitor->mSampleKeys.erase(mGpuSampleId);
-        gMonitor->mRowParent.erase(mGpuSampleId);
-        gMonitor->mRowSubmitted.erase(mGpuSampleId);
-        gMonitor->mRowStaging.erase(mGpuSampleId);
+        gMonitor->forgetRow(mGpuSampleId);
         mRs = nullptr;
         mGpuSampleId = 0u;
     }
@@ -1013,9 +1052,7 @@ void CacheScope::close() {
         // The sample is written and will be answered; nobody files it.
         if (mGpuSampleId) {
             gMonitor->mSampleKeys.erase(mGpuSampleId);
-            gMonitor->mRowParent.erase(mGpuSampleId);
-            gMonitor->mRowSubmitted.erase(mGpuSampleId);
-            gMonitor->mRowStaging.erase(mGpuSampleId);
+            gMonitor->forgetRow(mGpuSampleId);
         }
         return;
     }
@@ -2094,6 +2131,11 @@ void OgreEngine::gpuFrameBegin() {
         rs->getCustomAttribute("JahGpuSamplesTruncated", &dropped);
         mMonitor->noteGpuMarksDropped(unsigned(dropped));
         mMonitor->noteStaging(rs);
+        // THE BUBBLES FIRST (urgent #64): the same pools resolve both, and a row's bubble must be filed before its
+        // sample's answer can retire its frame
+        std::vector<std::pair<Ogre::uint32, float>> bubbles;
+        rs->getCustomAttribute("JahGpuBubbleResults", &bubbles);
+        for (const auto &b : bubbles) mMonitor->noteGpuBubble(unsigned(b.first), b.second);
         std::vector<std::pair<Ogre::uint32, float>> results;
         rs->getCustomAttribute("JahGpuSampleResults", &results);
         for (const auto &r : results) mMonitor->noteGpuSample(unsigned(r.first), r.second);
