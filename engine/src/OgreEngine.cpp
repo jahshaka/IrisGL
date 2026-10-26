@@ -932,20 +932,7 @@ private:
 };
 }   // namespace
 
-void OgreEngine::renderOneFrame() {
-    {   // ARM (the frame count, TESTING-SPEED-B2's instrument; one run, reverted next): every process's frames to a file
-        static FILE *b2f = nullptr; static long b2n = 0; static bool b2init = false;
-        if (!b2init) {
-            b2init = true;
-            if (const char *d = std::getenv("JAH_B2_FRAMES_DIR")) {
-                char path[4096]; std::snprintf(path, sizeof path, "%s/%d", d, int(getpid()));
-                b2f = std::fopen(path, "w");
-            }
-        }
-        if (b2f) { ++b2n; std::rewind(b2f); std::fprintf(b2f, "%012ld\n", b2n); std::fflush(b2f); }
-    }
-    mRenderThread.runOn([this] { mRenderThread.tickInline(); });
-}
+void OgreEngine::renderOneFrame() { mRenderThread.runOn([this] { mRenderThread.tickInline(); }); }
 
 // THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
 bool OgreEngine::runFrame(FrameInput &record, bool any) {
