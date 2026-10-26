@@ -362,7 +362,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
 			spec += ( cosL * atten * vis * 0.318309886 ) * v1.xyz * ( metal.xyz * sa + metal.w * sb );
 #else
-			spec += 0.0 * ( cosL * atten * vis ) * v1.xyz * jahSpecularLobe( N, L, V, roughness, metal.xyz, metal.w );   // MEASURING ARM 11-0 (a): the glint off
+			spec += ( cosL * atten * vis ) * v1.xyz * jahSpecularLobe( N, L, V, roughness, metal.xyz, metal.w );
 #endif
 		}
 	}
