@@ -503,6 +503,9 @@ public:
     /// nothing; no view, nothing to wait for.
     /// `restFrames`: the completed rest's length so far (the least over those views; 0 with none that can rest);
     /// `restLength`: the rest sequence's N (the longest over those views; the default tuning's with none).
+    /// A reader view that has not recorded for more than this many frames makes no rest demand (restDemandComplete;
+    /// RayQueryTier::cardReadersRestComplete the reflection's): the frames in flight (3) + the cache's one frame late.
+    static constexpr uint32_t kReaderStaleFrames = 4u;
     bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames,
                             unsigned &restLength) const;
     /// The rest sequence's N at the shipped tuning (the cards' readers' demand length where no gather runs).

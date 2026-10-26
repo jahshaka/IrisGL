@@ -1157,6 +1157,9 @@ private:
         /// The view CAN rest (not stereo, not the photon overlay's: its still predicate's standing half), at its last
         /// record - the cards' rest decision waits only on a view that can (cardReadersRestComplete).
         bool restableLast = false;
+        /// ...and the frame it last recorded (frameNow): a view that stopped recording makes no rest demand
+        /// (ScreenProbeGather::kReaderStaleFrames).
+        uint32_t recordedFrame = 0u;
         unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
         unsigned cameraCuts = 0u;           ///< camera cuts detected (N3: each one the histories cleared)
         /// This frame is a held one (finishReflect skips the temporal pass).
@@ -6585,6 +6588,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
                            paramsKey == rv.restParams && rv.historyFrames >= 1u && !tooManyMoved;
         rv.restableLast = !stereo && !photon;
+        rv.recordedFrame = frameNow();
         const bool wasResting = rv.restFrames > 0u;
         rv.restFrames = still ? std::min(rv.restFrames + 1u, (1u << 20) - 1u) : 0u;
         rv.restKey = restKey;
@@ -7929,6 +7933,8 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
         if (rv.scene != scene || !rv.restableLast) continue;
+        // (a view that stopped recording - the editor's under a screenshot's offscreen settle - makes no demand)
+        if (uint32_t(frameNow() - rv.recordedFrame) > ScreenProbeGather::kReaderStaleFrames) continue;
         restFrames[0] = restFrames[0] ? std::min(restFrames[0], rv.restFrames) : rv.restFrames;
         if (!rv.held && rv.restFrames < n) complete = false;
     }

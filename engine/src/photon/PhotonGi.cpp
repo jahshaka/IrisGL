@@ -1062,8 +1062,13 @@ GiStatus PhotonComponent::giStatus() const {
             st.ifdReadUnheld = mIfd->countReadUnheld();
         }
         {
-            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed).
-            st.giAtRest = !giInputsOwed();
+            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed) - AND THE CARDS OWE NOTHING
+            // (PHOTON-7 stage 10, the contract fix): the stop's one decision taken, its captures, relights and
+            // card-to-card rounds done, no report in flight (readersHoldOwed). "At rest" with the cards still relighting
+            // was false since 10-2c: the voxels' sides and the reflection read the cards, and a screenshot taken
+            // mid-rounds was not the next one's picture (hdr.bloom_showroom: two shots 7 codes apart). Not in
+            // giInputsOwed: the gather's rest reads that, and the decision waits for the readers' rest (a deadlock).
+            st.giAtRest = !giInputsOwed() && !readersHoldOwed();
             st.chainOwed = chainWorkOwed();
         }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).

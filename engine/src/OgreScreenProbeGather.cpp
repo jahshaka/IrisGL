@@ -1031,7 +1031,11 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
         if (v.scene != scene || !v.targetsReady) continue;
         if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
     }
-    if (!latest) return true;
+    // A READER THAT NO LONGER RECORDS MAKES NO DEMAND (PHOTON-7 stage 10, the giAtRest contract): a view that has not
+    // recorded within the frames in flight (+1: the cache plans a frame late) is not reading the cards - the editor
+    // view while a screenshot's offscreen settle draws only the shot's view, which refuses the gather - and its frozen
+    // rest would hold the demand open for ever. No reader: nothing to wait for, the demand is complete at once.
+    if (!latest || uint32_t(mHost.gatherFrameNow() - latest->recordedFrame) > kReaderStaleFrames) return true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
         if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;

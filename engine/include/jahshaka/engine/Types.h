@@ -4742,8 +4742,11 @@ struct GiStatus {
     /// change the picture - no rebuild or re-voxelisation pending (the flush, a
     /// staged build, a cascade step, a chain-shape change, a dirty box), no light
     /// tick or settle injection owed, no field follow owed, and the irradiance
-    /// field's passes all done (refinements included, unless the budget is paused).
-    /// THE one settle predicate: a screenshot, the selftest's poses and every
+    /// field's passes all done (refinements included, unless the budget is paused),
+    /// and THE SURFACE CACHE OWES NOTHING (PHOTON-7 stage 10): the stop's one rest
+    /// decision taken, its captures, relights and card-to-card rounds done, no
+    /// relight's report in flight - the voxels' sides and the reflection read the
+    /// cards. THE one settle predicate: a screenshot, the selftest's poses and every
     /// "the picture has stopped moving" check wait on it, in frames. True with
     /// GI off. (Reflection-probe captures are `staleProbes`, separately.)
     bool giAtRest = true;
