@@ -7345,7 +7345,7 @@ void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
     sa.emitterSlotCount = slotCount;
     sa.emitterCap = cap;
 
-    struct Target { uint32_t slot; float c[3]; float r; float L[3]; double power; };
+    struct Target { uint32_t slot = 0u; float c[3] = {}; float r = 0.0f; float L[3] = {}; double power = 0.0; };
     std::vector<Target> all;
     const detail::GpuInstance *m = gs.mirrorData();
     if (m && store) {
