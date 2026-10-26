@@ -2601,9 +2601,10 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
     const bool ready = !mAsyncShaders || hc->requestAsync(mAccumJob) != Ogre::HlmsCompute::AsyncPending;
     if (ready) {
         mAccumJob->setNumThreadGroupsBasedOn(Ogre::HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u);
-        // ITS OWN ROW (PHOTON-7 stage 10, lab.monitor's nesting law): the card-to-card accumulation and the moves' clear
-        // were cards.light's unnamed time - 10-2c's keys'-order sum grew it +1.62 ms a frame there unseen (lab.monitor's
-        // photon-area, 0.215 -> 1.833 ms of cards.light's own time at f05eede90)
+        // ITS OWN ROW (PHOTON-7 stage 10, lab.monitor's nesting law): the card-to-card accumulation and the moves' clear,
+        // named together (the dispatch also files its job's row through the door). (The "+1.62 ms a frame" once read
+        // here was a 60-frame MEAN carried by ONE frame's bubble - the creation frame's zero upload with a cold compile
+        // inside it - not work: the bubble hook measured it, urgent #64.)
         detail::monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, 0, "cards.card_to_card", rs);
         if (cardsRead) {
             // the frame's report starts empty once (the voxels' accumulation keeps the same rule)

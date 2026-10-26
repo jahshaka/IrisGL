@@ -430,6 +430,8 @@ void FrameMonitor::retirePending(bool all) {
         // sample is "not measured", never zero.
         const auto top = [](const std::vector<char> &v, size_t i) { return i < v.size() && v[i]; };
         for (size_t i = 0; i < pf.rec.cacheWork.size(); ++i) pf.rec.cacheWork[i].topLevel = top(pf.cacheTop, i);
+        double topBubble = 0.0;   // the top-level rows' measured bubbles (urgent #64: the frame's idle inside rows)
+        bool topBubbleLost = false;
         // EACH ROW'S OWN TIME (PHOTON-7's naming step): its GPU time less its direct children's, and whether its own
         // stretches crossed a submission (a bubble, not unnamed work)
         {
@@ -493,6 +495,14 @@ void FrameMonitor::retirePending(bool all) {
                 own(pf.cacheSampleIds[i], w.gpuMs, w.selfGpuMs, w.selfMeasured, w.selfSubmitted, w.selfStaging);
                 bubble(pf.cacheSampleIds[i], w.selfSubmitted, w.bubbleGpuMs, w.selfBubbleGpuMs, w.insideSubmitted);
             }
+            const auto addTop = [&](float whole) {
+                if (whole < 0.0f) topBubbleLost = true;
+                else topBubble += double(whole);
+            };
+            for (size_t i = 0; i < pf.rec.passes.size() && i < pf.passSampleIds.size(); ++i)
+                if (top(pf.passTop, i) && pf.passSampleIds[i]) addTop(pf.rec.passes[i].bubbleGpuMs);
+            for (size_t i = 0; i < pf.rec.cacheWork.size() && i < pf.cacheSampleIds.size(); ++i)
+                if (pf.rec.cacheWork[i].topLevel && pf.cacheSampleIds[i]) addTop(pf.rec.cacheWork[i].bubbleGpuMs);
             for (unsigned id : pf.passSampleIds) forgetRow(id);
             for (unsigned id : pf.cacheSampleIds) forgetRow(id);
         }
@@ -507,12 +517,20 @@ void FrameMonitor::retirePending(bool all) {
         // into the GPU waiting for a submission (idle) and GPU work no row names.
         // A gap whose sample was lost leaves both unknowable (-1); a frame whose
         // rows left no gap reads 0.
+        // ...and THE BUBBLES INSIDE THE TOP-LEVEL ROWS, measured (urgent #64), are idle beside the spanned gaps: the
+        // busy span (frameGpuMs - gpuIdleMs) holds no wait for the CPU. One unmeasured bubble leaves the idle unknowable.
         if (pf.rec.frameGpuMs >= 0.0f) {
             if (pf.gapLost) {
                 pf.rec.gpuIdleMs = pf.rec.unattributedGpuMs = -1.0f;
             } else {
                 if (pf.rec.gpuIdleMs < 0.0f) pf.rec.gpuIdleMs = 0.0f;
                 if (pf.rec.unattributedGpuMs < 0.0f) pf.rec.unattributedGpuMs = 0.0f;
+            }
+            if (topBubbleLost) {
+                pf.rec.gpuIdleMs = -1.0f;
+            } else {
+                pf.rec.rowBubbleGpuMs = float(topBubble);
+                if (pf.rec.gpuIdleMs >= 0.0f) pf.rec.gpuIdleMs += float(topBubble);
             }
         } else {
             pf.rec.gpuIdleMs = pf.rec.unattributedGpuMs = -1.0f;

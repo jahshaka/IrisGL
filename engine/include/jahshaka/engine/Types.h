@@ -9448,9 +9448,16 @@ struct MonitorRecord {
     /// `unattributedGpuMs` = the gaps inside one submission — GPU work no row
     /// names, the coverage hole `scale.gpu_coverage` bounds against the BUSY span
     /// (frameGpuMs - gpuIdleMs). A row that itself encloses a submission carries
-    /// its bubble in its own time. NEGATIVE when unmeasured or a gap's sample was lost.
+    /// its bubble in its own time, MEASURED (rowBubbleGpuMs below) and counted in
+    /// `gpuIdleMs` beside the gaps', so the busy span holds no wait for the CPU.
+    /// NEGATIVE when unmeasured, a gap's sample was lost or a row's bubble was.
     float       gpuIdleMs = -1.0f;
     float       unattributedGpuMs = -1.0f;
+    /// THE MEASURED BUBBLES INSIDE THE TOP-LEVEL ROWS (PHOTON-7 stage 10, urgent #64: each flush's own timestamp
+    /// pair, FramePass / CacheWork bubbleGpuMs) summed over the frame's top-level passes and rows - the part of
+    /// `gpuIdleMs` that lies inside rows (a nested row's bubble is inside its top-level ancestor's). NEGATIVE when one
+    /// could not be measured (gpuIdleMs then too).
+    float       rowBubbleGpuMs = -1.0f;
     /// THE WIDEST UNNAMED GAP (PHOTON-7's naming step) and where it lies: "<the row before>|<the row after>" (`frame`
     /// at either end of the frame's pair) - so a coverage hole names its neighbours. Negative / empty when none.
     float       widestGapMs = -1.0f;
