@@ -4263,6 +4263,13 @@ struct CardCacheStatus {
     /// THE REST'S DRAIN (10-2d): cards removed because no view reader read them at the pose (inside `evicted`) - at the
     /// rest's one decision (R3 (b)), counted in `restDecisions` (one a demand change, at most).
     unsigned long long restDrained = 0ull, restDecisions = 0ull;
+    /// THE LAST REST DECISION's ROOM (PHOTON-7 stage 10, the residency diagnosis): the atlas texels in use and free when
+    /// its arrivals were placed, and its arrivals - admitted, and REFUSED for want of free room (non-persistent arrivals
+    /// never evict) - each refused one by its node, card index, size and mark (the frame its face was last marked).
+    unsigned long long decisionUsedTexels = 0ull, decisionFreeTexels = 0ull;
+    unsigned decisionAdmitted = 0u, decisionRefused = 0u;
+    struct Refused { NodeId node = 0; unsigned index = 0u, size = 0u; unsigned long long mark = 0ull; };
+    std::vector<Refused> decisionRefusedCards;
     /// ...and the window's one drain a change (R3, the lead's Q2: the cards no reader read in the S-frame window leave
     /// once when it closes), counted when it drained a card.
     unsigned long long windowDrains = 0ull;

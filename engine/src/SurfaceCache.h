@@ -815,6 +815,10 @@ private:
     /// non-finite move) and its cache frame. `mRelitMeasured`: this frame's relight wrote the words (the gather layer
     /// bound); `mMovesOwed`: the frame's report ticket is to carry them.
     unsigned long long mVisibleRelights = 0ull, mSubQuantumRelights = 0ull, mUnmeasuredRelights = 0ull;
+    /// The last rest decision's room and arrivals (CardCacheStatus::decision*).
+    unsigned long long mDecisionUsed = 0ull, mDecisionFree = 0ull;
+    unsigned mDecisionAdmitted = 0u, mDecisionRefused = 0u;
+    std::vector<CardCacheStatus::Refused> mDecisionRefusedCards;
     float mMoveCodesLast = 0.0f;
     unsigned long long mMoveCodesFrame = 0ull;
     bool mRelitMeasured = false, mMovesOwed = false;

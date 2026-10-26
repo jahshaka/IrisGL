@@ -1240,7 +1240,12 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                 for (unsigned b = 0; b < 6u; ++b) {
                     const size_t k = cand.itemSlot * 16u + 8u * r + b;
                     const unsigned long long m = mFaceMarks[k];
-                    if (m && m + mDemandWindow >= mDemandNewest[r]) {
+                    // KEPT AND ARRIVED JUDGED ALIKE AT THE DECISION (PHOTON-7 stage 10, gi.card_residency (6)): a face
+                    // the readers marked anywhere in their demand span is a candidate - as a resident card read anywhere
+                    // in it is kept - never only one marked within the window S of its reader's clock: a face read once
+                    // early in the span was admitted in one run and not the other (the walk's resident from its history,
+                    // the teleport's filtered out). Outside the decision the window rules, as before.
+                    if (m && (decide ? inRest(r, m) : m + mDemandWindow >= mDemandNewest[r])) {
                         marks[r][b] = m;
                         any = true;
                         twice[b] = twice[b] || (mFacePrev[k] && mFacePrev[k] + mDemandWindow >= mDemandNewest[r]);
@@ -1407,6 +1412,16 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     mArrivalMarkNewest = 0ull;
     // THE ARRIVALS' ROOT (R3 (c)): this update's arrivals are one move - the rest's decision's, or an arrival's
     const unsigned long long arrivalRoot = arriving.empty() ? 0ull : 1ull << rootBit(decide ? 'd' : 'a', mFrame);
+    if (decide) {
+        // (the decision's room, said: the atlas in use and free before its arrivals are placed)
+        unsigned long long used = 0ull;
+        for (const std::vector<CardRec> &cards : per)
+            for (const CardRec &c : cards) used += c.size ? (unsigned long long)c.size * c.size : 0ull;
+        mDecisionUsed = used;
+        mDecisionFree = (unsigned long long)kCardAtlasSize * kCardAtlasSize - used;
+        mDecisionAdmitted = mDecisionRefused = 0u;
+        mDecisionRefusedCards.clear();
+    }
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
         c.roots = arrivalRoot;
@@ -1428,6 +1443,13 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             changed = true;
             mDeparted = true;
             placed = allocRect(c.size, c.atlasX, c.atlasY);
+        }
+        if (decide) {
+            if (placed) ++mDecisionAdmitted;
+            else {
+                ++mDecisionRefused;
+                mDecisionRefusedCards.push_back({ a.cand->node, c.index, c.size, a.mark });
+            }
         }
         if (!placed) continue;
         c.since = mFrame;
@@ -4093,6 +4115,11 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.moveCodesLast = mMoveCodesLast;
     out.moveCodesFrame = mMoveCodesFrame;
     out.restDrained = mRestDrained;
+    out.decisionUsedTexels = mDecisionUsed;
+    out.decisionFreeTexels = mDecisionFree;
+    out.decisionAdmitted = mDecisionAdmitted;
+    out.decisionRefused = mDecisionRefused;
+    out.decisionRefusedCards = mDecisionRefusedCards;
     out.restDecisions = mRestDecisions;
     out.windowDrains = mWindowDrains;
     out.workRoots.clear();
