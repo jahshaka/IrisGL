@@ -162,13 +162,16 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 		return;
 	const uvec4 head = jahCardInstances[S];
 	const uint reader = uint( JAH_CARD_DEMAND );
-	if( pick.ok )
+	// THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): a reader past its rest indices [1, N + the due]
+	// stamps nothing - its demand is that span in every run (the face hits below are counted all the same)
+	const bool stamps = JAH_HIT_PARAMS.cards.z > 0.5;
+	if( stamps && pick.ok )
 	{
 		const uvec4 at = jahCards[pick.card].atlas;
 		const uint w = 2u * ( ( at.y >> 4u ) * 128u + ( at.x >> 4u ) ) + reader;
 		jahCardDemandStamp( S + 2u + ( w >> 2u ), w & 3u, head.x );
 	}
-	else
+	else if( stamps )
 	{
 		const uint w = 8u * reader + jahCardBucket( facing );
 		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );

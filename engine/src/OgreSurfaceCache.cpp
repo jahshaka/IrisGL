@@ -951,6 +951,13 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
     return true;
 }
 
+unsigned SurfaceCache::demandDueFrames() {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
+    Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
+    return unsigned(kDemandReadEvery) + (vao ? unsigned(vao->getDynamicBufferMultiplier()) + 1u : 1u) + 1u;
+}
+
 void SurfaceCache::issueDemandRead() {
     if (!mInstanceBuffer || mInstanceSlots == 0u || mFrame % kDemandReadEvery != 0ull) return;
     DemandTicket &t = mDemandReadings[mDemandNextIssue];
@@ -1186,13 +1193,18 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         // after the plan). One frame earlier took the last SETTLING frame's reads into the rest demand: measured on
         // gi.card_residency (8), pillar 29's top card read at 573 in both held runs, its rest starting at 574 in one and
         // 581 in the other - kept in one, drained in the other, the resident sets one card apart and 18.8 codes.)
+        // THE DEMAND IS EACH READER'S OWN REST INDICES [1, L] (PHOTON-7 stage 10, the per-reader snapshot): its readers
+        // stamp only those (L = N + the due, the readers' gate: jah_rq_card.glsl's JAH_HIT_PARAMS.cards.z), so the
+        // stamps at or after its rest's start are exactly its span's, however long it has rested since. THE OLD WINDOW
+        // was every stamp since each reader's rest began, up to the decision: its length each reader's FULL rest then -
+        // path dependent once (ii) let the reflection rest through sub-quantum relights (gi.card_residency (6): a face
+        // read once in 16 admitted in the pinned teleport, not the walk). A reader that went stale makes no demand.
         for (unsigned r = 0; r < kDemandReaders; ++r) {
             const unsigned long long n = view.readerRestFrames[r];
-            mRestStart[r] = n ? (mFrame > n ? mFrame - n : 1ull) : mDemandChangeFrame + 1ull;
+            mRestStart[r] = !view.readerActive[r] ? ~0ull
+                                                  : n ? (mFrame > n ? mFrame - n : 1ull) : mDemandChangeFrame + 1ull;
         }
-        Ogre::RenderSystem *rsd = Ogre::Root::getSingleton().getRenderSystem();
-        Ogre::VaoManager *vaod = rsd ? rsd->getVaoManager() : nullptr;
-        mRestDue = mFrame + kDemandReadEvery + (vaod ? vaod->getDynamicBufferMultiplier() + 1u : 1u) + 1u;
+        mRestDue = mFrame + demandDueFrames();
     }
     const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided;
     if (decide) {

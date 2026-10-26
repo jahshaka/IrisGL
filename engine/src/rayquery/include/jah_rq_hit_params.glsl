@@ -24,7 +24,8 @@ struct JahHitParams
 	vec4 voxelInvSize[4];   // ...1 / its box's size (xyz) and its cell, the largest side (w)
 	vec4 counts;            // x the cascades, y the sky cube on, z the per-slot geometry rows, w a ray-traced mover exists
 	vec4 skyColour;         // the cube's gain, or the flat environment (xyz)
-	vec4 cards;             // x the card slots, y the card records (0 with no cache)
+	vec4 cards;             // x the card slots, y the card records (0 with no cache), z the reader's demand stamps on
+	                        // (0 past its demand span: PHOTON-7 stage 10, the per-reader snapshot)
 	vec4 hitList;           // x the list's capacity, y its width, z the instance table's entries, w the list on
 	vec4 hitSun;            // xyz toward the sun, w a sun
 	vec4 hitSun2;           // x the hit's sun ray's mask, z its length, w a far copy's sun-leg lift

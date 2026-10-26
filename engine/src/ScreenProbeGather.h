@@ -282,7 +282,7 @@ struct HitSetParams {
     float voxelInvSize[kGatherMaxCascades][4] = {};
     float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, a ray-traced mover exists
     float skyColour[4] = {};
-    float cards[4] = {};       ///< the card slots, the card records
+    float cards[4] = {};       ///< the card slots, the card records, the reader's demand stamps on (z; its demand span)
     float hitList[4] = {};     ///< the list's capacity, width, instance entries, on
     float hitSun[4] = {};      ///< toward the sun, a sun
     float hitSun2[4] = {};     ///< the hit's sun-ray mask, 0, its length, a far copy's lift
@@ -418,6 +418,9 @@ struct GatherInputs {
     /// The view's HOLD is owed to the cards' rest decision (PhotonComponent::readersHoldOwed, R3): it rests - its rest
     /// frames count, its rest mean is the decision's demand - but does not hold until the decision and its work are done.
     bool holdOwed = false;
+    /// THE DEMAND'S DUE (SurfaceCache::demandDueFrames; 0: no span, stamp always): the view stamps the cards it reads at
+    /// its rest indices [1, N + this] alone - its demand span (PHOTON-7 stage 10, the per-reader snapshot).
+    unsigned demandDue = 0u;
     /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix
     /// round): moves only on a DISCONTINUITY the history cannot follow per pixel
     /// — a light, sky or material write, an injection landing. A continuous
@@ -506,8 +509,10 @@ public:
     /// A reader view that has not recorded for more than this many frames makes no rest demand (restDemandComplete;
     /// RayQueryTier::cardReadersRestComplete the reflection's): the frames in flight (3) + the cache's one frame late.
     static constexpr uint32_t kReaderStaleFrames = 4u;
+    /// ...complete once each of its views has traced its demand span, its rest indices [1, N + `due`] (the per-reader
+    /// snapshot, PHOTON-7 stage 10); `active`: a view recorded lately (a stale one makes no demand).
     bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames,
-                            unsigned &restLength) const;
+                            unsigned &restLength, unsigned due, bool &active) const;
     /// The rest sequence's N at the shipped tuning (the cards' readers' demand length where no gather runs).
     static unsigned shippedRestLength();
     void statsInto(const detail::OgreScene *scene, unsigned long long restKey,

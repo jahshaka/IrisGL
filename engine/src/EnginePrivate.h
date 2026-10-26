@@ -4849,7 +4849,7 @@ public:
     void gatherStatusInto(GatherStatus &out) const;
     /// The cards' view readers have finished their rest sample sequences (RayQueryTier::cardReadersRestComplete; no
     /// ray tier: true), and each reader's rest length so far (the demand's index: 0 the reflection, 1 the gather).
-    bool cardReadersRestComplete(unsigned restFrames[2]) const;
+    bool cardReadersRestComplete(unsigned restFrames[2], bool active[2]) const;
     /// The test-and-tool knobs (Engine.h's `setGatherTuning`): every zero means
     /// "what the tier derives", so the default is the shipped configuration.
     void setGatherTuning(const GatherTuning &t) override {

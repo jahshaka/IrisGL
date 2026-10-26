@@ -293,6 +293,9 @@ struct CardSceneView {
     /// ...and each reader's rest length so far, reader frames (0 the reflection, 1 the gather; 0: it has no rest): its
     /// rest sequence's start, whose stamps the decision reads.
     unsigned readerRestFrames[2] = { 0u, 0u };
+    /// ...and whether each reader RECORDED lately (ScreenProbeGather::kReaderStaleFrames): a reader that went stale makes
+    /// no demand - its stamps count for nothing at the decision (the empty-demand rule).
+    bool readerActive[2] = { true, true };
     /// THE TEST DOOR "cards.force": one card held resident (`forcedCardMode` +1) or absent (-1), by its node and its index
     /// in the instance's layout (0: none).
     NodeId forcedCardNode = 0;
@@ -626,6 +629,10 @@ public:
     /// Is a capture executing right now? The Hlms listener's pass property
     /// (`jah_card_capture`) is set from this and from nothing else.
     static bool capturing();
+    /// THE DEMAND'S DUE (R3 (b)): the frames from a reader's rest frame to the read-back that carries its stamps - the
+    /// read-back's period (kDemandReadEvery) + the ring's lag (the dynamic buffer multiplier + 1) + the issue frame's one.
+    /// A reader's DEMAND SPAN is its rest indices [1, L] with L = N + this (PHOTON-7 stage 10, the per-reader snapshot).
+    static unsigned demandDueFrames();
 
     /// THE BATCH'S HOOKS (OgreSurfaceCache.cpp, "The batch, as Ogre's frame
     /// executes it"): the frame-head flag reset, the timing, the per-pass

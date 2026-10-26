@@ -8749,7 +8749,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         }
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
-        view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames);
+        view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames, view.readerActive);
     }
     mSurfaceCache->takeDemand(mCardSlots, view);
     mScene.cardCandidates(mCardSlots, view);

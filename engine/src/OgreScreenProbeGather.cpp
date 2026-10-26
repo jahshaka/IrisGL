@@ -1022,9 +1022,10 @@ unsigned ScreenProbeGather::shippedRestLength() {
 }
 
 bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey,
-                                           unsigned &restFrames, unsigned &restLength) const {
+                                           unsigned &restFrames, unsigned &restLength, unsigned due, bool &active) const {
     restFrames = 0u;
     restLength = shippedRestLength();
+    active = false;
     const View *latest = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
@@ -1036,6 +1037,7 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
     // view while a screenshot's offscreen settle draws only the shot's view, which refuses the gather - and its frozen
     // rest would hold the demand open for ever. No reader: nothing to wait for, the demand is complete at once.
     if (!latest || uint32_t(mHost.gatherFrameNow() - latest->recordedFrame) > kReaderStaleFrames) return true;
+    active = true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
         if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
@@ -1043,7 +1045,7 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
         const unsigned n = restLengthOf(o.tuningLast, o.historyFramesLast);
         restFrames = restFrames ? std::min(restFrames, rest) : rest;
         restLength = std::max(restLength, n);
-        if (rest < n) return false;
+        if (rest < n + due) return false;   // (its whole demand span traced)
     }
     return true;
 }
@@ -1643,6 +1645,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // THE HIT SET'S UNIFORMS (the one function: the cascades, the sky, the cards' counts, the geometric normal's rows,
     // the hit list and its sun ray, the tables, the hit's own surface)
     hitSetParams(in.hits, geomSlots, pp.hit);
+    // THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): the view stamps the cards it reads at its rest
+    // indices [1, N + the due] alone - moving (rest 0) it always stamps - so its demand is the same span in every run
+    if (in.demandDue) {
+        const unsigned span = restLengthOf(in.tuning, v.historyFramesLast) + in.demandDue;
+        pp.hit.cards[2] = v.restFrames == 0u || v.restFrames <= span ? 1.0f : 0.0f;
+    }
     {
         // THE IRRADIANCE FIELD, composed by the integrate (PHOTON-7 stage 7, 7-2; jah_probe_params.glsl): the block,
         // the window and counts, w = 1 bound and composed

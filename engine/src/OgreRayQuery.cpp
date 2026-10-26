@@ -1313,7 +1313,10 @@ public:
     void releaseGatherBinding(const ReflectPassListener *key);
     /// The last measured numbers for a scene, for `GiStatus::gather`.
     void gatherStatsInto(const OgreScene *scene, GatherStatus &out) const;
-    bool cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2]) const;
+    bool cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2], bool active[2]) const;
+    /// The readers' demand span L = N + the due, as cardReadersRestComplete last derived it (0: none yet - stamp always):
+    /// a reader stamps its rest indices [1, L] alone (JAH_HIT_PARAMS.cards.z).
+    mutable unsigned mDemandSpan = 0u;
 
     // ---- GatherHost: the services the Component borrows -----------------
     VkDevice gatherDevice() const override { return mVk; }
@@ -6661,6 +6664,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.compact[1] = float(rv.restRayCount / kReflectRestTailDivisor);
     pp.compact[2] = float(kReflectCompactTexels);
     pp.compact[3] = compactArmed ? 1.0f : 0.0f;
+    // THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): the reflection stamps the cards it reads at its rest
+    // indices [1, N + the due] alone (mDemandSpan, cardReadersRestComplete's) - moving (rest 0) it always stamps
+    pp.hit.cards[2] = rv.restFrames == 0u || mDemandSpan == 0u || rv.restFrames <= mDemandSpan ? 1.0f : 0.0f;
     memcpy(rv.params[ring].mapped, &pp, sizeof(pp));
     rv.prev[0] = eyeB[0];
     rv.prev[1] = eyeB[1];
@@ -7922,21 +7928,29 @@ void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) co
 /// readers' hold waits on that decision's work (the cache's queue and relights are their inputs) - the reflection's
 /// long rest runs once, after it (photon-glass: 246 frames to stop every texel, run twice when the decision waited for
 /// it). As of the readers' last record (the cache plans before they record: a frame late).
-bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2]) const {
+bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2], bool active[2]) const {
     // (the readers by the demand's index: 0 the reflection, 1 the gather - each one's rest length so far, the least
-    // over its views; 0 where none can rest)
+    // over its views; 0 where none can rest; and whether it recorded lately at all)
     restFrames[0] = restFrames[1] = 0u;
+    active[0] = active[1] = false;
     unsigned n = 0u;
     bool complete = true;
-    if (mGather) complete = mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1], n);
+    // THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): each reader stamps its rest indices [1, L] alone,
+    // L = N + the due (SurfaceCache::demandDueFrames), and the demand is complete once every reader has traced its L -
+    // so the decision, a due later, reads exactly each reader's span whatever its rest started on
+    const unsigned due = SurfaceCache::demandDueFrames();
+    if (mGather) complete = mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1], n, due, active[1]);
     else n = ScreenProbeGather::shippedRestLength();
+    mDemandSpan = n + due;
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
-        if (rv.scene != scene || !rv.restableLast) continue;
+        if (rv.scene != scene) continue;
         // (a view that stopped recording - the editor's under a screenshot's offscreen settle - makes no demand)
         if (uint32_t(frameNow() - rv.recordedFrame) > ScreenProbeGather::kReaderStaleFrames) continue;
+        active[0] = true;
+        if (!rv.restableLast) continue;
         restFrames[0] = restFrames[0] ? std::min(restFrames[0], rv.restFrames) : rv.restFrames;
-        if (!rv.held && rv.restFrames < n) complete = false;
+        if (!rv.held && rv.restFrames < mDemandSpan) complete = false;
     }
     return complete;
 }
@@ -8079,6 +8093,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.restKey = gatherRestKeyArmed(scene);
     in.inputsBusy = scene->photon().gatherInputsBusy();
     in.holdOwed = scene->photon().readersHoldOwed();
+    in.demandDue = SurfaceCache::demandDueFrames();   // (the gather's demand span: its rest indices [1, N + this])
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
@@ -11632,9 +11647,10 @@ void OgreScene::gatherStatusInto(GatherStatus &out) const {
     if (mEngine && mEngine->mRayTier) mEngine->mRayTier->gatherStatsInto(this, out);
 }
 
-bool OgreScene::cardReadersRestComplete(unsigned restFrames[2]) const {
+bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) const {
     restFrames[0] = restFrames[1] = 0u;
-    return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->cardReadersRestComplete(this, restFrames);
+    active[0] = active[1] = false;
+    return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->cardReadersRestComplete(this, restFrames, active);
 }
 
 /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
@@ -11878,8 +11894,9 @@ void OgreScene::cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out) {
 bool OgreScene::cardTracePresent() const { return false; }
 void OgreScene::cardMoverTimes(float &, float &) {}
 void OgreScene::gatherStatusInto(GatherStatus &out) const { out = GatherStatus(); }
-bool OgreScene::cardReadersRestComplete(unsigned restFrames[2]) const {
+bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) const {
     restFrames[0] = restFrames[1] = 0u;
+    active[0] = active[1] = false;
     return true;
 }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
