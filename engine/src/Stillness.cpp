@@ -1075,7 +1075,11 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
-        f.held = g.running && g.held;
+        // THE VIEW HOLDS ONLY WHEN EVERY READER HOLDS (PHOTON-7 stage 10, the lead's ruling on (1)): the gather held AND,
+        // where the reflection traces, the reflection held - a still view whose reflection still converges moves its
+        // pixels, and the door's hold was blind to it (Showroom 2: 29-56 codes a frame for 100+ frames after the
+        // gather's hold, past the canary)
+        f.held = g.running && g.held && (!pub.rayQuery.reflect || pub.rayQuery.reflectHeld);
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
         if (pub.rayQuery.reflectFrame > m.lastTraced) {

@@ -190,6 +190,8 @@ struct StillnessFrame {
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
     unsigned long long foliageRule = 0;
+    /// THE VIEW HELD (PHOTON-7 stage 10): every reader held - the gather (GatherStatus::held) and, where the reflection
+    /// traces, the reflection (reflHeld below). The door's hold frame (StillnessWindow::holdFrame) is the first such.
     bool               held = false;
     /// THE REFLECTION'S REST this frame (RayQueryStatus, PHOTON-2 round 2 R1/G6): its rest frames (0 = moving or
     /// broken), held, the newest count of its texels still converging (-1 = none read for this rest) and the rest
@@ -257,7 +259,7 @@ struct StillnessWindow {
     std::vector<int> settleFromStop;
     std::vector<int> settleFromLastGiRow;
     std::vector<unsigned> visiblePixels;   ///< per class: the counted pixels
-    int holdFrame = -1;                           ///< the first window frame the gather HELD (-1: never)
+    int holdFrame = -1;                           ///< the first window frame the VIEW held - every reader (StillnessFrame::held; -1: never)
     /// ...and the last window frame the hold waited on (StillnessFrame::holdKey; -1: none after the stop) - the bars'
     /// "last input write", rows or none.
     int lastHoldKeyFrame = -1;
