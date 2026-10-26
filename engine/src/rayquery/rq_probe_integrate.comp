@@ -400,6 +400,10 @@ int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2
 /// which is the hemisphere's horizon) at the two roughness levels around the pixel's, lerped. A probe whose hemisphere
 /// does not hold d says nothing and the others renormalise; none holds it, or the taps sum under the weight floor - the
 /// pixel's diffuse E/pi.
+/// Whether the last lobe read ANSWERED from no probe and returned its fallback (PHOTON-7 stage 10-3, carrier 3: the rough
+/// rest takes no sample where that fallback is the diffuse's "no sample" - roughLobeNow sets it, the lobes below).
+bool gLobeFellBack = false;
+
 vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
 {
 	float tapSum = 0.0;
@@ -435,6 +439,7 @@ vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], 
 		acc += L * tapW[t];
 		wacc += tapW[t];
 	}
+	gLobeFellBack = !( wacc > 0.0 );
 	return wacc > 0.0 ? acc / wacc : diffuse;
 }
 
@@ -504,12 +509,14 @@ vec3 probeLobeBrute( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW
 		acc += accT / wT * tapW[t];
 		wacc += tapW[t];
 	}
+	gLobeFellBack = !( wacc > 0.0 );
 	return wacc > 0.0 ? acc / wacc : diffuse;
 }
 
 /// THIS FRAME'S LOBE where it is read (the gate open, the diffuse not owning it), the diffuse E/pi elsewhere.
 vec3 roughLobeNow( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
 {
+	gLobeFellBack = true;
 	if( !( roughGate( roughness ) > 0.0 ) || roughToDiffuse( roughness ) >= 1.0 )
 		return diffuse;
 	const vec3 lobe = p.roughLevels.w > 1.5 ? probeLobeBrute( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse )
@@ -900,6 +907,9 @@ void main()
 	// (the rest's law, held for the rough specular's rest below: whether this frame's sample enters, and the hand-over)
 	bool restTakes = false;
 	float restHandover = 0.0;
+	// (and the diffuse's REST ANSWER itself, for the rough lobe's fallback during rest - carrier 3, below: w -1 = no
+	// rest sample yet)
+	vec4 diffuseRest = vec4( 0.0, 0.0, 0.0, -1.0 );
 	if( restK >= 1.0 )
 	{
 		// NO SAMPLE THIS FRAME: the rest mean takes none, and is never SEEDED from the history (PHOTON-2 1b H2: the EMA is
@@ -925,6 +935,7 @@ void main()
 		if( starved )
 			atomicAdd( gatherCounter.words[2], 1u );
 		const vec4 restAnswer = starved ? vec4( 0.0 ) : rest.w < -0.5 ? prev : rest;
+		diffuseRest = rest;
 		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
 		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
@@ -954,7 +965,36 @@ void main()
 	// rest the diffuse's rest law word for word; then the hand-over to the diffuse and the gate.
 	{
 		const vec3 diffuseOut = outV.xyz * outV.w;
-		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, diffuseOut );
+		// THE LOBE's FALLBACK DURING REST IS THE DIFFUSE's REST ANSWER (PHOTON-7 stage 10-3, carrier 3; L8 R2 at the seam,
+		// the lead's ruling): where no probe answers the lobe it takes the pixel's diffuse - and during rest that is the
+		// diffuse REST answer (its rest mean, composed with the field as the shading pass takes it), or NO SAMPLE where the
+		// diffuse has none yet; never the hand-over's composition (diffuseOut before the hold), which carries the pre-rest
+		// EMA - the path - into the rough rest mean, sample after sample.
+		vec3 lobeFallback = diffuseOut;
+		bool fallbackNone = false;
+		if( restK >= 1.0 )
+		{
+			if( diffuseRest.w < -0.5 )
+				fallbackNone = true;
+			else
+			{
+				vec4 r = vec4( 0.0 );
+				if( diffuseRest.w > 1e-3 )
+					r = vec4( clamp( diffuseRest.xyz / diffuseRest.w, vec3( 0.0 ), vec3( kMaxRadiance ) ), diffuseRest.w );
+				if( composeField )
+				{
+					const float cover = clamp( r.w, 0.0, 1.0 );
+					r = vec4( r.xyz * cover +
+								  ( cover < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - cover )
+												: vec3( 0.0 ) ),
+							  1.0 );
+				}
+				lobeFallback = r.xyz * r.w;
+			}
+		}
+		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, lobeFallback );
+		// (a lobe that fell back to a diffuse with no rest sample is no sample: the rough rest takes none this frame)
+		const bool lobeTakes = restTakes && !( gLobeFellBack && fallbackNone );
 		bool roughStarved = false;
 		const vec3 prevLobe =
 			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
@@ -962,11 +1002,11 @@ void main()
 		if( restK >= 1.0 )
 		{
 			const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, at );
-			vec4 rest = !restTakes ? stored
+			vec4 rest = !lobeTakes ? stored
 							  : stored.w < -0.5 ? vec4( lobe, 1.0 )
 												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
 			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
-			if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
+			if( lobeTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
 			imageStore( roughRest, at, rest );
 			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
 			// probe or the sky answers the lobe)
