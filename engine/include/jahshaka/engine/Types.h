@@ -3899,6 +3899,12 @@ struct GatherStatus {
     /// diffuse's (the field's fallback answers them) and the rough specular's (the probe or the sky answers them) - the
     /// latest views' last traced frame, the most any view counted. A one-pixel sliver is the typical one.
     unsigned starvedDiffuse = 0u, starvedRough = 0u;
+    /// ...AND THE LAST SHOT's (the shot-view fold, PHOTON-7 stage 10-3): a screenshot's shot view is destroyed right after
+    /// its readback, before its last traced frame's counters retire, so its own counts are read at its destruction (the
+    /// device finished that frame: the readback waited) and kept here for the scene until its next shot. shotValid
+    /// false = no shot of this scene has been destroyed yet.
+    bool shotValid = false;
+    unsigned shotStarvedDiffuse = 0u, shotStarvedRough = 0u;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own
@@ -5614,6 +5620,13 @@ struct RayQueryStatus {
     /// standard error - the rest's defect reading (0 on a healthy rest; -1: none read, as reflectRestActive).
     int      reflectRestCapped = -1;
     unsigned reflectRests = 0u;
+    /// ...AND THE LAST SHOT's REST (the shot-view fold, PHOTON-7 stage 10-3): a screenshot's shot view's rest frames, held
+    /// flag and rest serial as it last recorded them, kept for the scene past the view's destruction until its next shot
+    /// (reflectShotValid false = none yet) - what the shot photographed, which the live views no longer say.
+    bool     reflectShotValid = false;
+    unsigned reflectShotRestFrames = 0u;
+    bool     reflectShotHeld = false;
+    unsigned reflectShotRests = 0u;
     unsigned reflectRestMoverFrames = 0u;
     /// THE CAMERA CUTS a reflection view detected (N3, the gather's rule) - each one its histories cleared.
     unsigned reflectCameraCuts = 0u;

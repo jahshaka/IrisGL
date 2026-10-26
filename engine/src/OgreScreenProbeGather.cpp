@@ -958,6 +958,26 @@ bool ScreenProbeGather::holdLast(const void *key, unsigned w, unsigned h, unsign
 void ScreenProbeGather::forget(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return;
+    // THE SHOT-VIEW FOLD (mForgotten): the newest traced, non-held slot's starved counts, read now - a slot the
+    // device has finished (a shot's readback waited for it) though it has not retired.
+    {
+        View &v = it->second;
+        if (v.readbackMapped) {
+            bool any = false;
+            uint32_t newest = 0u;
+            for (unsigned i = 0; i < kFramesInFlight; ++i) {
+                if (!v.pending[i].live || v.pending[i].held) continue;
+                if (any && int32_t(v.pending[i].frame - newest) <= 0) continue;
+                uint32_t starved[2] = { 0u, 0u };
+                std::memcpy(starved, static_cast<const char *>(v.readbackMapped) + i * 16u + 8u, sizeof(starved));
+                v.starvedDiffuse = starved[0];
+                v.starvedRough = starved[1];
+                newest = v.pending[i].frame;
+                any = true;
+            }
+        }
+        if (v.scene && v.targetsReady) mForgotten[v.scene] = ForgottenView{ v.starvedDiffuse, v.starvedRough };
+    }
     // ...AND THE SHADER'S REGISTRATION WITH IT: this view's irradiance texture
     // is about to be retired, and the Hlms listener holds a raw pointer to it
     // keyed by the scene's manager (GATHER-0's D1).
@@ -966,6 +986,13 @@ void ScreenProbeGather::forget(const void *key) {
     drop(it->second);
     mViews.erase(it);
     detail::monitor::forgetGpuOwner(key);
+}
+
+void ScreenProbeGather::forgetScene(const detail::OgreScene *scene) {
+    // THE SHOT-VIEW FOLD's entry dies with its scene (a new scene at its address never reads it). Not with the scene's
+    // last view: a shot view is often the only gather view the scene holds when it is destroyed (the viewport's own is
+    // made again when it next records).
+    mForgotten.erase(scene);
 }
 
 void ScreenProbeGather::close() {
@@ -1071,7 +1098,10 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
         if (v.scene != scene || !v.targetsReady) continue;
         if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) { latest = &v; latestKey = kv.first; }
     }
-    if (!latest) return;
+    if (!latest) {
+        shotInto(scene, out);
+        return;
+    }
     const View &v = *latest;
     out.running = true;
     out.stride = v.stride;
@@ -1141,6 +1171,16 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     }
     if (out.restFrames == ~0u) out.restFrames = 0u;
     if (out.sinceRestart == ~0u) out.sinceRestart = 0u;
+    shotInto(scene, out);
+}
+
+void ScreenProbeGather::shotInto(const detail::OgreScene *scene, GatherStatus &out) const {
+    // THE SHOT-VIEW FOLD (mForgotten): the last destroyed view's counts, as the last shot's
+    if (const auto f = mForgotten.find(scene); f != mForgotten.end()) {
+        out.shotValid = true;
+        out.shotStarvedDiffuse = f->second.starvedDiffuse;
+        out.shotStarvedRough = f->second.starvedRough;
+    }
 }
 
 // ---------------------------------------------------------------------------

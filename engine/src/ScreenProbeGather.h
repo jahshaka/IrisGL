@@ -529,6 +529,10 @@ public:
     static unsigned shippedRestLength();
     void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
                    unsigned long long restartKey, GatherStatus &out) const;
+    /// The shot-view fold's numbers alone (statsInto calls it; also with no live view of the scene).
+    void shotInto(const detail::OgreScene *scene, GatherStatus &out) const;
+    /// ...and its entry's end, with the scene (RayQueryTier::forgetScene).
+    void forgetScene(const detail::OgreScene *scene);
     /// Is anything at all held for this key?
     bool holds(const void *key) const { return mViews.count(key) != 0; }
     /// Will this frame's second half run the integrate for `key` (a frame recorded
@@ -779,6 +783,15 @@ private:
 
     GatherHost &mHost;
     std::unordered_map<const void *, View> mViews;
+    /// THE SHOT-VIEW FOLD (PHOTON-7 stage 10-3): a screenshot's shot view is destroyed right after its pixel readback,
+    /// before its last traced frame's counter slot retires - `forget` folds that slot (the device finished it: the
+    /// readback waited) and keeps its starved counts here, per scene, with the frame the view last recorded. statsInto
+    /// reports them as THE LAST SHOT's (GatherStatus::shotStarved*, never merged into the live views' numbers), and the
+    /// entry dies with the scene (forgetScene: no new scene reads a dead one's at its address).
+    struct ForgottenView {
+        unsigned starvedDiffuse = 0u, starvedRough = 0u;
+    };
+    std::unordered_map<const detail::OgreScene *, ForgottenView> mForgotten;
 
     VkDescriptorSetLayout mPlaceLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout mTraceLayout = VK_NULL_HANDLE;

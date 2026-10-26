@@ -1207,6 +1207,16 @@ private:
     void readReflectHistory(ReflectView &rv, VkCommandBuffer cmd);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
+    /// THE SHOT-VIEW FOLD (PHOTON-7 stage 10-3): a screenshot's shot view is destroyed right after its readback, and
+    /// with it its reflection's rest state - the rest frames, the held flag and the rest's serial it photographed.
+    /// forgetReflect keeps them here, per scene; reflectStatsInto reports them as THE LAST SHOT's
+    /// (RayQueryStatus::reflectShot*, never merged into the live views'), and the entry dies with the scene (forgetScene:
+    /// no new scene reads a dead one's at its address).
+    struct ForgottenReflect {
+        unsigned restFrames = 0u, restSession = 0u;
+        bool held = false;
+    };
+    std::unordered_map<const OgreScene *, ForgottenReflect> mForgottenReflects;
     bool makeMotionPipeline(std::string &err);
     VkDescriptorSetLayout mMotionSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mMotionPipeLayout = VK_NULL_HANDLE;
@@ -2779,6 +2789,8 @@ void RayQueryTier::close() {
 /// wait: a scene can be destroyed on any frame, and draining the GPU to free a
 /// thumbnail's structures would be a stall the user feels.
 void RayQueryTier::forgetScene(OgreScene *scene) {
+    mForgottenReflects.erase(scene);   // (the shot-view fold's entries die with their scene)
+    if (mGather) mGather->forgetScene(scene);
     SceneAs *saP = asOf(scene);
     if (!saP) return;
     SceneAs &sa = *saP;
@@ -5989,6 +6001,10 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
 void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
     auto it = mReflects.find(key);
     if (it == mReflects.end()) return;
+    // THE SHOT-VIEW FOLD (mForgottenReflects): the rest this view photographed, kept past it.
+    const OgreScene *scene = it->second.scene;
+    if (scene)
+        mForgottenReflects[scene] = ForgottenReflect{ it->second.restFrames, it->second.restSession, it->second.held };
     dropReflect(it->second);
     mReflects.erase(it);
     monitor::forgetGpuOwner(key);
@@ -6035,6 +6051,13 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
                 st.reflectRestCapped = int(h->second.restCapped);
             }
         }
+    }
+    // THE SHOT-VIEW FOLD (mForgottenReflects): the last destroyed view's rest, as the last shot's
+    if (const auto f = mForgottenReflects.find(scene); f != mForgottenReflects.end()) {
+        st.reflectShotValid = true;
+        st.reflectShotRestFrames = f->second.restFrames;
+        st.reflectShotHeld = f->second.held;
+        st.reflectShotRests = f->second.restSession;
     }
 }
 
