@@ -5570,6 +5570,13 @@ struct RayQueryStatus {
     /// late). Their ratio is the cone's efficiency (a thin or edge-on emitter's falls; under ~25 % its cone is owed the
     /// instance's oriented box).
     unsigned long long reflectNeeRays = 0ull, reflectNeeHits = 0ull;
+    /// THE REFLECTION'S REST BOUND (PHOTON-7 stage 11, 11-1c): at rest frame 2N (the hand-over done) every texel still
+    /// converging owes v_need - v samples, v_need = v ( e / share )^2 (its standard error e over v samples, the stop's bar
+    /// its share); `reflectRestBoundOwed` their sum, `reflectRestNeedMax` the largest v_need (over 65,535 PREDICTS a capped
+    /// texel), and `reflectRestBound` the rest frame the hold is bound by: 2N + ceil( owed / the tail's rays a frame ) +
+    /// the stop's 8 frames. -1 / 0 until this rest's 2N has been read back.
+    int reflectRestBound = -1;
+    unsigned reflectRestBoundOwed = 0u, reflectRestNeedMax = 0u;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the

@@ -262,6 +262,9 @@ constexpr unsigned kReflectRestSequence = 0x10000u;
 /// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two.
 constexpr unsigned kReflectRestRaysCap = 64u;
 constexpr unsigned kReflectRestTailDivisor = 8u;
+/// THE STOP'S FRAMES (jah_reflect_rest.glsl kReflectStopFrames): a texel stops after its standard error stayed within its
+/// share this many frames - the rest bound's last term (PHOTON-7 11-1c).
+constexpr unsigned kReflectStopFrames = 8u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
@@ -1686,6 +1689,9 @@ private:
         /// THE NEE's CONE HIT RATE (PHOTON-7 11-1b, counter words 10-11; the lead's condition): the NEE rays and those
         /// whose first hit was the target drawn, summed over every retired frame read.
         unsigned long long neeRays = 0ull, neeHits = 0ull;
+        /// THE REST'S BOUND's words (PHOTON-7 11-1c, counter words 8-9: filled at rest frame 2N, held after it) as the
+        /// newest retired frame that carried them read them, with that frame's rest tag.
+        uint32_t boundOwed = 0u, boundNeedMax = 0u, boundTag = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -6099,6 +6105,17 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (const auto h = mHits.find(kv.first); h != mHits.end()) {
             st.reflectNeeRays += h->second.neeRays;
             st.reflectNeeHits += h->second.neeHits;
+            // THE REST'S BOUND (PHOTON-7 stage 11, 11-1c): the samples the texels converging at rest frame 2N still owe,
+            // over the tail's rays a frame (the rest's count / kReflectRestTailDivisor), past 2N, plus the stop's frames
+            const uint32_t tag = h->second.boundTag;
+            if (rv.restFrames > 0u && tag && (tag >> 20u) == (rv.restSession & 0xFFFu)) {
+                const unsigned long long tail =
+                    std::max<unsigned long long>(rv.restRayCount / kReflectRestTailDivisor, 1ull);
+                st.reflectRestBoundOwed = h->second.boundOwed;
+                st.reflectRestNeedMax = h->second.boundNeedMax;
+                st.reflectRestBound = int(2u * rv.restN + unsigned((h->second.boundOwed + tail - 1ull) / tail) +
+                                          kReflectStopFrames);
+            }
         }
     }
     // THE SHOT-VIEW FOLD (mForgottenReflects): the last destroyed view's rest, as the last shot's
@@ -10938,6 +10955,11 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.restCapped = w[3];
             hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
+            if (w[9] > 0u && pd.restTag != 0u) {
+                hv.boundOwed = w[8];
+                hv.boundNeedMax = w[9];
+                hv.boundTag = pd.restTag;
+            }
             newest = pd.frame;
             any = true;
         }
@@ -11037,7 +11059,10 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
                              &b, 0, nullptr, 0, nullptr);
-        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, kHitCounterBytes, 0u);
+        // (every counter word but the rest bound's two, 8-9: the trace zeroes them up to the rest's 2N and they hold
+        // the temporal pass' figures after it - PHOTON-7 11-1c)
+        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, 32u, 0u);
+        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset + 40u, kHitCounterBytes - 40u, 0u);
         b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,

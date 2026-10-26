@@ -88,6 +88,9 @@ float gExposure = 1.0;
 /// this texel of each one's share, a denoiser-space standard error (a float's bits; all ones = no pixel measured it).
 /// Read here, then reset to all ones for this frame's filter.
 layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
+/// THE HIT LIST'S BUFFER (binding 28, the hit set's): its words 8-9 take THE REST's BOUND at rest frame 2N (PHOTON-7
+/// stage 11, 11-1c) - the samples the converging texels still need and the most one needs.
+layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
 uint gShareRaw = 0xFFFFFFFFu;
 #include "jah_reflect_state.glsl"
 #include "jah_reflect_draw.glsl"
@@ -421,6 +424,21 @@ void main()
 			st.stop = capped ? kReflectStopFrames
 							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
+			// THE REST'S BOUND (PHOTON-7 stage 11, 11-1c), at rest frame 2N - every texel's hand-over is done: a texel
+			// still converging needs v_need = v ( e / share )^2 samples (its standard error over v is e, the stop's bar its
+			// share: sigma^2 = e^2 v, and sigma^2 / v_need = share^2), so it still owes max( 0, v_need - v ). The words:
+			// 8 = their sum (each clamped at 2^20), 9 = the largest v_need (over kReflectRestVCap PREDICTS a capped texel).
+			// The trace zeroes both at every frame up to 2N; past it they hold this frame's (OgreRayQuery.cpp publishes
+			// RayQueryStatus::reflectRestBound = 2N + ceil( sum / the tail's rays a frame ) + kReflectStopFrames).
+			if( JAH_HIT_ON && uint( p.knobs2.x + 0.5 ) == 2u * uint( N + 0.5 ) && !capped && st.stop < kReflectStopFrames &&
+				!reference && share > 0.0 && finite1( e ) )
+			{
+				const float r = e / share;
+				const float need = min( ceil( v * r * r ), 16777216.0 );
+				const uint owe = need > v ? uint( min( need - v, 1048576.0 ) ) : 0u;
+				atomicAdd( jahHitBuf[8], owe );
+				atomicMax( jahHitBuf[9], uint( need ) );
+			}
 			return;
 		}
 	}
