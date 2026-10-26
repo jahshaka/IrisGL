@@ -373,6 +373,10 @@ public:
     /// ...and its Root, so the destructor can flush without reaching into the
     /// view's privates.
     Ogre::Root *mRoot = nullptr;
+    /// THE SHOT-VIEW FOLD's door (PHOTON-7 stage 10-3): an OFFSCREEN view's (a screenshot's shot) ray-tier state is
+    /// kept past it as the last shot's when it is forgotten; a presenting view's never is (the viewport's listener is
+    /// dropped and re-made whenever it stops and starts drawing, and that is no shot).
+    bool        mFoldsOnForget = false;
 };
 
 // ---------------------------------------------------------------------------

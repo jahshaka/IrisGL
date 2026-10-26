@@ -506,7 +506,8 @@ public:
     /// recorded this frame.
     bool holdLast(const void *key, unsigned w, unsigned h, unsigned layers);
     /// A view's listener is going away, or its scene has disarmed.
-    void forget(const void *key);
+    /// `fold`: the view is an offscreen picture's (a shot) - its last counts are kept as the last shot's (mForgotten).
+    void forget(const void *key, bool fold = false);
     /// The last frame's numbers for a scene.
     /// `restKey` / `restartKey` are the scene's CURRENT keys: a view whose last
     /// frame saw another restart key has not begun the settle its picture owes

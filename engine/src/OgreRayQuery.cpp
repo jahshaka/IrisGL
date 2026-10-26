@@ -6001,9 +6001,9 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
 void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
     auto it = mReflects.find(key);
     if (it == mReflects.end()) return;
-    // THE SHOT-VIEW FOLD (mForgottenReflects): the rest this view photographed, kept past it.
+    // THE SHOT-VIEW FOLD (mForgottenReflects): the rest an offscreen view (a shot) photographed, kept past it.
     const OgreScene *scene = it->second.scene;
-    if (scene)
+    if (scene && key && key->mFoldsOnForget)
         mForgottenReflects[scene] = ForgottenReflect{ it->second.restFrames, it->second.restSession, it->second.held };
     dropReflect(it->second);
     mReflects.erase(it);
@@ -7936,7 +7936,7 @@ void RayQueryTier::releaseGatherBinding(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::forgetGather(const ReflectPassListener *key) {
-    if (mGather) mGather->forget(key);
+    if (mGather) mGather->forget(key, key && key->mFoldsOnForget);
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
@@ -10594,6 +10594,7 @@ void OgreView::syncReflectListener() {
     }
     mReflectListener->mView = this;
     mReflectListener->mRoot = mRoot;
+    mReflectListener->mFoldsOnForget = isOffscreen();
 }
 
 // THE HIT LIST'S GROWTH (kHitListWidth's law in EnginePrivate.h). Before the workspace runs, so no pass of this frame has

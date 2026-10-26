@@ -955,7 +955,7 @@ bool ScreenProbeGather::holdLast(const void *key, unsigned w, unsigned h, unsign
     return true;
 }
 
-void ScreenProbeGather::forget(const void *key) {
+void ScreenProbeGather::forget(const void *key, bool fold) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return;
     // THE SHOT-VIEW FOLD (mForgotten): the newest traced, non-held slot's starved counts, read now - a slot the
@@ -976,7 +976,7 @@ void ScreenProbeGather::forget(const void *key) {
                 any = true;
             }
         }
-        if (v.scene && v.targetsReady) mForgotten[v.scene] = ForgottenView{ v.starvedDiffuse, v.starvedRough };
+        if (fold && v.scene && v.targetsReady) mForgotten[v.scene] = ForgottenView{ v.starvedDiffuse, v.starvedRough };
     }
     // ...AND THE SHADER'S REGISTRATION WITH IT: this view's irradiance texture
     // is about to be retired, and the Hlms listener holds a raw pointer to it
