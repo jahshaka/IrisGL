@@ -2025,7 +2025,8 @@ void OgreView::noteGiCamera() {
         mGiNoteRot = rot;
         mGiNoteKnown = true;
         // ...AND EACH EYE (PHOTON-7 stage 5, 5-2: the cards' demand reads displacement per eye): a stereo view's two from
-        // the rig (their own frusta), else the camera - each with one pixel's angle of its projection.
+        // the rig (their own frusta), else the camera - each with one pixel's angle of its projection and its frustum's
+        // extents (PHOTON-7 stage 10-3, F2: a resize moves what the rays can hit).
         GiEyePose eyes[2];
         unsigned eyeCount = 0u;
         const float rows = float(std::max(1u, height()));
@@ -2034,12 +2035,26 @@ void OgreView::noteGiCamera() {
                 eyes[k].position = se[k].position;
                 eyes[k].orientation = se[k].orientation;
                 eyes[k].pixelAngle = (std::atan(se[k].tanTop) - std::atan(se[k].tanBottom)) / rows;
+                eyes[k].left = se[k].tanLeft;
+                eyes[k].right = se[k].tanRight;
+                eyes[k].top = se[k].tanTop;
+                eyes[k].bottom = se[k].tanBottom;
+                eyes[k].view = mIdentityId;
             }
             eyeCount = 2u;
         } else {
             eyes[0].position = pos;
             eyes[0].orientation = rot;
             eyes[0].pixelAngle = mCamera->getFOVy().valueRadians() / rows;
+            // (its frustum, the camera's own extents after this frame's resize: applyPendingResize runs first)
+            Ogre::Real l = 0, r = 0, t = 0, b = 0;
+            mCamera->getFrustumExtents(l, r, t, b, Ogre::FET_TAN_HALF_ANGLES);
+            eyes[0].left = float(l);
+            eyes[0].right = float(r);
+            eyes[0].top = float(t);
+            eyes[0].bottom = float(b);
+            eyes[0].orthographic = mCamera->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
+            eyes[0].view = mIdentityId;
             eyeCount = 1u;
         }
         mScene->noteGiCamera(pos, mStereo, still, eyes, eyeCount);

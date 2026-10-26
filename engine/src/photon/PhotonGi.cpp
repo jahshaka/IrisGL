@@ -8192,6 +8192,23 @@ bool PhotonComponent::eyesLeft(const GiEyePose *ref, unsigned refCount) const {
         const Ogre::Quaternion rel = a.orientation.Inverse() * b.orientation;
         const float turn = 2.0f * std::acos(std::min(1.0f, std::fabs(rel.w)));
         if ((b.position - a.position).length() > 1.0f / 64.0f || turn > std::min(a.pixelAngle, b.pixelAngle)) return true;
+        // THE FRUSTUM (PHOTON-7 stage 10-3, F2): what the readers' rays can hit is the frustum's, not the pose's alone - a
+        // window resize (the aspect: the horizontal extent), a lens change (the vertical) or a VR runtime's new eye
+        // tangents moves it, and a decided cache that kept the old frustum's set at the new one held a set no rest at
+        // that frustum would decide (the resize row's case B). An edge moved by more than one pixel's angle (or one
+        // card texel of an orthographic window) is a change.
+        // WITHIN ONE DRIVING VIEW ONLY (the lead's ruling): a screenshot's offscreen view drives the scene's GI while it
+        // settles, with its own frustum, and the editor drives again after it. Comparing their frusta would make every
+        // shot, and the editor after every shot, re-decide - captures, relights and a visible settle in the user's view.
+        // RESIDENCY IS AN OPTIMISATION: the law that bounds what a shot's picture owes the editor's resident set is item
+        // 3's agreement bar (a card's answer within a code of the voxels'), so the shot reads the editor's set.
+        if (a.view != b.view) continue;
+        if (a.orthographic != b.orthographic) return true;
+        const float ea[4] = { a.left, a.right, a.top, a.bottom }, eb[4] = { b.left, b.right, b.top, b.bottom };
+        for (int e = 0; e < 4; ++e) {
+            const float moved = a.orthographic ? std::fabs(eb[e] - ea[e]) : std::fabs(std::atan(eb[e]) - std::atan(ea[e]));
+            if (moved > (a.orthographic ? 1.0f / 64.0f : std::min(a.pixelAngle, b.pixelAngle))) return true;
+        }
     }
     return false;
 }

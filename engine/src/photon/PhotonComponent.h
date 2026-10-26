@@ -90,12 +90,19 @@ class VoxelFeed;
 struct VoxelReading;
 
 /// ONE EYE OF THE AUTHORITATIVE VIEW AS THE GI SEES IT (PHOTON-7 stage 5, 5-2: the cards' demand reopens on a
-/// displacement from the pose at its last change): where it is, which way it looks, and the angle one pixel of its
-/// projection subtends (radians: the vertical extent over the view's rows).
+/// displacement from the pose at its last change): where it is, which way it looks, the angle one pixel of its
+/// projection subtends (radians: the vertical extent over the view's rows) - and ITS FRUSTUM (PHOTON-7 stage 10-3, F2:
+/// what the rays can hit is the frustum's, so a resize or a lens change is a change too): the extents as
+/// Ogre::Frustum::getFrustumExtents(FET_TAN_HALF_ANGLES) gives them - tangents of the half-angles in perspective
+/// (left and bottom negative), half-extents in metres orthographic - and WHICH VIEW drives it (its identity id): the
+/// frustum is compared within one driving view only (a screenshot's offscreen view driving its settle is not a resize).
 struct GiEyePose {
     Ogre::Vector3    position = Ogre::Vector3::ZERO;
     Ogre::Quaternion orientation = Ogre::Quaternion::IDENTITY;
     float            pixelAngle = 0.0f;
+    float            left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+    bool             orthographic = false;
+    unsigned long long view = 0ull;
 };
 
 // FORWARD+ CUBEMAP-PROBE SLOTS PER CELL — the budget a scene starts with, and
@@ -1025,7 +1032,8 @@ private:
     /// frame, so a slow walk still reopens).
     GiEyePose mGiEyes[2];
     unsigned mGiEyeCount = 0u;
-    /// An eye left its reference pose by more than one card texel or one pixel's angle (the one displacement rule).
+    /// An eye left its reference pose by more than one card texel or one pixel's angle (the one displacement rule), or its
+    /// FRUSTUM moved an edge by more than one pixel's angle (one card texel orthographic): PHOTON-7 stage 10-3, F2.
     bool eyesLeft(const GiEyePose *ref, unsigned refCount) const;
     GiEyePose mCardDemandRef[2];
     unsigned mCardDemandRefCount = 0u;
