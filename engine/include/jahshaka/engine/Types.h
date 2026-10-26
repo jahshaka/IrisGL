@@ -3895,6 +3895,10 @@ struct GatherStatus {
     /// looser test accepted (a depth delta between the 1 % and the 3 % bounds), summed over the gathered frames since
     /// the view began (a few frames late). 0 under gather.classOff by construction.
     unsigned long long foliageRuleAccepts = 0ull;
+    /// THE STARVED PIXELS AT THE HOLD (PHOTON-7 stage 10-3; L8 R2): the pixels whose rest took no sample by the hold - the
+    /// diffuse's (the field's fallback answers them) and the rough specular's (the probe or the sky answers them) - the
+    /// latest views' last traced frame, the most any view counted. A one-pixel sliver is the typical one.
+    unsigned starvedDiffuse = 0u, starvedRough = 0u;
     /// THE READBACK (`GatherTuning::readback`): the last retired frame's
     /// `probeIrradiance`, row-major, four floats per pixel (rgb = E/pi, the
     /// mean radiance over the cosine-weighted hemisphere of the pixel's own

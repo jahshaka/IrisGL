@@ -776,6 +776,12 @@ void ScreenProbeGather::readPending(View &v) {
             std::memcpy(&foliageRule, static_cast<const char *>(v.readbackMapped) + i * 16u + 4u,
                         sizeof(foliageRule));
             v.foliageRuleAccepts += foliageRule;
+            // ...and the pixels that reached the hold with no rest sample (PHOTON-7 stage 10-3: NO SAMPLE there),
+            // the diffuse's and the rough specular's - the last traced frame's
+            uint32_t starved[2] = { 0u, 0u };
+            std::memcpy(starved, static_cast<const char *>(v.readbackMapped) + i * 16u + 8u, sizeof(starved));
+            v.starvedDiffuse = starved[0];
+            v.starvedRough = starved[1];
             }
             // ...AND THE HISTORY COUNT of the same retired frame (PHOTON-2 stage 0): the second word's
             // bits 22-25 of each rg32ui texel (jah_probe_history.glsl packGeom), the eye layers side by side.
@@ -1126,6 +1132,8 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
         out.keyMoves = std::max(out.keyMoves, o.keyMoves + (o.restKey == restKey ? 0ull : 1ull));
         out.inputsBusy = out.inputsBusy || o.inputsBusyLast;
         out.foliageRuleAccepts = std::max(out.foliageRuleAccepts, o.foliageRuleAccepts);
+        out.starvedDiffuse = std::max(out.starvedDiffuse, o.starvedDiffuse);
+        out.starvedRough = std::max(out.starvedRough, o.starvedRough);
         out.cameraCuts = std::max(out.cameraCuts, o.cameraCuts);
         const unsigned since = o.restartKey == restartKey ? o.sinceRestart : 0u;
         out.sinceRestart = std::min(out.sinceRestart, since);
@@ -2153,8 +2161,9 @@ void ScreenProbeGather::finish(const void *key) {
     JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
     vkCmdDispatch(cmd, (in.width + 7u) / 8u, (in.height + 7u) / 8u, v.layers);   // z = the eye
     integrateWork.close();
-    // ...AND THE INTEGRATE'S OWN COUNTER WORD (PHOTON-2 L8: the histories accepted only by the foliage rule) into the
-    // same slot of the host ring, the word after the placement's.
+    // ...AND THE INTEGRATE'S OWN COUNTER WORDS (PHOTON-2 L8: the histories accepted only by the foliage rule; PHOTON-7
+    // stage 10-3: the pixels starved of a rest sample at the hold, the diffuse's and the rough specular's) into the same
+    // slot of the host ring, the three words after the placement's.
     {
         VkMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2165,7 +2174,7 @@ void ScreenProbeGather::finish(const void *key) {
         VkBufferCopy region{};
         region.srcOffset = 4u;
         region.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * 16u + 4u;
-        region.size = 4u;
+        region.size = 12u;
         vkCmdCopyBuffer(cmd, v.counter, v.readback, 1, &region);
         VkMemoryBarrier h{};
         h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

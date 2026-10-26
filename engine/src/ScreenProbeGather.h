@@ -605,6 +605,9 @@ private:
         /// PHOTON-2 L8: the pixels whose history the foliage rule ALONE accepted (between the 1 % and 3 % depth
         /// bounds), summed over the retired frames.
         unsigned long long foliageRuleAccepts = 0ull;
+        /// PHOTON-7 stage 10-3: the pixels that reached the hold with no rest sample (NO SAMPLE there), the diffuse's and
+        /// the rough specular's, the last traced frame's
+        unsigned starvedDiffuse = 0u, starvedRough = 0u;
         bool inputsBusyLast = false;
         /// ...and whether it HELD its last frame (GatherStatus::held)
         bool heldLast = false;

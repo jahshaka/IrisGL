@@ -153,7 +153,9 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray restMean;
 /// of its business. With the knob off the binding holds a stand-in, never written.
 layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOverlay;
 /// THE FRAME'S COUNTER (the placement's buffer, zeroed at the frame's head): word 1 counts the pixels whose history only
-/// the foliage rule accepted (PHOTON-2 L8, K5's guard; read back with the placement's word 0).
+/// the foliage rule accepted (PHOTON-2 L8, K5's guard; read back with the placement's word 0); words 2 and 3 the pixels
+/// that reached the HOLD with no rest sample - the diffuse's and the rough specular's (PHOTON-7 stage 10-3: they answer
+/// NO SAMPLE there, below).
 layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } gatherCounter;
 /// THE IRRADIANCE FIELD (PHOTON-7 stage 7, 7-2; bindings 10, 11): the fallback of the pixels no probe answers is the
 /// field's cage - jah_field_read.glsl, the one text the PBS pixel's reader runs too - and where its confidence fades the
@@ -207,10 +209,14 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 /// long history a few quanta from a constant estimate (gi.far_blas' frozen A/B
 /// caught exactly that, 5,360 px). Deterministic run to run; two eyes at one
 /// pose round alike.
+/// AT REST THE KEY IS THE REST FRAME'S OWN INDEX (PHOTON-7 stage 10-3; L1: the picture at rest is the pose's): the
+/// view's frame counter counts every frame the view traced before its rest began, so a key on it rounded the rest's
+/// history differently by the path - how long the view had lived, which another view's state set (the resize history's
+/// row). The rest index (p.knobs6.x: 1, 2, ... N) is the same sequence whatever came before it.
 float roundingDither( ivec2 localPix, uint salt )
 {
-	const uint h = jahPcg( uint( localPix.x ) * 1973u + uint( localPix.y ) * 9277u +
-						   uint( p.knobs6.z ) * 26699u + salt * 104729u );
+	const uint key = p.knobs6.x >= 1.0 ? 0x80000000u + uint( p.knobs6.x ) : uint( p.knobs6.z );
+	const uint h = jahPcg( uint( localPix.x ) * 1973u + uint( localPix.y ) * 9277u + key * 26699u + salt * 104729u );
 	return float( h & 0xFFFFFFu ) / 16777216.0;
 }
 
@@ -910,7 +916,15 @@ void main()
 		// drops it unevenly - the stage 7 read's F5; w, the count's sentinel, is exact)
 		if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye, restK );
 		imageStore( restMean, at, rest );
-		const vec4 restAnswer = rest.w < -0.5 ? prev : rest;
+		// AT THE HOLD A PIXEL WITH NO REST SAMPLE IS NO SAMPLE (PHOTON-7 stage 10-3; L8 R2; L1): its pre-rest EMA is an
+		// estimate of the PATH - which frames the view traced before its rest began, set by the scene's rest timing and so
+		// by another view's state - and the hold froze it (the resize history's row: 14,961 px; a one-pixel sliver, the
+		// self-test's fixture B's pillar top, 56 codes). Coverage 0: the field's fallback answers it, below. Before the
+		// hold the hand-over still reads the history (its weight reaches the rest mean at k = N).
+		const bool starved = rest.w < -0.5 && restK >= p.knobs6.y;
+		if( starved )
+			atomicAdd( gatherCounter.words[2], 1u );
+		const vec4 restAnswer = starved ? vec4( 0.0 ) : rest.w < -0.5 ? prev : rest;
 		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
 		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
@@ -941,6 +955,7 @@ void main()
 	{
 		const vec3 diffuseOut = outV.xyz * outV.w;
 		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, diffuseOut );
+		bool roughStarved = false;
 		const vec3 prevLobe =
 			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
 		vec3 meanLobe = mix( prevLobe, lobe, blend );
@@ -953,13 +968,18 @@ void main()
 			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
 			if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
 			imageStore( roughRest, at, rest );
+			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
+			// probe or the sky answers the lobe)
+			roughStarved = rest.w < -0.5 && restK >= p.knobs6.y;
+			if( roughStarved )
+				atomicAdd( gatherCounter.words[3], 1u );
 			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
 		}
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		imageStore( roughHistoryCur, at,
 					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
-		imageStore( roughSpec, at, roughTexel( meanLobe, diffuseOut, roughness ) );
+		imageStore( roughSpec, at, roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) );
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
