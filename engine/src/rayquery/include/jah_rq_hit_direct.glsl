@@ -25,7 +25,9 @@
 // THE TABLE (RayQueryTier::updateHitTable), read through its device address JAH_HIT_TABLE (a uvec2;
 // zero = no table: the hit reads the store whole): u[0] = the lights, u[1] = the material rows,
 // u[2] = the first light's word, u[3] = the first row's word, u[4] = the first word of the metal's lobe
-// integrals (METAL-BOUNCE-1: photon/voxel/PhotonSpecularAlbedo.h's table, its floats' bits). A light is
+// integrals (METAL-BOUNCE-1: photon/voxel/PhotonSpecularAlbedo.h's table, its floats' bits), u[5] = the first
+// word of THE EMITTER TABLE and u[6] = its targets (PHOTON-7 stage 11, 11-1a: 8 words each - the world bounding
+// sphere's centre and radius, the row's emissive radiance and the slot; RayQueryTier::updateEmitterTable). A light is
 // 32 words (eight vec4):
 //   0 position (directional: the direction TOWARDS the light), w = the type (0 directional,
 //     1 point, 2 spot, 5 area); 1 the diffuse colour x power, w = the range (0: none);

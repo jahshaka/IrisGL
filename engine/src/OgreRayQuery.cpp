@@ -596,6 +596,15 @@ private:
         uint32_t hitSlotUntil[kFramesInFlight] = {};
         int hitSlot = -1;
         std::vector<uint32_t> hitWords, hitScratch;
+        /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a; updateEmitterTable): the reflection's NEE targets, a section of
+        /// the hit table (its u[5] / u[6]). `emitterWords` the section as last derived (kEmitterWords a target, ordered
+        /// by slot); the inputs it was derived from (the GPU scene's writes, slot count and mesh set, the rows' serial,
+        /// the material edits, the tier's cap) - re-derived only when one of them moved; `emitterSetKey` the SET's
+        /// words (slot + radiance, never the bounds: a move is no new set) and its serial.
+        std::vector<uint32_t> emitterWords, emitterSetKey;
+        unsigned long long emitterWrites = ~0ull, emitterRows = ~0ull, emitterEdits = ~0ull, emitterMeshes = ~0ull;
+        uint32_t emitterSlotCount = ~0u, emitterCap = ~0u;
+        bool emitterDirty = true;   ///< the section changed since the hit table last took it
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
@@ -880,6 +889,9 @@ private:
         fold(gs.slotCount());
         fold(gs.meshSetSerial());
         fold(sa.skinUse.size());
+        // THE EMITTER SET (PHOTON-7 11-1a): the NEE targets' slots and radiance (never their bounds - a move is the
+        // per-texel test's), so a set the sampling changes restarts the rest exactly as a material edit does.
+        fold(sa.st.reflectEmitterSetSerial);
         return key;
     }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
@@ -1237,6 +1249,7 @@ private:
     /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots (the masks: the GPU scene's table).
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
+    void updateEmitterTable(OgreScene *scene, SceneAs &sa);
     void updateHitTable(OgreScene *scene, SceneAs &sa);
 public:
     /// The table's address a job hands its shader (0: none - the hit reads the store whole).
@@ -4533,6 +4546,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // gate: a mask that became ready, or a slot's near level the ray rule moved,
     // changes it with nothing else moving.
     updateAlphaTable(scene, sa);
+    updateEmitterTable(scene, sa);
     updateHitTable(scene, sa);
     // A COMPACTION OWED, from its own list (decision 14.4: this was a walk of every structure every
     // frame, an idle one included).
@@ -7228,7 +7242,8 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 
 /// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
 /// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's, u[4] = the first
-/// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable); a light is
+/// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable), u[5] / u[6] the emitter
+/// table's first word and targets (PHOTON-7 11-1a, updateEmitterTable); a light is
 /// kHitLightWords words (eight vec4, PhotonVoxelLighting::addLight's packing in WORLD space), a
 /// row PhotonVoxelMaterial::kRowWords. THE LIGHTS are the scene's one light list
 /// (SceneLightList), EVERY visible light with the injection's mask and NO budget (the lead's
@@ -7242,7 +7257,116 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 /// tlasIn pattern): a sun the day cycle moves re-writes a slot, never re-makes the buffer.
 namespace {
 constexpr unsigned kHitLightWords = 32u;
+/// The header's words: u[0..4] above, u[5] = the first word of the EMITTER TABLE, u[6] = its targets (PHOTON-7 11-1a).
+constexpr uint32_t kHitHeaderWords = 7u;
+/// AN EMITTER TARGET (PHOTON-7 stage 11, 11-1a; jah_rq_emitters.glsl reads it): the world bounding sphere's centre
+/// and radius (vec4), the row's emissive radiance (xyz) and the instance's SLOT (w, its bits).
+constexpr uint32_t kEmitterWords = 8u;
 }   // namespace
+
+/// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the instances the reflection's next-event estimation aims at. An
+/// emitter is a TRACED instance (kGpuRayTraced: what a ray can hit) whose material row (GpuInstance::ids.y, the
+/// voxeliser's row - the same E a ray hit adds, unclamped fp32) emits: any channel of its emissive above zero. A light
+/// is a light at any radiance: the floor is zero, and the tier's CAP (GiQualityFacts::reflectEmitters, a count)
+/// keeps the brightest by POWER - the radiance's largest channel x the bounding sphere's cross-section pi r^2, the
+/// measure the cone strategy samples by - the rest counted (reflectEmittersOver), never silent. A target is the world
+/// bounding sphere of the instance's world box (the cone the NEE ray is drawn in: any emitter shape, the sample's pdf
+/// exact from the table alone) and the row's radiance (the pick's weight; the E a ray takes is the hit's own row and map).
+/// ORDERED BY SLOT (never by a container's or a pointer's order: a run repeats). The SET's serial (slots and radiance -
+/// never the bounds: a moving emitter is a mover, which the rest follows per texel) folds into the rest key.
+/// Re-derived only when its inputs moved (the GPU scene's writes, its slot count and mesh set, the rows, the edits,
+/// the cap); the hit table re-writes only when the section's words changed.
+void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
+    const detail::GpuScene &gs = scene->gpuScene();
+    const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
+    const unsigned long long writes = gs.writes();
+    const unsigned long long rowsSerial = store ? store->getRowsSerial() : 0ull;
+    const unsigned long long edits = scene->photon().materialEditSerial();
+    const unsigned long long meshes = gs.meshSetSerial();
+    const uint32_t slotCount = gs.live() ? gs.slotCount() : 0u;
+    const uint32_t cap = giQualityFacts(scene->giParams().quality).reflectEmitters;
+    if (writes == sa.emitterWrites && rowsSerial == sa.emitterRows && edits == sa.emitterEdits &&
+        meshes == sa.emitterMeshes && slotCount == sa.emitterSlotCount && cap == sa.emitterCap)
+        return;
+    sa.emitterWrites = writes;
+    sa.emitterRows = rowsSerial;
+    sa.emitterEdits = edits;
+    sa.emitterMeshes = meshes;
+    sa.emitterSlotCount = slotCount;
+    sa.emitterCap = cap;
+
+    struct Target { uint32_t slot; float c[3]; float r; float L[3]; double power; };
+    std::vector<Target> all;
+    const detail::GpuInstance *m = gs.mirrorData();
+    if (m && store) {
+        const auto &rows = store->getRowWords();
+        const uint32_t nRows = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
+        for (uint32_t i = 0; i < slotCount; ++i) {
+            uint32_t f;
+            std::memcpy(&f, &m[i].boundsMax[3], sizeof(f));
+            if (!(f & detail::kGpuRayTraced)) continue;
+            const uint32_t word = m[i].ids[1];
+            if (word == detail::GpuScene::kNoMaterialWord) continue;
+            const uint32_t row = (word >> 16u) * Ogre::PhotonVoxelMaterial::kRowsPerBucket + (word & 0xFFFFu);
+            if (row >= nRows) continue;
+            Target t;
+            const uint32_t *rw = &rows[size_t(row) * Ogre::PhotonVoxelMaterial::kRowWords];
+            bool emits = false, finite = true;
+            for (int k = 0; k < 3; ++k) {
+                std::memcpy(&t.L[k], &rw[8 + k], sizeof(float));
+                finite = finite && std::isfinite(t.L[k]);
+                emits = emits || t.L[k] > 0.0f;
+            }
+            if (!emits || !finite) continue;
+            double d2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double lo = m[i].boundsMin[k], hi = m[i].boundsMax[k];
+                t.c[k] = float(0.5 * (lo + hi));
+                d2 += (hi - lo) * (hi - lo);
+            }
+            t.r = float(0.5 * std::sqrt(d2));
+            if (!std::isfinite(t.r) || !(t.r > 0.0f) || !std::isfinite(t.c[0] + t.c[1] + t.c[2])) continue;
+            t.slot = i;
+            t.power = double(std::max({ t.L[0], t.L[1], t.L[2] })) * 3.14159265358979 * double(t.r) * double(t.r);
+            all.push_back(t);
+        }
+    }
+    // THE CAP: the brightest by power (ties by slot: deterministic), then back into slot order.
+    if (all.size() > cap) {
+        std::stable_sort(all.begin(), all.end(), [](const Target &a, const Target &b) { return a.power > b.power; });
+        sa.st.reflectEmittersOver = unsigned(all.size() - cap);
+        all.resize(cap);
+        std::sort(all.begin(), all.end(), [](const Target &a, const Target &b) { return a.slot < b.slot; });
+    } else {
+        sa.st.reflectEmittersOver = 0u;
+    }
+    auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, sizeof u); return u; };
+    std::vector<uint32_t> words, setKey;
+    words.reserve(all.size() * kEmitterWords);
+    setKey.reserve(all.size() * 4u);
+    sa.st.reflectEmitterTable.clear();
+    for (const Target &t : all) {
+        const uint32_t e[kEmitterWords] = { bits(t.c[0]), bits(t.c[1]), bits(t.c[2]), bits(t.r),
+                                            bits(t.L[0]), bits(t.L[1]), bits(t.L[2]), t.slot };
+        words.insert(words.end(), e, e + kEmitterWords);
+        const uint32_t k[4] = { t.slot, bits(t.L[0]), bits(t.L[1]), bits(t.L[2]) };
+        setKey.insert(setKey.end(), k, k + 4);
+        RayQueryStatus::ReflectEmitter pub;
+        pub.slot = t.slot;
+        for (int c = 0; c < 3; ++c) { pub.centre[c] = t.c[c]; pub.radiance[c] = t.L[c]; }
+        pub.radius = t.r;
+        sa.st.reflectEmitterTable.push_back(pub);
+    }
+    sa.st.reflectEmitters = int(all.size());
+    if (setKey != sa.emitterSetKey) {
+        sa.emitterSetKey.swap(setKey);
+        ++sa.st.reflectEmitterSetSerial;
+    }
+    if (words != sa.emitterWords) {
+        sa.emitterWords.swap(words);
+        sa.emitterDirty = true;
+    }
+}
 
 void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     // RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3; it was re-derived every frame):
@@ -7261,7 +7385,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         const unsigned long long rows = storeGate ? storeGate->getRowsSerial() : 0ull;
         const unsigned long long edits = scene->photon().materialEditSerial();
         if (sa.hitTableAddress && lights == sa.hitLightSerial && removed == sa.hitLightsRemoved &&
-            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial) {
+            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial && !sa.emitterDirty) {
             if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = frameNow();
             return;
         }
@@ -7269,9 +7393,10 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         sa.hitLightsRemoved = removed;
         sa.hitRowsSerial = rows;
         sa.hitMaterialSerial = edits;
+        sa.emitterDirty = false;
     }
     std::vector<uint32_t> &w = sa.hitScratch;
-    w.assign(5u, 0u);
+    w.assign(kHitHeaderWords, 0u);
     const SurfaceCache *cardCache = scene->photon().surfaceCache();
     const Ogre::Light *cardSun = cardCache ? cardCache->readersSun() : nullptr;
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
@@ -7344,11 +7469,16 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     // shaded by the directional albedo the injection takes (jah_rq_hit_direct.glsl), from the same floats.
     const uint32_t specWords = uint32_t(w.size());
     for (float f : Ogre::PhotonSpecularAlbedo::kTable) w.push_back(bits(f));
+    // THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the reflection's NEE targets, as updateEmitterTable derived them.
+    const uint32_t emitterWords = uint32_t(w.size());
+    w.insert(w.end(), sa.emitterWords.begin(), sa.emitterWords.end());
     w[0] = nLights;
     w[1] = nRows;
-    w[2] = 5u;
+    w[2] = kHitHeaderWords;
     w[3] = lightWords;
     w[4] = specWords;
+    w[5] = emitterWords;
+    w[6] = uint32_t(sa.emitterWords.size() / kEmitterWords);
     const uint32_t nowFrame = frameNow();
     if (w == sa.hitWords && sa.hitTableAddress) {
         if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;

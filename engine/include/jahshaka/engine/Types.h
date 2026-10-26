@@ -3120,6 +3120,12 @@ struct GiQualityFacts {
     /// rest converges in about (2N + its measured samples) / k + 8 frames, then holds. 4 where the rays are the
     /// reflection (the preflight's simulated stop: ~100 frames on photon-glass against the deleted K_max's 513), 1 else.
     unsigned reflectRestRays = 1u;
+    /// THE EMITTER TABLE'S CAP (PHOTON-7 stage 11, 11-1a/d): at most this many emissive traced instances are the
+    /// reflection's NEE targets (the brightest by power, the bounding sphere's cross-section x its radiance; the rest
+    /// stay the BRDF sample's alone and are counted as RayQueryStatus::reflectEmittersOver, never silently). A
+    /// count, not milliseconds (L7): each NEE sample's pick walks the table once. 0 where the rays are not the
+    /// reflection.
+    unsigned reflectEmitters = 0u;
     /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
     /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
     /// that is right in open and sealed scenes alike). The Studio tier table's
@@ -3247,6 +3253,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
         f.reflectRestRays = 4u;
+        f.reflectEmitters = 64u;   // PHOTON-7 11-1d: the pick's walk priced on the fixtures (the stage's evidence)
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -5543,6 +5550,21 @@ struct RayQueryStatus {
     /// The hit table's ring buffers made, ever (decision 16.2: a written-every-frame table re-makes none
     /// once its three slots exist).
     unsigned long long hitTableBuffers = 0ull;
+    /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a: the reflection's NEE targets, published in the hit table): the
+    /// emissive traced instances it holds (-1: no table made yet), those left out by the tier's cap
+    /// (GiQualityFacts::reflectEmitters), the serial of its SET (moves when an emitter enters, leaves or changes its
+    /// radiance - never on a move), and the table itself as uploaded, ordered by slot: the slot, the world bounding
+    /// sphere (the instance's world box's) and the row's emissive radiance.
+    int reflectEmitters = -1;
+    unsigned reflectEmittersOver = 0u;
+    unsigned long long reflectEmitterSetSerial = 0ull;
+    struct ReflectEmitter {
+        unsigned slot = 0u;
+        float centre[3] = {};
+        float radius = 0.0f;
+        float radiance[3] = {};
+    };
+    std::vector<ReflectEmitter> reflectEmitterTable;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the
