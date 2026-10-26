@@ -1225,6 +1225,14 @@ GiStatus PhotonComponent::giStatus() const {
         // saw - the held picture is then a mean of the finished field only (pool.world_sky_b's height_fog: two
         // at-rest shots 1.4e-4 apart without it).
         if (st.gather.running && mIfd && giWriterFrame() - mIfdWriteFrame < st.gather.settleFrames) st.giAtRest = false;
+        // ...AND EVERY READER's REST PAST ITS HAND-OVER: THE REFLECTION's TOO (PHOTON-7 stage 10-3, carrier 2; the lead's
+        // ruling - the contract, as with the gather and the cards). A shot that ended "at rest" photographed the
+        // reflection mid-hand-over, its rest restarted a history-dependent number of times during the settle
+        // (scripting.e2e.resize_history: 0 rest frames at both shots, rest #3 vs #2), so the picture carried the path.
+        // Past its hand-over (2N rest samples, at least one a frame: 2N rest frames) since its last restart every texel's
+        // composite is its rest mean, a function of the pose and the rest index alone. NOT its hold (open-ended until
+        // stage 11 bounds it): the settle stays the last relight plus 2N.
+        if (st.giAtRest && !mScene.reflectRestPastHandOver()) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
 }

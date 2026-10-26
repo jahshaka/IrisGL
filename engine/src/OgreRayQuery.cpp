@@ -1161,6 +1161,10 @@ private:
         /// (ScreenProbeGather::kReaderStaleFrames).
         uint32_t recordedFrame = 0u;
         unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
+        /// THE REST's N this view last recorded with (reflectRestLength): its hand-over is 2N rest samples
+        /// (jahRestHandOverLength), and past 2N rest frames every texel's composite is its rest mean (PHOTON-7 stage
+        /// 10-3, carrier 2: GiStatus::giAtRest waits for it)
+        unsigned restN = 0u;
         unsigned cameraCuts = 0u;           ///< camera cuts detected (N3: each one the histories cleared)
         /// This frame is a held one (finishReflect skips the temporal pass).
         bool held = false;
@@ -1324,6 +1328,11 @@ public:
     /// The last measured numbers for a scene, for `GiStatus::gather`.
     void gatherStatsInto(const OgreScene *scene, GatherStatus &out) const;
     bool cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2], bool active[2]) const;
+    /// THE REFLECTION's REST PAST ITS HAND-OVER (PHOTON-7 stage 10-3, carrier 2; GiStatus::giAtRest): every reflection
+    /// view of the scene that records and can rest has held still for at least its hand-over (2N rest frames) since its
+    /// last restart - every texel's composite is then its rest mean, a function of the pose and the rest index alone. A
+    /// view that no longer records makes no demand (ScreenProbeGather::kReaderStaleFrames), nor one that cannot rest.
+    bool reflectRestPastHandOver(const OgreScene *scene) const;
     /// The readers' demand span L = N + the due, as cardReadersRestComplete last derived it (0: none yet - stamp always):
     /// a reader stamps its rest indices [1, L] alone (JAH_HIT_PARAMS.cards.z).
     mutable unsigned mDemandSpan = 0u;
@@ -6528,6 +6537,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
     const unsigned restN = reflectRestLength(reflectWindow);
     pp.stereo[3] = float(restN);
+    rv.restN = restN;
     // THE MOVED INSTANCES (G6): every slot the frame's update staged (a transform write, a flags change, a birth) and
     // every pose the skin pass moved, as a SWEPT BOX - its world bounds this frame joined with last frame's (the same
     // box carried by prevWorld * world^-1). A resting texel whose ray segments cross one resumes; more than
@@ -7976,6 +7986,21 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
         if (!rv.held && rv.restFrames < mDemandSpan) complete = false;
     }
     return complete;
+}
+
+bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
+    for (const auto &kv : mReflects) {
+        const ReflectView &rv = kv.second;
+        if (rv.scene != scene) continue;
+        if (uint32_t(frameNow() - rv.recordedFrame) > ScreenProbeGather::kReaderStaleFrames) continue;
+        if (!rv.restableLast) continue;
+        // THE HAND-OVER IS 2N REST SAMPLES (jah_reflect_rest.glsl, jahRestHandOverLength) and a converging texel takes at
+        // least one a frame (its batch: up to k, the first that needs a record ends it), while a texel stops only past
+        // it (rq_reflect_temporal.comp's `settled`): 2N rest frames bound every texel's hand-over. N frames did not
+        // (scripting.e2e.resize_history at 21 rest frames, N 19: the two boots still 5,876 px apart).
+        if (rv.restFrames < 2u * std::max(rv.restN, 1u)) return false;
+    }
+    return true;
 }
 
 void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
@@ -11679,6 +11704,10 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
     return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->cardReadersRestComplete(this, restFrames, active);
 }
 
+bool OgreScene::reflectRestPastHandOver() const {
+    return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->reflectRestPastHandOver(this);
+}
+
 /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1): the row, held inside its band.
 /// Storing it builds nothing; the view's chain re-checks its shape each frame.
 void PhotonComponent::setSunContact(const SunContactDesc &d) {
@@ -11925,6 +11954,7 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
     active[0] = active[1] = false;
     return true;
 }
+bool OgreScene::reflectRestPastHandOver() const { return true; }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
 SunContactStatus OgreScene::sunContactStatus() const { return SunContactStatus(); }
