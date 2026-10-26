@@ -3943,6 +3943,15 @@ void SurfaceCache::photonQuads(std::vector<PhotonCardQuad> &out) const {
     }
 }
 
+bool SurfaceCache::restHoldOwed() const {
+    if (!mBuilt) return false;
+    if (!mRestDecided) return true;   // the stop's one decision is still to come
+    if (mReportNextTake != mReportNextIssue) return true;   // a card-to-card report in flight: a round may follow
+    for (const CardRec &c : mCards)
+        if (c.size && (c.queued || c.relight || c.relightIndirect || c.stillPending)) return true;
+    return false;
+}
+
 void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out = CardCacheStatus();
     out.built = mBuilt;

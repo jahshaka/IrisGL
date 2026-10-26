@@ -514,6 +514,11 @@ public:
 
     /// Everything a host, a monitor or a suite can see.
     void fillStatus(CardCacheStatus &out) const;
+    /// THE READERS' HOLD IS OWED TO THE REST'S DECISION (PHOTON-7 stage 10, R3's ruling: "the readers' hold waits on that
+    /// decision's work"): true while the stop's one rest decision is not taken yet, or its work - a capture queued, a
+    /// relight owed, a card-to-card report still in flight - is pending. A view may REST (count its rest frames: the
+    /// decision's demand is their first N) but never HOLD while it is: the first hold is the last (lab.stillness_control).
+    bool restHoldOwed() const;
     /// THE PHOTON VIEW'S TABLE (PHOTON-VIEW-1): every allocated card of every
     /// resident instance, held (a capture landed) or waiting for its first.
     void photonQuads(std::vector<PhotonCardQuad> &out) const;

@@ -3878,6 +3878,10 @@ struct GatherStatus {
     unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
+    /// THE HOLD ITSELF: every latest view of the scene HELD its last frame (dispatched nothing). Past its rest length a
+    /// view holds unless its hold is owed to the cards' rest decision (PHOTON-7 stage 10, R3: it rests and waits) - so
+    /// `restFrames > settleFrames` alone is not the hold.
+    bool held = false;
     /// THE HOLD'S REASONS (PHOTON-2 round 2, L7): the frames the gather's rest key has moved (every input write, the
     /// ones that file no GI row included: a ray-level refit, a shadow scan, a light write), and whether the inputs owed
     /// work on the last gathered frame. A frame where either moved is one the hold waited on.

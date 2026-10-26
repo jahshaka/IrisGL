@@ -415,6 +415,9 @@ struct GatherInputs {
     /// The scene's GI inputs still owe work (PhotonComponent::gatherInputsBusy): a view
     /// settles, never rests, until none is owed.
     bool inputsBusy = false;
+    /// The view's HOLD is owed to the cards' rest decision (PhotonComponent::gatherHoldOwed, R3): it rests - its rest
+    /// frames count, its rest mean is the decision's demand - but does not hold until the decision and its work are done.
+    bool holdOwed = false;
     /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix
     /// round): moves only on a DISCONTINUITY the history cannot follow per pixel
     /// — a light, sky or material write, an injection landing. A continuous
@@ -583,6 +586,8 @@ private:
         /// bounds), summed over the retired frames.
         unsigned long long foliageRuleAccepts = 0ull;
         bool inputsBusyLast = false;
+        /// ...and whether it HELD its last frame (GatherStatus::held)
+        bool heldLast = false;
         /// THE SETTLE (the fix round's split): frames drawn since the history's
         /// last RESTART — its birth, a resize, a scene bind, the lever, an
         /// estimator-changing tuning, or a move of the scene's restart key.

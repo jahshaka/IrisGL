@@ -1073,7 +1073,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
-        f.held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
+        f.held = g.running && g.held;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
         if (pub.rayQuery.reflectFrame > m.lastTraced) {
@@ -1128,7 +1128,7 @@ bool StillnessRun::frameDone(std::string &err)
     // it (an arm latches at the top of the next frame) only when THIS frame is converged: the gather HELD (its true rest
     // mean) and the reflection HELD (every texel stopped on its rest mean) where one traces.
     if (m.spec.freezeWalk && !m.freezeArmOn && m.next < m.plan.size() && m.plan[m.next].walkStart) {
-        const bool held = g.running && g.settleFrames && g.restFrames > g.settleFrames;
+        const bool held = g.running && g.held;
         const bool reflHeld = !pub.rayQuery.reflect || pub.rayQuery.reflectHeld;
         if (!held || !reflHeld) {
             err = "stillness: freeze - the view had not converged at the walk's start (the gather " +

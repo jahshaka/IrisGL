@@ -1108,9 +1108,11 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.settled = true;
     out.restFrames = ~0u;
     out.sinceRestart = ~0u;
+    out.held = true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
         if (o.scene != scene || !o.targetsReady || o.recordedFrame != v.recordedFrame) continue;
+        out.held = out.held && o.heldLast;
         const unsigned n = settleFramesOf(o.historyFramesLast);
         out.settleFrames = std::max(out.settleFrames, n);
         const unsigned rest = o.restKey == restKey ? o.restFrames : 0u;
@@ -1450,7 +1452,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         v.sinceRestart = restart ? 0u : std::min(v.sinceRestart + 1u, 1u << 20);
         v.restFrames = still ? std::min(v.restFrames + 1u, 1u << 20) : 0u;
         v.historyFramesLast = historyFramesOf(in.tuning);
-        if (still && v.restFrames > restLengthOf(in.tuning, v.historyFramesLast)) {
+        v.heldLast = still && !in.holdOwed && v.restFrames > restLengthOf(in.tuning, v.historyFramesLast);
+        if (v.heldLast) {
             // THE RE-BIND IS THE SECOND HALF'S (finish): the registration is
             // scoped to the opaque pass, and the hit decode pass runs between.
             v.finishPending = true;

@@ -8069,6 +8069,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     }
     in.restKey = gatherRestKeyArmed(scene);
     in.inputsBusy = scene->photon().gatherInputsBusy();
+    in.holdOwed = scene->photon().gatherHoldOwed();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
@@ -11529,6 +11530,14 @@ unsigned long long PhotonComponent::gatherRestKey() const {
 /// and the surface cache's capture queue or stale sun terms. Between two writes of a cache that runs at a cadence
 /// the rest key stands still for a frame or more; this is what keeps a view SETTLING through those gaps, so its rest
 /// mean starts only once every input has finished (the hold = the last write + the settle).
+/// THE GATHER'S HOLD IS OWED TO THE CARDS' REST DECISION (PHOTON-7 stage 10, R3's ruling; SurfaceCache::restHoldOwed):
+/// a view counts its rest frames - the decision's demand is the first N of them - but never holds before the stop's one
+/// decision is taken and its captures, relights and card-to-card rounds are done, so its first hold is its last (the
+/// view held 9 frames before the decision and the decision's 72 frames of rounds broke it: lab.stillness_control).
+bool PhotonComponent::gatherHoldOwed() const {
+    return mSurfaceCache && mSurfaceCache->restHoldOwed();
+}
+
 bool PhotonComponent::gatherInputsBusy() const {
     if (giInputsOwed()) return true;
     if (mSurfaceCache) {

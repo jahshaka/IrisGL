@@ -741,6 +741,9 @@ public:
     unsigned long long reflectionReadsKey() const;
     /// The gather's inputs still owe work (PHOTON-2 stage 2's round, H1: a view SETTLES, never rests, until none is).
     bool gatherInputsBusy() const;
+    /// The gather's HOLD is owed to the surface cache's rest decision (SurfaceCache::restHoldOwed; R3's ruling): the view
+    /// rests, but does not hold, until the stop's one decision and its work are done.
+    bool gatherHoldOwed() const;
     /// The GI chain's own owed work (GiStatus::giAtRest's predicate, PhotonGi.cpp): a rebuild or re-solve pending, an
     /// injection owed, the field's integration or refinements owed.
     bool giInputsOwed() const;
