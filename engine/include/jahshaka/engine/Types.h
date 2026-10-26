@@ -4285,6 +4285,9 @@ struct CardCacheStatus {
     /// never evict) - each refused one by its node, card index, size and mark (the frame its face was last marked).
     unsigned long long decisionUsedTexels = 0ull, decisionFreeTexels = 0ull;
     unsigned decisionAdmitted = 0u, decisionRefused = 0u;
+    /// ...and the READERS the last decision armed with (PHOTON-7 stage 10-3, F1): bit 0 the reflection, bit 1 the
+    /// gather - a reader that counted as stale when the decision armed makes no demand, so its bit is clear (3 = both).
+    unsigned decisionReaders = 0u;
     struct Refused { NodeId node = 0; unsigned index = 0u, size = 0u; unsigned long long mark = 0ull; };
     std::vector<Refused> decisionRefusedCards;
     /// ...and the window's one drain a change (R3, the lead's Q2: the cards no reader read in the S-frame window leave

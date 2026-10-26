@@ -1066,10 +1066,13 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
         if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
     }
     // A READER THAT NO LONGER RECORDS MAKES NO DEMAND (PHOTON-7 stage 10, the giAtRest contract): a view that has not
-    // recorded within the frames in flight (+1: the cache plans a frame late) is not reading the cards - the editor
-    // view while a screenshot's offscreen settle draws only the shot's view, which refuses the gather - and its frozen
-    // rest would hold the demand open for ever. No reader: nothing to wait for, the demand is complete at once.
-    if (!latest || uint32_t(mHost.gatherFrameNow() - latest->recordedFrame) > kReaderStaleFrames) return true;
+    // recorded within the frames in flight (+1: the cache plans a frame late) OF ITS SCENE'S DRAWS is not reading the
+    // cards - the editor view while a screenshot's offscreen settle draws only the shot's view - and its frozen rest
+    // would hold the demand open for ever. No reader: nothing to wait for, the demand is complete at once. TIMED ON THE
+    // SCENE'S DRAWS (OgreScene::drawSerial, PHOTON-7 stage 10-3, F1), never on Ogre's frame count: a window's resize ran
+    // six engine frames that drew no view of the scene, both readers read as gone, and the cards' one rest decision was
+    // taken on an empty demand - every card drained, none admitted, for the session.
+    if (!latest || uint32_t(scene->drawSerial() - latest->recordedDraw) > kReaderStaleFrames) return true;
     active = true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
@@ -1311,6 +1314,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     ++v.age;
     v.lastTemporal = temporal;
     v.recordedFrame = mHost.gatherFrameNow();
+    v.recordedDraw = v.scene ? v.scene->drawSerial() : 0u;
 }
 
 void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
@@ -2410,6 +2414,7 @@ void ScreenProbeGather::finish(const void *key) {
     v.flip ^= 1u;
     ++v.age;
     v.recordedFrame = mHost.gatherFrameNow();
+    v.recordedDraw = v.scene ? v.scene->drawSerial() : 0u;
     v.lastTemporal = temporal;
     v.cpuMs = float(v.finishCpuMs + msSince(cpuStart));
     ++v.frame;

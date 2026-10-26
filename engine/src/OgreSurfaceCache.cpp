@@ -1205,6 +1205,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                                                   : n ? (mFrame > n ? mFrame - n : 1ull) : mDemandChangeFrame + 1ull;
         }
         mRestDue = mFrame + demandDueFrames();
+        mDecisionReaders = (view.readerActive[0] ? 1u : 0u) | (view.readerActive[1] ? 2u : 0u);
     }
     const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided;
     if (decide) {
@@ -4160,6 +4161,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.decisionUsedTexels = mDecisionUsed;
     out.decisionFreeTexels = mDecisionFree;
     out.decisionAdmitted = mDecisionAdmitted;
+    out.decisionReaders = mDecisionReaders;
     out.decisionRefused = mDecisionRefused;
     out.decisionRefusedCards = mDecisionRefusedCards;
     out.restDecisions = mRestDecisions;

@@ -838,6 +838,7 @@ private:
     /// THE REST DEMAND'S WINDOW: each reader's rest start in cache frames (0: since the change) and the frame its stamps
     /// have landed by (a read-back's period + lag + 1 past the rest's completion; 0: not complete yet).
     unsigned long long mRestStart[2] = { 0ull, 0ull }, mRestDue = 0ull;
+    unsigned mDecisionReaders = 0u;   ///< the readers active when the rest decision armed (CardCacheStatus::decisionReaders)
     /// THE WINDOW'S ONE DRAIN (R3, the lead's Q2): taken for the current change (the cards no reader read in the S-frame
     /// window leave once, when it closes), and how many drained a card.
     bool mWindowDrained = false;

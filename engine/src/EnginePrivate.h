@@ -6318,6 +6318,13 @@ public:
         mCountRecordLookups = mCountNameVisits = mCountNameLookups = 0u;
     }
     void setBoxesCurrent(bool current) { mBoxesCurrent = current; }
+    /// THE SCENE'S DRAWS (PHOTON-7 stage 10-3, F1): +1 once per engine frame that draws this scene (OgreEngine's
+    /// `drawnThisFrame`, at the head of its pending work and before its cards plan). A READER'S CLOCK: a view that reads
+    /// the scene's GI (the gather, the reflection, the area visibility, the hit list) is stale when the scene has been
+    /// drawn kReaderStaleFrames times since that view last recorded - never by engine frames the scene missed (a
+    /// window's resize ran six that drew no view of it, and the readers timed on Ogre's frame count read as gone).
+    void noteDrawn() { ++mDrawSerial; }
+    uint32_t drawSerial() const { return mDrawSerial; }
     bool boxesCurrent() const { return mBoxesCurrent; }
     void updateForwardPlusRanges(const Ogre::Camera *cam) { return mPhoton.updateForwardPlusRanges(cam); }
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const { return mPhoton.forwardPlusLightCensus(lights, budget); }
@@ -7128,6 +7135,7 @@ private:
     mutable bool mGeomSigFull = true;
     std::vector<Node *> mGeomSigTake;   ///< the signature's read of the name list (scratch)
     bool mBoxesCurrent = false;
+    uint32_t mDrawSerial = 0u;   ///< noteDrawn: the engine frames that drew this scene
     struct GiPlanStash {
         bool owed = false, pushed = false, materialPreview = false;
         std::optional<unsigned long long> refreshSerial;

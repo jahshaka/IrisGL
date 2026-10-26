@@ -519,8 +519,9 @@ public:
     /// nothing; no view, nothing to wait for.
     /// `restFrames`: the completed rest's length so far (the least over those views; 0 with none that can rest);
     /// `restLength`: the rest sequence's N (the longest over those views; the default tuning's with none).
-    /// A reader view that has not recorded for more than this many frames makes no rest demand (restDemandComplete;
-    /// RayQueryTier::cardReadersRestComplete the reflection's): the frames in flight (3) + the cache's one frame late.
+    /// A reader view that has not recorded for more than this many of ITS SCENE'S DRAWS (OgreScene::drawSerial - never
+    /// engine frames the scene missed) makes no rest demand (restDemandComplete; RayQueryTier::cardReadersRestComplete
+    /// the reflection's): the frames in flight (3) + the cache's one frame late.
     static constexpr uint32_t kReaderStaleFrames = 4u;
     /// ...complete once each of its views has traced its demand span, its rest indices [1, N + `due`] (the per-reader
     /// snapshot, PHOTON-7 stage 10); `active`: a view recorded lately (a stale one makes no demand).
@@ -649,6 +650,8 @@ private:
         /// Ogre's frame number of the last frame this view recorded — which of
         /// a scene's views drew the LATEST frame (statsInto reports those).
         uint32_t recordedFrame = 0u;
+        /// ...and its scene's draw count then (OgreScene::drawSerial): the reader's clock, which staleness is timed on.
+        uint32_t recordedDraw = 0u;
         /// ...and what makes it restart besides new targets: the history
         /// switched back on, or a GatherTuning field that changes the estimator.
         bool temporalLast = false;

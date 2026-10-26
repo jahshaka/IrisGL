@@ -1484,6 +1484,9 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     // recompile globals (moved here with the step, U4 stage 3).
                     for (auto &s : mScenes)
                         if (drawnThisFrame(s.get())) {
+                            // THE SCENE'S DRAWS, first (OgreScene::noteDrawn): its readers' clock, read by the cards'
+                            // plan below and stamped by every reader's record in the frame.
+                            s->noteDrawn();
                             // THE SKY AMBIENT'S DEFERRED READ (audit ON-14), first: at its DUE
                             // frame, a map and 6 x 1024 texels of integral - never polled for
                             // landing (OgreScene::skyReadDue: the frame it lands on is a

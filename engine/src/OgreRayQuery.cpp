@@ -1157,9 +1157,11 @@ private:
         /// The view CAN rest (not stereo, not the photon overlay's: its still predicate's standing half), at its last
         /// record - the cards' rest decision waits only on a view that can (cardReadersRestComplete).
         bool restableLast = false;
-        /// ...and the frame it last recorded (frameNow): a view that stopped recording makes no rest demand
-        /// (ScreenProbeGather::kReaderStaleFrames).
+        /// ...and the frame it last recorded (frameNow), and its scene's draw count then (OgreScene::drawSerial): a view
+        /// that stopped recording while its scene is drawn makes no rest demand (ScreenProbeGather::kReaderStaleFrames,
+        /// timed on the draws).
         uint32_t recordedFrame = 0u;
+        uint32_t recordedDraw = 0u;
         unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
         /// THE REST's N this view last recorded with (reflectRestLength): its hand-over is 2N rest samples
         /// (jahRestHandOverLength), and past 2N rest frames every texel's composite is its rest mean (PHOTON-7 stage
@@ -1507,9 +1509,9 @@ private:
         OgreScene *scene = nullptr;
         bool ran = false, finishPending = false, bound = false;
         uint32_t boundFrame = 0xFFFFFFFFu;
-        /// The frame it last ran (a view the tier no longer records - rays switched off, the chain gone to the no-ray
-        /// route - is not reported: the scene's status is its current producer's).
-        uint32_t ranFrame = 0u;
+        /// The scene draw it last ran at (OgreScene::drawSerial; a view the tier no longer records - rays switched off,
+        /// the chain gone to the no-ray route - is not reported: the scene's status is its current producer's).
+        uint32_t ranDraw = 0u;
         unsigned long long rays = 0ull, vramBytes = 0ull;
         float cpuMs = -1.0f;
         std::string reason;
@@ -1636,10 +1638,10 @@ private:
         Pending pending[kFramesInFlight];
         unsigned frame = 0;
         OgreScene *scene = nullptr;
-        /// The newest retired frame's counters (RayQueryStatus) and its frame (a view whose readings stopped is STALE:
-        /// the status counts live views only).
+        /// The newest retired frame's counters (RayQueryStatus) and the scene draw they landed at (a view whose readings
+        /// stopped is STALE: the status counts live views only).
         unsigned long long appended = 0ull, dropped = 0ull;
-        uint32_t readFrame = 0u;
+        uint32_t readDraw = 0u;
         bool everRead = false;
         /// ...THE PER-VIEW READOUT (RayQueryStatus::hitViews, PHOTON-7 stage 0's read R4): the view's eyes and one
         /// eye's target (stamped at every prepare), the list the newest read-back frame held and the list the FIRST
@@ -6627,6 +6629,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                            paramsKey == rv.restParams && rv.historyFrames >= 1u && !tooManyMoved;
         rv.restableLast = !stereo && !photon;
         rv.recordedFrame = frameNow();
+        rv.recordedDraw = rv.scene ? rv.scene->drawSerial() : 0u;
         const bool wasResting = rv.restFrames > 0u;
         rv.restFrames = still ? std::min(rv.restFrames + 1u, (1u << 20) - 1u) : 0u;
         rv.restKey = restKey;
@@ -7981,7 +7984,7 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
         const ReflectView &rv = kv.second;
         if (rv.scene != scene) continue;
         // (a view that stopped recording - the editor's under a screenshot's offscreen settle - makes no demand)
-        if (uint32_t(frameNow() - rv.recordedFrame) > ScreenProbeGather::kReaderStaleFrames) continue;
+        if (uint32_t(scene->drawSerial() - rv.recordedDraw) > ScreenProbeGather::kReaderStaleFrames) continue;
         active[0] = true;
         if (!rv.restableLast) continue;
         restFrames[0] = restFrames[0] ? std::min(restFrames[0], rv.restFrames) : rv.restFrames;
@@ -8001,7 +8004,7 @@ bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
         if (rv.scene != scene) continue;
-        if (uint32_t(frameNow() - rv.recordedFrame) > ScreenProbeGather::kReaderStaleFrames) continue;
+        if (uint32_t(scene->drawSerial() - rv.recordedDraw) > ScreenProbeGather::kReaderStaleFrames) continue;
         if (!rv.restableLast) continue;
         // THE HAND-OVER IS 2N REST SAMPLES (jah_reflect_rest.glsl, jahRestHandOverLength) and a converging texel takes at
         // least one a frame (its batch: up to k, the first that needs a record ends it), while a texel stops only past
@@ -8709,7 +8712,7 @@ void RayQueryTier::areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) c
     for (const auto &kv : mAreaVis) {
         const AreaVisView &av = kv.second;
         if (av.scene != scene) continue;
-        if (!av.ran || av.ranFrame + 1u < frameNow()) {
+        if (!av.ran || av.ranDraw + 1u < scene->drawSerial()) {
             if (av.ran) continue;   // a view the tier stopped recording: not this scene's producer now
             if (st.reason.empty()) st.reason = av.reason;
             continue;
@@ -9115,7 +9118,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     // THE REGISTRATION IS THE SECOND HALF'S (finishAreaVis, in front of the opaque pass).
     av.finishPending = true;
     av.ran = true;
-    av.ranFrame = frameNow();
+    av.ranDraw = av.scene ? av.scene->drawSerial() : 0u;
     av.reason.clear();
     av.cpuMs = float(msSince(cpuStart));
 }
@@ -10776,7 +10779,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
     }
     if (any) {
         if (!hv.everRead) hv.firstCapacity = hv.readCapacity;
-        hv.readFrame = newest;
+        hv.readDraw = hv.scene ? hv.scene->drawSerial() : 0u;
         hv.everRead = true;
     }
 }
@@ -11111,10 +11114,11 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
     // LIVE VIEWS ONLY: a view whose readings stopped (its decode left the chain, its window closed) keeps its last
     // counters, which name records and drops nobody has now. A view's drops are its OWN list's overflow, so
     // hitDropped == 0 says every live view's list held its own demand.
-    const uint32_t now = frameNow(), stale = 2u * kFramesInFlight + 2u;
+    // (timed on the scene's draws, OgreScene::drawSerial - never on engine frames the scene missed: PHOTON-7 10-3, F1)
+    const uint32_t now = scene ? scene->drawSerial() : 0u, stale = 2u * kFramesInFlight + 2u;
     for (const auto &kv : mHits) {
         const HitView &hv = kv.second;
-        if (hv.scene != scene || !hv.everRead || uint32_t(now - hv.readFrame) > stale) continue;
+        if (hv.scene != scene || !hv.everRead || uint32_t(now - hv.readDraw) > stale) continue;
         st.hitRecords += hv.appended;
         st.hitDropped += hv.dropped;
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
