@@ -8078,7 +8078,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     }
     in.restKey = gatherRestKeyArmed(scene);
     in.inputsBusy = scene->photon().gatherInputsBusy();
-    in.holdOwed = false;   // ARM (the restated rows' red): the gather's hold blind to the cache's owed work - reverted next
+    in.holdOwed = scene->photon().readersHoldOwed();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
