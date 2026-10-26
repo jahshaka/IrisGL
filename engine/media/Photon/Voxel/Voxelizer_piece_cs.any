@@ -397,6 +397,18 @@
 	uint  cEmitWeight = 0u;
 	uint3 cPosP = uint3( 0u, 0u, 0u );
 	uint3 cPosN = uint3( 0u, 0u, 0u );
+@property( voxel_emissive_max )
+	// THE MAX PRE-PASS (PHOTON-7 stage 10-3, R2): the voxel's emissive BOUND - the brightest emissive constant of the
+	// materials whose triangles touch it (an emissive map scales it by at most one: the pool's maps are unorm) - the
+	// grid the sum pass quantises the voxel's emissive on (VoxelMerge_piece_cs.any, THE EMISSIVE PER VOXEL SHARED
+	// EXPONENT). No clip, no texture read: the pass costs the triangle-voxel tests alone.
+	if( intersects_tri_aabb( tri, voxelAabb ) )
+	{
+		const float jahBound = max( max( material.emissive.x, material.emissive.y ), material.emissive.z );
+		if( jahBound > 0.0f && ( floatBitsToUint( jahBound ) & 0x7FFFFFFFu ) < 0x7F800000u )
+			atomicMax( g_voxelEmissiveMax[uint( vx + 4 * vy + 16 * vz )], floatBitsToUint( jahBound ) );
+	}
+@else
 	{
 			float3 pieceCentroid = voxelAabb.center;
 			uint weight = 0u;
@@ -456,18 +468,9 @@
 												weight );
 				cMetal		= voxelMergeWeigh4( voxelMergeQuantize4( float4( specRel, specW ) ),
 												weight );
-			@property( voxel_emissive_max )
-				// THE MAX PRE-PASS (R2): the voxel's brightest emissive contribution, nothing else
-				{
-					const float jahEmit = max( max( finalEmissive.x, finalEmissive.y ), finalEmissive.z );
-					if( jahEmit > 0.0f && ( floatBitsToUint( jahEmit ) & 0x7FFFFFFFu ) < 0x7F800000u )
-						atomicMax( g_voxelEmissiveMax[uint( vx + 4 * vy + 16 * vz )], floatBitsToUint( jahEmit ) );
-				}
-			@else
 				cEmissive		= voxelMergeWeigh3( voxelMergeEmissiveQuantize( finalEmissive,
 													 uintBitsToFloat( g_voxelEmissiveMax[uint( vx + 4 * vy + 16 * vz )] ) ),
 													 weight );
-			@end
 				cRoughness	= voxelMergeWeigh3( voxelMergeQuantize3(
 									   float3( material.roughness, 0.0f, 0.0f ) ),
 									   weight ).x;
@@ -555,6 +558,7 @@
 				}
 			}
 	}
+@end
 @end
 
 @piece( BodyCS )
