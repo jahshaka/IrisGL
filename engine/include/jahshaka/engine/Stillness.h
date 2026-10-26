@@ -186,6 +186,12 @@ struct StillnessFrame {
     /// ...and the frame's indirect relight in texels (CardCacheStatus::indirectTexelsLastFrame: the pace the L7 count
     /// bounds - lab.stillness_control's pace law reads a round's pages from it)
     unsigned cardsIndirectRelit = 0;
+    /// THE READERS' THRESHOLD's counts (PHOTON-7 stage 10, CardCacheStatus: R3 (a) applied to every reader): the cards
+    /// relit and captured so far, the relight frames read back VISIBLE (a texel moved a code since its last report; the
+    /// unmeasured ones inside), those read back SUB-QUANTUM, and the newest reading's largest move in codes (-1: not
+    /// finite) - lab.stillness_control's every-restart-has-a-cause law reads them
+    unsigned long long cardsRelights = 0, cardsCaptures = 0, cardsVisible = 0, cardsSubQuantum = 0, cardsUnmeasured = 0;
+    float cardsMoveCodes = 0.0f;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).

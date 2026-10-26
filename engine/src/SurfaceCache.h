@@ -801,6 +801,16 @@ private:
     unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
     /// ...and the listings a later march had answered already (R3: dropped, never a re-march)
     unsigned long long mIndirectAnswered = 0ull;
+    /// THE READERS' THRESHOLD (PHOTON-7 stage 10, R3 (a) applied to every reader): the relight frames that moved a texel
+    /// by a code since its last report (JahCardLight_cs.glsl's frame word, read back with the report) or could not be
+    /// measured (counted at once: a relight with no gather layer bound, a report not issued) - `mVisibleRelights`; those
+    /// whose every texel stayed under a code - `mSubQuantumRelights`; the newest reading's largest move in codes (-1 a
+    /// non-finite move) and its cache frame. `mRelitMeasured`: this frame's relight wrote the words (the gather layer
+    /// bound); `mMovesOwed`: the frame's report ticket is to carry them.
+    unsigned long long mVisibleRelights = 0ull, mSubQuantumRelights = 0ull, mUnmeasuredRelights = 0ull;
+    float mMoveCodesLast = 0.0f;
+    unsigned long long mMoveCodesFrame = 0ull;
+    bool mRelitMeasured = false, mMovesOwed = false;
     /// the cards the rest's drain removed (10-2d: read by no view reader at the pose; R3 (b): at the rest's one decision)
     unsigned long long mRestDrained = 0ull;
     /// THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b)): taken for the current demand change, and how many were taken.
@@ -918,6 +928,7 @@ private:
         Ogre::AsyncTicketPtr ticket;
         unsigned long long frame = 0ull;
         unsigned long long cacheFrame = 0ull;   ///< the cache's own frame of the issue (the roots' clock, R3 (c))
+        bool carriesMoves = false;              ///< it carries its frame's relight move words (the readers' threshold)
     };
     static constexpr unsigned kReportSlots = 8u;
     ReportTicket mReportReadings[kReportSlots];

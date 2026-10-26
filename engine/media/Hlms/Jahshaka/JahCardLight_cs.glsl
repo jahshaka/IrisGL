@@ -266,6 +266,10 @@ layout( std430, ogre_U2 ) readonly restrict buffer giLayout { CardGiParams gp; }
 // does) - what the cards that read it gathered from moved by
 // (Jahshaka/CardAccumulate's mode 3, after this job; its mode 4 clears them). Tested before the atomic: a texel moves the
 // word only past the running largest.
+// ...and past the slots, THE FRAME'S TWO WORDS (PHOTON-7 stage 10, the readers' threshold: R3 (a) applied to every
+// reader): [16384] the largest REPORTED move this frame IN CODES (float bits, a finite non-negative value: the bits order
+// as the float does; 0 = nothing reported - every texel's change since its last report under one code), [16385] a
+// non-finite move seen (1). CardAccumulate's mode 4 copies them into the report the host reads back, then clears them.
 layout( std430, ogre_U3 ) restrict buffer movesLayout { uint cardMoves[]; };
 
 layout( local_size_x = @value( threads_per_group_x ),
@@ -615,6 +619,13 @@ void main()
 		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
 		// (the accumulation's arrivals, through the geometric bound)
 		const bool fresh = ( mode & 8u ) != 0u;
+		// THE MOVE IN CODES for the frame's word, tested BY ITS BITS (a NaN compares false to everything, and its bits
+		// would win every max): a non-finite one raises the flag word instead of being stored
+		// (no reference yet: the whole value moved, as a capture's)
+		const float codes = ( fresh || !refOk ? S : d ) / code;
+		const bool finiteCodes = ( floatBitsToUint( codes ) & 0x7F800000u ) != 0x7F800000u;
+		if( !finiteCodes )
+			atomicOr( cardMoves[16385u], 1u );
 		if( fresh || d > code )
 		{
 			imageStore( cardGather, at, vec4( g.xyz, S ) );
@@ -622,6 +633,11 @@ void main()
 			const uint slot = ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u );
 			if( mb > cardMoves[slot] )
 				atomicMax( cardMoves[slot], mb );
+			// (the cumulative report - against the LAST REPORTED value - is what makes this word a reader's threshold: a
+			// drift of many sub-code steps still reports once it passes a code, so a reader resting across unreported
+			// relights is never more than a code from the cache)
+			if( finiteCodes )
+				atomicMax( cardMoves[16384u], floatBitsToUint( codes ) & 0x7FFFFFFFu );   // (the sign bit cleared: a -0 is 0)
 		}
 	}
 @end

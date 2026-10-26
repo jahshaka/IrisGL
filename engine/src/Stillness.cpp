@@ -945,6 +945,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsDecisions = pub.gi.cards.restDecisions;
         f.cardsWindowDrains = pub.gi.cards.windowDrains;
         f.cardsIndirectRelit = pub.gi.cards.indirectTexelsLastFrame;
+        f.cardsRelights = pub.gi.cards.relights;
+        f.cardsCaptures = pub.gi.cards.captures;
+        f.cardsVisible = pub.gi.cards.visibleRelights;
+        f.cardsSubQuantum = pub.gi.cards.subQuantumRelights;
+        f.cardsUnmeasured = pub.gi.cards.unmeasuredRelights;
+        f.cardsMoveCodes = pub.gi.cards.moveCodesLast;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1065,6 +1071,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsDecisions = pub.gi.cards.restDecisions;
         f.cardsWindowDrains = pub.gi.cards.windowDrains;
         f.cardsIndirectRelit = pub.gi.cards.indirectTexelsLastFrame;
+        f.cardsRelights = pub.gi.cards.relights;
+        f.cardsCaptures = pub.gi.cards.captures;
+        f.cardsVisible = pub.gi.cards.visibleRelights;
+        f.cardsSubQuantum = pub.gi.cards.subQuantumRelights;
+        f.cardsUnmeasured = pub.gi.cards.unmeasuredRelights;
+        f.cardsMoveCodes = pub.gi.cards.moveCodesLast;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1276,7 +1288,7 @@ std::string StillnessReport::tsv() const
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
       << "\trefl_sources"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1308,7 +1320,9 @@ std::string StillnessReport::tsv() const
               << "\t" << f.cardsAdmitted << "\t" << f.cardsArrivalMark << "\t" << f.cardsFrame << "\t" << f.cardsDemandEvery
               << "\t" << f.cardsDemandLag << "\t" << f.cardsBudgetTexels << "\t" << f.cardsIndirectTexels << "\t"
               << f.cardsPageSize << "\t" << f.cardsSettleFrames << "\t" << f.cardsRoots << "\t" << f.cardsRound << "\t"
-              << f.cardsDecisions << "\t" << f.cardsWindowDrains << "\t" << f.cardsIndirectRelit << "\n";
+              << f.cardsDecisions << "\t" << f.cardsWindowDrains << "\t" << f.cardsIndirectRelit << "\t" << f.cardsRelights
+              << "\t" << f.cardsCaptures << "\t" << f.cardsVisible << "\t" << f.cardsSubQuantum << "\t" << f.cardsUnmeasured
+              << "\t" << f.cardsMoveCodes << "\n";
         }
     return o.str();
 }

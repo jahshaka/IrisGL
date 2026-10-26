@@ -4248,6 +4248,14 @@ struct CardCacheStatus {
     /// THE CARD-TO-CARD RE-LISTING (10-2c): the indirect listings a moved card read by the listed one made, and those an
     /// overflowed read list's geometric bound took part in (both inside indirectReported).
     unsigned long long indirectByCards = 0ull, indirectByBound = 0ull;
+    /// THE READERS' THRESHOLD (PHOTON-7 stage 10, R3 (a) applied to every reader): the relight frames that moved a card
+    /// texel by at least a display code since its last report, or could not be measured (counted as such: `unmeasured`
+    /// of them) - `visibleRelights`, what a reader's rest key folds - and those whose every texel stayed under a code
+    /// (`subQuantumRelights`). The newest reading's largest move IN CODES (-1: a non-finite move) and the cache frame it
+    /// was relit at (a reading arrives at the report's fixed lag).
+    unsigned long long visibleRelights = 0ull, subQuantumRelights = 0ull, unmeasuredRelights = 0ull;
+    float moveCodesLast = 0.0f;
+    unsigned long long moveCodesFrame = 0ull;
     /// THE REST'S DRAIN (10-2d): cards removed because no view reader read them at the pose (inside `evicted`) - at the
     /// rest's one decision (R3 (b)), counted in `restDecisions` (one a demand change, at most).
     unsigned long long restDrained = 0ull, restDecisions = 0ull;

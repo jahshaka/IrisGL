@@ -178,13 +178,27 @@ void main()
 @else
 	if( caMode.x == 1u )
 	{
+		// (the count, and past the capacity the frame's two move words: the largest reported move in codes, a
+		// non-finite move seen - PHOTON-7 stage 10, the readers' threshold)
 		if( gl_GlobalInvocationID.x == 0u )
+		{
 			caReport[0] = 0u;
+			caReport[1u + caMode.z] = 0u;
+			caReport[2u + caMode.z] = 0u;
+		}
 		return;
 	}
 	if( caMode.x == 4u )
 	{
-		// THE MOVES CLEARED (mode 4): every slot (caMode.y = the slots)
+		// THE MOVES CLEARED (mode 4): every slot (caMode.y = the slots), and the relight's two frame words past them
+		// (JahCardLight_cs.glsl) carried into the report first - at its capacity's end (caMode.z) - by the largest
+		if( gl_GlobalInvocationID.x == 0u )
+		{
+			atomicMax( caReport[1u + caMode.z], caCluster[caMode.y] );
+			atomicOr( caReport[2u + caMode.z], caCluster[caMode.y + 1u] );
+			caCluster[caMode.y] = 0u;
+			caCluster[caMode.y + 1u] = 0u;
+		}
 		if( gl_GlobalInvocationID.x < caMode.y )
 			caCluster[gl_GlobalInvocationID.x] = 0u;
 		return;

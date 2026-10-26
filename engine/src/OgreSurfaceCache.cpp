@@ -2484,6 +2484,7 @@ void SurfaceCache::relightCards() {
         for (unsigned m : mRelightMode) indirect += m == 1u ? 1u : 0u;
         if (indirect) detail::monitor::noteCacheWork(CacheKind::Gi, WorkReason::Sweep, 0, "cards.indirect", indirect);
         detail::photonDispatch(hc, mLightJob, rs);   // the one door: its barriers, the witness
+        mRelitMeasured = gatherBound;   // (the frame's move words are written where the gather layer is bound)
     }
     if (sensBound) {
         if (shaderReady) detail::photonDispatch(hc, mSensJob, rs);
@@ -2573,6 +2574,14 @@ Ogre::UavBufferPacked *SurfaceCache::ensureLightBuffer() {
 }
 
 void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
+    // THE FRAME'S RELIGHTS AND THE READERS' THRESHOLD: they count VISIBLE at once wherever their move words cannot come
+    // back (the relight wrote none, the accumulation does not run, the report is not read) - never a silent "no move"
+    const auto unmeasured = [this]() {
+        ++mVisibleRelights;
+        ++mUnmeasuredRelights;
+        mRelitMeasured = false;
+    };
+    if (shaderReadyRelight && !ensureIndirectBuffers()) { unmeasured(); return; }
     if (!shaderReadyRelight || !ensureIndirectBuffers()) return;
     Ogre::Root &root = Ogre::Root::getSingleton();
     Ogre::RenderSystem *rs = root.getRenderSystem();
@@ -2633,7 +2642,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
             detail::photonDispatch(hc, mAccumJob, rs);
             mAccumRan = true;
         }
-        const Ogre::uint32 clearMoves[4] = { 4u, kCardSlots, 0u, 0u };
+        const Ogre::uint32 clearMoves[4] = { 4u, kCardSlots, kReportCapacity, 0u };   // (z: the report's frame words)
         setMode(clearMoves);
         mAccumJob->setNumThreadGroups((kCardSlots + 63u) / 64u, 1u, 1u);
         detail::photonDispatch(hc, mAccumJob, rs);
@@ -2647,7 +2656,14 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
     }
     const Ogre::DescriptorSetUav::BufferSlot empty = Ogre::DescriptorSetUav::BufferSlot::makeEmpty();
     for (Ogre::uint8 k = 0u; k < 5u; ++k) mAccumJob->_setUavBuffer(k, empty);
+    // (mode 4 carried the relight's words into the report: its ticket brings them back, or they count visible)
+    if (shaderReadyRelight) {
+        if (mRelitMeasured && cardsRead && ready) mMovesOwed = true;
+        else unmeasured();
+        mRelitMeasured = false;
+    }
     if (cardsRead && ready) endIndirectFrame(mPlanFrame);
+    if (mMovesOwed) { mMovesOwed = false; unmeasured(); }   // (no ticket took them)
 }
 
 bool SurfaceCache::ensureIndirectBuffers() {
@@ -2668,9 +2684,11 @@ bool SurfaceCache::ensureIndirectBuffers() {
         mCardBoxDelta.reset(mCardBoxBuffer, zeros.data(), zeros.size() * sizeof(float));
     }
     if (!mCardSlotState) mCardSlotState = zeroed(size_t(kCardSlots) * 4u, sizeof(Ogre::uint32));
-    if (!mCardReport) mCardReport = zeroed(1u + kReportCapacity, sizeof(Ogre::uint32));
+    // (the report: its count, the listings, and THE FRAME'S TWO MOVE WORDS past them - the largest reported move in
+    // codes and a non-finite move seen, the readers' threshold; the moves: a slot each and the relight's same two words)
+    if (!mCardReport) mCardReport = zeroed(3u + kReportCapacity, sizeof(Ogre::uint32));
     if (!mCardCluster) mCardCluster = zeroed(6u * kMaxCardClusters, sizeof(Ogre::uint32));
-    if (!mCardMoves) mCardMoves = zeroed(size_t(kCardSlots), sizeof(Ogre::uint32));
+    if (!mCardMoves) mCardMoves = zeroed(size_t(kCardSlots) + 2u, sizeof(Ogre::uint32));
     return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster && mCardMoves;
 }
 
@@ -2766,9 +2784,11 @@ void SurfaceCache::endIndirectFrame(unsigned long long frame) {
     mAccumRan = false;
     ReportTicket &r = mReportReadings[mReportNextIssue];
     if (r.ticket.get()) return;   // every slot in flight: a later frame's list answers (the cards stay listed)
-    r.ticket = mCardReport->readRequest(0u, 1u + kReportCapacity, /*accurateTracking=*/false);
+    r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
     r.frame = frame;
     r.cacheFrame = mFrame;
+    r.carriesMoves = mMovesOwed;
+    mMovesOwed = false;
     mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
 }
 
@@ -2819,6 +2839,17 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             ++mIndirectReported;
             if (word & 0x40000000u) ++mIndirectByCards;
             if (word & 0x80000000u) ++mIndirectByBound;
+        }
+        // THE READERS' THRESHOLD: the frame's relights moved a texel by a code (or a move was not finite) - VISIBLE - or
+        // every texel stayed under one (the report's cumulative rule: against its last reported value)
+        if (r.carriesMoves) {
+            float codes = 0.0f;
+            std::memcpy(&codes, &w[1u + kReportCapacity], sizeof(codes));
+            const bool nonFinite = w[2u + kReportCapacity] != 0u;
+            if (nonFinite || codes > 0.0f) ++mVisibleRelights;
+            else ++mSubQuantumRelights;
+            mMoveCodesLast = nonFinite ? -1.0f : codes;
+            mMoveCodesFrame = r.cacheFrame;
         }
         r.ticket->unmap();
         r.ticket.reset();
@@ -4033,6 +4064,11 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     if (mMoverHooks.gatherCounts) mMoverHooks.gatherCounts(out.gather);
     out.gatherWaits = mGatherWaits;
     out.indirectByCards = mIndirectByCards;
+    out.visibleRelights = mVisibleRelights;
+    out.subQuantumRelights = mSubQuantumRelights;
+    out.unmeasuredRelights = mUnmeasuredRelights;
+    out.moveCodesLast = mMoveCodesLast;
+    out.moveCodesFrame = mMoveCodesFrame;
     out.restDrained = mRestDrained;
     out.restDecisions = mRestDecisions;
     out.windowDrains = mWindowDrains;
