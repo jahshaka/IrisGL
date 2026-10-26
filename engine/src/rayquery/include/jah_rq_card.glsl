@@ -306,7 +306,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 									  JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
 	}
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut - cutLobe, indirect - cut,
-								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
+								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + 0.0 * lobe;   // MEASURING ARM 11-0 (a): the glint off
 }
 
 #endif   // JAH_RQ_CARD_GLSL
