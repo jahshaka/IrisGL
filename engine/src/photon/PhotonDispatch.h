@@ -10,6 +10,7 @@
 #define JAHSHAKA_ENGINE_PHOTONDISPATCH_H
 
 namespace Ogre {
+class BufferPacked;
 class ComputeTools;
 class TextureGpu;
 class HlmsCompute;
@@ -32,6 +33,12 @@ void photonDispatch(Ogre::HlmsCompute *hc, Ogre::HlmsComputeJob *job, Ogre::Rend
 /// caller has resolved the clears' barriers (ComputeTools::prepareForUavClear).
 void photonClearUavFloat(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const float value[4]);
 void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const unsigned value[4]);
+/// A BUFFER FILLED ON THE GPU (PHOTON-7 stage 10): every 32-bit word of `buffer` set to `value` by the fork's
+/// VulkanRenderSystem::jahFillBuffer (vkCmdFillBuffer through the copy encoder; a transfer, not a dispatch: the
+/// witness does not count it). A buffer that must start at a constant is created with NO initial data and filled
+/// here - never host words through the staging buffer (ensureGatherLayer's 4 MB of zeros forced a fenced flush and a
+/// 13.5 ms GPU idle on its creation frame). Ogre-Next's own GPU clears (ComputeTools) are textures only.
+void photonFillBuffer(Ogre::BufferPacked *buffer, unsigned value);
 
 }  // namespace detail
 }  // namespace engine

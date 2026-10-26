@@ -662,12 +662,13 @@ bool SurfaceCache::ensureGatherLayer() {
     mGather->setPixelFormat(Ogre::PFG_RGBA16_FLOAT);
     mGather->setNumMipmaps(1u);
     mGather->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
-    // ...and THE READ LISTS (10-2c): every slot's block zero (no card read yet)
+    // ...and THE READ LISTS (10-2c): every slot's block zero (no card read yet) - ZEROED ON THE GPU (photonFillBuffer):
+    // its 4 MB of host zeros through the staging buffer forced a fenced flush and a 13.5 ms GPU idle on this frame
     if (!mCardReads) {
         Ogre::VaoManager *vao = rs->getVaoManager();
         constexpr size_t slots = size_t(kCardAtlasSize / kCardMinSize) * (kCardAtlasSize / kCardMinSize);
-        std::vector<Ogre::uint32> zeros(slots * kCardReadsBlock, 0u);
-        mCardReads = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
+        mCardReads = vao->createUavBuffer(slots * kCardReadsBlock, sizeof(Ogre::uint32), 0, nullptr, false);
+        if (mCardReads) detail::photonFillBuffer(mCardReads, 0u);
     }
     return mCardReads != nullptr;
 }
@@ -2653,27 +2654,22 @@ bool SurfaceCache::ensureIndirectBuffers() {
     Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
     if (!vao) return false;
+    // EVERY ONE STARTS AT ZERO, WRITTEN BY THE GPU (photonFillBuffer: never host zeros through the staging buffer - the
+    // creation frame's flush and idle, ensureGatherLayer's); the box buffer's delta keeps its host mirror of the zeros
+    const auto zeroed = [&](size_t elements, size_t bytesPerElement) {
+        Ogre::UavBufferPacked *b = vao->createUavBuffer(elements, Ogre::uint32(bytesPerElement), 0, nullptr, false);
+        if (b) detail::photonFillBuffer(b, 0u);
+        return b;
+    };
     if (!mCardBoxBuffer) {
-        std::vector<float> zeros(size_t(kCardRecordCeiling) * 8u, 0.0f);
-        mCardBoxBuffer = vao->createUavBuffer(size_t(kCardRecordCeiling) * 2u, 16u, 0, zeros.data(), false);
+        const std::vector<float> zeros(size_t(kCardRecordCeiling) * 8u, 0.0f);
+        mCardBoxBuffer = zeroed(size_t(kCardRecordCeiling) * 2u, 16u);
         mCardBoxDelta.reset(mCardBoxBuffer, zeros.data(), zeros.size() * sizeof(float));
     }
-    if (!mCardSlotState) {
-        std::vector<Ogre::uint32> zeros(size_t(kCardSlots) * 4u, 0u);
-        mCardSlotState = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
-    }
-    if (!mCardReport) {
-        std::vector<Ogre::uint32> zeros(1u + kReportCapacity, 0u);
-        mCardReport = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
-    }
-    if (!mCardCluster) {
-        std::vector<Ogre::uint32> zeros(6u * kMaxCardClusters, 0u);
-        mCardCluster = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
-    }
-    if (!mCardMoves) {
-        std::vector<Ogre::uint32> zeros(size_t(kCardSlots), 0u);
-        mCardMoves = vao->createUavBuffer(zeros.size(), sizeof(Ogre::uint32), 0, zeros.data(), false);
-    }
+    if (!mCardSlotState) mCardSlotState = zeroed(size_t(kCardSlots) * 4u, sizeof(Ogre::uint32));
+    if (!mCardReport) mCardReport = zeroed(1u + kReportCapacity, sizeof(Ogre::uint32));
+    if (!mCardCluster) mCardCluster = zeroed(6u * kMaxCardClusters, sizeof(Ogre::uint32));
+    if (!mCardMoves) mCardMoves = zeroed(size_t(kCardSlots), sizeof(Ogre::uint32));
     return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster && mCardMoves;
 }
 

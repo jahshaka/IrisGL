@@ -226,6 +226,19 @@ void photonClearUavUint(Ogre::ComputeTools *tools, Ogre::TextureGpu *tex, const 
     tools->clearUavUint(tex, value);
 }
 
+void photonFillBuffer(Ogre::BufferPacked *buffer, unsigned value) {
+    Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
+    auto *vk = dynamic_cast<Ogre::VulkanRenderSystem *>(rs);
+    if (!vk || !buffer) return;
+    // (inside an aggregate row it files its own, as the door's clears do)
+    if (monitor::innermostRowIsAggregate()) {
+        monitor::CacheScope row(CacheKind::Gi, WorkReason::None, 0ull, "gi.fill", rs);
+        vk->jahFillBuffer(buffer, 0u, buffer->getNumElements(), Ogre::uint32(value));
+        return;
+    }
+    vk->jahFillBuffer(buffer, 0u, buffer->getNumElements(), Ogre::uint32(value));
+}
+
 // The region's open depth (nesting counts once); GiRegion is the only door. A close with no
 // open is a broken pairing: logged, never wrapped to 4 billion open regions.
 bool PhotonComponent::inComputeRegion() { return gPhotonRegionDepth && gPhotonRegionCompute; }
