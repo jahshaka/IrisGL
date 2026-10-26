@@ -349,9 +349,15 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
         break;
     }
     // Additive/Modulate ride an explicit blendblock preset (setTransparency
-    // only knows alpha blending) and never write depth — like other transparents
-    // they must not occlude what they blend over. Managed idempotently both
-    // ways, the same discipline as the culling macroblock above.
+    // only knows alpha blending). NO BLENDED SURFACE WRITES DEPTH, in any mode: it
+    // does not occlude what it blends over (PHOTON-7 10-4; gi.glass_pass). Ogre's
+    // Fade and Transparent keep the macroblock's depth write, and in a DEPTH-ONLY
+    // pass (the Atom stock depth between the id passes, OgreChain.cpp) a pane's
+    // depth then joined the scene's: every screen product behind the window (the
+    // gather's diffuse, the integrate's, the HZB that culls the clusters behind it)
+    // took the pane for the surface, and the wall seen through it lost its whole
+    // indirect light. Managed idempotently both ways, the same discipline as the
+    // culling macroblock above.
     {
         const bool srcDest = p.alphaMode == PbrAlphaMode::Additive ||
                              p.alphaMode == PbrAlphaMode::Modulate;
@@ -377,7 +383,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
             want.mSeparateBlend != cur.mSeparateBlend)
             db->setBlendblock(want);
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const bool wantDepthWrite = !srcDest;
+        const bool wantDepthWrite = !isBlendedMode(p.alphaMode);
         if (macro.mDepthWrite != wantDepthWrite) {
             macro.mDepthWrite = wantDepthWrite;
             db->setMacroblock(macro);
