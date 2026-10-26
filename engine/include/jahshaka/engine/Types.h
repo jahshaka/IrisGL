@@ -3212,7 +3212,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 128u;
         f.cardBudgetTexels = 98304u;    // 6 cards a frame ~ 0.37 ms (sized 0.4)
         f.cardLightTexels = 65536u;     // 4 pages a frame
-        f.cardIndirectTexels = 16384u;  // 1 page a frame
+        f.cardIndirectTexels = 32768u;  // 2 pages a frame (DOUBLED with every tier, PHOTON-7 stage 10-3: derived, see High's)
         f.cardAreaStrata = 4u;          // 16 rays a texel an area light: 1 / 4 at a parallel edge
         // 64 rays a probe, a probe per 32x32 (7-4: Lumen High's density); the twins capped at THE GRID (GiGatherFacts)
         f.gather = { 32u, 8u, 1u };
@@ -3232,12 +3232,17 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeShadowsDefault = true;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 1.0)
         f.cardLightTexels = 262144u;    // 16 pages a frame (Lumen's 1024^2 / 4)
-        // 8 pages a frame (PHOTON-7 stage 10, R3, the lead's L7 ruling: the smallest count whose card-to-card rounds
-        // converge a lamp step inside 120 frames - photon-room's 8 -> 12 at High: 4 pages held at 201, 8 at 119, 12 and
-        // more at 101 (the field's own); the card frame at 8 pages 3.48 ms, +0.75 over 4's 2.73 - almost all of it the
-        // TLAS gather's ~2.5 ns a ray, the relight's own ~0.15 ms. Epic the same: 6 held at 142, 8 at 119, 3.55 ms. Medium
-        // and Low hold the step at 114 and 98 at any count: no card-to-card rounds there)
-        f.cardIndirectTexels = 131072u;
+        // 16 pages a frame (PHOTON-7 stage 10-3, the lead's ruling: DOUBLED at every tier). THE LAW: after a STOP the
+        // card-to-card rounds converge geometrically (about x0.5 a round, a 1-2 code tail; no pair, no gain) over the
+        // listed set at this budget's pace, a round of 130-190 cards ~15-20 frames at 8 pages - so the frames to rest
+        // after a stop are the count's to set. MEASURED on two scenes, F3 + the fit, one run each (spikes/photon-7/
+        // stage10/10-3/pace-price): Bistro Exterior (Epic, 1920x1080) rests 330 / 196 / 153 frames after a stop at 8 / 16
+        // / 32 pages, the round frame's worst cards.light + cards.gather 5.5 / 6.2 / 9.4 ms; the Mirror Room 217 / 178 /
+        // 158 frames, 3.6 / 5.5 / 10.2 ms (its GPU p95 9.7 / 10.0 / 11.6). 16, not 32: the first doubling buys most of
+        // the gain for +1-2 ms on the worst frame; 32 puts one round frame at a VR frame's whole 11.1 ms. (The earlier
+        // rule, a lamp step's rounds inside 120 frames: 8 held photon-room's step at 119.) Medium and Low are DERIVED by
+        // the same doubling (2 -> 4, 1 -> 2 pages), not measured: re-measured on two scenes in the optimisation round.
+        f.cardIndirectTexels = 262144u;
         f.gather = { 16u, 8u, 2u };   // 64 rays a probe, a probe per 16x16; the twins capped at half the grid
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
@@ -3253,7 +3258,7 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.probeFaceSize   = 256u;
         f.cardBudgetTexels = 131072u;   // the batch's 8 cards a frame ~ 0.50 ms (sized 0.6)
         f.cardLightTexels = 131072u;    // 8 pages a frame
-        f.cardIndirectTexels = 32768u;  // 2 pages a frame
+        f.cardIndirectTexels = 65536u;  // 4 pages a frame (DOUBLED with every tier, PHOTON-7 stage 10-3: derived, see High's)
         f.cardAreaStrata = 6u;          // 36 rays a texel an area light: 1 / 6 at a parallel edge
         f.gather = { 16u, 6u, 2u };   // 36 rays a probe (T-A); the twins capped at half the grid
         f.probeGridBudgetBytes = 128ull << 20;
