@@ -626,7 +626,7 @@ void main()
 		const bool finiteCodes = ( floatBitsToUint( codes ) & 0x7F800000u ) != 0x7F800000u;
 		if( !finiteCodes )
 			atomicOr( cardMoves[16385u], 1u );
-		if( fresh || d > code )
+		if( fresh || d > 0.0 )   // ARM (c): the re-list threshold 0 - reverted next
 		{
 			imageStore( cardGather, at, vec4( g.xyz, S ) );
 			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );
