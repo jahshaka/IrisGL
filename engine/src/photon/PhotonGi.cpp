@@ -1068,7 +1068,7 @@ GiStatus PhotonComponent::giStatus() const {
             // was false since 10-2c: the voxels' sides and the reflection read the cards, and a screenshot taken
             // mid-rounds was not the next one's picture (hdr.bloom_showroom: two shots 7 codes apart). Not in
             // giInputsOwed: the gather's rest reads that, and the decision waits for the readers' rest (a deadlock).
-            st.giAtRest = !giInputsOwed() && !readersHoldOwed();
+            st.giAtRest = !giInputsOwed();   // ARM (the hashes' A/B): the cards' term off - reverted next
             st.chainOwed = chainWorkOwed();
         }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
