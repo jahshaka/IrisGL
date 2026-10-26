@@ -415,7 +415,7 @@ struct GatherInputs {
     /// The scene's GI inputs still owe work (PhotonComponent::gatherInputsBusy): a view
     /// settles, never rests, until none is owed.
     bool inputsBusy = false;
-    /// The view's HOLD is owed to the cards' rest decision (PhotonComponent::gatherHoldOwed, R3): it rests - its rest
+    /// The view's HOLD is owed to the cards' rest decision (PhotonComponent::readersHoldOwed, R3): it rests - its rest
     /// frames count, its rest mean is the decision's demand - but does not hold until the decision and its work are done.
     bool holdOwed = false;
     /// THE SCENE'S RESTART KEY (OgreScene::gatherRestartKey, PHOTON-GATHER-1d fix

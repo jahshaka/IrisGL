@@ -6631,8 +6631,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // THE HOLD: every texel has stopped (its standard error under a code - a capped texel stops too, counted as the
         // defect it is: RayQueryStatus::reflectRestCapped). No frame count holds a rest (K_max 512 deleted, commit 8).
         // (under the reference arm no texel stops: the view holds after its 4,096 samples)
+        // ...AND THE CACHE OWES THE READERS NOTHING (PHOTON-7 stage 10, (1) (ii): readersHoldOwed): the stop's one decision
+        // taken, its work done, no relight's report in flight - the rest runs across a sub-quantum relight, so a hold
+        // must wait until the late reading says whether it moved a code (the gather's own rule)
         hold = rv.restFrames > 0u && movedBoxes == 0u &&
-               (restReference ? rv.restFrames > 4096u : rv.restAllStopped);
+               (restReference ? rv.restFrames > 4096u : rv.restAllStopped) && !scene->photon().readersHoldOwed();
         pp.knobs2[0] = restBreak ? -1.0f : float(rv.restFrames);   // (< 2^20: exact)
         // THE REST'S SEQUENCE BASE (the shader adds each sample's number v; kReflectRestSequence).
         // (the reference arm's value 2 takes a disjoint rest sequence: two references measure their own noise)
@@ -8069,7 +8072,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     }
     in.restKey = gatherRestKeyArmed(scene);
     in.inputsBusy = scene->photon().gatherInputsBusy();
-    in.holdOwed = scene->photon().gatherHoldOwed();
+    in.holdOwed = scene->photon().readersHoldOwed();
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
     in.drawnCutFootprints = drawnFootprintsOf(scene, view->chainDesc().lodHysteresis);
@@ -11494,7 +11497,7 @@ bool PhotonComponent::probeGatherWanted() const {
 /// moved (the transform epoch with the shadow scan's writes), a material edit, an injection landing or a cascade
 /// rebuilt (giLightingSerial, the settle's steps included), the cloud layer's GI (cloudGiSerial - a restart-class
 /// change that also breaks the hold), a field dispatch (counted on the
-/// CPU as it is recorded: no readback latency) and the surface cache's captures and relights. With the camera still
+/// CPU as it is recorded: no readback latency) and the surface cache's captures and VISIBLE relights (a texel moved a code: R3 (a)). With the camera still
 /// and this key moving, the gather is SETTLING: its EMA goes on taking every input's change at its rate, no rest
 /// mean starts and nothing holds — the stage-2 key that left these out held the picture over changing inputs, and
 /// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). The key and
@@ -11519,8 +11522,12 @@ unsigned long long PhotonComponent::gatherRestKey() const {
         mSurfaceCache->fillStatus(cs);
         fold(cs.captures);
         fold(cs.stillTraces);
-        fold(cs.relights);
-        fold(cs.indirectRelights);
+        // R3 (a)'s DISPLAY QUANTUM APPLIED TO THE READER (PHOTON-7 stage 10, (1) (ii)): the relights that moved a card
+        // texel by a code since its last report (or could not be measured), read back - never the relight count, which
+        // restarted a rest on relights whose every texel stayed under a code (Showroom 2: all 272 frames of a stop's
+        // rounds). The report is CUMULATIVE (against the last reported value), so a rest across sub-code relights is never
+        // more than a code from the cache.
+        fold(cs.visibleRelights);
     }
     return key;
 }
@@ -11530,11 +11537,13 @@ unsigned long long PhotonComponent::gatherRestKey() const {
 /// and the surface cache's capture queue or stale sun terms. Between two writes of a cache that runs at a cadence
 /// the rest key stands still for a frame or more; this is what keeps a view SETTLING through those gaps, so its rest
 /// mean starts only once every input has finished (the hold = the last write + the settle).
-/// THE GATHER'S HOLD IS OWED TO THE CARDS' REST DECISION (PHOTON-7 stage 10, R3's ruling; SurfaceCache::restHoldOwed):
+/// THE READERS' HOLD IS OWED TO THE CARDS' REST DECISION (PHOTON-7 stage 10, R3's ruling; SurfaceCache::restHoldOwed):
 /// a view counts its rest frames - the decision's demand is the first N of them - but never holds before the stop's one
 /// decision is taken and its captures, relights and card-to-card rounds are done, so its first hold is its last (the
-/// view held 9 frames before the decision and the decision's 72 frames of rounds broke it: lab.stillness_control).
-bool PhotonComponent::gatherHoldOwed() const {
+/// view held 9 frames before the decision and the decision's 72 frames of rounds broke it: lab.stillness_control). The
+/// gather's and the reflection's alike (stage 10, (1) (ii)): a sub-quantum relight no longer restarts their rests, so a
+/// rest runs across relights whose visibility is still in flight, and neither holds until every report is read.
+bool PhotonComponent::readersHoldOwed() const {
     return mSurfaceCache && mSurfaceCache->restHoldOwed();
 }
 
@@ -11551,7 +11560,7 @@ bool PhotonComponent::gatherInputsBusy() const {
 /// WHAT BREAKS A REFLECTION'S REST VIEW-WIDE (PHOTON-2 F5; round 2, G6): every LIGHTING write a reflection ray reads -
 /// a light write or removal (the hit's direct light), giLightingSerial (an injection landing, a cascade rebuild, the
 /// settle's steps), the cloud layer's GI, the irradiance field's every dispatch (counted on the CPU as recorded) and the
-/// surface cache's captures and relights - every material EDIT, every TEXTURE that arrived (a streamed map the hit
+/// surface cache's captures and VISIBLE relights (R3 (a): a texel moved a code) - every material EDIT, every TEXTURE that arrived (a streamed map the hit
 /// decode reads from then on: settleTextureResidency). (The traced geometry no longer changes under a still node: the
 /// near copy is level 0, PHOTON-7 stage 6.) NOT A MOVE: the transform and shadow epochs are out - a moved instance breaks the rest
 /// PER TEXEL (the swept boxes RayQueryTier hands rq_reflect.comp: a texel whose ray, mean segment or sun leg crosses
@@ -11576,8 +11585,12 @@ unsigned long long PhotonComponent::reflectionReadsKey() const {
         mSurfaceCache->fillStatus(cs);
         fold(cs.captures);
         fold(cs.stillTraces);
-        fold(cs.relights);
-        fold(cs.indirectRelights);
+        // R3 (a)'s DISPLAY QUANTUM APPLIED TO THE READER (PHOTON-7 stage 10, (1) (ii)): the relights that moved a card
+        // texel by a code since its last report (or could not be measured), read back - never the relight count, which
+        // restarted a rest on relights whose every texel stayed under a code (Showroom 2: all 272 frames of a stop's
+        // rounds). The report is CUMULATIVE (against the last reported value), so a rest across sub-code relights is never
+        // more than a code from the cache.
+        fold(cs.visibleRelights);
     }
     return key;
 }
