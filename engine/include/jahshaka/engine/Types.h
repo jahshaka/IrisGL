@@ -4224,6 +4224,12 @@ struct CardCacheStatus {
     /// a reader marked by frame s arrives by s + demandReadEvery + demandReadLag.
     unsigned long long cacheFrame = 0ull, arrivalMarkNewest = 0ull;
     unsigned demandReadEvery = 0u, demandReadLag = 0u;
+    /// THE DEMAND WINDOW's INPUTS (PHOTON-7 stage 10-3, the exact judge): the last demand change's cache frame, each
+    /// reader's FIRST and NEWEST counted stamp since it (0 the reflection, 1 the gather; 0: none), and the lag the window's
+    /// closing counts (the read-back's, plus the issue frame's one) - SurfaceCache::demandWindowOpen reads exactly these,
+    /// and a law after a stop (tests/support/owed_rows.py) applies that one formula to them.
+    unsigned long long demandChangeFrame = 0ull, demandFirst[2] = { 0ull, 0ull }, demandNewest[2] = { 0ull, 0ull };
+    unsigned demandOpenLag = 0u;
     /// THE LAMPS' TRACE (PHOTON-7 stage 5, 5-3): the relights whose cards were traced toward their lamps (cumulative)
     /// and the cards traced the last frame.
     unsigned long long lampTraces = 0ull;

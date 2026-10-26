@@ -958,6 +958,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsUnmeasured = pub.gi.cards.unmeasuredRelights;
         f.cardsMoveCodes = pub.gi.cards.moveCodesLast;
         f.cardsReportsDropped = pub.gi.cards.reportsDropped;
+        f.cardsChange = pub.gi.cards.demandChangeFrame;
+        f.cardsFirst[0] = pub.gi.cards.demandFirst[0];
+        f.cardsFirst[1] = pub.gi.cards.demandFirst[1];
+        f.cardsNewest[0] = pub.gi.cards.demandNewest[0];
+        f.cardsNewest[1] = pub.gi.cards.demandNewest[1];
+        f.cardsOpenLag = pub.gi.cards.demandOpenLag;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1087,6 +1093,12 @@ bool StillnessRun::frameDone(std::string &err)
         f.cardsUnmeasured = pub.gi.cards.unmeasuredRelights;
         f.cardsMoveCodes = pub.gi.cards.moveCodesLast;
         f.cardsReportsDropped = pub.gi.cards.reportsDropped;
+        f.cardsChange = pub.gi.cards.demandChangeFrame;
+        f.cardsFirst[0] = pub.gi.cards.demandFirst[0];
+        f.cardsFirst[1] = pub.gi.cards.demandFirst[1];
+        f.cardsNewest[0] = pub.gi.cards.demandNewest[0];
+        f.cardsNewest[1] = pub.gi.cards.demandNewest[1];
+        f.cardsOpenLag = pub.gi.cards.demandOpenLag;
         f.storeOwed = pub.gi.chainOwed;
         f.foliageRule = g.foliageRuleAccepts >= m.lastFoliageRule ? g.foliageRuleAccepts - m.lastFoliageRule : 0ull;
         f.reflRestFrames = pub.rayQuery.reflectRestFrames;
@@ -1299,7 +1311,7 @@ std::string StillnessReport::tsv() const
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
       << "\trefl_sources"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1333,7 +1345,9 @@ std::string StillnessReport::tsv() const
               << f.cardsPageSize << "\t" << f.cardsSettleFrames << "\t" << f.cardsRoots << "\t" << f.cardsRound << "\t"
               << f.cardsDecisions << "\t" << f.cardsWindowDrains << "\t" << f.cardsIndirectRelit << "\t" << f.cardsRelights
               << "\t" << f.cardsCaptures << "\t" << f.cardsVisible << "\t" << f.cardsSubQuantum << "\t" << f.cardsUnmeasured
-              << "\t" << f.cardsMoveCodes << "\t" << (f.gatherHeld ? 1 : 0) << "\t" << f.cardsReportsDropped << "\n";
+              << "\t" << f.cardsMoveCodes << "\t" << (f.gatherHeld ? 1 : 0) << "\t" << f.cardsReportsDropped
+              << "\t" << f.cardsChange << "\t" << f.cardsFirst[0] << "\t" << f.cardsFirst[1] << "\t" << f.cardsNewest[0]
+              << "\t" << f.cardsNewest[1] << "\t" << f.cardsOpenLag << "\n";
         }
     return o.str();
 }

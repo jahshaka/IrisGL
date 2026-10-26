@@ -633,6 +633,15 @@ public:
     /// read-back's period (kDemandReadEvery) + the ring's lag (the dynamic buffer multiplier + 1) + the issue frame's one.
     /// A reader's DEMAND SPAN is its rest indices [1, L] with L = N + this (PHOTON-7 stage 10, the per-reader snapshot).
     static unsigned demandDueFrames();
+    /// THE DEMAND WINDOW, ONE FORMULA (PHOTON-7 stage 5's read W3, stage 10's empty demand, stage 10-3's liveness fix):
+    /// open at cache frame `frame` after the change at `change` while no reader has stamped since it and the frame is
+    /// within S + the period + `lag` of it, or while a reader r's first stamp since it fell within S + the period of the
+    /// change, its newest has not passed that first by S and the frame is within S + the period + `lag` of that first.
+    /// refreshResidency decides by it; tests/support/owed_rows.py's judge mirrors it line for line on the published
+    /// inputs (CardCacheStatus::demandChangeFrame, demandFirst, demandNewest, demandOpenLag, demandReadEvery).
+    static bool demandWindowOpen(unsigned long long frame, unsigned long long change, const unsigned long long first[2],
+                                 const unsigned long long newest[2], unsigned long long settleS,
+                                 unsigned long long every, unsigned long long lag);
 
     /// THE BATCH'S HOOKS (OgreSurfaceCache.cpp, "The batch, as Ogre's frame
     /// executes it"): the frame-head flag reset, the timing, the per-pass
@@ -1082,6 +1091,7 @@ private:
     unsigned long long mDemandWindow = 10ull;
     /// Each reader's FIRST stamp after the last demand change (0: it has not read since): its own settle's start.
     unsigned long long mDemandFirst[2] = { 0ull, 0ull };
+    unsigned mDemandOpenLag = 0u;   ///< the lag demandWindowOpen's closing counted last (CardCacheStatus::demandOpenLag)
     unsigned mDemandGatherLate = 0u;   // the test door cards.gatherLate
     unsigned long long mAdmitted = 0ull, mEvicted = 0ull, mCompactionMoves = 0ull;
     unsigned long long mArrivalMarkNewest = 0ull;   ///< the newest face mark among the last update's arrivals

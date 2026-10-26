@@ -195,6 +195,11 @@ struct StillnessFrame {
     /// ...and the cache's reports never read for want of a ring slot (CardCacheStatus::reportsDropped): a defect if
     /// seen at all (lab.stillness_control's law)
     unsigned long long cardsReportsDropped = 0;
+    /// ...and THE DEMAND WINDOW's INPUTS as the frame's plan read them (PHOTON-7 stage 10-3, the exact judge;
+    /// CardCacheStatus::demandChangeFrame, demandFirst, demandNewest, demandOpenLag): owed_rows.py applies
+    /// SurfaceCache::demandWindowOpen's one formula to them, never a stand-in
+    unsigned long long cardsChange = 0, cardsFirst[2] = { 0, 0 }, cardsNewest[2] = { 0, 0 };
+    unsigned cardsOpenLag = 0;
     float cardsMoveCodes = 0.0f;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2

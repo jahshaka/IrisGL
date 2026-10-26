@@ -951,6 +951,25 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
     return true;
 }
 
+// THE DEMAND WINDOW (SurfaceCache.h): the one formula refreshResidency decides by and owed_rows.py's judge mirrors.
+// ...AND A READER's WINDOW CLOSES IN THE CACHE's FRAMES TOO (PHOTON-7 stage 10-3, the liveness fix): "its clock has not
+// passed its first by S" read the reader's clock - its newest stamp - and a reader that grazes the cards once and never
+// again (a shot's gather over a near-empty view: one carded hit 5 frames after the change, none after; or a reader past
+// its stamping span) froze its clock below first + S, held the demand OPEN for ever, the rest decision never came, the
+// cards owed their hold and giAtRest stayed false: a screenshot taken at once after a 5 cm camera move ran to its
+// 2,002-frame cap (scripting.e2e.change_then_shot). Its stamps have all landed by the read-back's period and lag past
+// first + S, so the window is closed then, read or not - the same frame a reader stamping every frame closes it at.
+bool SurfaceCache::demandWindowOpen(unsigned long long frame, unsigned long long change, const unsigned long long first[2],
+                                    const unsigned long long newest[2], unsigned long long settleS, unsigned long long every,
+                                    unsigned long long lag) {
+    if (!first[0] && !first[1]) return frame < change + settleS + every + lag;   // no reader since the change
+    for (unsigned r = 0; r < kDemandReaders; ++r)
+        if (first[r] && first[r] < change + settleS + every && newest[r] < first[r] + settleS &&
+            frame < first[r] + settleS + every + lag)
+            return true;
+    return false;
+}
+
 unsigned SurfaceCache::demandDueFrames() {
     Ogre::Root *root = Ogre::Root::getSingletonPtr();
     Ogre::RenderSystem *rs = root ? root->getRenderSystem() : nullptr;
@@ -1167,20 +1186,11 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     Ogre::RenderSystem *rsw = Ogre::Root::getSingleton().getRenderSystem();
     Ogre::VaoManager *vaow = rsw ? rsw->getVaoManager() : nullptr;
     const unsigned long long readLag = (vaow ? vaow->getDynamicBufferMultiplier() + 1u : 1u) + 1u;
-    bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1] &&
-                      mFrame < mDemandChangeFrame + settleS + kDemandReadEvery + readLag;
-    // ...AND A READER's WINDOW CLOSES IN THE CACHE's FRAMES TOO (PHOTON-7 stage 10-3, the liveness fix): "its clock has
-    // not passed its first by S" read the reader's clock - its newest stamp - and a reader that grazes the cards once
-    // and never again (a shot's gather over a near-empty view: one carded hit 5 frames after the change, none after; or
-    // a reader past its stamping span) froze its clock below first + S, held the demand OPEN for ever, the rest
-    // decision never came, the cards owed their hold and giAtRest stayed false: a screenshot taken at once after a
-    // 5 cm camera move ran to its 2,002-frame cap (scripting.e2e.change_then_shot). Its stamps have all landed by the
-    // read-back's period and lag past first + S, so the window is closed then, read or not - the same frame a reader
-    // stamping every frame closes it at.
-    for (unsigned r = 0; r < kDemandReaders && !demandOpen; ++r)
-        demandOpen = mDemandFirst[r] && mDemandFirst[r] < mDemandChangeFrame + settleS + kDemandReadEvery &&
-                     mDemandNewest[r] < mDemandFirst[r] + settleS &&
-                     mFrame < mDemandFirst[r] + settleS + kDemandReadEvery + readLag;
+    mDemandOpenLag = unsigned(readLag);
+    const bool demandOpen = demandWindowOpen(mFrame, mDemandChangeFrame, mDemandFirst, mDemandNewest, settleS,
+                                             kDemandReadEvery, readLag);
+    // (THE FORMULA: demandWindowOpen, below - its liveness clause: a reader that grazes the cards once and never again
+    // froze its clock below first + S and held the window OPEN for ever, scripting.e2e.change_then_shot)
     // THE REST'S ONE DECISION (PHOTON-7 stage 10, R3 (b), the lead's ruling): with the demand closed, NOTHING ARRIVES
     // AND NOTHING LEAVES until the view readers' REST DEMAND IS COMPLETE (each has finished its rest sample sequence:
     // CardSceneView::readersRestComplete) - then, ONCE per change, the cards no view reader read over the rest are
@@ -4137,6 +4147,12 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.cacheFrame = mFrame;
     out.arrivalMarkNewest = mArrivalMarkNewest;
     out.demandReadEvery = unsigned(kDemandReadEvery);
+    out.demandChangeFrame = mDemandChangeFrame;
+    out.demandFirst[0] = mDemandFirst[0];
+    out.demandFirst[1] = mDemandFirst[1];
+    out.demandNewest[0] = mDemandNewest[0];
+    out.demandNewest[1] = mDemandNewest[1];
+    out.demandOpenLag = mDemandOpenLag;
     {
         Ogre::RenderSystem *rs = Ogre::Root::getSingletonPtr() ? Ogre::Root::getSingleton().getRenderSystem() : nullptr;
         Ogre::VaoManager *vao = rs ? rs->getVaoManager() : nullptr;
