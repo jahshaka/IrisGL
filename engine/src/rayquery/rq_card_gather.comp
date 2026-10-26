@@ -133,6 +133,7 @@ layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
 // cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL
 #include "jah_rq_hit_radiance.glsl"
+#include "jah_rq_panes.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
 {
@@ -224,10 +225,18 @@ void main()
 			rayQueryEXT rq;
 			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs.w ), origin, 0.0,
 								   dir, p.knobs.y );
-			JAH_RQ_PROCEED( rq )
-			if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+			JahPanes panes = jahPanesNone();
+			JAH_RQ_PROCEED_PANES( rq, panes )
+			// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl)
+			const bool committed =
+				rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT;
+			float through = 1.0;
+			vec3 paneLight = vec3( 0.0 );
+			if( jahPanesInFront( panes, committed ? rayQueryGetIntersectionTEXT( rq, true ) : p.knobs.y ) > 0 )
+				paneLight = jahPanesOwnLight( panes, origin, dir, spread, through );
+			if( !committed )
 			{
-				sum += jahEnvCone( dir, binTan );
+				sum += paneLight + through * jahEnvCone( dir, binTan );
 				taken += 1.0;
 				++c[kCountSky];
 				continue;
@@ -244,6 +253,7 @@ void main()
 			// kGpuTwoSided: a CULL_NONE macroblock draws both faces, and both are its surface)
 			if( known && dot( wound, dir ) > 0.0 && ( jahHitFlags( slot ) & kJahHitGpuTwoSided ) == 0u )
 			{
+				sum += paneLight;
 				taken += 1.0;
 				++c[kCountBack];
 				continue;
@@ -261,7 +271,7 @@ void main()
 				++c[kCountNoSample];
 				continue;
 			}
-			sum += radiance;
+			sum += paneLight + through * radiance;
 			taken += 1.0;
 			++c[source == 1u ? kCountCard : kCountVoxel];
 			if( source == 1u && jahCardPicked < JAH_CARD_RECORDS )

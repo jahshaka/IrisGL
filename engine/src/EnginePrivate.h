@@ -6694,6 +6694,11 @@ private:
     /// `queue`: the item is GI-visible and its datablock not converted yet — the slot is owed to the material
     /// store's queue (the composer's serial tail does the push, U4 stage 4).
     uint32_t gpuMaterialWordFor(const Node &n, Ogre::uint32 flags, bool &queue) const;
+    /// THE PANE WORD (PHOTON-7 10-4 R7; GpuScene.h GpuInstance::ids.w): 0 for every surface that occludes, else
+    /// kGpuPaneOn | (two-sided ? kGpuPaneTwoSided : 0) | T in bits 0-10 | own in bits 11-21 (each x 2047) - what a
+    /// ray crossing the item's sub-item 0 keeps (its transmittance) and the share of the surface's shaded light it
+    /// sends back (its own light, of the store's row, OgreScene::gpuPaneWordFor's comment).
+    static uint32_t gpuPaneWordFor(const Node &n);
 
 
     /// THE SUBSTRATE — the scene's ONE writer of its GPU description (GpuSceneSubstrate.h,

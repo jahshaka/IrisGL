@@ -720,6 +720,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                 noteShadowShapeChanged(id);
         }
         const Ogre::uint8 rqBefore = renderQueueFor(it->second);
+        const PbrAlphaMode o0Mode = it->second.params.alphaMode;
+        const float o0Alpha = it->second.params.alpha;
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -768,7 +770,11 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // marked and no epoch moves — so a still scene would keep tracing its wearers
         // with the old kGpuMetal (a crate dragged to metalness 1 stayed black in a
         // reflection until something moved). Mark them, refileItems' shape.
-        if (wasMetal != gpuIsMetal(db))
+        // ...and THE PANE WORD (PHOTON-7 10-4 R7, gpuPaneWordFor): an alpha edit inside one mode moves no queue and
+        // flushes no renderable, so the wearers are marked here or their TLAS instances keep the old transmittance.
+        const bool paneMoved = isBlendedMode(o0Mode) != isBlendedMode(p.alphaMode) ||
+                               (isBlendedMode(p.alphaMode) && o0Alpha != p.alpha);
+        if (wasMetal != gpuIsMetal(db) || paneMoved)
             for (auto &kv : mNodes)
                 if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
         if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();

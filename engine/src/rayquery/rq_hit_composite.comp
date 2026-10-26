@@ -125,7 +125,8 @@ void main()
 		// AN UNSHADED RECORD IS NO SAMPLE (PHOTON-2 1b H3), never a black ray at its hit's distance: the texel's distance
 		// becomes kAtlasNoSample, which keeps it out of the filter and the SH sums like a dropped record.
 		const vec4 texel = imageLoad( probeAtlas, xy );
-		imageStore( probeAtlas, xy, shaded ? vec4( min( radiance * weight, vec3( kMaxRadiance ) ), texel.w )
+		// (ADDED to what the trace wrote: the crossed panes' own light, PHOTON-7 10-4 R7 - 0 where no pane was crossed)
+		imageStore( probeAtlas, xy, shaded ? vec4( min( texel.xyz + radiance * weight, vec3( kMaxRadiance ) ), texel.w )
 										   : vec4( 0.0, 0.0, 0.0, kAtlasNoSample ) );
 		return;
 	}

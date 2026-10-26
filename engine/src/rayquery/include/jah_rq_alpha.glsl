@@ -63,13 +63,14 @@ layout( buffer_reference, std430, buffer_reference_align = 16 ) readonly buffer 
 
 const uint kJahAlphaNone = 0xFFFFFFFFu;
 
-/// The ray flags a query asks with: opaque (the pre-lane fast path, every
-/// candidate committed by the hardware) where the scene has no alpha table,
-/// none where it has one (only a FORCE_NO_OPAQUE instance then makes candidates).
+/// The ray flags a query asks with: NONE - every bottom-level structure is opaque, so
+/// only a FORCE_NO_OPAQUE instance (a cut-out, or a PANE: PHOTON-7 10-4 R7) makes a
+/// candidate, and every other triangle commits inside the traversal as before. (The
+/// opaque flag this used to ask where the scene had no alpha table would make a pane
+/// opaque.)
 uint jahAlphaRayFlags( uint extra )
 {
-	const uvec2 t = JAH_ALPHA_TABLE;
-	return ( ( t.x | t.y ) == 0u ? gl_RayFlagsOpaqueEXT : gl_RayFlagsNoneEXT ) | extra;
+	return gl_RayFlagsNoneEXT | extra;
 }
 
 /// Is the candidate triangle SOLID at its barycentrics? `instanceId` is the TLAS
@@ -130,5 +131,117 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 						   rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                   \
 			rayQueryConfirmIntersectionEXT( q );                                                  \
 	}
+
+/// THE PANES (PHOTON-7 10-4 R7; L9: a transparent surface transmits a ray, attenuated by its material). A blended
+/// item's TLAS instance is FORCE_NO_OPAQUE and carries its PANE WORD in its shader-binding-table offset
+/// (rq_tlas_write.comp; GpuScene.h kGpuPaneOn: T and its own light's share on 2047 steps, and whether its material
+/// draws both faces). A ray never COMMITS a pane: each pane candidate is listed (its distance, its word, and the
+/// surface: slot, near/far, submesh, triangle, barycentrics), and after the traversal the panes NEARER than the
+/// committed opaque hit (or than the ray's end, on a miss) are folded in crossing order - the throughput the product
+/// of their T, each one's own light weighted by the panes in front of it (jahPanesFold). A pane's FACING decides as
+/// the raster does: the back face of a one-sided pane is culled there, so it transmits whole and adds nothing; a
+/// two-sided pane takes both faces. Past kJahPanesMax panes a candidate is CONFIRMED: blocked, never a leak.
+/// The order the hardware reports candidates in is free, so the list keeps them unsorted and the fold sorts.
+const uint kJahPaneOn = 1u << 23u;
+const uint kJahPaneTwoSided = 1u << 22u;
+const int kJahPanesMax = 8;
+struct JahPanes
+{
+	int n;
+	float t[kJahPanesMax];
+	uint word[kJahPanesMax];
+	uint slotFar[kJahPanesMax];	// slot in bits 0-23, bit 31 the far copy, bits 24-30 the submesh
+	uint prim[kJahPanesMax];
+	uint bary[kJahPanesMax];	// packHalf2x16
+};
+float jahPaneT( uint word ) { return float( word & 2047u ) * ( 1.0 / 2047.0 ); }
+float jahPaneOwn( uint word ) { return float( ( word >> 11u ) & 2047u ) * ( 1.0 / 2047.0 ); }
+
+/// A pane candidate of query q (its word w nonzero): listed, skipped (the back of a one-sided pane), or - the list full
+/// - confirmed. True when it was confirmed.
+#define JAH_RQ_PANE_CANDIDATE( q, panes, w )                                                          \
+	{                                                                                                 \
+		if( ( ( w ) & kJahPaneTwoSided ) != 0u || rayQueryGetIntersectionFrontFaceEXT( q, false ) )   \
+		{                                                                                             \
+			if( ( panes ).n < kJahPanesMax )                                                          \
+			{                                                                                         \
+				const int k_ = ( panes ).n++;                                                         \
+				( panes ).t[k_] = rayQueryGetIntersectionTEXT( q, false );                           \
+				( panes ).word[k_] = ( w );                                                           \
+				( panes ).slotFar[k_] = ( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ) & 0xFFFFFFu ) | \
+					( ( uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ) & 127u ) << 24u ) |       \
+					( ( uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ) & 1u ) << 31u );            \
+				( panes ).prim[k_] = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) );    \
+				( panes ).bary[k_] = packHalf2x16( rayQueryGetIntersectionBarycentricsEXT( q, false ) ); \
+			}                                                                                         \
+			else                                                                                      \
+				rayQueryConfirmIntersectionEXT( q );                                                  \
+		}                                                                                             \
+	}
+
+/// THE LOOP of a ray that CROSSES panes (the caches' gathers, the screen gather, the reflection; R8 the light rays):
+/// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0.
+#define JAH_RQ_PROCEED_PANES( q, panes )                                                              \
+	while( rayQueryProceedEXT( q ) )                                                                  \
+	{                                                                                                 \
+		if( rayQueryGetIntersectionTypeEXT( q, false ) != gl_RayQueryCandidateIntersectionTriangleEXT ) \
+			continue;                                                                                 \
+		const uint w_ = uint( rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT( q, false ) ); \
+		if( ( w_ & kJahPaneOn ) != 0u )                                                               \
+			JAH_RQ_PANE_CANDIDATE( q, panes, w_ )                                                     \
+		else if( jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),    \
+								uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),             \
+								uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),          \
+								uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),         \
+								rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                \
+			rayQueryConfirmIntersectionEXT( q );                                                      \
+	}
+
+JahPanes jahPanesNone()
+{
+	JahPanes p;
+	p.n = 0;
+	return p;
+}
+
+/// THE PANES BETWEEN tStart AND tEnd (jahPanesInFront: nearer than tEnd), in crossing order (an insertion sort of the list in place; the ones past tEnd dropped):
+/// returns how many there are; the throughput past them all is jahPanesThroughput.
+int jahPanesBetween( inout JahPanes p, float tStart, float tEnd )
+{
+	int m = 0;
+	for( int i = 0; i < p.n; ++i )
+	{
+		if( !( p.t[i] < tEnd ) || p.t[i] < tStart )
+			continue;
+		const float t = p.t[i];
+		const uint w = p.word[i], sf = p.slotFar[i], pr = p.prim[i], b = p.bary[i];
+		int j = m - 1;
+		while( j >= 0 && p.t[j] > t )
+		{
+			p.t[j + 1] = p.t[j];
+			p.word[j + 1] = p.word[j];
+			p.slotFar[j + 1] = p.slotFar[j];
+			p.prim[j + 1] = p.prim[j];
+			p.bary[j + 1] = p.bary[j];
+			--j;
+		}
+		p.t[j + 1] = t;
+		p.word[j + 1] = w;
+		p.slotFar[j + 1] = sf;
+		p.prim[j + 1] = pr;
+		p.bary[j + 1] = b;
+		++m;
+	}
+	p.n = m;
+	return m;
+}
+int jahPanesInFront( inout JahPanes p, float tEnd ) { return jahPanesBetween( p, -1e30, tEnd ); }
+float jahPanesThroughput( JahPanes p )
+{
+	float T = 1.0;
+	for( int i = 0; i < p.n; ++i )
+		T *= jahPaneT( p.word[i] );
+	return T;
+}
 
 #endif   // JAH_RQ_ALPHA_GLSL

@@ -542,6 +542,7 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 layout( set = 0, binding = 43 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 44 ) uniform sampler2D jahHitCloud;
 #include "jah_rq_hit_radiance.glsl"
+#include "jah_rq_panes.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl, ENGINE-POLISH-PHOTON-1): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
 {
@@ -740,7 +741,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
-		JAH_RQ_PROCEED( rq )
+		JahPanes panes = jahPanesNone();
+		JahPanes panesFar = jahPanesNone();
+		JAH_RQ_PROCEED_PANES( rq, panes )
 		float t = 0.0;
 		vec3 hitN = -L;
 		bool hitNormalKnown = false;
@@ -756,7 +759,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
 			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
 		}
-		else if( p.screen2.w > maxT )
+		jahPanesInFront( panes, slotHit ? t : maxT );
+		if( !slotHit && p.screen2.w > maxT )
 		{
 			// (3) THE FAR COPIES for an escape (kRayMaskFar, each mesh's coarsest level), from the near length less
 			// the widest coarse-vs-fine hand-over gap to the far plane - the gather's continuation (rq_probe_gather.comp):
@@ -766,7 +770,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			rayQueryEXT rqFar;
 			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, L,
 								   p.screen2.w );
-			JAH_RQ_PROCEED( rqFar )
+			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
 				slotHit = true;
@@ -776,6 +780,21 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
 				recBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
 			}
+			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
+			jahPanesBetween( panesFar, maxT, slotHit ? t : p.screen2.w );
+		}
+		// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl)
+		float through = 1.0;
+		vec3 paneLight = vec3( 0.0 );
+		const bool crossedPanes = panes.n + panesFar.n > 0;
+		if( crossedPanes )
+		{
+			const float paneSpread = reflectFootprint( lobeAlpha, 1.0 );
+			paneLight = jahPanesOwnLight( panes, origin, L, paneSpread, through );
+			float throughFar = 1.0;
+			const vec3 farLight = jahPanesOwnLight( panesFar, origin, L, paneSpread, throughFar );
+			paneLight += through * farLight;
+			through *= throughFar;
 		}
 		if( slotHit )
 		{
@@ -808,6 +827,18 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !record )
 				traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
 									  length( world - thisEye.camPos ) );
+			// ...THROUGH THE PANES IN FRONT (PHOTON-7 10-4 R7). A record's write-back carries no throughput, so a hit
+			// the decode must shade BEHIND a pane is NO SAMPLE (counted out like the screen's: the rest fills it).
+			if( crossedPanes )
+			{
+				if( record )
+				{
+					noSample = true;
+					record = false;
+				}
+				else
+					traced = paneLight + through * traced;
+			}
 			// THE MEASURING ARM reflect.flatHits (denoiser.w): the hit answered by a constant of its instance - no cache,
 			// no footprint, no fog, no record (the estimator and the denoiser measured alone).
 			if( p.denoiser.w > 0.5 )
@@ -822,7 +853,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		else
 		{
 			// (4) THE SKY: nothing near, nothing far.
-			traced = jahFogAlongSky( skyRadiance( L, lobeAlpha, centre ), world.y, L, length( world - thisEye.camPos ) );
+			traced = paneLight + through * jahFogAlongSky( skyRadiance( L, lobeAlpha, centre ), world.y, L,
+														   length( world - thisEye.camPos ) );
 			ok = true;
 			photonSource = 3u;
 		}

@@ -45,6 +45,7 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <cassert>
 #include <chrono>
@@ -929,6 +930,31 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
 /// outright, the two specular workflows through F0 — getFresnel(), never the specular
 /// colour kS — (a dielectric's is 0.02-0.08, a metal's its colour). One function, two callers: gpuFlagsFor, and setPbrMaterial's
 /// in-place edit, which marks the wearers' slots when the answer flips.
+/// THE PANE WORD (PHOTON-7 10-4 R7; L9: a transparent surface transmits a ray, attenuated by its material). Ogre's
+/// blend passes 1 - alpha of what lies behind a Fade (Blend) or Transparent (Glass) surface and of a Refractive one's
+/// refraction (OgreHlmsPbsDatablock.cpp setTransparency's blendblocks; Refractions_piece_ps.any), so a ray crossing it
+/// keeps T = 1 - alpha. ITS OWN LIGHT: the pixel sends alpha x its shaded colour for Fade, and alpha^2 kD for
+/// Transparent / Refractive (kD premultiplied by alpha^2 on upload) - the store's row carries kD x alpha for those two
+/// (PhotonVoxelMaterial::writeRow), so a ray takes alpha x the row-shaded light in every mode. Sub-item 0's datablock
+/// decides (the material word's rule). NOT A PANE: an opaque or cut-out material; Modulate (Ogre's Src x Dest is no
+/// transmittance) and Additive (it absorbs nothing: T 1, its add) - both recorded, out of R7.
+uint32_t OgreScene::gpuPaneWordFor(const Node &n) {
+    const Ogre::Item *item = n.item;
+    if (!item || !item->getNumSubItems()) return 0u;
+    const Ogre::HlmsDatablock *db = item->getSubItem(0)->getDatablock();
+    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return 0u;
+    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+    const Ogre::HlmsPbsDatablock::TransparencyModes mode = pbs->getTransparencyMode();
+    if (mode == Ogre::HlmsPbsDatablock::None) return 0u;
+    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE) return 0u;   // Additive
+    const float alpha = std::min(std::max(pbs->getTransparency(), 0.0f), 1.0f);
+    if (!(alpha < 1.0f)) return 0u;
+    const uint32_t T = uint32_t(std::lround((1.0f - alpha) * float(kGpuPaneSteps)));
+    const uint32_t own = uint32_t(std::lround(alpha * float(kGpuPaneSteps)));
+    const bool twoSided = db->getMacroblock()->mCullMode == Ogre::CULL_NONE;
+    return kGpuPaneOn | (twoSided ? kGpuPaneTwoSided : 0u) | T | (own << 11);
+}
+
 bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
     if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return false;
     const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
@@ -1112,6 +1138,7 @@ void OgreScene::composeGpuInstanceLane(const Node &n, const Ogre::Matrix4 &world
     out.ids[0] = gpuKeyOf(n);   // Ogre's 32-bit key, never the 64-bit id (U3 stage 3, F6)
     out.ids[1] = gpuMaterialWordFor(n, flags, tail.queueMaterial);
     out.ids[2] = uint32_t(n.lightMask);
+    out.ids[3] = gpuPaneWordFor(n);
     // THE RASTER WORDS (see GpuInstance::raster): sub-item 0's PBS material word, and
     // the tangent's place in the vertex of the mesh's level-0 VAO — submesh 0, like
     // every other geometry fact this table carries.
