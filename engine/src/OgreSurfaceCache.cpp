@@ -1135,8 +1135,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
 
     // THE DEMAND OPEN (PHOTON-7 stage 5's read W3): EACH READER SETTLES FROM ITS OWN FIRST STAMP since the last change -
     // reader r holds the demand open while its first falls within the settle S of the change and its clock has not
-    // passed that first by S; and it is open while no reader has read since the change (for the window a first read
-    // would open it in: an empty demand closes past it, below). So a reader that reads first
+    // passed that first by S; and it is open while no reader has read since the change. So a reader that reads first
     // a few frames after the other keeps it open for its own S (the faster reader's clock closed it before: a gather
     // reading 8 frames late lost its faces), a reader that never reads holds nothing (the reflection with no card in
     // view: the readers' least clock never closed it), and a first graze long after the change cannot reopen it.
@@ -1152,16 +1151,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mWindowDrained = false;
     }
     const unsigned long long settleS = view.demandSettleFrames;
-    // AN EMPTY DEMAND CLOSES (PHOTON-7 stage 10, the giAtRest contract; the lead's rule: no reader, nothing to wait for):
-    // "open while no reader has read since the change" held only for the window a first read would have opened it in -
-    // the settle S, one read-back period, and the read-back's lag. Past it, a cache no reader read (no view reads the
-    // cards: gi.changed_regions' fixture, a sky scene, a screenshot's offscreen settle) takes its rest decision on an
-    // EMPTY demand, never an open one for ever: GiStatus::giAtRest waits on that decision.
-    Ogre::RenderSystem *rsw = Ogre::Root::getSingleton().getRenderSystem();
-    Ogre::VaoManager *vaow = rsw ? rsw->getVaoManager() : nullptr;
-    const unsigned long long readLag = (vaow ? vaow->getDynamicBufferMultiplier() + 1u : 1u) + 1u;
-    bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1] &&
-                      mFrame < mDemandChangeFrame + settleS + kDemandReadEvery + readLag;
+    bool demandOpen = !mDemandFirst[0] && !mDemandFirst[1];
     for (unsigned r = 0; r < kDemandReaders && !demandOpen; ++r)
         demandOpen = mDemandFirst[r] && mDemandFirst[r] < mDemandChangeFrame + settleS + kDemandReadEvery &&
                      mDemandNewest[r] < mDemandFirst[r] + settleS;
