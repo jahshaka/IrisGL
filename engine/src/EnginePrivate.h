@@ -5924,6 +5924,9 @@ public:
 private:
     /// The render queue an item using this material belongs in.
     static Ogre::uint8 renderQueueFor(const MaterialRec &m);
+    /// A mode that BLENDS over what is behind it (every mode but Opaque and Cutout): its surface is drawn after the
+    /// opaque ones, in the blended queue, and occludes nothing.
+    static bool isBlendedMode(PbrAlphaMode m) { return m != PbrAlphaMode::Opaque && m != PbrAlphaMode::Cutout; }
     /// Re-files every item that uses this material after its alpha mode changed.
     void refileItems(MaterialId id, const MaterialRec &m);
 

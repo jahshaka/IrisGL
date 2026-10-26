@@ -14,12 +14,17 @@ Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     // pass, at a queue above every other scene range.
     if (m.distortion) return kDistortionRenderQueue;
     if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
-    // A BLENDED surface draws after the depth-tested editor helpers (REFLECT-FIX-1): a
-    // grid line or an outline behind a pane of glass is seen THROUGH it — dimmed by its
-    // alpha — on every chain. In the opaque queue it drew before the grid's queue, and
-    // whether its depth then hid the grid depended on the tier (a prepass makes the
-    // opaque pass read-only: through on a march chain, hidden without one).
-    if (m.params.alphaMode == PbrAlphaMode::Blend && !(m.unlit && !m.shadingUnlit)) return kBlendedRenderQueue;
+    // EVERY BLENDED SURFACE draws in the blended queue: Blend, Glass, Additive and Modulate alike.
+    // It draws after the depth-tested editor helpers (REFLECT-FIX-1: a grid line or an outline
+    // behind a pane of glass is seen THROUGH it, dimmed by its alpha, on every chain), and on a
+    // screen-GI chain in its own pass after the opaque one ("Jahshaka blended", OgreChain.cpp),
+    // which binds no screen product. In the opaque queue a Glass, Additive or Modulate fragment
+    // was shaded in the opaque pass, whose pass properties hand every fragment the gathered
+    // diffuse and the rough specular at its pixel - the OPAQUE surface's behind it, which the
+    // prepass holds alone: a window glowed with the lit wall's irradiance (PHOTON-7 10-4 R6;
+    // SPECS/audits/PHYSICS_AUDIT_2026-10-26.md A0; gi.glass_pass). The mode is the blend, not
+    // a category: what decides the pass is that the surface blends over what is behind it.
+    if (isBlendedMode(m.params.alphaMode) && !(m.unlit && !m.shadingUnlit)) return kBlendedRenderQueue;
     return 10u;                                        // Ogre's default for normal items
 }
 
