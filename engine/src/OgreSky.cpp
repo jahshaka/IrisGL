@@ -1159,6 +1159,7 @@ void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
         // frame's own submission and is taken at its DUE frame (skyReadDue).
         mSkyShTicket->download(cube, mip, false);
         mSkyShTicketFrame = mSkyFrame;
+        ++mSkyShDeferredReads;
         return;
     } JAH_CATCH(mError, );
     destroySkyShTicket();
@@ -2554,6 +2555,7 @@ void OgreScene::captureCloudClearSky() {
             ticket->download(cube, mip, false);   // read at its due frame's top (skyReadDue)
             mCloudClearTicket = ticket;
             mCloudClearTicketFrame = mSkyFrame;
+            ++mCloudClearDeferredReads;
             ticket = nullptr;
         } else {
             mRoot->getRenderSystem()->flushCommands();

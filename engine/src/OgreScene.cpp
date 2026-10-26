@@ -813,6 +813,8 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.heightFog = heightFogStatus();
     back.skyAmbientShValid = skyAmbientSh(back.skyAmbientSh);
     back.environmentPending = environmentPending();
+    back.skyShDeferredReads = mSkyShDeferredReads;
+    back.cloudClearDeferredReads = mCloudClearDeferredReads;
     back.clouds = cloudStatus();
     back.atmosphereStatus = atmosphereStatus();
     back.rayQuery = rayQueryStatus();

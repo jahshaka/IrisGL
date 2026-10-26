@@ -9308,6 +9308,11 @@ struct PublishedFrame {
     /// an asynchronous scene's convolution permutation may be compiling in the background — wall-clock, not frames). A
     /// host holds a loading cover, a test counts frames to this clearing, never a guessed count.
     bool                 environmentPending = false;
+    /// THE SKY's DEFERRED READS over the scene's life (PHOTON-7 stage 10-3, item 0): the environment SH's and the cloud
+    /// sheet's clear-sky ambient's reads issued as a ticket and taken at their due frame (a drag, the cloud scroll's
+    /// captures) rather than read in the capture's own frame. 0 = every sky light this scene took landed synchronously.
+    unsigned             skyShDeferredReads = 0;
+    unsigned             cloudClearDeferredReads = 0;
     CloudStatus          clouds;
     AtmosphereStatus     atmosphereStatus;
     RayQueryStatus       rayQuery;

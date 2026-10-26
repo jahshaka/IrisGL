@@ -4327,6 +4327,9 @@ public:
     unsigned long long mSkyFrame = 0ull;
     unsigned long long mSkyShTicketFrame = 0ull;
     unsigned long long mCloudClearTicketFrame = 0ull;
+    /// The deferred reads issued over the scene's life (PublishedFrame::skyShDeferredReads, cloudClearDeferredReads).
+    unsigned mSkyShDeferredReads = 0u;
+    unsigned mCloudClearDeferredReads = 0u;
     /// Drawn frames since the last sky capture — the gesture's clock. A capture
     /// within `kSkyCaptureDragFrames` of the previous one is a DRAG and defers
     /// its read; a lone change stays synchronous, so nothing that renders a
