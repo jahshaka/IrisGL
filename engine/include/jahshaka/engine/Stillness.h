@@ -183,6 +183,9 @@ struct StillnessFrame {
     std::string cardsRoots;
     unsigned    cardsRound = 0;
     unsigned long long cardsDecisions = 0, cardsWindowDrains = 0;
+    /// ...and the frame's indirect relight in texels (CardCacheStatus::indirectTexelsLastFrame: the pace the L7 count
+    /// bounds - lab.stillness_control's pace law reads a round's pages from it)
+    unsigned cardsIndirectRelit = 0;
     bool               storeOwed = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS that reached the host this frame (GatherStatus::foliageRuleAccepts' step; PHOTON-2
     /// L8: a few frames late, so a window's SUM is the reading).
