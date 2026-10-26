@@ -4109,6 +4109,20 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     out.instancesResident = 0u;
     for (const InstanceRec &i : mInstances) out.instancesResident += i.cardCount ? 1u : 0u;
     out.cardsResident = unsigned(mCards.size());
+    {
+        // (the resident set's fingerprint: its pairs sorted, then FNV-1a over their bytes - an order-free identity)
+        std::vector<std::pair<NodeId, unsigned>> set;
+        set.reserve(mCards.size());
+        for (const CardRec &c : mCards)
+            if (c.instance < mInstances.size()) set.emplace_back(mInstances[c.instance].node, c.index);
+        std::sort(set.begin(), set.end());
+        unsigned long long h = set.empty() ? 0ull : 1469598103934665603ull;
+        const auto mix = [&h](unsigned long long v, unsigned bytes) {
+            for (unsigned b = 0; b < bytes; ++b) { h ^= (v >> (8u * b)) & 0xFFull; h *= 1099511628211ull; }
+        };
+        for (const auto &p : set) { mix(p.first, 8u); mix(p.second, 4u); }
+        out.residentHash = h;
+    }
     out.admitted = mAdmitted;
     out.cacheFrame = mFrame;
     out.arrivalMarkNewest = mArrivalMarkNewest;

@@ -4208,6 +4208,9 @@ struct CardCacheStatus {
     /// Residency: the instances holding pages, and their cards.
     unsigned instancesResident = 0u;
     unsigned cardsResident = 0u;
+    /// WHICH cards are resident (PHOTON-7 stage 10-3, the resize row): FNV-1a 64 over the resident cards' (node id, card
+    /// index) pairs, sorted - equal fingerprints are the same resident set, whatever order it arrived in; 0 with none.
+    unsigned long long residentHash = 0ull;
     /// RESIDENCY BY THE READERS' DEMAND (PHOTON-7 stage 5, 5-2): the cards admitted (a face a hit marked, a read
     /// card's re-admission after a move), evicted (unread for the window, an arrival needing the room) and moved by the
     /// atlas's compaction (each re-captured where it lands), cumulative; and under the measuring arm
