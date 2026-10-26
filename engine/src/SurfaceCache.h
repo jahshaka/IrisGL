@@ -808,6 +808,14 @@ private:
     unsigned long long mIndirectByCards = 0ull, mIndirectByBound = 0ull;
     /// ...and the listings a later march had answered already (R3: dropped, never a re-march)
     unsigned long long mIndirectAnswered = 0ull, mReportsDropped = 0ull;
+    /// THE FRAME'S ONE REPORT (PHOTON-7 stage 10, the stranded listings): every accumulation of a frame (the voxels' and
+    /// the card-to-card) writes into the one report, and endIndirectFrame only marks it PENDING; flushReport issues its
+    /// read-back once - before the next frame's clear, or at the cache's next frame - so a frame takes one ring slot,
+    /// never two (two a frame filled the ring and dropped reports, and a dropped report STRANDS its listed cards: their
+    /// GPU flag stays set until their next march, so no later frame lists them again - gi.card_lamp_shadow (2)).
+    bool mReportPending = false;
+    unsigned long long mReportPendingHost = 0ull, mReportPendingCache = 0ull;
+    void flushReport();
     /// THE READERS' THRESHOLD (PHOTON-7 stage 10, R3 (a) applied to every reader): the relight frames that moved a texel
     /// by a code since its last report (JahCardLight_cs.glsl's frame word, read back with the report) or could not be
     /// measured (counted at once: a relight with no gather layer bound, a report not issued) - `mVisibleRelights`; those

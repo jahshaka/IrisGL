@@ -2661,8 +2661,11 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
         detail::monitor::CacheScope row(CacheKind::Gi, WorkReason::Light, 0, "cards.card_to_card", rs);
         if (cardsRead) {
             // the frame's report starts empty once (the voxels' accumulation keeps the same rule)
-            if (mAccumClearFrame != mPlanFrame) {
-                mAccumClearFrame = mPlanFrame;
+            // (ONE CLOCK for both paths' clear, the cache's own frame: the voxels' giWriterFrame and the plan's frame
+            // differ, and two clears a frame meant two reports a frame)
+            if (mAccumClearFrame != mFrame) {
+                flushReport();   // (the previous frame's report read before this frame's clear)
+                mAccumClearFrame = mFrame;
                 const Ogre::uint32 clear[4] = { 1u, 0u, kReportCapacity, 0u };
                 setMode(clear);
                 mAccumJob->setNumThreadGroups(1u, 1u, 1u);
@@ -2707,7 +2710,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
         mRelitMeasured = false;
     }
     if (cardsRead && ready) endIndirectFrame(mPlanFrame);
-    if (mMovesOwed) { mMovesOwed = false; unmeasured(); }   // (no ticket took them)
+    if (mMovesOwed && !mReportPending) { mMovesOwed = false; unmeasured(); }   // (no report will carry them)
 }
 
 bool SurfaceCache::ensureIndirectBuffers() {
@@ -2770,8 +2773,9 @@ void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const u
     const bool clustersOver = clusters > kMaxCardClusters;
     if (shaderReady) {
         // THE FRAME'S FIRST: the list starts empty (one thread)
-        if (mAccumClearFrame != frame) {
-            mAccumClearFrame = frame;
+        if (mAccumClearFrame != mFrame) {   // (the cache's own frame: one clock with the card-to-card's clear)
+            flushReport();   // (the previous frame's report read before this frame's clear)
+            mAccumClearFrame = mFrame;
             const Ogre::uint32 mode[4] = { 1u, 0u, kReportCapacity, 0u };
             set("caMode", mode, false);
             params.setDirty();
@@ -2826,11 +2830,32 @@ void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const u
 void SurfaceCache::endIndirectFrame(unsigned long long frame) {
     if (!mAccumRan || !mCardReport) return;
     mAccumRan = false;
+    // (pending: the frame's later accumulation may still write into the report; flushReport reads it once)
+    mReportPending = true;
+    mReportPendingHost = frame;
+    mReportPendingCache = mFrame;
+}
+
+void SurfaceCache::flushReport() {
+    if (!mReportPending || !mCardReport) return;
+    mReportPending = false;
     ReportTicket &r = mReportReadings[mReportNextIssue];
-    if (r.ticket.get()) { ++mReportsDropped; return; }   // every slot in flight: a later frame's list answers (the cards stay listed)
+    if (r.ticket.get()) {
+        // NO SLOT (the ring is sized for one report a frame over the read-back's lag, so this is a defect if it is seen):
+        // a report never read must never strand its listings - every card's indirect is listed (the overflow rule, a
+        // move that could not be measured) and the relights it carried count visible
+        ++mReportsDropped;
+        const unsigned long long root = 1ull << rootBit('r', mFrame);
+        for (CardRec &c : mCards)
+            if (c.indirectValid) { c.relightIndirect = true; c.roots |= root; }
+        ++mIndirectOverflows;
+        if (mMovesOwed) { ++mVisibleRelights; ++mUnmeasuredRelights; }
+        mMovesOwed = false;
+        return;
+    }
     r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
-    r.frame = frame;
-    r.cacheFrame = mFrame;
+    r.frame = mReportPendingHost;
+    r.cacheFrame = mReportPendingCache;
     r.carriesMoves = mMovesOwed;
     mMovesOwed = false;
     mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
@@ -3883,6 +3908,7 @@ void SurfaceCache::update(const CardSceneView &view) {
     mRelitInstances.clear();
     if (!mBuilt) return;
     mFrozen = false;
+    flushReport();   // (the last frame's report, if no accumulation of this frame has read it yet)
     ++mFrame;
     mCapturesLastFrame = 0u;
     mTexelsLastFrame = 0u;
@@ -4022,7 +4048,7 @@ void SurfaceCache::photonQuads(std::vector<PhotonCardQuad> &out) const {
 bool SurfaceCache::restHoldOwed() const {
     if (!mBuilt) return false;
     if (!mRestDecided) return true;   // the stop's one decision is still to come
-    if (mReportNextTake != mReportNextIssue) return true;   // a card-to-card report in flight: a round may follow
+    if (mReportPending || mReportNextTake != mReportNextIssue) return true;   // a report pending or in flight: a round may follow
     for (const CardRec &c : mCards)
         if (c.size && (c.queued || c.relight || c.relightIndirect || c.stillPending)) return true;
     return false;
