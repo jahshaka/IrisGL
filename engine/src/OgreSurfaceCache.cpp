@@ -1208,6 +1208,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     }
     const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided;
     if (decide) {
+        mArmRemarch = true;   // ARM: every resident card re-marched once its arrivals are captured - reverted next
         mRestDecided = true;
         ++mRestDecisions;
     }
@@ -1825,6 +1826,15 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
         };
         bool direct = view.allDirect, indirect = view.allIndirect;
         unsigned long long regionRoot = 0ull;   // (R3 (c): a region's or an overflow's work is its own root's)
+        if (mArmRemarch) {   // ARM: once the decision's arrivals are all captured, every resident card's indirect once
+            bool pending = false;
+            for (const CardRec &c : mCards) pending = pending || (c.size && (c.queued || !c.lastUpdated));
+            if (!pending) {
+                mArmRemarch = false;
+                const unsigned long long root = 1ull << rootBit('d', mFrame);
+                for (CardRec &c : mCards) if (c.size) { c.relightIndirect = true; c.roots |= root; }
+            }
+        }
         for (CardRec &c : mCards) {
             bool d = view.allDirect, n = view.allIndirect;
             if (!d || !n) {
