@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include "core/math/vec.h"
 #include "QColor"
+#include <QJsonObject>
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/shadowmap.h"
@@ -42,6 +43,17 @@ enum class LightType:int
     // as it looks. (D14's "no node = no ambient" - a visible sky that did not
     // light - is deleted: a sky that shows and does not emit breaks physics.)
     Sky = 4,
+};
+
+/// THE SKY LIGHT's SOURCE (PHOTON-7 10-3 R5b, an author tool on top of R5's one-radiance law; Unreal's Sky Light Source
+/// Type): what the scene's sky LIGHT is made of. `Sky` (the default): the World sky as drawn, x the node's tint x
+/// intensity (R5: the sky emits what it shows). `Cubemap`: an INVISIBLE DOME LIGHT - the node's own six faces x tint x
+/// intensity light the scene while the camera sees the World sky as drawn (a studio HDRI lighting a product against a
+/// black World sky).
+enum class SkyLightSource : int
+{
+    Sky = 0,
+    Cubemap = 1,
 };
 
 class LightNode:public SceneNode
@@ -189,6 +201,16 @@ public:
     QString iesProfileGuid;
     QString iesProfilePath;
     float   iesNormalisation;
+
+    /**
+     * THE SKY LIGHT's SOURCE (SkyLightSource above; Sky lights only). The dome's six faces are TEXTURE ASSET guids
+     * under their roles (front, back, top, bottom, left, right - world.sky's cubemap keys); `skyCubeTexture` is RUNTIME
+     * state, the faces loaded by whoever binds the guids (the reader, the panel, the verb: LightBindings::bindSkyCube),
+     * exactly as the IES profile's path above.
+     */
+    SkyLightSource skySource = SkyLightSource::Sky;
+    QJsonObject skyCubeFaces;
+    QSharedPointer<Texture2D> skyCubeTexture;
 
     //editor-specific
     QSharedPointer<Texture2D> icon;

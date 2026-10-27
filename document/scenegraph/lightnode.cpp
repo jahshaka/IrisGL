@@ -172,6 +172,8 @@ QVariant LightNode::getPropertyValue(QString valueName)
         return iesNormalisation;
     if(valueName == "iconSize")
         return iconSize;
+    if(valueName == "skySource")
+        return static_cast<int>(skySource);
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -201,6 +203,7 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return markedParams(); }
     if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return markedParams(); }
     if (valueName == "iconSize")          { iconSize = value.toFloat();          return markedParams(); }
+    if (valueName == "skySource")         { skySource = value.toInt() == 1 ? SkyLightSource::Cubemap : SkyLightSource::Sky; return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
 }
@@ -284,6 +287,9 @@ SceneNodePtr LightNode::createDuplicate()
 	light->iesProfileGuid = this->iesProfileGuid;
 	light->iesProfilePath = this->iesProfilePath;
 	light->iesNormalisation = this->iesNormalisation;
+	light->skySource = this->skySource;
+	light->skyCubeFaces = this->skyCubeFaces;
+	light->skyCubeTexture = this->skyCubeTexture;
 	light->shadowMap = this->shadowMap;
 	light->icon = this->icon;
 	light->iconSize = this->iconSize;

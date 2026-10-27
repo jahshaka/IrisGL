@@ -1319,6 +1319,27 @@ struct SkyDesc {
     }
 };
 
+/// THE ENVIRONMENT'S SOURCE (PHOTON-7 10-3 R5b: the two author tools every renderer has on top of R5's one-radiance law -
+/// Unreal's Sky Light Source Type and the film renderers' dome light / backdrop split). What the environment capture
+/// photographs - the ambient SH, the convolved reflection cube and every escape that reads them - at the scene's Sky
+/// Light gain (Scene::setEnvironmentLight); the camera sees the scene's sky as drawn (SkyDesc) whatever this says.
+///   * Sky (the default, R5): the sky as drawn - it emits what it shows;
+///   * Cubemap: an INVISIBLE DOME LIGHT - six world-axis faces (SkyDesc::faces' order and frame), photographed instead
+///     of the drawn sky, at the faces' own size (a studio HDRI lighting a product against a black World sky);
+///   * Black: an UNLIT BACKDROP - nothing is photographed: no sky light at all, the sky still drawn.
+enum class EnvironmentSource : unsigned char { Sky = 0, Cubemap, Black };
+struct EnvironmentDesc {
+    EnvironmentSource source = EnvironmentSource::Sky;
+    TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };   ///< Cubemap only; the faces are copied, the caller may destroy them
+    bool operator==(const EnvironmentDesc &o) const {
+        if (source != o.source) return false;
+        if (source == EnvironmentSource::Cubemap)
+            for (int i = 0; i < 6; ++i) if (faces[i] != o.faces[i]) return false;
+        return true;
+    }
+    bool operator!=(const EnvironmentDesc &o) const { return !(*this == o); }
+};
+
 /// PBR texture slots. There is NO Occlusion slot, and since HLMS_ADOPTION P2
 /// there is no occlusion row on the document side either: the backend has no
 /// ambient-occlusion input AT ALL (not one `occlusion` reference in its whole
@@ -9066,6 +9087,7 @@ struct FrameInputScene {
     std::vector<SceneMessage> messages;
     std::optional<ShadowDesc>             shadows;
     std::optional<Colour>                 environmentLight;
+    std::optional<EnvironmentDesc>        environment;   ///< R5b: what the environment capture photographs
     std::optional<FogDesc>                fog;
     std::optional<HeightFogDesc>          heightFog;
     std::optional<RayTracingMode>         rayTracing;

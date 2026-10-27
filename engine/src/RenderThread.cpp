@@ -106,6 +106,7 @@ void mergeRecord(FrameInput &p, FrameInput &&in) {
         // one it does not carry keeps the older record's value (a sparser second sync never drops the first's).
         if (sc.shadows) it->shadows = sc.shadows;
         if (sc.environmentLight) it->environmentLight = sc.environmentLight;
+        if (sc.environment) it->environment = sc.environment;
         if (sc.fog) it->fog = sc.fog;
         if (sc.heightFog) it->heightFog = sc.heightFog;
         if (sc.rayTracing) it->rayTracing = sc.rayTracing;

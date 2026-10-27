@@ -123,6 +123,11 @@ public:
     /// of its own (a sky capture then leaves it alone). 1.0 is the default, and
     /// the value is clamped at zero.
     virtual void        setEnvironmentLight(const Colour &gain) = 0;
+    /// WHAT THE ENVIRONMENT IS MADE OF (EnvironmentDesc; PHOTON-7 10-3 R5b): the drawn sky (the default), an invisible
+    /// dome cubemap, or nothing (an unlit backdrop) - photographed at the setEnvironmentLight gain; the camera's sky is
+    /// SkyDesc's either way. A change is one recapture. False (lastError) for unknown or unequal faces: the source in
+    /// force stays.
+    virtual bool        setEnvironment(const EnvironmentDesc &) { return false; }
     /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
     /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
     /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled

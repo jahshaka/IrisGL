@@ -269,8 +269,8 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             // re-taken before the capture that photographs it.
             mCloudClearPending = true;
             applyCloudLayer(false);
-            if (desc.mode != SkyMode::NoSky)
-                requestSkyCapture();
+            if (desc.mode != SkyMode::NoSky || mEnvDesc.source == EnvironmentSource::Cubemap)
+                requestSkyCapture();   // (a dome lights a scene with no sky: R5b)
             else {
                 // No sky, no sky light: the ambient the host derives from this
                 // must go to zero in the same push that removed the sky.
@@ -325,6 +325,52 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
         return true;
     } JAH_CATCH(mError, false);
+}
+
+// THE ENVIRONMENT'S SOURCE (R5b, EnvironmentDesc): the drawn sky, an invisible dome, or an unlit backdrop. A dome's
+// six faces are copied into a picture-only cube (the Cubemap sky's own builder); a change is one recapture - the previous
+// environment stays bound until the new one lands, as for any sky change.
+bool OgreScene::setEnvironment(const EnvironmentDesc &desc) {
+    if (postScene([=](OgreScene &s) { return s.setEnvironment(desc); })) return true;
+    JAH_HOST_CALL("Scene::setEnvironment");
+    if (desc == mEnvDesc) return true;
+    JAH_TRY {
+        Ogre::TextureGpu *dome = nullptr;
+        if (desc.source == EnvironmentSource::Cubemap) {
+            Ogre::TextureGpu *tex[6];
+            for (int i = 0; i < 6; ++i) {
+                auto it = mTextures.find(desc.faces[i]);
+                if (it == mTextures.end() || !it->second.texture) {
+                    mError = "setEnvironment: unknown dome face texture";
+                    return false;
+                }
+                tex[i] = it->second.texture;
+            }
+            for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
+            for (int i = 0; i < 6; ++i)
+                if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getWidth()) {
+                    mError = "setEnvironment: the six dome faces must be square and the same size";
+                    return false;
+                }
+            dome = buildCubeFromWorldFaces(tex, "domecube", 0u, false);
+            if (!dome) return false;   // mError set
+        }
+        destroyEnvironmentDome();
+        mDomeCube = dome;
+        mEnvDesc = desc;
+        applySkyGain();   // (the drawn sky's gain: 1 under a dome, the Sky Light's otherwise)
+        staleProbeGrid(GiStaleReason::Sky);
+        requestSkyCapture();
+        return true;
+    } JAH_CATCH(mError, false);
+}
+
+void OgreScene::destroyEnvironmentDome() {
+    if (!mDomeCube) return;
+    JAH_TRY {
+        destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mDomeCube);
+    } JAH_CATCH(mError, );
+    mDomeCube = nullptr;
 }
 
 bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
@@ -845,8 +891,55 @@ void OgreScene::destroyPendingReflection() {
 // at that queue — from a camera at the origin into a new `size`^2 RGBA16F cube
 // named from the recycled pool, and returns it (the caller frees it with
 // destroyRecycled). Throws through Ogre's exceptions; the callers catch.
-Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips) {
+Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips, bool environment) {
     updateAtmosphere();   // the export's bake can run outside a frame: the tables it draws, current
+    // A DOME'S CAPTURE (R5b, EnvironmentSource::Cubemap): the queue-0 tenants the camera sees - Ogre's sky, the
+    // atmosphere's quad, the cloud sheet - are hidden, and Ogre's sky renderable shows the dome's cube at the Sky
+    // Light's gain (its own Sky.material path: what a Cubemap sky draws), for this capture alone; all restored after.
+    struct DomeScope {
+        OgreScene *s = nullptr;
+        bool hadSky = false;
+        Ogre::SceneManager::SkyMethod method = Ogre::SceneManager::SkyCubemap;
+        Ogre::TextureGpu *skyTex = nullptr;
+        Ogre::uint32 atmoFlags = 0u, cloudFlags = 0u;
+        ~DomeScope() {
+            if (!s) return;
+            try {
+                if (hadSky && skyTex) {
+                    s->mSceneMgr->setSky(true, method, skyTex);
+                    s->tuneSkyRenderable();
+                } else if (s->mSceneMgr->getSky()) {
+                    s->mSceneMgr->setSky(false, s->mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
+                }
+                if (s->mAtmosphere && s->mAtmosphere->skyQuad()) s->mAtmosphere->skyQuad()->setVisibilityFlags(atmoFlags);
+                if (s->mCloudQuad) s->mCloudQuad->setVisibilityFlags(cloudFlags);
+            } catch (...) {}
+        }
+    } dome;
+    if (environment && mEnvDesc.source == EnvironmentSource::Cubemap && mDomeCube) {
+        dome.s = this;
+        if (Ogre::Rectangle2D *sky = mSceneMgr->getSky()) {
+            Ogre::MaterialPtr mat = mSceneMgr->getSkyMaterial();
+            Ogre::TextureUnitState *tu = mat && mat->getNumTechniques() && mat->getTechnique(0)->getNumPasses() &&
+                                                 mat->getTechnique(0)->getPass(0)->getNumTextureUnitStates()
+                                             ? mat->getTechnique(0)->getPass(0)->getTextureUnitState(0)
+                                             : nullptr;
+            dome.hadSky = sky->isVisible() && tu && tu->_getTexturePtr();
+            dome.method = mSceneMgr->getSkyMethod();
+            dome.skyTex = tu ? tu->_getTexturePtr() : nullptr;
+        }
+        if (mAtmosphere && mAtmosphere->skyQuad()) {
+            dome.atmoFlags = mAtmosphere->skyQuad()->getVisibilityFlags();
+            mAtmosphere->skyQuad()->setVisibilityFlags(0u);
+        }
+        if (mCloudQuad) {
+            dome.cloudFlags = mCloudQuad->getVisibilityFlags();
+            mCloudQuad->setVisibilityFlags(0u);
+        }
+        mSceneMgr->setSky(true, Ogre::SceneManager::SkyCubemap, mDomeCube);
+        tuneSkyRenderable();             // (queue 0 subgroup 1, the visible bit)
+        setSkyMaterialGain(mSkyGain);    // ...and the DOME's gain: the Sky Light's tint x intensity
+    }
     // THE ENVIRONMENT IS PHOTOGRAPHED FROM ITS OWN OBSERVER (REOPEN-SKY-1, measured):
     // the capture used to see the sky from the DRAWN observer, whose quarter-octave
     // band remembers the camera's history — a fresh scene captured from 5 m (its
@@ -950,7 +1043,13 @@ void OgreScene::applyPendingSkyCapture() {
     if (mCloudClearPending && mSkyCapturePending && cloudLayerDrawn()) captureCloudClearSky();
     if (!mSkyCapturePending) return;
     mSkyCapturePending = false;
-    if (mSkyDesc.mode == SkyMode::NoSky) { forgetSkySh(); return; }
+    // NOTHING TO PHOTOGRAPH - no sky and no dome, or an UNLIT BACKDROP (R5b: EnvironmentSource::Black) - is no sky light:
+    // the ambient and the reflection both go (the drawn sky stays).
+    if (!environmentCaptured()) {
+        forgetSkySh();
+        if (mSkyDesc.mode != SkyMode::NoSky) destroyReflection();
+        return;
+    }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
     if (!cm->hasWorkspaceDefinition(Ogre::IdString(kSkyCaptureWorkspace))) {
         // Media missing (an unstaged tree): no environment rather than a wrong
@@ -968,10 +1067,12 @@ void OgreScene::applyPendingSkyCapture() {
         // THE CAPTURE'S SIZE: 128 for every sky but a CUBEMAP one, which is captured at its faces' own size
         // (no less): its environment is its capture like every other sky's (PHOTON-7 10-3 R5, the sky emits what
         // it shows), and a 128 capture would throw its detail away.
-        const Ogre::uint32 size = (mSkyDesc.mode == SkyMode::Cubemap && mSkyOwnedTex)
-                                      ? std::max(kSkyCaptureSize, mSkyOwnedTex->getWidth())
-                                      : kSkyCaptureSize;
-        cube = renderSkyCaptureCube("skycapture", size, true);
+        // (A DOME, R5b, is a cubemap too: captured at its faces' size.)
+        const Ogre::TextureGpu *faces = mEnvDesc.source == EnvironmentSource::Cubemap ? mDomeCube
+                                        : mSkyDesc.mode == SkyMode::Cubemap        ? mSkyOwnedTex
+                                                                                   : nullptr;
+        const Ogre::uint32 size = faces ? std::max(kSkyCaptureSize, faces->getWidth()) : kSkyCaptureSize;
+        cube = renderSkyCaptureCube("skycapture", size, true, true);
 
         // THE AMBIENT, off the sky the capture just took. The SUN DISC is
         // deliberately NOT in it (the compositor's queue range), and not in the
@@ -2133,22 +2234,28 @@ bool OgreScene::cloudLayerDrawn() const {
 // term is the clear sky's capture, which carries the gain already). The sun disc is a light and is not in it. Cheap,
 // idempotent: uniforms only.
 void OgreScene::applySkyGain() {
+    // A DOME's gain is the dome's (R5b: the Sky Light lights the scene from its own cubemap; the World sky the camera
+    // sees is drawn as authored, gain 1): the dome's capture sets it on its own draw (renderSkyCaptureCube).
+    const Colour g = mEnvDesc.source == EnvironmentSource::Cubemap ? Colour(1.0f, 1.0f, 1.0f, 1.0f) : mSkyGain;
     JAH_TRY {
-        if (mSceneMgr->getSky()) {
-            Ogre::MaterialPtr skyMat = mSceneMgr->getSkyMaterial();
-            if (skyMat && skyMat->getNumTechniques() > 0 && skyMat->getTechnique(0)->getNumPasses() > 0)
-                skyMat->getTechnique(0)->getPass(0)->getFragmentProgramParameters()->setNamedConstant(
-                    "skyGain", Ogre::Vector4(mSkyGain.r, mSkyGain.g, mSkyGain.b, 1.0f));
-        }
-        if (mAtmosphere) mAtmosphere->setSkyGain(Ogre::Vector3(mSkyGain.r, mSkyGain.g, mSkyGain.b));
+        setSkyMaterialGain(g);
+        if (mAtmosphere) mAtmosphere->setSkyGain(Ogre::Vector3(g.r, g.g, g.b));
         if (mCloudMaterial) {
             const CloudLayerDesc &c = mSkyDesc.clouds;
             mCloudMaterial->getTechnique(0)->getPass(0)->getFragmentProgramParameters()->setNamedConstant(
-                "cloudSunE", Ogre::Vector4(c.sunIrradiance.r * mSkyGain.r, c.sunIrradiance.g * mSkyGain.g,
-                                           c.sunIrradiance.b * mSkyGain.b, kCloudSlabMetres));
+                "cloudSunE", Ogre::Vector4(c.sunIrradiance.r * g.r, c.sunIrradiance.g * g.g,
+                                           c.sunIrradiance.b * g.b, kCloudSlabMetres));
             bindCloudAir();   // the sheet's air: the atmosphere's scale, the gain in it
         }
     } JAH_CATCH(mError, );
+}
+
+void OgreScene::setSkyMaterialGain(const Colour &g) {
+    if (!mSceneMgr->getSky()) return;
+    Ogre::MaterialPtr skyMat = mSceneMgr->getSkyMaterial();
+    if (skyMat && skyMat->getNumTechniques() > 0 && skyMat->getTechnique(0)->getNumPasses() > 0)
+        skyMat->getTechnique(0)->getPass(0)->getFragmentProgramParameters()->setNamedConstant(
+            "skyGain", Ogre::Vector4(g.r, g.g, g.b, 1.0f));
 }
 
 void OgreScene::applyCloudLayer(bool fieldChanged) {

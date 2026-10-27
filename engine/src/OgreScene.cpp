@@ -304,7 +304,7 @@ void OgreScene::setEnvironmentLight(const Colour &gain) {
     applySkyGain();
     // ...and the environment follows the picture: a recapture (the cloud sheet's clear sky too - its ambient is
     // that sky's light). The previous set stays bound until the new one lands (landEnvironmentIfComplete).
-    if (mSkyDesc.mode != SkyMode::NoSky) {
+    if (mSkyDesc.mode != SkyMode::NoSky || mEnvDesc.source == EnvironmentSource::Cubemap) {
         mCloudClearPending = true;
         requestSkyCapture();
     }
@@ -2063,6 +2063,7 @@ void OgreScene::destroy() {
         // (like PhotonVoxelLighting's) does not do.
         teardownPlanar();
         destroySky();   // also unbinds + destroys the reflection cubemap
+        destroyEnvironmentDome();
         destroyGrid();
         for (auto &kv : mNodes) releaseNode(kv.first, kv.second);
         owesNamesFull(kNameAll);

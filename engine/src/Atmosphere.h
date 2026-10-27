@@ -163,6 +163,8 @@ public:
     Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness * mSkyGain; }
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
+    /// The sky quad itself (a queue-0 tenant: the environment capture hides it while it photographs a dome, R5b).
+    Ogre::Rectangle2D *skyQuad() const { return mQuad; }
     /// The const buffer the passes read (JahFog's `JahAtmoSettings`), as floats:
     /// fog density, the breakthrough pair, aerial scale; skyE; sunDir; planet;
     /// heightFog; heightFogColour.

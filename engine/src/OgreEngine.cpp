@@ -3243,6 +3243,8 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
         applyIfChanged(part.shadows, last.shadows, applied, [&](const ShadowDesc &v) { sc->setShadowSettings(v); });
         applyIfChanged(part.environmentLight, last.environmentLight, applied,
                        [&](const Colour &v) { sc->setEnvironmentLight(v); });
+        applyIfChanged(part.environment, last.environment, applied,
+                       [&](const EnvironmentDesc &v) { sc->setEnvironment(v); });
         applyIfChanged(part.fog, last.fog, applied, [&](const FogDesc &v) { sc->setFog(v); });
         applyIfChanged(part.heightFog, last.heightFog, applied, [&](const HeightFogDesc &v) { sc->setHeightFog(v); });
         applyIfChanged(part.rayTracing, last.rayTracing, applied, [&](RayTracingMode v) { sc->setRayTracing(v); });

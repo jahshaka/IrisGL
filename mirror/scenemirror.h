@@ -1932,6 +1932,11 @@ private:
     /// reclaimUnused does not free what the engine's sky is sampling.
     jahshaka::engine::TextureId mSkyTexture = 0;
     jahshaka::engine::TextureId mSkyFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
+    /// THE SKY LIGHT's DOME (R5b, SkyLightSource::Cubemap): the cube texture last uploaded and its six faces, held while
+    /// the engine's environment names them (the engine copies them into its dome cube).
+    const iris::Texture2D *mDomeSource = nullptr;
+    jahshaka::engine::TextureId mDomeFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
+    void releaseDome();
     /// THE CLOUD LAYER'S WEATHER MAP (CLOUDS-2D-1), uploaded from its decoded
     /// pixels (a plain 2D texture: the engine's file-loaded textures are pool
     /// SLICES, which the layer's bake cannot sample as a texture2D), and the

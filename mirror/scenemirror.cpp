@@ -504,6 +504,8 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mDecalTextures.clear();
     postCall(&jahshaka::engine::Scene::setSky, SkyDesc());   // no sky — which also clears the reflection cubemap
     for (TextureId &t : mSkyFaceTextures)  { if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t); t = 0; }
+    postCall(&jahshaka::engine::Scene::setEnvironment, EnvironmentDesc());   // the drawn sky: no dome
+    releaseDome();
     if (mCloudWeatherTexture) postCall(&jahshaka::engine::Scene::destroyTexture, mCloudWeatherTexture);
     mCloudWeatherTexture = 0;
     mCloudWeatherPath.clear();
@@ -7699,6 +7701,35 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
                              tint.b * skyLight->intensity, 1.0f);
         }
         scene.environmentLight = envGain;   // the engine's drain compares (the mirror's latch is gone)
+        // THE TWO AUTHOR TOOLS (R5b; the one-radiance law stays the default): a Sky Light whose source is a CUBEMAP is
+        // an invisible dome - the environment photographed from its six faces x the same gain, the World sky drawn as
+        // authored; a World sky with lighting off is an UNLIT BACKDROP - drawn, photographing nothing. A dome wins
+        // (it is the light; the backdrop says only that the drawn sky emits nothing).
+        EnvironmentDesc env;
+        const iris::Texture2D *cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
+                                          ? skyLight->skyCubeTexture.data() : nullptr;
+        const QImage *faces = cube ? cube->cubeFaces() : nullptr;
+        if (cube != mDomeSource) {
+            releaseDome();
+            if (faces) {
+                bool ok = true;
+                for (int i = 0; ok && i < 6; ++i) {
+                    const QImage img = faces[i].convertToFormat(QImage::Format_RGBA8888);
+                    mDomeFaceTextures[i] = img.isNull() ? 0 : newTexture(unsigned(img.width()), unsigned(img.height()),
+                                                                         img.constBits(), true);
+                    ok = mDomeFaceTextures[i] != 0;
+                }
+                if (!ok) releaseDome();
+                else mDomeSource = cube;
+            }
+        }
+        if (mDomeSource && mDomeFaceTextures[0]) {
+            env.source = EnvironmentSource::Cubemap;
+            for (int i = 0; i < 6; ++i) env.faces[i] = mDomeFaceTextures[i];
+        } else if (!mSource->skyLighting) {
+            env.source = EnvironmentSource::Black;
+        }
+        scene.environment = env;
     }
     // THE PER-VIEW HALF, which a second view of this scene gets on its own
     // (buildViewEnvironment, above the definition): shadows, MSAA and the post
@@ -7992,6 +8023,12 @@ jahshaka::engine::AtmosphereSky SceneMirror::atmosphereOf(const SkySource &src)
 /// scene (or a textured one with no texture loaded) reads as Kind::None — which
 /// is also the initial state. A SINGLE_COLOR sky is Kind::Color and a real sky
 /// since SKY_LIGHT_SPEC §2.
+void SceneMirror::releaseDome()
+{
+    for (TextureId &t : mDomeFaceTextures) { if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t); t = 0; }
+    mDomeSource = nullptr;
+}
+
 SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
 {
     SkySource src;

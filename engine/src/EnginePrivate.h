@@ -4147,6 +4147,7 @@ public:
     /// staling the probe grid with `why`.
     void applyAmbientSh(const float sh[27], GiStaleReason why);
     void setEnvironmentLight(const Colour &gain) override;
+    bool setEnvironment(const EnvironmentDesc &desc) override;
 
     void setFog(const FogDesc &desc) override;
     /// Creates the scene's atmosphere component (JahAtmosphere, Atmosphere.h)
@@ -4290,7 +4291,9 @@ public:
     /// `out` = the 27 coefficients (the scene's mSkySh unless told otherwise).
     void integrateSkyShFromBox(const Ogre::TextureBox &box, float *out = nullptr);
     /// Renders the capture workspace into a new cube (OgreSky.cpp says who).
-    Ogre::TextureGpu *renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips);
+    /// `environment`: the ENVIRONMENT's capture - photographs the source EnvironmentDesc names (the drawn sky, the dome,
+    /// or nothing); every other capture (the cloud sheet's clear sky, the export) photographs the sky as drawn.
+    Ogre::TextureGpu *renderSkyCaptureCube(const char *prefix, Ogre::uint32 size, bool mips, bool environment = false);
     /// Called at the top of every frame this scene is drawn in: counts the
     /// gesture's clock and the sky's frame, and takes each deferred read that is
     /// DUE (skyReadDue) - never one polled for landing.
@@ -4446,6 +4449,17 @@ public:
     /// construction and no reader scales anything (applySkyGain).
     Colour mSkyGain { 1.0f, 1.0f, 1.0f, 1.0f };
     void applySkyGain();
+    void setSkyMaterialGain(const Colour &gain);   ///< Ogre's sky material's `skyGain` (both its programs)
+    /// THE ENVIRONMENT'S SOURCE (EnvironmentDesc, R5b) and, for a dome, its cube - the six faces copied, a picture only
+    /// (one mip), photographed by the environment capture in place of the drawn sky (renderSkyCaptureCube's scope).
+    EnvironmentDesc mEnvDesc;
+    Ogre::TextureGpu *mDomeCube = nullptr;
+    void destroyEnvironmentDome();
+    /// Is there an environment to capture at all: a dome, or a drawn sky that is not a backdrop.
+    bool environmentCaptured() const {
+        return mEnvDesc.source == EnvironmentSource::Cubemap ||
+               (mEnvDesc.source == EnvironmentSource::Sky && mSkyDesc.mode != SkyMode::NoSky);
+    }
     void destroySky();
     bool removeNode(NodeId id) override;
 

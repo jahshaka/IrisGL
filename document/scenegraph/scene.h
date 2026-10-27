@@ -1041,6 +1041,10 @@ public:
 	// shows two suns — the World-panel row's tooltip says so, and the answer is
 	// to aim the light or switch the disc off.
 	bool sunDiscVisible = true;
+	/// THE WORLD SKY's LIGHTING (PHOTON-7 10-3 R5b, an author tool on top of R5's one-radiance law: the film renderers'
+	/// backdrop): `true` (the default) - the sky emits what it shows; `false` - an UNLIT BACKDROP: the camera sees the
+	/// sky as drawn and it lights nothing (with no cubemap Sky Light, the scene has no sky light at all).
+	bool skyLighting = true;
 	/// Do reflection-probe captures contain the disc? FALSE by default (owner
 	/// pick 4, both options): the sun's energy already reaches glossy surfaces
 	/// through the directional light's own specular highlight, so capturing the
