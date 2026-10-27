@@ -430,7 +430,6 @@ void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigne
 void FogHlmsListener::setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis) {
     if (SceneBinds *b = bindsOf(sm)) b->fogSkyVis = skyVis;
 }
-bool FogHlmsListener::sFogMarchArm = true;   // MEASURING ARM fog.march (render thread only)
 bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
     return b && b->lampRaysOn;
@@ -1110,7 +1109,7 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
             const float *sh = sceneManager->getSphericalHarmonics();
             const double lSky = sh ? double(std::max(0.0f, lum(sh[0], sh[1], sh[2]))) : 0.0;
             const double open = eSun + 4.0 * 3.14159265358979 * lSky;
-            inscatter[0] = open > 0.0 && sFogMarchArm ? float(eSun / open) : 0.0f;
+            inscatter[0] = open > 0.0 ? float(eSun / open) : 0.0f;
         }
         std::memcpy(passBufferPtr, inscatter, sizeof(inscatter));
         passBufferPtr += 4;
