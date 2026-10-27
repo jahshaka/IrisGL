@@ -45,10 +45,9 @@ const uint kJahHitLightWords = 32u;
 void jahSpecularAlbedo( float v, float r, out float a, out float b );
 #endif
 
-vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
+vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, uvec4 lampBits,
 						uvec4 lampIds[12] )
 {
-	const uvec2 lampMask = jahSunVisMask( lampBits );
 	const uvec2 a = JAH_HIT_TABLE;
 	if( ( a.x | a.y ) == 0u )
 		return vec3( 0.0 );
@@ -86,7 +85,7 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 			for( int q = 0; q < int( kJahCardLampTable ); ++q )
 				if( lampIds[q >> 2][q & 3] == id )
 				{
-					lampVis = jahSunVisBit( lampMask, uint( q ) ) ? 1.0 : 0.0;
+					lampVis = jahSunVisLamp( lampBits, uint( q ) );
 					break;
 				}
 			vis = lampVis * jahLightAttenuation( dist, v1.w, v2.w );

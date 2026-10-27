@@ -88,7 +88,7 @@ layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 5 ) uniform sampler2D ja
 #define JAH_CARD_SPECULAR( t ) texelFetch( jahCardSpecularLayer, t, 0 )
 // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), the seventh: the still world's traced term times the
 // movers' and the cloud sheet's, as the relight shaded the texel (R8) - the weight of the read's sun lobe.
-layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 6 ) uniform sampler2D jahCardSunVisLayer;
+layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 6 ) uniform usampler2D jahCardSunVisLayer;
 #define JAH_CARD_SUN_VIS( t ) jahSunVisSun( texelFetch( jahCardSunVisLayer, t, 0 ) )
 // ...and THE LAMPS' (PHOTON-7 stage 5, 5-3; rq_card_movers.comp): the 48-bit mask, bit j the traced visibility of lamp j
 // of the card's lamp table (JahCardRecordGpu::lamps), and the fractional lamps (the area lights and the lamps past the

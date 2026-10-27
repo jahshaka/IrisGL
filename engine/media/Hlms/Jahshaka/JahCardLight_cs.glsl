@@ -228,7 +228,7 @@ uniform restrict writeonly image2D cardFlat;
 // the cloud sheet's - what the read's specular lobe of the sun is weighted by - in red; THE LAMPS' (PHOTON-7 stage 5,
 // 5-3) in green, blue and alpha: traced before this job (rq_card_movers.comp's lamps mode), read here, kept.
 layout( vulkan( ogre_u10 ) vk_comma @insertpiece( uav10_pf_type ) )
-uniform restrict image2D cardSunVis;
+uniform restrict uimage2D cardSunVis;
 @property( jah_card_gather )
 // THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): at the ray tier the cards this relight re-gathers were
 // traced through the scene's TLAS before this job, in the same frame (rq_card_gather.comp: the same N fixed rays, the
@@ -414,12 +414,13 @@ void main()
 	vec3 cached = vec3( 0.0, 0.0, 0.0 );
 	vec3 flatTerm = vec3( 0.0, 0.0, 0.0 );
 	float sunVis = 0.0;
-	// THE LAMPS' TRACED VISIBILITY (PHOTON-7 stage 5, 5-3; rq_card_movers.comp's lamps mode), the SunVis layer's g,
-	// a and b: a 16-bit MASK (g the low byte, a the high), bit j the visibility of the card's lamp table's lamp j
-	// (exact per lamp), and the lamps past the table one visibility weighted by their shares of the texel's direct
-	// luminance (b) - kept as traced. Untraced (no structure yet): every lamp visible.
-	uvec2 lampMask = kJahSunVisAllLamps;   // (the texel: jah_card_sunvis.glsl)
-	float lampRest = 1.0;
+	// THE LAMPS' TRACED VISIBILITY (PHOTON-7 stage 5, 5-3; rq_card_movers.comp's lamps mode; jah_card_sunvis.glsl the
+	// texel): the 48-bit MASK, bit j the card's lamp table's lamp j unblocked; the 48-bit TRANSMITTED mask, the table's
+	// lamps reached through panes, which read the transmitted lamps' visibility (the fix round's F3); and the lamps past
+	// the table one visibility weighted by their shares of the texel's direct luminance - kept as traced. Untraced (no
+	// structure yet): every lamp visible.
+	uvec2 lampMask = kJahSunVisAllLamps, lampThroughMask = uvec2( 0u );   // (the texel: jah_card_sunvis.glsl)
+	float lampRest = 1.0, lampThrough = 1.0;
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
@@ -461,9 +462,11 @@ void main()
 		// (axisD.w), else unshadowed.
 		if( r.axisD.w > 0.5 )
 		{
-			const vec4 was = imageLoad( cardSunVis, at );
+			const uvec4 was = imageLoad( cardSunVis, at );
 			lampMask = jahSunVisMask( was );
 			lampRest = jahSunVisRest( was );
+			lampThroughMask = jahSunVisThroughMask( was );
+			lampThrough = jahSunVisThrough( was );
 		}
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
 		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
@@ -523,7 +526,9 @@ void main()
 			if( type > 0.5 )
 			{
 				const int slot = jahCardLampSlot( r.lampIds, floatBitsToUint( l.spotParams.w ) );
-				lampVis = slot >= 0 ? ( jahSunVisBit( lampMask, uint( slot ) ) ? 1.0 : 0.0 ) : lampRest;
+				lampVis = slot < 0 ? lampRest
+						  : jahSunVisBit( lampMask, uint( slot ) ) ? 1.0
+						  : jahSunVisBit( lampThroughMask, uint( slot ) ) ? lampThrough : 0.0;
 			}
 			float visibility = l.diffuse.w > 0.5 ? sr.x * moverVis : ( type < 0.5 ? 1.0 : lampVis );
 @property( jah_cloud_shadow )
@@ -600,7 +605,7 @@ void main()
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
-	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampMask ) );
+	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampThrough, lampMask, lampThroughMask ) );
 	// (RGBA16F, 10-2d: the store rounds to nearest itself - jahCardRound is the R11G11B10F layers')
 	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
 @property( jah_card_gather )

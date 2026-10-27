@@ -4132,9 +4132,12 @@ struct CardSample {
     float flat[3] = { 0, 0, 0 };
     /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3; 48 lamps since 10-4 R9): bit j of `lampMask`
     /// = lamp j of the card's table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the
-    /// lamps past it (and the area lights).
+    /// lamps past it (and the area lights); bit j of `lampThroughMask` = lamp j reached through panes (the one read's F3),
+    /// which reads `lampThroughVis` (the transmitted lamps' share-weighted visibility); a lamp in neither mask is blocked.
     unsigned long long lampMask = 0ull;
     float lampOverflowVis = 1.0f;
+    unsigned long long lampThroughMask = 0ull;
+    float lampThroughVis = 1.0f;
     unsigned lampIds[48] = {};
     unsigned lampCount = 0u;
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from

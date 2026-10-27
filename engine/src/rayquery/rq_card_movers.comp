@@ -119,7 +119,7 @@ layout( std430, set = 0, binding = 7 ) readonly buffer Lamps
 	uvec4 lampCount;
 	CardLightRec lamps[];
 };
-layout( rgba16, set = 0, binding = 8 ) uniform image2D sunVis;   // jah_card_sunvis.glsl's texel
+layout( rgba32ui, set = 0, binding = 8 ) uniform uimage2D sunVis;   // jah_card_sunvis.glsl's texel
 /// A lamp's ray stops this far short of its source (beyond its source radius): its own bulb is not its shadow.
 const float kLampEnd = 0.05;
 // THE AREA LIGHT'S STRATA (PHOTON-7 stage 7, 7-A): one text with the pixel's trace - the key, the one origin function,
@@ -170,8 +170,8 @@ void main()
 	if( p.knobs.y > 1.5 )
 	{
 		// THE LAMPS' MODE (the head of this file)
-		float wRest = 0.0, vRest = 0.0;
-		uvec2 mask = kJahSunVisAllLamps;
+		float wRest = 0.0, vRest = 0.0, wThrough = 0.0, vThrough = 0.0;
+		uvec2 mask = kJahSunVisAllLamps, throughMask = uvec2( 0u );
 		if( depth > 0.0 )
 		{
 			const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
@@ -261,20 +261,29 @@ void main()
 					rayQueryEXT rq;
 					rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 										   uint( p.knobs.x ), origin, 0.0, Lo, reach );
-					// THROUGH THE PANES (PHOTON-7 10-4 R8; the table's bit keeps a lamp passing half or more of its light,
-					// the rest's weight takes the fraction)
+					// THROUGH THE PANES (PHOTON-7 10-4 R8; the fix round's F3: a lamp reached through panes keeps its
+					// fraction - the transmitted mask's bit, its share in the transmitted lamps' visibility)
 					float T = 1.0;
 					JAH_RQ_PROCEED_TRANSMIT( rq, T )
 					v = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
 				}
 				if( slot >= 0 )
 				{
-					if( !( v > 0.5 ) )
+					if( !( v >= 1.0 ) )
 					{
 						if( slot < 32 )
 							mask.x &= ~( 1u << uint( slot ) );
 						else
 							mask.y &= ~( 1u << uint( slot - 32 ) );
+					}
+					if( v > 0.0 && v < 1.0 )
+					{
+						if( slot < 32 )
+							throughMask.x |= 1u << uint( slot );
+						else
+							throughMask.y |= 1u << uint( slot - 32 );
+						wThrough += w;
+						vThrough += w * v;
 					}
 				}
 				else
@@ -284,8 +293,9 @@ void main()
 				}
 			}
 		}
-		const vec4 was = imageLoad( sunVis, at );
-		imageStore( sunVis, at, jahSunVisPack( jahSunVisSun( was ), wRest > 0.0 ? vRest / wRest : 1.0, mask ) );
+		const uvec4 was = imageLoad( sunVis, at );
+		imageStore( sunVis, at, jahSunVisPack( jahSunVisSun( was ), wRest > 0.0 ? vRest / wRest : 1.0,
+											   wThrough > 0.0 ? vThrough / wThrough : 1.0, mask, throughMask ) );
 		return;
 	}
 	if( depth > 0.0 )

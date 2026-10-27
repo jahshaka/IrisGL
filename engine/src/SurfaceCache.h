@@ -614,6 +614,8 @@ public:
     /// the read's specular lobe of the sun takes, PHOTON-3). In the order
     /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
     static constexpr unsigned kViewLayers = 7u;
+    /// ...the SunVis layer's place among them (RGBA32_UINT: its binding is a usampler).
+    static constexpr unsigned kViewSunVis = 6u;
     void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
         out[0] = mIndirect;
         out[1] = mFlat;
@@ -621,7 +623,7 @@ public:
         out[3] = mAtlas[unsigned(CardLayer::Albedo)];
         out[4] = mAtlas[unsigned(CardLayer::Normal)];
         out[5] = mAtlas[unsigned(CardLayer::Specular)];
-        out[6] = mSunVis;
+        out[kViewSunVis] = mSunVis;
     }
     /// The item slot of a node's instance, or -1 when it holds no cards.
     long itemSlotOf(NodeId node) const;

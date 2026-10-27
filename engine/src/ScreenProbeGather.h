@@ -167,6 +167,9 @@ public:
     /// the flat stand-in as a one-layer 2D array (the texture pool's binding when none).
     virtual VkSampler gatherWrapSampler() const = 0;
     virtual VkImageView gatherDummyFlatArray() const = 0;
+    /// ...and an UNSIGNED 2D stand-in, for a usampler (the cards' SunVis layer, RGBA32_UINT: the one read's F3); valid
+    /// after gatherDummies.
+    virtual VkImageView gatherDummyUint() const = 0;
 };
 
 /// EVERYTHING ONE FRAME OF ONE VIEW NEEDS, gathered by the tier from the scene

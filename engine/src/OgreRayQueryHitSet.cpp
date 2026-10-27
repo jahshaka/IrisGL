@@ -130,7 +130,9 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     }
     for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
         mCardView[i].sampler = point;
-        mCardView[i].imageView = cards ? sampledView(src.cardView[i]) : dummyFlat;
+        // (the SunVis layer, the seventh, is RGBA32_UINT: an unsigned stand-in for its usampler)
+        mCardView[i].imageView = cards ? sampledView(src.cardView[i])
+                                       : i == SurfaceCache::kViewSunVis ? host.gatherDummyUint() : dummyFlat;
         mCardView[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (!mCardView[i].imageView) { err = "a card view-term binding is null"; return false; }
         entry(s.cardView + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCardView[i];

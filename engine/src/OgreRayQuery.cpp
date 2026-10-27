@@ -1464,6 +1464,7 @@ public:
     VkSampler gatherLinearSampler() const override { return mLinearSampler; }
     VkSampler gatherWrapSampler() const override { return mWrapSampler; }
     VkImageView gatherDummyFlatArray() const override { return mDummyFlatArrayView; }
+    VkImageView gatherDummyUint() const override { return mDummyIds.view; }
 
 private:
     /// Made on the first frame a scene gathers, destroyed by close().

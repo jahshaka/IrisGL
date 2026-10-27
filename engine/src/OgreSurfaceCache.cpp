@@ -382,9 +382,10 @@ bool SurfaceCache::makeAtlas(std::string &err) {
                                 Ogre::TextureFlags::ManualTexture | Ogre::TextureFlags::Uav,
                                 Ogre::TextureTypes::Type2D);
     mSunVis->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
-    // RGBA16_UNORM (PHOTON-7 10-4 R9 (3), the lead's ruling: 48 lamps exact a texel): r = the sun's byte and the
-    // fractional lamps' byte, g/b/a = the 48-bit lamp mask (jah_card_sunvis.glsl) - +8 MB over the RGBA8 texel.
-    mSunVis->setPixelFormat(Ogre::PFG_RGBA16_UNORM);
+    // RGBA32_UINT (PHOTON-7 10-4 R9 (3), the lead's ruling: 48 lamps exact a texel; the fix round's F3: a lamp through
+    // panes keeps its fraction): the sun's, the fractional lamps' and the transmitted lamps' bytes, the 48-bit lamp mask
+    // and the 48-bit transmitted mask (jah_card_sunvis.glsl) - +16 MB over the RGBA16 texel at 2048^2.
+    mSunVis->setPixelFormat(Ogre::PFG_RGBA32_UINT);
     mSunVis->setNumMipmaps(1u);
     mSunVis->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
@@ -4532,13 +4533,15 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         src.x = tx; src.y = ty; src.width = 1u; src.height = 1u;
         tk->download(mSunVis, 0, true, &src, true);
         const Ogre::TextureBox box = tk->map(0);
-        float sv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        decodeTexel(mSunVis->getPixelFormat(), box.at(0, 0, 0), sv);
+        Ogre::uint32 sv[4] = { 0u, 0u, 0u, 0u };
+        std::memcpy(sv, box.at(0, 0, 0), sizeof(sv));   // RGBA32_UINT, raw (jah_card_sunvis.glsl's layout)
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
-        const auto word = [](float c) { return (unsigned long long)std::lround(double(c) * 65535.0); };
-        out.lampMask = word(sv[1]) | (word(sv[2]) << 16u) | (word(sv[3]) << 32u);
-        out.lampOverflowVis = float(word(sv[0]) & 0xFFull) / 255.0f;
+        out.lampMask = (unsigned long long)sv[1] | ((unsigned long long)(sv[2] & 0xFFFFu) << 32u);
+        out.lampOverflowVis = float(sv[0] & 0xFFu) / 255.0f;
+        out.lampThroughMask = (unsigned long long)((sv[2] >> 16u) | (sv[3] << 16u)) |
+                              ((unsigned long long)(sv[3] >> 16u) << 32u);
+        out.lampThroughVis = float((sv[0] >> 16u) & 0xFFu) / 255.0f;
     }
     out.lampCount = rec.lampCount;
     static_assert(sizeof(out.lampIds) / sizeof(out.lampIds[0]) == kCardLampTable, "the sample carries the whole table");
