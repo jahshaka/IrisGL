@@ -853,7 +853,6 @@ private:
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
-        std::atomic<bool> done{ false };   ///< the worker finished (read without a join: a build started late, R4)
         std::string err;
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
     };
@@ -2610,7 +2609,10 @@ void RayQueryTier::startAhead() {
     launch(kAheadCardGather, &RayQueryTier::makeCardGatherPipelineNow);
     launch(kAheadCardMovers, &RayQueryTier::makeCardMoverPipelineNow);
     launch(kAheadVoxelSides, &RayQueryTier::makeVoxelSidePipelineNow);
-    // (the blended passes' escapes: launched by the first scene that holds a blended material - prepareGlassEscape)
+    // THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): at the tier's open too, never later - a build launched when the
+    // first blended material arrived let the picture change seconds after it rested (the cold driver compile: the
+    // blended passes lit by the environment until it was done; gi.glass_escape's settle read that as the rest)
+    launch(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);
 }
 
 void RayQueryTier::launchAhead(AheadId id, bool (RayQueryTier::*make)(std::string &)) {
@@ -2621,7 +2623,6 @@ void RayQueryTier::launchAhead(AheadId id, bool (RayQueryTier::*make)(std::strin
         tAheadNotes = &a.notes;
         a.ok = (this->*make)(a.err);
         tAheadNotes = nullptr;
-        a.done.store(true);
     });
 }
 
@@ -11832,19 +11833,10 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     if (!scene || !target || !chainGlassEscape(cd.rayReflect, cd.probeGather, floatScene) ||
         target->getPixelFormat() != Ogre::PFG_RGBA16_FLOAT)
         return;
-    // ONLY WHERE A RECORD CAN BE MADE: a scene with no blended material appends none, and its pipelines are not built
-    // (their cold driver compile is seconds: the cold app rows). The first scene that holds one launches the build on a
-    // worker; until it is done the blended passes light their open share by the environment, as before - the one
-    // switch, at the first blended material's arrival (the review list).
+    // ONLY WHERE A RECORD CAN BE MADE: a scene with no blended material appends none and holds no list (the pixels'
+    // sums are 12 bytes a pixel). Its pipelines were built ahead at the tier's open (startAhead).
     if (!scene->hasBlended()) return;
     std::string err;
-    if (!mEscPipeline) {
-        if (!mAhead[kAheadGlassEscape].started) {
-            launchAhead(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);
-            return;
-        }
-        if (!mAhead[kAheadGlassEscape].done.load()) return;
-    }
     if (!mEscPipeline && !makeGlassEscapePipelines(err)) {
         mEscFailed = true;
         Ogre::LogManager::getSingleton().logMessage(
