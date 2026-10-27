@@ -753,6 +753,10 @@ inline Ogre::uint32 shadowPassMask(ShadowNodeKind kind) {
 inline Ogre::uint32 paneShadowPassMask(ShadowNodeKind kind) {
     return paneCasterBits(shadowCasterChannels(kind)) & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
 }
+/// THE TRANSMITTANCE LAYER OF A SHADOW NODE (atlasT, OgreShadow.cpp), or null in a node defined without it (only a
+/// node DEFINED with the layer has it: getDefinedTexture throws for a name its definition lacks). Its two readers: the
+/// colour pass's binding (FogHlmsListener::preparePassHash) and that pass's barrier (ScenePbs::analyzeBarriers).
+Ogre::TextureGpu *shadowTransmitLayer(const Ogre::CompositorShadowNode *node);
 inline Ogre::uint32 allShadowCasterChannels() {
     return shadowCasterChannels(ShadowNodeKind::View) |
            shadowCasterChannels(ShadowNodeKind::Reflect) |

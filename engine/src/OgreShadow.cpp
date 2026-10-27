@@ -289,6 +289,8 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         texDef->fsaa = "1";
         // (cached lamp maps keep their layer with their depth: the atlas's keep_content rule)
         if (perMapClears) texDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+        // the layer's own view, no depth (its whole clear: (a1) below)
+        def->addRenderTextureView(transName)->setForTextureDefinition(transName, texDef);
         Ogre::RenderTargetViewDef *rtv = def->addRenderTextureView(transRtv);
         Ogre::RenderTargetViewEntry colour;
         colour.textureName = transName;
@@ -471,8 +473,12 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     }
     // (a1) THE TRANSMITTANCE LAYER's CLEAR to 1 (nothing between a light and its casters): the whole layer with the
     //     whole-atlas clear, one quad per map with the per-map clears (gated on its map like the depth quads).
+    //     (the whole-layer clear targets the LAYER alone, its own view with no depth: Ogre's clear pass moves every
+    //     attachment of its target to the clear layout - CompositorPassClear::analyzeBarriers has no read-only depth -
+    //     so on atlasTRtv it left the depth atlas in the attachment layout while the render pass, read-only, expected
+    //     the read-only one: VUID-vkCmdBeginRenderPass-initialLayout-00900 under the validation layer)
     if (panes && !perMapClears) {
-        Ogre::CompositorTargetDef *target = def->addTargetPass(transRtv);
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transName);
         target->setNumPasses(1u);
         Ogre::CompositorPassClearDef *clr =
             static_cast<Ogre::CompositorPassClearDef *>(target->addPass(Ogre::PASS_CLEAR));
@@ -757,6 +763,14 @@ unsigned OgreEngine::effectiveShadowMapBudget() const {
     else if (mShadowResolution <= 2048u) cap = 8u;
     else if (mShadowResolution <= 4096u) cap = 4u;
     return std::max(2u, std::min(std::min(mShadowMapBudget, cap), kMaxShadowMaps));
+}
+
+Ogre::TextureGpu *shadowTransmitLayer(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    static const Ogre::IdString kAtlasT("atlasT");
+    for (const auto &td : node->getDefinition()->getLocalTextureDefinitions())
+        if (td.getName() == kAtlasT) return node->getDefinedTexture(kAtlasT);
+    return nullptr;
 }
 
 namespace {

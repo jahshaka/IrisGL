@@ -94,6 +94,14 @@ void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // The Photon volumes the pixel stage reads (HlmsPbs's own walk did this while it
     // held them — OWN-GI-1).
     PhotonPassBinding::analyzeBarriers(barrierSolver, resourceTransitions, sm, bCasterPass);
+    // THE SHADOWS' TRANSMITTANCE LAYER (PHOTON-7 10-4 R8), sampled by this colour pass's fragments: Ogre's own scene
+    // pass moves the shadow node's DEPTH maps to the texture layout (CompositorPassScene::analyzeBarriers, the
+    // contiguous shadow maps) and knows nothing of the layer the listener binds - its pane passes leave it a render
+    // target.
+    if (!bCasterPass && sm)
+        if (Ogre::TextureGpu *t = shadowTransmitLayer(sm->getCurrentShadowNode()))
+            barrierSolver.resolveTransition(resourceTransitions, t, Ogre::ResourceLayout::Texture,
+                                            Ogre::ResourceAccess::Read, 1u << Ogre::PixelShader);
 }
 
 Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,

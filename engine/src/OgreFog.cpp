@@ -640,13 +640,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.shadowTransmit = nullptr;
     pb.shadowTransmitSampler = nullptr;
     if (shadowNode && !casterPass) {
-        static const Ogre::IdString kAtlasT("atlasT");
-        // (only a node DEFINED with the layer has it: getDefinedTexture throws for a name its definition lacks)
-        bool defined = false;
-        for (const auto &td : shadowNode->getDefinition()->getLocalTextureDefinitions())
-            defined = defined || td.getName() == kAtlasT;
-        Ogre::TextureGpu *t = defined ? shadowNode->getDefinedTexture(kAtlasT) : nullptr;
-        if (t) {
+        if (Ogre::TextureGpu *t = shadowTransmitLayer(shadowNode)) {
             const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
             if (linear) {
                 pb.shadowTransmit = t;
