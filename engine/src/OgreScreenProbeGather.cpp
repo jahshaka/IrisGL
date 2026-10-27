@@ -1228,8 +1228,17 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     // same held state: the history half and the irradiance a held frame copies are the last traced frame's, unchanged)
     // and names that last traced frame as its gather frame. (It advanced the counter: with gather.historyReadback on,
     // every later frame's picture differed - gi.walk's second frozen walk on 59 of 60 frames.)
+    // A HELD COPY NEVER TAKES A SLOT STILL IN FLIGHT (PHOTON-7 stage 11's fix round): the traced frames key the ring by
+    // the view's counter and a held frame by the host's, so the first held frames after a trace can land on the slot of
+    // a traced frame whose copy has not retired - and overwrote it, its record and its bytes: a stop the gather traced
+    // two frames before it held never had its count (rtreflect.nee_firefly: the stop traced gather frame 229, the
+    // next frame 230, then held; the held copy took 229's slot a frame before it retired, and the door saw 230 only).
+    // Such a frame copies nothing (it binds and holds as any other); the next held frame's slot is free (a held frame
+    // changes no state, so a later copy holds the same answer).
     const unsigned heldSlot = unsigned(mHost.gatherFrameNow() % kFramesInFlight);
-    if (in.tuning.readback && v.irrReadback) {
+    const bool slotFree = !v.pending[heldSlot].live ||
+                          uint32_t(mHost.gatherFrameNow() - v.pending[heldSlot].frame) >= mHost.gatherFramesInFlight();
+    if (slotFree && in.tuning.readback && v.irrReadback) {
         {
             Ogre::BarrierSolver &solver = rs->getBarrierSolver();
             Ogre::ResourceTransitionArray trans;
@@ -1285,7 +1294,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     // made it the previous half), unchanged since. Copied under the arm like a traced frame's, so a stop the view
     // already holds (a still camera, a lamp step at rest) has its count too: the stillness door's mask, never a wait
     // for a frame that will not trace.
-    if (in.tuning.historyReadback && temporal && v.age > 0u) {
+    if (slotFree && in.tuning.historyReadback && temporal && v.age > 0u) {
         const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
         if (!v.histReadback) {
             std::string rerr;
