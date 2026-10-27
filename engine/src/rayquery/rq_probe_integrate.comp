@@ -208,7 +208,7 @@ layout( set = 0, binding = 22 ) uniform sampler3D voxelPosN[kMaxCascades];
 layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
 layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 #include "jah_rq_finite.glsl"
-#define JAH_VOX_MAX_CASCADES kMaxCascades
+#define JAH_VOX_MAX_CASCADES 4   // a PREPROCESSOR integer (kMaxCascades): #if reads an identifier as 0
 #define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
 #define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( voxelCovP[c], u, l )
 #define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( voxelCovN[c], u, l )

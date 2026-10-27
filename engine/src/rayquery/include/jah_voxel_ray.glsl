@@ -76,6 +76,9 @@
 #ifndef JAH_VOXEL_RAY_GLSL
 #define JAH_VOXEL_RAY_GLSL
 
+#if !( JAH_VOX_MAX_CASCADES >= 1 )
+#error "jah_voxel_ray.glsl: JAH_VOX_MAX_CASCADES must be a preprocessor integer of at least 1 - an identifier (a const int) reads 0 in #if and skips every cascade's hand-over"
+#endif
 #ifndef JAH_VOX_SAMPLE_NRM
 #error "jah_voxel_ray.glsl: the hit reads the side facing the ray - bind JAH_VOX_SAMPLE_NRM (the voxeliser's normal)"
 #endif
