@@ -339,7 +339,7 @@
 	@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 		#define JAH_FOG_P( k ) JAH_FOG_P_##k
 		#define JAH_FOG_P_0 passBuf.jahFogColour
-		#define JAH_FOG_P_2 float4( atmoSettings.fogDensity, 0.0, 0.0, atmoSettings.aerialScale )   // (yz: the deleted breakthrough)
+		#define JAH_FOG_P_2 float4( atmoSettings.fogDensity, 0.0, 0.0, atmoSettings.aerialScale )   // (yz: unused)
 		#define JAH_FOG_P_3 float4( atmoSettings.skyE.xyz, 1.0 )
 		#define JAH_FOG_P_4 atmoSettings.sunDir
 		#define JAH_FOG_P_5 atmoSettings.planet
@@ -371,8 +371,8 @@
 	struct JahAtmoSettings
 	{
 		float fogDensity;
-		float fogBreakMinBrightness;
-		float fogBreakFalloff;
+		float jahAtmoPad0;		// (std140: aerialScale and the pad fill fogDensity's float4; nothing reads them)
+		float jahAtmoPad1;
 		float aerialScale;
 		float4 skyE;
 		float4 sunDir;

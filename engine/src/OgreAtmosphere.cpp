@@ -50,8 +50,8 @@ constexpr float kOzoneAbsorb[3] = { 0.650e-3f, 1.881e-3f, 0.085e-3f };
 /// `atmoSettings` — upstream's fog block reads its first three floats by name).
 struct AtmoSettingsGpu {
     float fogDensity = 0.0f;
-    float fogBreakMinBrightness = 0.0f;   ///< upstream's layout; written 0 (the breakthrough is deleted, 10-4 R11)
-    float fogBreakFalloff = 0.0f;         ///< ...the same
+    float pad0 = 0.0f;   ///< (std140: the first float4's middle - nothing reads it)
+    float pad1 = 0.0f;
     float aerialScale = 1.0f;
     float skyE[4] = { 0.0f, 0.0f, 0.0f, 0.0f };     ///< rgb = the sun at the top of the air, w = 1 with the air on
     float sunDir[4] = { 0.0f, 1.0f, 0.0f, 0.0f };   ///< xyz = towards the sun
@@ -483,8 +483,8 @@ void JahAtmosphere::uploadSettings() {
 void JahAtmosphere::settingsFloats(float out[kSettingsFloats]) const {
     static_assert(sizeof(AtmoSettingsGpu) == kSettingsFloats * sizeof(float), "the settings block's size");
     AtmoSettingsGpu g{};
-    // THE FOG BLOCK IN UPSTREAM'S LAYOUT (AtmosphereNpr::_update): the density; the breakthrough pair's two floats
-    // stay in the layout, written 0 (no reader: the fork's block and the law read the optical depth alone, 10-4 R11).
+    // THE FOG BLOCK: the density (the fork's distance block reads atmoSettings.fogDensity by name) and the aerial scale;
+    // the two floats between them are std140's padding.
     g.fogDensity = mFogDensity;
     g.aerialScale = mAerialScale;
     const Ogre::Vector3 e = skyRadianceScale();   // scattered light only: the sky's brightness

@@ -47,8 +47,7 @@
 //       0  rgb = the World fog's authored colour, w = the height layer's density
 //       1  x = the height layer's falloff, y = its reference height, z = 1 under the
 //          atmosphere (the air's table bound), w = the World fog's density there
-//       2  x = upstream's block density, y/z = its breakthrough pair (the block's
-//          packing: min x falloff, -falloff), w = the air's aerial scale
+//       2  x = upstream's block density, y/z unused (0), w = the air's aerial scale
 //       3  xyz = the sun at the top of the air (skyE), w = 1 when the passes fog at all
 //       4  the sun's direction, 5 the planet (bottom, top, observer, aerial far, km)
 //       6  the height fog (density, falloff, base height, start distance)
