@@ -10,6 +10,7 @@
 //   adds none and still transmits.
 // The caller adds own + throughput x (the committed hit's light, or the sky over a miss). Needs the hit-radiance
 // includes (jahHitRadianceStore, jahHitWoundNormal, JAH_HIT_INSTANCE) and jah_rq_alpha.glsl.
+// The includer enables GL_EXT_control_flow_attributes (the fold's loop is never unrolled).
 // No Hlms directive mark anywhere in this file.
 
 #ifndef JAH_RQ_PANES_GLSL
@@ -30,7 +31,10 @@ vec3 jahPanesOwnLight( JahPanes p, vec3 origin, vec3 dir, float spread, out floa
 {
 	vec3 own = vec3( 0.0 );
 	float T = 1.0;
-	for( int i = 0; i < p.n; ++i )
+	// NEVER UNROLLED: the body inlines the whole store's shading (jahHitRadianceStore), and the list's bound is a
+	// constant (8): unrolled, every caller's pipeline compiled that shading eight times over (rq_reflect 15 s cold
+	// against its 2.9 s, rq_voxel_sides 4.0 s against 1.0 s - PHOTON-7 10-4 R7's fold, found by the app rows' cold boots)
+	[[dont_unroll]] for( int i = 0; i < p.n; ++i )
 	{
 		const uint w = p.word[i];
 		const float share = jahPaneOwn( w );
