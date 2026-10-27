@@ -4644,6 +4644,7 @@ ValidationStatus OgreEngine::validation() const {
 }  // namespace detail
 
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
+unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }
 
 std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &error) {
     if (isAlive()) {
