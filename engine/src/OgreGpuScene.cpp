@@ -945,7 +945,12 @@ uint32_t OgreScene::gpuPaneWordFor(const Node &n) {
     const float T = paneTransmittance(db);
     if (T < 0.0f) return 0u;
     const uint32_t t = uint32_t(std::lround(T * float(kGpuPaneSteps)));
-    const uint32_t own = uint32_t(std::lround((1.0f - T) * float(kGpuPaneSteps)));
+    // ITS OWN LIGHT's share: what the pixel adds of the pane's lit colour - 1 - T for a blend over what is behind,
+    // alpha for ADDITIVE (Src x alpha + Dest: it passes everything AND adds its alpha's share - the one read's F8)
+    float ownShare = 1.0f - T;
+    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE && db->getCreator()->getType() == Ogre::HLMS_PBS)
+        ownShare = std::min(std::max(static_cast<const Ogre::HlmsPbsDatablock *>(db)->getTransparency(), 0.0f), 1.0f);
+    const uint32_t own = uint32_t(std::lround(ownShare * float(kGpuPaneSteps)));
     const bool twoSided = db->getMacroblock()->mCullMode == Ogre::CULL_NONE;
     return kGpuPaneOn | (twoSided ? kGpuPaneTwoSided : 0u) | t | (own << 11);
 }

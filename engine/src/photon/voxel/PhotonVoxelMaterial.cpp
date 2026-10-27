@@ -159,6 +159,11 @@ namespace Ogre
             for( size_t i = 0; i < 4; ++i )
                 shaderMaterial.bgDiffuse[i] = bgDiffuse[i];
             shaderMaterial.diffuse[3] = pbsDatablock->getTransparency();
+            // ADDITIVE ABSORBS NOTHING (the one read's F8; paneTransmittance): its coverage is 0 - a pane of T = 1 the
+            // voxels' rays pass whole (the voxeliser's coverage is the projected area x alpha)
+            if( pbsDatablock->getTransparencyMode() != HlmsPbsDatablock::None &&
+                pbsDatablock->getBlendblock()->mDestBlendFactor == SBF_ONE )
+                shaderMaterial.diffuse[3] = 0.0f;
             // A GLASS's OWN LIGHT (PHOTON-7 10-4 R7, C): Ogre's Transparent and Refractive pixel draws kD x alpha^2
             // (premultiplied on upload, OgreHlmsPbsDatablock.cpp), a Fade's alpha x kD. The voxel's coverage already
             // carries one alpha (Voxelizer: the projected area x alpha) and a ray crossing a pane takes alpha of the

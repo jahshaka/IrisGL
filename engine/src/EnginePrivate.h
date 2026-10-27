@@ -660,13 +660,16 @@ inline Ogre::uint32 paneCasterBits(Ogre::uint32 channels) {
 /// A PANE's TRANSMITTANCE (PHOTON-7 10-4 R7/R8; L9: a transparent surface transmits light, attenuated by its
 /// material): Ogre's blend passes 1 - alpha of what lies behind a Fade (Blend) or Transparent (Glass) surface and of a
 /// Refractive one's refraction - NEUTRAL, by Ogre's own glass model (a tinted, RGB transmittance is on the owner's
-/// review list). -1 for a surface that occludes: an opaque or cut-out material, Modulate and Additive (out of R7/R8),
-/// an alpha of 1, anything not HlmsPbs's. Sub-item 0's datablock is the item's (the material word's rule).
+/// review list). ADDITIVE ABSORBS NOTHING (the one read's F8: Ogre's Src x alpha + Dest passes all of what lies behind,
+/// at any alpha): T = 1 - a pane on every path (the TLAS, the caster, the voxeliser: PhotonVoxelMaterial), adding its
+/// own light. -1 for a surface that occludes: an opaque or cut-out material, Modulate (its colour filter is not
+/// modelled: it occludes on every path, a named limit), an alpha of 1, anything not HlmsPbs's. Sub-item 0's datablock is
+/// the item's (the material word's rule).
 inline float paneTransmittance(const Ogre::HlmsDatablock *db) {
     if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return -1.0f;
     const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
     if (pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::None) return -1.0f;
-    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE) return -1.0f;   // Additive
+    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE) return 1.0f;   // Additive: passes everything
     const float alpha = std::min(std::max(pbs->getTransparency(), 0.0f), 1.0f);
     return alpha < 1.0f ? 1.0f - alpha : -1.0f;
 }
@@ -6038,8 +6041,10 @@ private:
     /// opaque ones, in the blended queue, and occludes nothing.
     static bool isBlendedMode(PbrAlphaMode m) { return m != PbrAlphaMode::Opaque && m != PbrAlphaMode::Cutout; }
     /// The pane caster's baked level for a material's mode and alpha (ScenePbs::calculateHashForPreCaster's value):
-    /// round((1 - alpha) x 255) + 1 for a pane's modes (Blend, Glass, Refractive) under alpha 1, 0 otherwise.
+    /// round((1 - alpha) x 255) + 1 for a pane's modes (Blend, Glass, Refractive) under alpha 1, 256 for Additive (T = 1
+    /// at any alpha: paneTransmittance), 0 otherwise.
     static int paneCasterLevel(PbrAlphaMode m, float alpha) {
+        if (m == PbrAlphaMode::Additive) return 256;
         const bool paneMode = m == PbrAlphaMode::Blend || m == PbrAlphaMode::Glass || m == PbrAlphaMode::Refractive;
         const float a = std::min(std::max(alpha, 0.0f), 1.0f);
         return paneMode && a < 1.0f ? int(std::lround((1.0f - a) * 255.0f)) + 1 : 0;
