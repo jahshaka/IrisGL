@@ -516,115 +516,161 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 			float tIn = tCur;
 			bool through = false;
 			const int maxSteps = resI.x + resI.y + resI.z + 3;
-			for( int it = 0; it < maxSteps; ++it )
+			// ONE CALL OF THE CELL RULE (jahVoxelRayCell), for this cascade's cells AND for an F2 cell's finer segment:
+			// the march alternates between them in one loop (`sub` the segment's), so the rule - the faces, the panes,
+			// the hit's side - is compiled once, never once per march (the F2 segment's own call made every includer
+			// compile the rule twice over: rq_voxel_sides' pipeline 4.0 s cold against 1.0 s)
+			bool sub = false;
+			int itMain = 0, itSub = 0, maxK = 0, subC = 0;
+			ivec3 ivK = ivec3( 0 ), stpK = ivec3( 0 ), resIK = ivec3( 0 );
+			vec3 tMaxK = vec3( 0.0 ), tDelK = vec3( 0.0 ), pK = posLS0, sK = surfLS0, invResK = invRes;
+			float s0k = 1.0, tInK = 0.0, tCell = 0.0;
+			vec3 coarseRad = vec3( 0.0 );
+			float coarseT = 1.0;
+			for( ;; )
 			{
+				if( !sub && itMain >= maxSteps )
+					break;
+				const float tCellK = sub ? min( min( min( tMaxK.x, tMaxK.y ), tMaxK.z ), tCell ) : 0.0;
+				if( !sub )
+					tCell = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
 				++r.steps;
-				const bool own = j == 0 && ownCell.w > 0 && all( equal( iv, ownCell.xyz ) );
+				const bool own = !sub && j == 0 && ownCell.w > 0 && all( equal( iv, ownCell.xyz ) );
 				// THE START CELL AND THE OWN CELL take a face only where the ray crosses it (the header)
-				const bool crossing = own || ( firstDda && it == 0 );
-				const float tCell = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
-				vec3 cellRad;
-				int bothAxis;
-				int st = jahVoxelRayCell( j, iv, invRes, own, crossing, planeTest0 && j == 0, surface, posJ, surfJ, nLS,
-										  epsC0 * s0j, s0j, dirLS, tIn, tCell, paneT, paneIn, paneLight, cellRad, bothAxis );
-				int hitC = j;
-				float hitT = tIn;
-#if JAH_VOX_MAX_CASCADES > 1
-				// F2: THE FINER CASCADE HOLDING THE POINT WINS (the header) - the finest whose box holds both ends of this
-				// cell's segment marches it on its own cells (each texture array indexed by a loop's own counter)
-				if( st == 1 && bothAxis >= 0 && j > 0 )
+				const bool crossing = !sub && ( own || ( firstDda && itMain == 0 ) );
+				const int cc = sub ? subC : j;
+				const float s0c = sub ? s0k : s0j;
+				vec3 cellRad = vec3( 0.0 );
+				int bothAxis = -1;
+				int st = 0;
+				// (the cascades' textures are indexed by a LOOP's own counter - dynamically uniform among the lanes that
+				// run the body, wherever each lane's march stands - and the rule is still written once)
+				for( int c = 0; c < JAH_VOX_COUNT; ++c )
 				{
-					vec3 pK = posLS0, sK = surfLS0;
-					float s0k = 1.0;
-					bool held = false;
-					for( int k = 0; k < JAH_VOX_COUNT && k < j && !held; ++k )
+					if( c != cc )
+						continue;
+					st = jahVoxelRayCell( c, sub ? ivK : iv, sub ? invResK : invRes, own, crossing, planeTest0 && c == 0,
+										  surface, sub ? pK : posJ, sub ? sK : surfJ, nLS, epsC0 * s0c, s0c, dirLS,
+										  sub ? tInK : tIn, sub ? tCellK : tCell, paneT, paneIn, paneLight, cellRad,
+										  bothAxis );
+				}
+				if( sub )
+				{
+					++itSub;
+					if( st != 0 )
 					{
-						if( k > 0 )
-						{
-							const vec4 sc = JAH_VOX_FROM_PREV_SCALE( k );
-							const vec4 of = JAH_VOX_FROM_PREV_OFFSET( k );
-							pK = pK * sc.xyz + of.xyz;
-							sK = sK * sc.xyz + of.xyz;
-							s0k *= sc.x;
-						}
-						const vec3 e0 = pK + dirLS * ( s0k * tIn ), e1 = pK + dirLS * ( s0k * tCell );
-						if( any( lessThan( min( e0, e1 ), vec3( 0.0 ) ) ) || any( greaterThan( max( e0, e1 ), vec3( 1.0 ) ) ) )
-							continue;
-						held = true;
-						// THE SEGMENT on cascade k's cells, from tIn to tCell
-						const vec3 invResK = JAH_VOX_INVRES( k );
-						const vec3 resK = vec3( 1.0, 1.0, 1.0 ) / invResK;
-						const vec3 qSK = pK * resK;
-						const vec3 dqK = dirLS * s0k * resK;
-						ivec3 ivK = ivec3( floor( qSK + dqK * tIn + sign( dqK ) * 1e-4 ) );
-						const ivec3 resIK = ivec3( resK + 0.5 );
-						ivec3 stpK;
-						vec3 tMaxK, tDelK;
-						for( int a = 0; a < 3; ++a )
-						{
-							stpK[a] = dqK[a] > 0.0 ? 1 : -1;
-							if( dqK[a] == 0.0 )
-							{
-								tMaxK[a] = 1e30;
-								tDelK[a] = 1e30;
-								continue;
-							}
-							tMaxK[a] = ( float( ivK[a] ) + ( dqK[a] > 0.0 ? 1.0 : 0.0 ) - qSK[a] ) / dqK[a];
-							tDelK[a] = 1.0 / abs( dqK[a] );
-						}
-						float tInK = tIn;
-						const vec3 coarseRad = cellRad;
-						const float coarseT = paneT, coarseIn = paneIn;
-						const vec3 coarseLight = paneLight;
-						bool covered = false;
-						st = 0;
-						const int maxK = resIK.x + resIK.y + resIK.z + 3;
-						for( int itK = 0; itK < maxK && st == 0; ++itK )
-						{
-							if( any( lessThan( ivK, ivec3( 0, 0, 0 ) ) ) || any( greaterThanEqual( ivK, resIK ) ) )
-								break;
-							++r.steps;
-							const float tCellK = min( min( min( tMaxK.x, tMaxK.y ), tMaxK.z ), tCell );
-							int bothK;
-							st = jahVoxelRayCell( k, ivK, invResK, false, false, planeTest0 && k == 0, surface, pK, sK, nLS,
-												  epsC0 * s0k, s0k, dirLS, tInK, tCellK, paneT, paneIn, paneLight, cellRad,
-												  bothK );
-							if( st != 0 )
-							{
-								hitC = k;
-								hitT = tInK;
-								break;
-							}
-							if( tCellK >= tCell )
-							{
-								covered = true;
-								break;
-							}
-							const int a = tMaxK.x <= tMaxK.y ? ( tMaxK.x <= tMaxK.z ? 0 : 2 ) : ( tMaxK.y <= tMaxK.z ? 1 : 2 );
-							ivK[a] += stpK[a];
-							tInK = tMaxK[a];
-							tMaxK[a] += tDelK[a];
-						}
+						r.radiance = finite3( cellRad ) ? cellRad : vec3( 0.0, 0.0, 0.0 );
+						r.throughput = st == 3 ? 0.0 : paneT;
+						r.exitReason = st == 1 && !finite3( cellRad ) ? kJahRayExhausted : kJahRayHit;
+						r.cascade = subC;
+						r.tC0 = tInK;
+						return r;
+					}
+					const bool covered = tCellK >= tCell;
+					bool lost = false;
+					if( !covered )
+					{
+						const int a = tMaxK.x <= tMaxK.y ? ( tMaxK.x <= tMaxK.z ? 0 : 2 ) : ( tMaxK.y <= tMaxK.z ? 1 : 2 );
+						ivK[a] += stpK[a];
+						tInK = tMaxK[a];
+						tMaxK[a] += tDelK[a];
+						lost = itSub >= maxK || any( lessThan( ivK, ivec3( 0, 0, 0 ) ) ) || any( greaterThanEqual( ivK, resIK ) );
+					}
+					if( lost )
+					{
 						// a segment the finer cells did not cover to its end proves nothing: the coarse cell's own answer
-						if( st == 0 && !covered )
+						r.radiance = finite3( coarseRad ) ? coarseRad : vec3( 0.0, 0.0, 0.0 );
+						r.throughput = coarseT;
+						r.exitReason = !finite3( coarseRad ) ? kJahRayExhausted : kJahRayHit;
+						r.cascade = j;
+						r.tC0 = tIn;
+						return r;
+					}
+					if( !covered )
+						continue;
+					// the segment proved empty: the ray goes on past the coarse cell
+					sub = false;
+				}
+				else
+				{
+					++itMain;
+#if JAH_VOX_MAX_CASCADES > 1
+					// F2: THE FINER CASCADE HOLDING THE POINT WINS (the header) - the finest whose box holds both ends of
+					// this cell's segment marches it on its own cells (each texture array indexed by a loop's own counter)
+					if( st == 1 && bothAxis >= 0 && j > 0 )
+					{
+						vec3 q = posLS0, qs = surfLS0;
+						float s = 1.0;
+						int held = -1;
+						for( int k = 0; k < JAH_VOX_COUNT && k < j && held < 0; ++k )
 						{
-							st = 1;
-							cellRad = coarseRad;
-							paneT = coarseT;
-							paneIn = coarseIn;
-							paneLight = coarseLight;
+							if( k > 0 )
+							{
+								const vec4 sc = JAH_VOX_FROM_PREV_SCALE( k );
+								const vec4 of = JAH_VOX_FROM_PREV_OFFSET( k );
+								q = q * sc.xyz + of.xyz;
+								qs = qs * sc.xyz + of.xyz;
+								s *= sc.x;
+							}
+							const vec3 e0 = q + dirLS * ( s * tIn ), e1 = q + dirLS * ( s * tCell );
+							if( any( lessThan( min( e0, e1 ), vec3( 0.0 ) ) ) || any( greaterThan( max( e0, e1 ), vec3( 1.0 ) ) ) )
+								continue;
+							held = k;
+							pK = q;
+							sK = qs;
+							s0k = s;
+							invResK = JAH_VOX_INVRES( k );
+						}
+						if( held >= 0 )
+						{
+							// THE SEGMENT on cascade held's cells, from tIn to tCell
+							subC = held;
+							const vec3 resK = vec3( 1.0, 1.0, 1.0 ) / invResK;
+							const vec3 qSK = pK * resK;
+							const vec3 dqK = dirLS * s0k * resK;
+							ivK = ivec3( floor( qSK + dqK * tIn + sign( dqK ) * 1e-4 ) );
+							resIK = ivec3( resK + 0.5 );
+							for( int a = 0; a < 3; ++a )
+							{
+								stpK[a] = dqK[a] > 0.0 ? 1 : -1;
+								if( dqK[a] == 0.0 )
+								{
+									tMaxK[a] = 1e30;
+									tDelK[a] = 1e30;
+									continue;
+								}
+								tMaxK[a] = ( float( ivK[a] ) + ( dqK[a] > 0.0 ? 1.0 : 0.0 ) - qSK[a] ) / dqK[a];
+								tDelK[a] = 1.0 / abs( dqK[a] );
+							}
+							tInK = tIn;
+							coarseRad = cellRad;
+							coarseT = paneT;
+							maxK = resIK.x + resIK.y + resIK.z + 3;
+							itSub = 0;
+							if( any( lessThan( ivK, ivec3( 0, 0, 0 ) ) ) || any( greaterThanEqual( ivK, resIK ) ) )
+							{
+								// (a segment that starts outside the finer cells proves nothing either)
+								r.radiance = finite3( cellRad ) ? cellRad : vec3( 0.0, 0.0, 0.0 );
+								r.throughput = paneT;
+								r.exitReason = !finite3( cellRad ) ? kJahRayExhausted : kJahRayHit;
+								r.cascade = j;
+								r.tC0 = tIn;
+								return r;
+							}
+							sub = true;
+							continue;
 						}
 					}
-				}
 #endif
-				if( st != 0 )
-				{
-					r.radiance = finite3( cellRad ) ? cellRad : vec3( 0.0, 0.0, 0.0 );
-					r.throughput = st == 3 ? 0.0 : paneT;
-					r.exitReason = st == 1 && !finite3( cellRad ) ? kJahRayExhausted : kJahRayHit;
-					r.cascade = hitC;
-					r.tC0 = hitT;
-					return r;
+					if( st != 0 )
+					{
+						r.radiance = finite3( cellRad ) ? cellRad : vec3( 0.0, 0.0, 0.0 );
+						r.throughput = st == 3 ? 0.0 : paneT;
+						r.exitReason = st == 1 && !finite3( cellRad ) ? kJahRayExhausted : kJahRayHit;
+						r.cascade = j;
+						r.tC0 = tIn;
+						return r;
+					}
 				}
 				const float tOut = min( min( tMax.x, tMax.y ), tMax.z );
 				if( tOut >= tStop )
