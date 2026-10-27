@@ -108,9 +108,11 @@ float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, v
 		rayQueryEXT rqa;
 		rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), mask, originQ, 0.0, wq,
 							   reachQ );
-		JAH_RQ_PROCEED( rqa )
-		if( rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
-			V = 0.0;
+		// THROUGH THE PANES (PHOTON-7 10-4 R8)
+		JahPanes panes = jahPanesNone();
+		JAH_RQ_PROCEED_PANES( rqa, panes )
+		V = rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
+				? 0.0 : jahPanesTransmit( panes, reachQ );
 	}
 	return f;
 }

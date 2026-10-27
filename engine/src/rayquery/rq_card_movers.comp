@@ -260,9 +260,12 @@ void main()
 					rayQueryEXT rq;
 					rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 										   uint( p.knobs.x ), origin, 0.0, Lo, reach );
-					JAH_RQ_PROCEED( rq )
-					if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
-						v = 0.0;
+					// THROUGH THE PANES (PHOTON-7 10-4 R8; the table's bit keeps a lamp passing half or more of its light,
+					// the rest's weight takes the fraction)
+					JahPanes panes = jahPanesNone();
+					JAH_RQ_PROCEED_PANES( rq, panes )
+					v = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
+							? 0.0 : jahPanesTransmit( panes, reach );
 				}
 				if( slot >= 0 )
 				{
@@ -300,10 +303,11 @@ void main()
 			rayQueryEXT rq;
 			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );
-			JAH_RQ_PROCEED( rq )
-			if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
-				gl_RayQueryCommittedIntersectionTriangleEXT )
-				vis = 0.0;
+			// THROUGH THE PANES (PHOTON-7 10-4 R8): the card's traced sun takes their transmittance
+			JahPanes panes = jahPanesNone();
+			JAH_RQ_PROCEED_PANES( rq, panes )
+			vis = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
+					  ? 0.0 : vis * jahPanesTransmit( panes, p.toSun.w );
 		}
 	}
 	if( p.knobs.y > 0.5 )

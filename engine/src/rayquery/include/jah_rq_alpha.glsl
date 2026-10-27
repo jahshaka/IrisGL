@@ -236,6 +236,16 @@ int jahPanesBetween( inout JahPanes p, float tStart, float tEnd )
 	return m;
 }
 int jahPanesInFront( inout JahPanes p, float tEnd ) { return jahPanesBetween( p, -1e30, tEnd ); }
+/// A LIGHT RAY's TRANSMITTANCE (PHOTON-7 10-4 R8): the product of the T of the panes it listed nearer than tEnd -
+/// order-free, so no sort; the panes' own light is no part of a visibility.
+float jahPanesTransmit( JahPanes p, float tEnd )
+{
+	float T = 1.0;
+	for( int i = 0; i < p.n; ++i )
+		if( p.t[i] < tEnd )
+			T *= jahPaneT( p.word[i] );
+	return T;
+}
 float jahPanesThroughput( JahPanes p )
 {
 	float T = 1.0;
