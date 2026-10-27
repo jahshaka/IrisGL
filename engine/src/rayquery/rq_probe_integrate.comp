@@ -195,6 +195,40 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 #include "jah_field_window.glsl"
 #include "jah_field_read.glsl"
 
+// THE VOXEL CHAIN (PHOTON-7 10-3 R3 (b); L9: the renderer follows the ray): where the field's confidence fades, the
+// share a probe did not answer is gathered by the world caches' rays (jah_voxel_cones.glsl's jahRayDiffuse at
+// kJahPixelDiffuseRays - the no-ray route's screen integrate's one estimator), never the sky unoccluded and never
+// nothing: the hit set's volumes by kind (bindings 18 - 24: the front, coverage +/-, position +/-, the back, the
+// normal - what an occupancy ray reads), its uniforms the trace's (p.hit: the chain's boxes).
+layout( set = 0, binding = 18 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 19 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 20 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 21 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 22 ) uniform sampler3D voxelPosN[kMaxCascades];
+layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
+#include "jah_rq_finite.glsl"
+#define JAH_VOX_MAX_CASCADES kMaxCascades
+#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
+#define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( voxelCovP[c], u, l )
+#define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( voxelCovN[c], u, l )
+#define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( voxelPosP[c], u, l )
+#define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
+#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( voxelBack[c], u, l )
+#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( voxelNrm[c], u, l )
+#define JAH_VOX_INVRES( c ) ( JAH_VOX_INVSIZE( c ).xyz * JAH_VOX_INVSIZE( c ).w )
+// cascade c - 1's normalised space to cascade c's, from the two boxes (the chain's table, derived)
+#define JAH_VOX_FROM_PREV_SCALE( c ) vec4( JAH_VOX_INVSIZE( c ).xyz / JAH_VOX_INVSIZE( (c) - 1 ).xyz, 0.0 )
+#define JAH_VOX_FROM_PREV_OFFSET( c ) \
+	vec4( ( JAH_VOX_ORIGIN( (c) - 1 ).xyz - JAH_VOX_ORIGIN( c ).xyz ) * JAH_VOX_INVSIZE( c ).xyz, 0.0 )
+#include "jah_ray_set.glsl"
+#include "jah_voxel_ray.glsl"
+// the cone frame is built in WORLD space (jahConeBasisWorld): a direction reaches cascade 0's normalised space through
+// its box
+#define JAH_CONES_TO_LS( d ) normalize( ( d ) * JAH_VOX_INVSIZE( 0 ).xyz )
+#define JAH_CONES_TO_WORLD( d ) ( d )
+#include "jah_voxel_cones.glsl"
+
 #include "jah_reproject.glsl"
 // THE REST MEANS' STORE (PHOTON_2_SPEC R1: every fp16 running statistic is stored stochastically rounded)
 #include "jah_half_stochastic.glsl"
@@ -318,13 +352,18 @@ vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, iv
 }
 
 /// THE FALLBACK OF A PIXEL NO PROBE ANSWERS (7-2): the field's cage at the pixel's point and normal (grid space through
-/// the field's world-to-grid rows), at its confidence - and where the confidence fades (past the field's window) NO
-/// SAMPLE: the share adds nothing, the convention the integrate keeps with no field bound (rgb x w is what was sampled).
-/// It added the environment's diffuse there, unoccluded - the sky through a wall past c0's window in any hall wider
-/// than it (PHOTON-7 10-3 R3; L9: a sky read with no visibility is light through a wall). The eye's direction for the
-/// sample point's bias: towards the camera, or the view's axis orthographic.
+/// the field's world-to-grid rows), at its confidence - and where the confidence fades (past the field's window)
+/// the voxel chain's rays answer (jahRayDiffuse: wall-tight by the ray, its sky earned by an escape). It added the
+/// environment's diffuse there, unoccluded - the sky through a wall past c0's window in any hall wider than it (PHOTON-7
+/// 10-3 R3; L9: a sky read with no visibility is light through a wall) - and for a moment nothing (light by omission
+/// on thin geometry: Bistro's curtains). The eye's direction for the sample point's bias: towards the camera, or the
+/// view's axis orthographic.
+bool gJahFallbackMemo = false;   // one pixel a thread: its fallback is traced once, whichever composition asks
+vec3 gJahFallback = vec3( 0.0 );
 vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 {
+	if( gJahFallbackMemo )
+		return gJahFallback;
 	const vec3 gridPos = vec3( dot( p.fieldRow0, vec4( worldPos, 1.0 ) ), dot( p.fieldRow1, vec4( worldPos, 1.0 ) ),
 							   dot( p.fieldRow2, vec4( worldPos, 1.0 ) ) );
 	const vec3 gridNormal = normalize( vec3( dot( p.fieldRow0.xyz, worldNormal ), dot( p.fieldRow1.xyz, worldNormal ),
@@ -336,7 +375,19 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 										   vec3( p.fieldProbes.x, p.fieldWin.y, p.fieldWin.z ),
 										   uvec3( packed & 127u, ( packed >> 7u ) & 127u, ( packed >> 14u ) & 127u ),
 										   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
-	return a.irradiance;
+	vec3 r = a.irradiance;
+	if( a.confidence < 1.0 && JAH_VOX_COUNT > 0 )
+	{
+		// THE CHAIN'S RAYS for the share the field does not cover (the screen integrate's construction, in world space)
+		const vec3 surfLS = ( worldPos - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz;
+		const vec3 biasDirLS = jahConeBiasDir( normalize( worldNormal * JAH_VOX_INVSIZE( 0 ).xyz ) );
+		r += jahRayDiffuse( surfLS, biasDirLS, jahConeBasisWorld( worldNormal ), kJahPixelDiffuseRays,
+							JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0, 0.0, true ) *
+			 ( 1.0 - a.confidence );
+	}
+	gJahFallbackMemo = true;
+	gJahFallback = r;
+	return r;
 }
 
 /// THE BILINEAR READ'S TAPS (GATHER-1a; one text for the diffuse's own read and the rough specular's lobe, 7-3): the

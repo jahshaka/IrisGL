@@ -337,6 +337,11 @@ public:
     /// not be made: the job declines its frame.
     bool write(GatherHost &host, VkDescriptorSet set, const HitSetSlots &slots, const HitSetSources &src,
                VkBuffer rowOfSlot, VkWriteDescriptorSet *w, std::string &err);
+    /// THE VOLUMES ALONE (the probe integrate's voxel rays, PHOTON-7 10-3 R3 (b)): kind k written at `binding[k]`
+    /// (kNoBinding: not bound), `w` indexed by binding - the same views and stand-ins `write` gives the hit set.
+    static constexpr uint32_t kNoBinding = 0xFFFFFFFFu;
+    bool writeVolumes(GatherHost &host, VkDescriptorSet set, const uint32_t (&binding)[kGatherVoxelKinds],
+                      const HitSetSources &src, VkWriteDescriptorSet *w, std::string &err);
 
 private:
     VkWriteDescriptorSetAccelerationStructureKHR mAs{};

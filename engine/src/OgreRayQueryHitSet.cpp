@@ -48,6 +48,43 @@ void hitSetLayout(const HitSetSlots &s, VkDescriptorSetLayoutBinding *b) {
     put(s.cloud, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u);
 }
 
+bool HitSetWrite::writeVolumes(GatherHost &host, VkDescriptorSet set, const uint32_t (&binding)[kGatherVoxelKinds],
+                               const HitSetSources &src, VkWriteDescriptorSet *w, std::string &err) {
+    VkImageView dummyCube = VK_NULL_HANDLE, dummyVolume = VK_NULL_HANDLE, dummyFlat = VK_NULL_HANDLE;
+    VkBuffer dummyStorage = VK_NULL_HANDLE;
+    if (!host.gatherDummies(dummyCube, dummyVolume, dummyFlat, dummyStorage, err)) return false;
+    const VkSampler linear = host.gatherLinearSampler();
+    // every kind for every slot the shaders index: past the chain's length the last cascade's (a slot with no chain at
+    // all the black stand-in, never read: the cascade count is 0). Views uncached and retired, as `write`'s.
+    for (unsigned k = 0; k < kGatherVoxelKinds; ++k) {
+        if (binding[k] == kNoBinding) continue;
+        for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
+            const unsigned from = c < src.cascadeCount ? c : (src.cascadeCount ? src.cascadeCount - 1u : 0u);
+            Ogre::TextureGpu *t = src.cascadeCount ? src.voxel[from][k] : nullptr;
+            VkImageView view = dummyVolume;
+            if (t) {
+                Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+                slot.texture = t;
+                view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
+                host.gatherRetireView(view);
+            }
+            mVolumes[k][c].sampler = linear;
+            mVolumes[k][c].imageView = view;
+            mVolumes[k][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (!mVolumes[k][c].imageView) { err = "a voxel view is null"; return false; }
+        }
+        VkWriteDescriptorSet &e = w[binding[k]];
+        e = VkWriteDescriptorSet{};
+        e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        e.dstSet = set;
+        e.dstBinding = binding[k];
+        e.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        e.descriptorCount = kGatherMaxCascades;
+        e.pImageInfo = mVolumes[k];
+    }
+    return true;
+}
+
 bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots &s, const HitSetSources &src,
                         VkBuffer rowOfSlot, VkWriteDescriptorSet *w, std::string &err) {
     // IMAGE VIEWS, UNCACHED AND RETIRED (the reflection's measured trap, OgreRayQuery.cpp recordReflect: Ogre's view
@@ -90,21 +127,10 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     mAs.pAccelerationStructures = &src.tlas;
     entry(s.tlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1u).pNext = &mAs;
 
-    // THE VOLUMES, every kind for every slot the shaders index: past the chain's length the last cascade's (a slot
-    // with no chain at all the black stand-in, never read: the cascade count is 0).
+    // THE VOLUMES, every kind for every slot the shaders index (writeVolumes)
     const VkSampler linear = host.gatherLinearSampler(), point = host.gatherPointSampler(),
                     wrap = host.gatherWrapSampler();
-    for (unsigned k = 0; k < kGatherVoxelKinds; ++k) {
-        for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
-            const unsigned from = c < src.cascadeCount ? c : (src.cascadeCount ? src.cascadeCount - 1u : 0u);
-            Ogre::TextureGpu *t = src.cascadeCount ? src.voxel[from][k] : nullptr;
-            mVolumes[k][c].sampler = linear;
-            mVolumes[k][c].imageView = t ? sampledView(t) : dummyVolume;
-            mVolumes[k][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!mVolumes[k][c].imageView) { err = "a voxel view is null"; return false; }
-        }
-        entry(s.voxel[k], VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kGatherMaxCascades).pImageInfo = mVolumes[k];
-    }
+    if (!writeVolumes(host, set, s.voxel, src, w, err)) return false;
     // THE SKY
     mSky.sampler = linear;
     mSky.imageView = src.sky ? sampledView(src.sky) : dummyCube;
