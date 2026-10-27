@@ -261,7 +261,11 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     }
 
     const Ogre::PixelFormatGpu fmt[kCardLayers] = {
-        Ogre::PFG_RGBA8_UNORM,   // albedo (kD)
+        // albedo (kD) at 16 bits a channel (PHOTON-7 10-3 R12, the lead's ruling): the layer stores kD = albedo / pi,
+        // so a byte spent its top 68 % on nothing and held any albedo to +-0.0062 (half a step x pi) - 0.6 read
+        // +0.61 %, a dark 0.03 -18 % (gi.card_truth (T1): the card-answered hits +0.6 % against the analytic, the
+        // voxel route exact). A UAV (the relight writes its alpha), so sRGB was not open. +16 MB at 2048^2.
+        Ogre::PFG_RGBA16_UNORM,
         Ogre::PFG_RGBA8_UNORM,   // normal
         Ogre::PFG_R16_FLOAT,     // depth
         mEmissiveFormat,         // emissive
