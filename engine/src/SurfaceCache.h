@@ -1075,6 +1075,10 @@ private:
     DemandTicket mDemandReadings[kDemandSlots];
     unsigned mDemandNextIssue = 0u, mDemandNextTake = 0u;
     std::vector<unsigned long long> mFaceMarks;   ///< 16 a slot: 8 per reader, the 6 buckets
+    /// ...THE SLOTS ANY OF WHICH WAS EVER MARKED (scale.cpu_walks, PHOTON-7 10-3): takeDemand's offer reads these, never
+    /// every slot of the table each frame (16 marks x 10k slots a frame was the still frame's 1.6 ms of a 10k world).
+    std::vector<uint32_t> mMarkedSlots;
+    std::vector<unsigned char> mSlotMarked;
     std::vector<unsigned long long> mFacePrev;    ///< ...and each one's mark before (a demand that persists: two)
     /// ...and each one's last kFaceRing read-backs that carried a new mark (the stamps: PHOTON-7 stage 10-3, F3's fit -
     /// the decision ranks a face by how many of its rest span's read-backs marked it, a count of the frames' hits alone)

@@ -751,6 +751,12 @@ private:
         /// The VaoManager frame on which a skin pass last MOVED a pose (a re-skin
         /// that was not the cache's first): the reflection's "a mover moved in the
         /// last two frames" counts a posed item's limbs too (REFLECT-MOVERS-2).
+        /// THE WORLD's BOX, ONCE A FRAME (hitSetOf: the union of every hit-able item's world AABB, PHOTON-7 10-3 R4). Every
+        /// ray job's hit set asks for it - four a frame - and the walk over every item each time was 2.7 ms of a 10k
+        /// world's Debug frame (scale.cpu_walks): taken once per VaoManager frame, the jobs share it.
+        mutable uint32_t worldBoxFrame = 0xFFFFFFFFu;
+        mutable bool worldBoxOn = false;
+        mutable float worldBoxMin[3] = { 0.0f, 0.0f, 0.0f }, worldBoxMax[3] = { 0.0f, 0.0f, 0.0f };
         uint32_t skinPosedFrame = 0xFFFFFFFFu;
         /// ...and the slots it posed on that frame (the reflection's per-texel rest break, PHOTON-2 round 2 G6).
         std::vector<uint32_t> skinPosedSlots;
@@ -7608,7 +7614,13 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     out.hit = hit;
     out.tlas = sa.tlas;
     // THE WORLD's BOX: every item a ray can hit (its GPU-scene slot: the TLAS's instance set), its world AABB - the
-    // sky is a pass, never an instance, and an instance's extent IS world a ray can hit
+    // sky is a pass, never an instance, and an instance's extent IS world a ray can hit. Once a frame (SceneAs::
+    // worldBoxFrame), every job of the frame reading the same.
+    const uint32_t boxFrame = mRs && mRs->getVaoManager() ? mRs->getVaoManager()->getFrameCount() : 0xFFFFFFFEu;
+    if (sa.worldBoxFrame == boxFrame) {
+        out.worldOn = sa.worldBoxOn;
+        for (int k = 0; k < 3; ++k) { out.worldMin[k] = sa.worldBoxMin[k]; out.worldMax[k] = sa.worldBoxMax[k]; }
+    } else
     for (const auto *np : scene->itemNodes()) {
         const Ogre::Item *item = np ? np->item : nullptr;
         if (!item || np->itemSlot == size_t(-1)) continue;
@@ -7622,6 +7634,11 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
             out.worldMax[k] = out.worldOn ? std::max(out.worldMax[k], hi[k]) : hi[k];
         }
         out.worldOn = true;
+    }
+    if (sa.worldBoxFrame != boxFrame) {
+        sa.worldBoxFrame = boxFrame;
+        sa.worldBoxOn = out.worldOn;
+        for (int k = 0; k < 3; ++k) { sa.worldBoxMin[k] = out.worldMin[k]; sa.worldBoxMax[k] = out.worldMax[k]; }
     }
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM: each cascade of the Photon chain is its OWN PhotonVoxelLighting
     // (chained with addCascade, OgreGi.cpp), innermost first - the order the shaders want: they take the first volume

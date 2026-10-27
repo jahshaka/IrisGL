@@ -58,6 +58,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace Ogre {
@@ -1918,7 +1919,11 @@ private:
     std::vector<RegionEntry> mRegionsOpen;
     uint32_t mRegionOverflowOpen = 0u;
     uint32_t mRegionMergesOpen = 0u;
-    std::vector<const Ogre::Light *> mRegionLampShadows;
+    /// The lamps whose shadow sphere this frame's list already holds (a SET: listMover asks it once per lamp per mover,
+    /// and a linear search made a 500-lamp world's mover frame quadratic - scale.cpu_walks, PHOTON-7 10-3).
+    std::unordered_set<const Ogre::Light *> mRegionLampShadows;
+    bool mRegionLampsAll = false;   ///< ...holding every lamp the list walked (the walk owes nothing more this frame)
+    bool mRegionSunSeen = false;    ///< ...and that walk saw a directional (a mover's sun shadow region)
     GiChangedRegions mRegionsClosed;
     float mRegionSunPeak = -1.0f, mRegionSkyPeak = -1.0f;
     unsigned long long mRegionCloses = 0, mRegionClosesListing = 0;

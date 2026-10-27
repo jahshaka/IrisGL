@@ -398,16 +398,27 @@ void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts) {
     SceneLightList::Consumer box;
     box.boxMin = swept.getMinimum();
     box.boxMax = swept.getMaximum();
+    // (EVERY LAMP LISTED ALREADY this frame - a world whose movers reach them all - leaves only the sun to ask about:
+    // the walk over the lamps is skipped, not repeated for every further mover; scale.cpu_walks, 500 lamps x a frame's
+    // movers)
+    if (mRegionLampsAll) {
+        if (mRegionSunSeen) appendRegion(GiRegionKind::MoverShadow, swept);
+        return;
+    }
     bool sun = false;
+    size_t lamps = 0u;
     for (Ogre::Light *l : lights.byRank(mSceneMgr)) {
         if (l->getType() == Ogre::Light::LT_DIRECTIONAL) { sun = true; continue; }
         if (!l->getParentNode()) continue;
-        if (std::find(mRegionLampShadows.begin(), mRegionLampShadows.end(), l) != mRegionLampShadows.end()) continue;
+        ++lamps;
+        if (mRegionLampShadows.count(l)) continue;
         if (!SceneLightList::reaches(l, box)) continue;
-        mRegionLampShadows.push_back(l);
+        mRegionLampShadows.insert(l);
         appendRegion(GiRegionKind::LampShadow,
                      sphereBox(l->getParentNode()->_getDerivedPosition(), float(l->getAttenuationRange())));
     }
+    mRegionLampsAll = mRegionLampShadows.size() >= lamps;
+    mRegionSunSeen = sun;
     if (sun) appendRegion(GiRegionKind::MoverShadow, swept);
 }
 
@@ -485,6 +496,8 @@ void PhotonComponent::closeRegions() {
     mRegionOverflowOpen = 0u;
     mRegionMergesOpen = 0u;
     mRegionLampShadows.clear();
+    mRegionLampsAll = false;
+    mRegionSunSeen = false;
 
     // THE ONE BUFFER (regionBuffer's layout), the used prefix written at every close.
     JAH_TRY {

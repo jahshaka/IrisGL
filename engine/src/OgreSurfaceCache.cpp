@@ -567,6 +567,8 @@ void SurfaceCache::destroyAll() {
     mCards.clear();
     mByNode.clear();
     mFaceMarks.clear();
+    mMarkedSlots.clear();
+    mSlotMarked.clear();
     mFacePrev.clear();
     mFaceRing.clear();
     mFaceRingHead.clear();
@@ -905,15 +907,23 @@ void SurfaceCache::layoutCards(const CardSceneView::Candidate &cand, std::vector
 bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsigned long long roots) {
     const unsigned perSide = kCardAtlasSize / kCardPageSize;
     // THE PAGE TO EMPTY: the sub-cut page with the fewest cards whose cards the OTHER pages cutting its size have free
-    // slots for (lowest index among equals) - deterministic, and a page freed whole.
+    // slots for (lowest index among equals) - deterministic, and a page freed whole. The free slots per sub-size are
+    // summed ONCE and each page's room is that sum less its own (it used to be re-summed over every page for every page:
+    // pages^2 = 65,536 steps a call, called for every arrival a full atlas turns away - 12 ms of a 10k world's mover
+    // frame in Debug, scale.cpu_walks; the same choice, in pages steps).
+    const size_t pages = mPageOwner.size();
+    unsigned freeBySize[kCardPageSize + 1u] = {};
+    for (size_t q = 0; q < pages; ++q)
+        if (mPageOwner[q] == 2u) {
+            const unsigned size = mPageSubSize[q];
+            freeBySize[size] += (kCardPageSize / size) * (kCardPageSize / size) - mPageSubUsed[q];
+        }
     size_t best = size_t(-1);
-    for (size_t p = 0; p < mPageOwner.size(); ++p) {
+    for (size_t p = 0; p < pages; ++p) {
         if (mPageOwner[p] != 2u) continue;
         const unsigned size = mPageSubSize[p];
         const unsigned slots = (kCardPageSize / size) * (kCardPageSize / size);
-        unsigned room = 0u;
-        for (size_t q = 0; q < mPageOwner.size(); ++q)
-            if (q != p && mPageOwner[q] == 2u && mPageSubSize[q] == size) room += slots - mPageSubUsed[q];
+        const unsigned room = freeBySize[size] - (slots - mPageSubUsed[p]);
         if (room < mPageSubUsed[p]) continue;
         if (best == size_t(-1) || mPageSubUsed[p] < mPageSubUsed[best]) best = p;
     }
@@ -1041,6 +1051,12 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
             if (face[k] > mFaceMarks[k] && counted(unsigned((k % 16u) / 8u), face[k])) {
                 mFacePrev[k] = mFaceMarks[k];
                 mFaceMarks[k] = face[k];
+                const size_t slot = k / 16u;
+                if (mSlotMarked.size() <= slot) mSlotMarked.resize(size_t(t.slots), 0u);
+                if (!mSlotMarked[slot]) {
+                    mSlotMarked[slot] = 1u;
+                    mMarkedSlots.push_back(uint32_t(slot));
+                }
                 // (the face's last read-backs that carried a new mark: the decision's span read count, F3's rank)
                 mFaceRing[k * kFaceRing + mFaceRingHead[k]] = face[k];
                 mFaceRingHead[k] = (unsigned char)((mFaceRingHead[k] + 1u) % kFaceRing);
@@ -1069,7 +1085,7 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
     //    decision's set is every hit face's cards, kept and arriving alike - a face read early in the span is offered
     //    as one read late is, never only within the window of its reader's clock)
     const bool restPending = mRestDue && !mRestDecided;
-    for (size_t s = 0; s * 16u < mFaceMarks.size(); ++s) {
+    for (const uint32_t s : mMarkedSlots) {   // (a slot never marked is never wanted)
         bool wanted = false;
         for (unsigned r = 0; r < kDemandReaders && !wanted; ++r)
             for (unsigned b = 0; b < 6u && !wanted; ++b) {
@@ -1575,13 +1591,34 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mDecisionFree = (unsigned long long)kCardAtlasSize * kCardAtlasSize - used;
         mDecisionAdmitted = 0u;   // (its refusals are the fit's: 4c)
     }
+    // A FULL ATLAS SAYS SO ONCE A SIZE (scale.cpu_walks, PHOTON-7 10-3: a 10k world's mover frame turned away every
+    // arrival of a full atlas with three page walks and a compaction attempt EACH - 22.6 ms of the cards stage in Debug
+    // against the 10-22 ship's 0.14). Within this loop the atlas only loses room - an allocation takes a slot - until an
+    // eviction frees one or a compaction empties a page, so a size refused once stays refused, and a compaction that
+    // failed stays failed, until then: the same placements, without repeating a refusal.
+    bool noRoom[kCardPageSize + 1u] = {};
+    bool compactFailed = false;
+    const auto roomChanged = [&]() {
+        std::fill(std::begin(noRoom), std::end(noRoom), false);
+        compactFailed = false;
+    };
+    const auto place = [&](CardRec &c) {
+        const unsigned sz = std::max(kCardMinSize, std::min(kCardPageSize, pow2Ceil(c.size)));
+        if (noRoom[sz]) return false;
+        if (allocRect(c.size, c.atlasX, c.atlasY)) return true;
+        noRoom[sz] = true;
+        return false;
+    };
     for (const Arrival &a : arriving) {
         CardRec c = a.card;
         c.roots = arrivalRoot;
         c.round = 0u;
-        bool placed = allocRect(c.size, c.atlasX, c.atlasY);
+        bool placed = place(c);
         while (!placed && a.persistent) {
-            if (compactOnePage(per, arrivalRoot)) { placed = allocRect(c.size, c.atlasX, c.atlasY); continue; }
+            if (!compactFailed) {
+                if (compactOnePage(per, arrivalRoot)) { roomChanged(); placed = place(c); continue; }
+                compactFailed = true;
+            }
             if (decide) break;   // (the decision's set fits by its count: it compacts, it never evicts)
             if (nextEvict >= evictable.size()) break;
             const Evictable &e = evictable[nextEvict++];
@@ -1596,7 +1633,8 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             ++mEvicted;
             changed = true;
             mDeparted = true;
-            placed = allocRect(c.size, c.atlasX, c.atlasY);
+            roomChanged();
+            placed = place(c);
         }
         if (decide) {
             if (placed) ++mDecisionAdmitted;
@@ -4009,7 +4047,12 @@ bool SurfaceCache::syncBuffers() {
     mInstanceSlots = slots;
     // THE TABLE AND, AFTER IT, THE DEMAND REGION (jah_rq_card_bindings.glsl), zeroed at creation and written by the
     // readers from then on; the host uploads the table's entries and the head only.
-    mInstanceBufferCpu.assign((size_t(slots) + demandEntries(slots)) * 4u, 0u);
+    // (the demand region's host copy is zeros the GPU never reads back from here - the buffer's creation data only - so
+    // a re-sync of an unchanged size re-zeroes the TABLE alone: the whole 2.5 MB at a 16k-slot table, every dirty frame,
+    // was a 10k world's syncBuffers - scale.cpu_walks, PHOTON-7 10-3)
+    const size_t instanceWords = (size_t(slots) + demandEntries(slots)) * 4u;
+    if (mInstanceBufferCpu.size() != instanceWords) mInstanceBufferCpu.assign(instanceWords, 0u);
+    else std::fill(mInstanceBufferCpu.begin(), mInstanceBufferCpu.begin() + std::ptrdiff_t(size_t(slots) * 4u), 0u);
     for (const InstanceRec &inst : mInstances) {
         if (!inst.cardCount || inst.itemSlot == size_t(-1)) continue;
         unsigned *e = &mInstanceBufferCpu[size_t(inst.itemSlot) * 4u];
