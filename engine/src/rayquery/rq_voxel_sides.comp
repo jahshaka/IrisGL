@@ -23,7 +23,8 @@
 // A RAY'S ANSWER, the world caches' law (rq_card_gather.comp's head): a front face reads jahHitRadianceStore - THE
 // CASCADES ALONE: the cache is bound as its stand-ins with zero slots (the lead's R1 - the cards read the voxels, so a voxel
 // that read a card closed a loop; RayQueryTier::gatherVoxelSides), never Sourced -, a back face of a one-sided surface 0,
-// a hit nothing shades no sample, a miss out to the reach the sky over the ray's bin. The still world alone
+// a hit nothing shades no sample, a miss - an EXIT from the world's box (10-3 R4: it stopped at the reach) - the sky
+// over the ray's bin. The still world alone
 // (kRayMaskStill, until 8-M).
 // THE COUNTS: nine (rays, a card, a cascade, a back face, no sample, the sky, the sides gathered, sides with no sample,
 // the BURIED sides - jahRayOriginBuried) a dispatch, read back (GiStatus::voxelSides) - inside a watertight room the sky
@@ -41,6 +42,7 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 	vec4 knobs;		// x = the rays a side N, y = the reach (metres), z = the start's lift (the finest cell, metres), w = the mask
 	uvec4 cascade;	// x = this cascade's place in the hit set's chain, yz = its bricks along x and y
 } p;
+#include "jah_world_exit.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 /// THE FEEDBACK'S LIST (PhotonBrickFeedback_cs.glsl): the bricks this pass covers, packed x | y << 10 | z << 20.
@@ -137,7 +139,7 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9] )
 		++c[kCountRays];
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs.w ), origin, 0.0, dir,
-							   p.knobs.y );
+							   jahWorldExitT( origin, dir, p.knobs.y ) );   // a miss is an EXIT (10-3 R4)
 		JAH_RQ_PROCEED( rq )
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{

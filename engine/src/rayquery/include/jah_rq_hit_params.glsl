@@ -37,6 +37,8 @@ struct JahHitParams
 	                        // by its ray's footprint (10-3: camera-independent), 0 the box rule (HitReader, C++)
 	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera),
 	                        // z its coarsest footprint level K (its placement quantum's)
+	vec4 worldMin;          // THE WORLD's BOX (PHOTON-7 10-3 R4): the traced instances' union - its corner (xyz), w 1 = known
+	vec4 worldMax;          // ...its far corner
 };
 
 #define JAH_VOX_COUNT        int( JAH_HIT_PARAMS.counts.x )
@@ -66,5 +68,7 @@ struct JahHitParams
 #define JAH_VOX_LEVEL_FOOTPRINT ( JAH_HIT_PARAMS.levelCam.w > 1.5 )
 #define JAH_VOX_LEVEL_CAM    JAH_HIT_PARAMS.levelCam.xyz
 #define JAH_VOX_LEVEL( c )   JAH_HIT_PARAMS.level[c]
+#define JAH_WORLD_ON         ( JAH_HIT_PARAMS.worldMin.w > 0.5 )
+
 
 #endif   // JAH_RQ_HIT_PARAMS_GLSL

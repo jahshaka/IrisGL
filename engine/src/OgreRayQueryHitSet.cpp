@@ -223,6 +223,11 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         out.voxelInvSize[c][3] = n ? src.voxelCell[from] : 1.0f;
     }
     out.counts[0] = float(n);
+    for (int k = 0; k < 3; ++k) {
+        out.worldMin[k] = src.worldMin[k];
+        out.worldMax[k] = src.worldMax[k];
+    }
+    out.worldMin[3] = src.worldOn ? 1.0f : 0.0f;
     // THE LEVEL RULE (HitReader): a view's by the GI camera (10-2e: the camera and each cascade's radius and band, past
     // the chain's length the last's - never read, the outermost reads by its box); a cache's by its ray's footprint
     // (each cascade's K), whatever the camera

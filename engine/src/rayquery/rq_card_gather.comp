@@ -26,9 +26,11 @@
 //   * a hit on a BACK face - a one-sided surface seen from behind (the TLAS disables facing culls: the ray stops on
 //     it) - is 0: the inside of a closed shell holds no light of its outside;
 //   * a hit neither the card nor a cascade can shade is NO SAMPLE (the mean is over the rays that are);
-//   * a MISS out to the reach (the outermost cascade's guaranteed radius, the voxel ray's last world shell) is the sky
-//     over the ray's bin (a cone of the bin's solid angle 2 pi / N: jahEnvCone, the voxel ray's escape) - the sky
-//     enters ONLY at an earned miss.
+//   * a MISS is an EXIT: the ray runs to where it leaves the world's box (jah_world_exit.glsl: the traced instances'
+//     union; PHOTON-7 10-3 R4 - it stopped at "the reach", the outermost cascade's radius, and a sealed hall longer
+//     than that read the sky inside), and only there is it the sky over the ray's bin (a cone of the bin's solid angle
+//     2 pi / N: jahEnvCone) - the sky enters ONLY at an earned miss. A hit past every cascade reads its card, or is no
+//     sample (above).
 // THE MASK: the still world alone (kRayMaskStill, until stage 8's 8-M): no brick fires when a mover moves, and the
 // gate's card half counts a mover's occlusion where a reader asks for it. Its own sun rays at a voxel-answered hit
 // take the still casters (kRayMaskStillCaster) for the same reason.
@@ -54,9 +56,10 @@ const int kMaxCascades = 4;
 layout( std140, set = 0, binding = 1 ) uniform Params
 {
 	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text: the cascades, the sky, the cards' counts, the tables)
-	vec4 knobs;			// x = the rays a texel N, y = the reach (metres), w = the ray mask
+	vec4 knobs;			// x = the rays a texel N, y = the reach (metres: where no world box is known), w = the ray mask
 	vec4 knobs2;		// y = the records
 } p;
+#include "jah_world_exit.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
@@ -223,7 +226,7 @@ void main()
 			++c[kCountRays];
 			rayQueryEXT rq;
 			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs.w ), origin, 0.0,
-								   dir, p.knobs.y );
+								   dir, jahWorldExitT( origin, dir, p.knobs.y ) );
 			JAH_RQ_PROCEED( rq )
 			if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 			{

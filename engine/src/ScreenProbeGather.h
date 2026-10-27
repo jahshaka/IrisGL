@@ -212,6 +212,10 @@ struct HitSetSources {
     /// direct term's front (MOVER-OCCLUSION-1), 11 its back (PHOTON-7 stage 7: the stores hold two sides). Innermost
     /// first; past `cascadeCount` the slots bind the last cascade's (a shader indexes kGatherMaxCascades).
     Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
+    /// THE WORLD's BOX (PHOTON-7 10-3 R4; L9: "ran out of distance" is not a miss): the union of the traced instances'
+    /// world AABBs - where a ray EXITS the world, the only place the sky is. `worldOn` false: no instance.
+    float worldMin[3] = {}, worldMax[3] = {};
+    bool worldOn = false;
     float voxelOrigin[kGatherMaxCascades][3] = {};
     float voxelSize[kGatherMaxCascades][3] = {};
     /// ...each cascade's cell, its largest side (metres).
@@ -292,8 +296,10 @@ struct HitSetParams {
     float cloudSun[4] = {};
     float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule (w: HitReader's code)
     float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres), its K
+    float worldMin[4] = {};    ///< THE WORLD's BOX (PHOTON-7 10-3 R4): its corner (xyz), w 1 = known
+    float worldMax[4] = {};    ///< ...its far corner (xyz)
 };
-static_assert(sizeof(HitSetParams) == 23u * 16u, "JahHitParams is twenty-three vec4s");
+static_assert(sizeof(HitSetParams) == 25u * 16u, "JahHitParams is twenty-five vec4s");
 /// WHO READS THE HITS (PHOTON-7 stage 10-3, the lead's ruling on the teleport window): the level a hit is read at.
 ///  - View: a VIEW reader (the gather, the reflection) reads the level by the GI CAMERA (10-2e): its picture may depend
 ///    on its pose, and two placements the engine can reach at one pose read one level (levelCam.w = 1; 0 without a
