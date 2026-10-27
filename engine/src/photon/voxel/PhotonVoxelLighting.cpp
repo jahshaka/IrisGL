@@ -274,8 +274,12 @@ namespace Ogre
 
         mBounceShaderParams = &mLightVctBounceInject->getShaderParams( "default" );
 
-        // RESERVED FOR EVERY PARAM BELOW: the members are pointers INTO this vector.
-        mLocalBounceShaderParams.reserve( 10u );
+        // RESERVED FOR EVERY PARAM BELOW: the members are pointers INTO this vector - one more than reserved
+        // reallocates it and leaves every earlier member dangling (measured while building PHOTON-7 10-3 R4 (a): two
+        // more params, a bounce dispatch read freed memory and segfaulted in runFeedbackPass), so the count is one
+        // constant and the last add is checked against it.
+        const size_t kBounceParams = 10u;
+        mLocalBounceShaderParams.reserve( kBounceParams );
 
         mBounceVoxelCellSize = addLocalBounceShaderParam( "voxelCellSize" );
         mBounceInvVoxelResolution = addLocalBounceShaderParam( "invVoxelResolution" );
@@ -287,6 +291,12 @@ namespace Ogre
         mBounceBrickMark = addLocalBounceShaderParam( "brickMark" );
         mBounceRayParams = addLocalBounceShaderParam( "rayParams" );
         mBounceRayCounts = addLocalBounceShaderParam( "rayCounts" );
+        if( mLocalBounceShaderParams.size() > kBounceParams )
+        {
+            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
+                         "the bounce job's parameters outgrew their reservation: the members point into the vector",
+                         "PhotonVoxelLighting" );
+        }
 
         // THE FEEDBACK'S JOBS (PHOTON-7 stage 4; Voxelizer.material.json), shared by name like the bounce's.
         mFeedbackJob = hlmsCompute->findComputeJob( "Photon/BrickFeedback" );
