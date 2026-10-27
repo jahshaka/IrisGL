@@ -135,6 +135,8 @@ struct JahRaySpecular
 	float open;		// the lobe's share no geometry stopped
 	float hitC0;	// the hits' mean distance, cascade 0's units (0: no hit)
 	float hits;		// the hits' weight
+	float openC0;	// THE OPEN SHARE'S READ LENGTH (PHOTON-7 10-4 R4): how far the chain read the escapes before they left it,
+					// their mean, cascade 0's units (0: no escape, or none a cascade held) - where a traced escape starts
 };
 float jahRadicalInverse2( uint b )
 {
@@ -153,6 +155,7 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 	o.open = 0.0;
 	o.hitC0 = 0.0;
 	o.hits = 0.0;
+	o.openC0 = 0.0;
 	const int n = max( rays, 1 );
 	const float a = max( perceptualRoughness * perceptualRoughness, 1e-4 );
 	// THE SET IS BUILT IN THE WORLD, whatever the caller's space: the screen integrate (world) and the pixel (the
@@ -199,8 +202,10 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 			o.radiance += r.radiance * w;
 			wSum += w;
 			wOpen += w * r.throughput;
+			o.openC0 += w * r.throughput * ( r.exitReason == kJahRayEscaped ? r.tC0 : 0.0 );
 		}
 	}
+	o.openC0 = wOpen > 0.0 ? o.openC0 / wOpen : 0.0;
 	if( wSum > 0.0 )
 	{
 		o.radiance *= 1.0 / wSum;

@@ -1637,6 +1637,11 @@ constexpr ArmDef kArms[] = {
       "1 = every frame the ray tier copies its jahAreaVis (RG32_UINT: x the forward LTC light i's diffuse visible share in "
       "byte i, y its specular share) "
       "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
+    { ArmId::GlassEscapeOff, 0.0, 0.0, 1.0,
+      "THE BLENDED PASSES' ESCAPES UNTRACED (PHOTON-7 10-4 R4; a test door, gi.glass_escape): 1 = the ray tier registers "
+      "no escape list for the blended pass and the refractives (the same permutation: a zero address), so a blended "
+      "fragment lights its specular lobe's open share by the environment, as before the escapes followed the ray - the "
+      "row's reference for the record's weight and its red. 0 = shipped." },
     { ArmId::GiScreenBindMissing, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES WITH THEIR INPUTS MISSING (PHOTON-7 stage 7; a test door, gi.screen_bind): 1 = the screen "
       "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - their shared jobs "

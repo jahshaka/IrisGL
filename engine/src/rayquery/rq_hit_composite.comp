@@ -78,14 +78,8 @@ layout( rg32ui, set = 0, binding = 11 ) uniform readonly uimage2DArray statePrev
 #include "jah_fog_along.glsl"
 #include "jah_atlas_sample.glsl"
 
-/// The record's direction (jah_rq_hit_record.glsl jahOctEncode, inverted).
-vec3 jahOctDecodeDir( vec2 e )
-{
-	vec3 n = vec3( e, 1.0 - abs( e.x ) - abs( e.y ) );
-	if( n.z < 0.0 )
-		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
-	return normalize( n );
-}
+/// The record's direction (jahOctEncode, inverted): the one text.
+#include "jah_oct_dir.glsl"
 
 /// kMaxRadiance and finite3: the one copy (jah_rq_finite.glsl).
 #include "jah_rq_finite.glsl"

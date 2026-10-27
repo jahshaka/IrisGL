@@ -1,0 +1,38 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+// THE BLENDED PASSES' ESCAPES INTO THE PICTURE (PHOTON-7 10-4 R4, the lead's design (D)): every pixel's fixed-point sum
+// rq_glass_escape.comp left (three words a pixel, r g b) added to the pass's colour target - the light the fragments'
+// open shares took along their rays - and the sum zeroed for the next pass. Dispatched INDIRECTLY from the list's header:
+// no group when the pass appended no record (the fragment that appends the first record arms it). ITS ONE LIMIT, named:
+// the add lands on top of every blended layer drawn after the fragment that appended the record, not under it - exact for
+// one layer of glass, a stacked pane over-counts by the front layer's coverage x the record's light (on the review list).
+
+layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
+
+layout( std140, set = 0, binding = 0 ) uniform Params
+{
+	vec4 knobs;   // x = one eye's width, y = its height, z = the eyes, w = 1 / the fixed-point scale
+} p;
+layout( std430, set = 0, binding = 1 ) buffer Accum { uint accum[]; };
+/// THE PASS'S COLOUR TARGET (the scene colour after the blended pass, the refraction target after the refractives): a
+/// layer an eye
+layout( rgba16f, set = 0, binding = 2 ) uniform image2DArray target;
+
+void main()
+{
+	const uvec3 g = gl_GlobalInvocationID;
+	const uint w = uint( p.knobs.x ), h = uint( p.knobs.y );
+	if( g.x >= w || g.y >= h || float( g.z ) >= p.knobs.z )
+		return;
+	const uint at = ( ( g.z * h + g.y ) * w + g.x ) * 3u;
+	const uvec3 s = uvec3( accum[at], accum[at + 1u], accum[at + 2u] );
+	if( ( s.x | s.y | s.z ) == 0u )
+		return;
+	accum[at] = 0u;
+	accum[at + 1u] = 0u;
+	accum[at + 2u] = 0u;
+	const ivec3 q = ivec3( g );
+	const vec4 c = imageLoad( target, q );
+	imageStore( target, q, vec4( c.xyz + vec3( s ) * p.knobs.w, c.w ) );
+}

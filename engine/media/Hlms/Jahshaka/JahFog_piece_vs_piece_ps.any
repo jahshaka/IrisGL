@@ -180,6 +180,16 @@
 			// receives (E_sun / (E_sun + 4 pi L_sky): OgreFog.cpp); yzw 0
 			float4 jahFogInscatter;
 		@end
+		@property( jah_glass_escape )
+			// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4; PhotonVct_piece_ps.any's jahGlassEscapeAppend): its
+			// device address (xy, as uints: the lamp addresses' rule), its capacity in records (z); w 0. A pass that is
+			// not the ray tier's blended or refractive one never declares it. (Only under jah_lamp_rays: no chain.)
+			@property( !hlms_fog )
+				float4 jahEscapePadChain[9];
+				float4 jahEscapePadInscatter;
+			@end
+			uint4 jahEscapeAddr;
+		@end
 	@end
 @end
 
@@ -214,6 +224,25 @@
 		#define JAH_ALPHA_TABLE passBuf.jahLampAddr.zw
 		@insertpiece( JahLampRayLib )
 		@insertpiece( JahLampRayView )
+	@end
+	// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): the records rq_glass_escape.comp traces - the header (the records
+	// appended, the job's groups, the add's), then two uvec4 a record - and the fragment's own record, if it appended one
+	@property( jah_glass_escape )
+		layout( buffer_reference, std430, buffer_reference_align = 16 ) buffer JahEscapeList
+		{
+			uint count;
+			uint traceX;
+			uint traceY;
+			uint traceZ;
+			uint addX;
+			uint addY;
+			uint addZ;
+			uint addFull;
+			uvec4 rec[];
+		};
+		uint jahEscapeIdx = 0xFFFFFFFFu;
+		float jahEscapeW0 = 0.0;
+		float jahEscapeRough = 0.0;
 	@end
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -617,6 +646,24 @@ midf jahCloudSunTransmittance( float3 viewPos )
 			outPs_colour0.xyz = midf3_c( sqrt( jahOut ) );
 		@else
 			outPs_colour0.xyz = midf3_c( jahOut );
+		@end
+		// THE ESCAPE RECORD'S WEIGHT (PHOTON-7 10-4 R4; jahGlassEscapeAppend): what one unit of the open share's light
+		// becomes in this fragment's output - the environment term's albedo (BRDF_EnvMap's Rs: kS ( F0 A + B ), the
+		// clear coat's attenuation), the eye leg's media as this pass applied them (upstream's distance block, then the
+		// law above: linear in the light, so its transmittance is the law at 1 less the law at 0) and, under a blend
+		// whose source factor is the fragment's alpha (Fade, Additive), that alpha
+		@property( jah_glass_escape )
+			// (upstream's distance block first, as the body ran it)
+			@property( hlms_fog )
+				float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 ) * exp2( -jahL * atmoSettings.fogDensity );
+			@else
+				float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 );
+			@end
+			jahEscEyeT *= jahFogMedia( float3( 1.0, 1.0, 1.0 ), passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0,
+									   jahFogLit ) -
+						  jahFogMedia( float3( 0.0, 0.0, 0.0 ), passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0,
+									   jahFogLit );
+			@insertpiece( JahGlassEscapeWeight )
 		@end
 	}
 	@end

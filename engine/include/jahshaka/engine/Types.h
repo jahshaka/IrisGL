@@ -5555,6 +5555,25 @@ struct RayQueryStatus {
     unsigned long long hitRecords = 0;
     unsigned long long hitDropped = 0;
     unsigned long long hitCapacity = 0;
+    /// THE BLENDED PASSES' ESCAPE LISTS (PHOTON-7 10-4 R4): a blended or refractive fragment's open specular share, traced
+    /// on the TLAS after its pass. Over the scene's LIVE views (the hit list's rule), the newest read-back frame:
+    /// `escapeRecords` the records the fragments appended (summed over the blended and the refractives' lists; may pass
+    /// the capacity), `escapeDropped` of those, the ones a full list could not hold (lit by the environment instead, the
+    /// list grows to the demand: 0 = every list held its own), `escapeCapacity` the largest view's two lists' size; then
+    /// what answered each traced record: a card, the cascades, the hit's direct light alone (past every cache: no indirect
+    /// - a named limit), a far copy's (the coarsest level: its normal faces the ray - a named limit), the environment, a
+    /// back face, and no sample (a hit no reader could shade: 0 expected). Read several frames late, never with a wait.
+    unsigned long long escapeRecords = 0;
+    unsigned long long escapeDropped = 0;
+    unsigned long long escapeCapacity = 0;
+    unsigned long long escapeTraced = 0;
+    unsigned long long escapeCard = 0;
+    unsigned long long escapeVoxel = 0;
+    unsigned long long escapeDirect = 0;
+    unsigned long long escapeFar = 0;
+    unsigned long long escapeSky = 0;
+    unsigned long long escapeBack = 0;
+    unsigned long long escapeNoSample = 0;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append

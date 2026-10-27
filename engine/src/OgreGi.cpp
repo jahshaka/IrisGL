@@ -130,6 +130,27 @@ void ScenePbs::calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outH
 }
 
 void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
+    // A BLEND A LATER ADD CANNOT FOLLOW (PHOTON-7 10-4 R4): the blended passes' escapes add their traced light into the
+    // pixel after the pass (rq_glass_escape_add.comp) - right for a source factor of one (Transparent, Refractive) or
+    // the fragment's alpha (Fade, Additive: the weight takes the alpha, PhotonVct's JahGlassEscapeWeight), never for any
+    // other (Modulate's destination colour): such a material lights its open share by the environment, as before.
+    {
+        const Ogre::HlmsDatablock *db = renderable ? renderable->getDatablock() : nullptr;
+        const Ogre::HlmsBlendblock *bb = db ? db->getBlendblock(false) : nullptr;
+        if (bb && bb->mIsTransparent && bb->mSourceBlendFactor != Ogre::SBF_ONE &&
+            bb->mSourceBlendFactor != Ogre::SBF_SOURCE_ALPHA) {
+            static const Ogre::IdString kNoEscape("jah_blend_no_escape");
+            setProperty(kNoTid, kNoEscape, 1);
+        }
+        // ...and WHICH of the two: the blend's source factor is the fragment's alpha (the record's weight takes it). The
+        // shader cannot tell: Ogre's Transparent mode without a diffuse map sets no transparent_mode (its alpha is
+        // precomputed on the material, OgreHlmsPbsDatablock.cpp uploadToConstBuffer) and blends with a source factor one,
+        // exactly as Fade's shader does with its source factor alpha.
+        if (bb && bb->mIsTransparent && bb->mSourceBlendFactor == Ogre::SBF_SOURCE_ALPHA) {
+            static const Ogre::IdString kSrcAlpha("jah_escape_src_alpha");
+            setProperty(kNoTid, kSrcAlpha, 1);
+        }
+    }
 #ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
     // THE RENDERABLE'S OWN SCENE: an Item's SubItem -> its Item -> its
     // SceneManager -> that scene's record. Anything else (a v1 renderable, an

@@ -99,6 +99,8 @@
 #include "rayquery/rq_hit_composite_spv.h"
 #include "rayquery/rq_card_movers_spv.h"
 #include "rayquery/rq_card_gather_spv.h"
+#include "rayquery/rq_glass_escape_spv.h"
+#include "rayquery/rq_glass_escape_add_spv.h"
 #include "rayquery/rq_voxel_sides_spv.h"
 #include "rayquery/rq_tlas_write_spv.h"
 // THE SCREEN-PROBE GATHER — a Component of ours (GATHER-1a). Its three compute
@@ -1820,6 +1822,61 @@ private:
     bool                  mCgFailed = false;
     /// a read-list block of zeros, the source of the copy that clears this dispatch's cards' blocks (10-2c)
     RawBuffer             mCgZeroBlock;
+    // ---- THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, design (D); rq_glass_escape.comp) ----------------
+    // A blended or refractive fragment at the ray tier appends its specular lobe's open share as a record
+    // (PhotonVct_piece_ps.any); after its pass the records are traced on the TLAS from where the voxel chain's read ended
+    // and their light added into the pass's colour target (rq_glass_escape_add.comp) - the same frame. Two lists a view:
+    // the blended pass's (0) and the refractives' (1).
+public:
+    /// photon_resolve, outside any render pass: the view's lists sized (the demand law) and reset for this frame.
+    void prepareGlassEscape(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next);
+    /// In front of the blended pass (0) / the refractives (1): the list registered for the pass's fragments.
+    void bindGlassEscape(const ReflectPassListener *key, OgreView *view, unsigned which);
+    /// After it: the registration taken away, the records traced and added into the pass's target.
+    void traceGlassEscape(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass, unsigned which);
+    void forgetGlassEscape(const ReflectPassListener *key);
+    void glassEscapeStatsInto(const OgreScene *scene, RayQueryStatus &st) const;
+
+private:
+    struct EscapeList {
+        RawBuffer       list;              ///< the header (8 words) and the records (two uvec4 each), device-local
+        VkDeviceAddress address = 0;
+        unsigned        capacity = 0u;
+        RawBuffer       counts;            ///< the job's counts (kEscapeCounts words), device-local
+        RawBuffer       params[kReflectRing];
+        RawBuffer       addParams[kReflectRing];
+        RawBuffer       rowOfSlot[kReflectRing];
+        VkDescriptorSet sets[kReflectRing] = {};
+        VkDescriptorSet addSets[kReflectRing] = {};
+        bool            ready = false;     ///< reset this frame (prepareGlassEscape): its pass may append
+    };
+    struct EscapeView {
+        const OgreScene *scene = nullptr;
+        unsigned width = 0u, height = 0u, eyes = 1u;
+        RawBuffer accum;                   ///< three fixed-point words a pixel, eye-major rows
+        EscapeList lists[2];
+        /// host-visible: per frame in flight and list, 16 words - the header's record count, then the job's counts
+        RawBuffer readback;
+        struct Pending { uint32_t frame = 0u; bool live = false; unsigned capacity = 0u; };
+        Pending pending[kFramesInFlight][2];
+        unsigned frame = 0u;
+        /// THE NEWEST READ (summed over the two lists): the records appended, those a full list dropped, the lists'
+        /// capacity, the job's counts; the largest demand a retired frame showed (the growth's target)
+        unsigned long long records = 0ull, dropped = 0ull, capacity = 0ull;
+        unsigned long long counts[8] = {};
+        unsigned long long demand[2] = {};
+        uint32_t readDraw = 0u;
+        bool everRead = false;
+    };
+    bool makeGlassEscapePipelines(std::string &err);
+    void readGlassEscape(EscapeView &ev);
+    std::unordered_map<const ReflectPassListener *, EscapeView> mEscape;
+    VkDescriptorSetLayout mEscSetLayout = VK_NULL_HANDLE, mEscAddSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mEscPipeLayout = VK_NULL_HANDLE, mEscAddPipeLayout = VK_NULL_HANDLE;
+    VkPipeline            mEscPipeline = VK_NULL_HANDLE, mEscAddPipeline = VK_NULL_HANDLE;
+    VkShaderModule        mEscModule = VK_NULL_HANDLE, mEscAddModule = VK_NULL_HANDLE;
+    VkDescriptorPool      mEscPool = VK_NULL_HANDLE;
+    bool                  mEscFailed = false;
     // ---- THE VOXEL SIDES' GATHER BY TLAS RAYS (PHOTON-7 stage 10, 10-2b; rq_voxel_sides.comp) ----------------------
     // One dispatch per cascade pass at the ray tier, recorded from PhotonVoxelLighting::runFeedbackPass BEFORE the
     // bounce that reads its scratch, over the pass's own list by its indirect arguments.
@@ -2802,6 +2859,21 @@ void RayQueryTier::close() {
         }
     mCardGather.clear();
     dropBuffer(mCgZeroBlock);
+    // THE BLENDED PASSES' ESCAPES' state (PHOTON-7 10-4 R4): sets dropped with the pool.
+    for (auto &kv : mEscape) {
+        dropBuffer(kv.second.accum);
+        dropBuffer(kv.second.readback);
+        for (EscapeList &l : kv.second.lists) {
+            dropBuffer(l.list);
+            dropBuffer(l.counts);
+            for (unsigned i = 0; i < kReflectRing; ++i) {
+                dropBuffer(l.params[i]);
+                dropBuffer(l.addParams[i]);
+                dropBuffer(l.rowOfSlot[i]);
+            }
+        }
+    }
+    mEscape.clear();
     // THE VOXEL SIDES' GATHER's state (10-2b): sets dropped with the pool.
     for (auto &kv : mVoxelSides)
         for (unsigned i = 0; i < kVoxelSideRing; ++i) {
@@ -2824,6 +2896,20 @@ void RayQueryTier::close() {
     if (mCgSetLayout) vkDestroyDescriptorSetLayout(mVk, mCgSetLayout, nullptr);
     mCgPool = VK_NULL_HANDLE; mCgPipeline = VK_NULL_HANDLE; mCgModule = VK_NULL_HANDLE;
     mCgPipeLayout = VK_NULL_HANDLE; mCgSetLayout = VK_NULL_HANDLE;
+    if (mEscPool) vkDestroyDescriptorPool(mVk, mEscPool, nullptr);
+    if (mEscPipeline) vkDestroyPipeline(mVk, mEscPipeline, nullptr);
+    if (mEscAddPipeline) vkDestroyPipeline(mVk, mEscAddPipeline, nullptr);
+    if (mEscModule) vkDestroyShaderModule(mVk, mEscModule, nullptr);
+    if (mEscAddModule) vkDestroyShaderModule(mVk, mEscAddModule, nullptr);
+    if (mEscPipeLayout) vkDestroyPipelineLayout(mVk, mEscPipeLayout, nullptr);
+    if (mEscAddPipeLayout) vkDestroyPipelineLayout(mVk, mEscAddPipeLayout, nullptr);
+    if (mEscSetLayout) vkDestroyDescriptorSetLayout(mVk, mEscSetLayout, nullptr);
+    if (mEscAddSetLayout) vkDestroyDescriptorSetLayout(mVk, mEscAddSetLayout, nullptr);
+    mEscPool = VK_NULL_HANDLE;
+    mEscPipeline = mEscAddPipeline = VK_NULL_HANDLE;
+    mEscModule = mEscAddModule = VK_NULL_HANDLE;
+    mEscPipeLayout = mEscAddPipeLayout = VK_NULL_HANDLE;
+    mEscSetLayout = mEscAddSetLayout = VK_NULL_HANDLE;
     if (mTwPool) vkDestroyDescriptorPool(mVk, mTwPool, nullptr);
     if (mTwPipeline) vkDestroyPipeline(mVk, mTwPipeline, nullptr);
     if (mTwPipeLayout) vkDestroyPipelineLayout(mVk, mTwPipeLayout, nullptr);
@@ -10574,6 +10660,7 @@ ReflectPassListener::~ReflectPassListener() {
         mView->mEngine->mRayTier->forgetSunContact(this);
         mView->mEngine->mRayTier->forgetAreaVis(this);
         mView->mEngine->mRayTier->forgetHits(this);
+        mView->mEngine->mRayTier->forgetGlassEscape(this);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener could not be flushed away cleanly (" +
@@ -10587,6 +10674,7 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetAreaVis(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetGlassEscape(this); } catch (...) {}
     } catch (...) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the ray-reflection listener's teardown threw a non-Ogre exception",
@@ -10596,6 +10684,7 @@ ReflectPassListener::~ReflectPassListener() {
         try { mView->mEngine->mRayTier->forgetSunContact(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetAreaVis(this); } catch (...) {}
         try { mView->mEngine->mRayTier->forgetHits(this); } catch (...) {}
+        try { mView->mEngine->mRayTier->forgetGlassEscape(this); } catch (...) {}
     }
 }
 
@@ -10628,6 +10717,13 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (def->mIdentifier == kBlendedPassIdentifier) {
         if (mView->ogreScene() && mView->mEngine->mRayTier->gatherSkyVis(this))
             FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), mView->mEngine->mRayTier->gatherSkyVis(this));
+        // ...and its escape list (PHOTON-7 10-4 R4)
+        mView->mEngine->mRayTier->bindGlassEscape(this, mView, 0u);
+        return;
+    }
+    // THE REFRACTIVES (PHOTON-7 10-4 R4): their escape list
+    if (def->mIdentifier == kRefractivesPassIdentifier) {
+        mView->mEngine->mRayTier->bindGlassEscape(this, mView, 1u);
         return;
     }
     if (def->mPrePassMode != Ogre::PrePassUse) return;
@@ -10665,6 +10761,12 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     }
     if (def->mIdentifier == kBlendedPassIdentifier) {
         if (mView->ogreScene()) FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), nullptr);
+        // ...its escapes traced and added into its target (PHOTON-7 10-4 R4)
+        mView->mEngine->mRayTier->traceGlassEscape(this, mView, pass, 0u);
+        return;
+    }
+    if (def->mIdentifier == kRefractivesPassIdentifier) {
+        mView->mEngine->mRayTier->traceGlassEscape(this, mView, pass, 1u);
         return;
     }
     if (def->mPrePassMode != Ogre::PrePassUse) return;
@@ -10710,6 +10812,7 @@ void OgreView::dropReflectState() {
     mEngine->mRayTier->forgetSunContact(mReflectListener.get());
     mEngine->mRayTier->forgetAreaVis(mReflectListener.get());
     mEngine->mRayTier->forgetHits(mReflectListener.get());
+    mEngine->mRayTier->forgetGlassEscape(mReflectListener.get());
 }
 
 void OgreView::syncReflectListener() {
@@ -11214,6 +11317,9 @@ void RayQueryTier::resolveRayJobs(const ReflectPassListener *key, OgreView *view
     }
     finishSunContact(key);
     finishAreaVis(key);
+    // THE BLENDED PASSES' ESCAPE LISTS (PHOTON-7 10-4 R4): sized and reset here, outside any render pass, before the
+    // blended pass and the refractives append to them
+    prepareGlassEscape(key, view, next);
 }
 
 /// THE PASS IT SERVES: the pass after `pass` in its node — false when there is nothing
@@ -11544,6 +11650,565 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         hv.restTag = 0u;
     }
     ++hv.frame;
+}
+
+// ---------------------------------------------------------------------------
+// THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, the lead's design (D); L9) - the ray tier's half. A
+// blended or refractive fragment at the ray tier appends its specular lobe's OPEN share (the voxel rays' escapes, which
+// are the environment's only past the world) as a record (PhotonVct_piece_ps.any's jahGlassEscapeAppend) into its
+// pass's list - the view's, reset in photon_resolve and registered for the pass (FogHlmsListener::setGlassEscape) - and
+// lights none of it; after the pass the records are traced on the TLAS from where the chain's read ended, their hits
+// read through the hit set (rq_glass_escape.comp, the records jobs' one text), and every pixel's fixed-point sum added
+// into the pass's colour target (rq_glass_escape_add.comp) - the same frame. THE DEMAND LAW (the hit list's,
+// kHitListWidth): a list holds a quarter of the target's pixels at first (the refractives' list 64k records); a retired
+// frame that appended more than its list held grows the list to that demand, and a record a full list cannot hold is
+// lit by the environment as before - counted (RayQueryStatus::escapeDropped), never a silent cap.
+namespace {
+/// The trace's set: the hit set at 0 and 5..36, its own four (the parameters, the list, the pixels' sums, the counts)
+/// and the air's table at 37.
+constexpr unsigned kEscapeBindings = 38u;
+static_assert(kEscapeBindings == kHitSetBindings + 5u, "the escapes' set is the hit set, its own four and the air");
+constexpr unsigned kEscapeAddBindings = 3u;
+/// rq_glass_escape.comp's kCountWords, and the list's header (eight words: the count, the trace's groups, the add's)
+constexpr unsigned kEscapeCounts = 8u;
+constexpr VkDeviceSize kEscapeHeaderBytes = 32u;
+constexpr VkDeviceSize kEscapeRecordBytes = 32u;   ///< two uvec4 (rq_glass_escape.comp's head)
+/// The pixels' sums' fixed point: 2^16 a unit of radiance - a record's term is at most kMaxRadiance (1024) x a weight
+/// at most 1, so a pixel holds 64 such terms in 32 bits; its quantum 1.5e-5 is far under one code at any exposure.
+constexpr float kEscapeFixedScale = 65536.0f;
+/// The lists' first sizes: the blended pass's a quarter of the target's pixels, the refractives' 64k records.
+constexpr unsigned kEscapeMinRecords = 65536u;
+/// The readback: per frame in flight and list, 16 words (the header's count, then the job's counts).
+constexpr VkDeviceSize kEscapeReadbackSlot = 64u;
+struct GlassEscapeParams {
+    HitSetParams hit;       ///< THE HIT SET'S UNIFORMS (hitSetParams; rq_glass_escape.comp's first member)
+    float knobs[4] = {};    ///< the capacity, the near length, the far query's start and end
+    float knobs2[4] = {};   ///< one eye's width, its height, the eyes, the fixed-point scale
+    float knobs3[4] = {};   ///< the frame, the pixel's angle, the ray mask
+    float fog[8][4] = {};   ///< OgreScene::fogAlong
+};
+struct GlassEscapeAddParams {
+    float knobs[4] = {};    ///< one eye's width, its height, the eyes, 1 / the fixed-point scale
+};
+}   // namespace
+
+bool RayQueryTier::makeGlassEscapePipelines(std::string &err) {
+    if (!ensureSamplers(err)) return false;
+    DescriptorPoolPlan plan;
+    const uint32_t sets = kMaxTimedScenes * kReflectRing * 2u;
+    {
+        VkDescriptorSetLayoutBinding b[kEscapeBindings] = {};
+        hitSetLayout(kCardGatherHitSlots, b);
+        const VkDescriptorType own[4] = {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,   // 1 params
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 2 the list
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 3 the pixels' sums
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 4 the counts
+        };
+        for (unsigned i = 0; i < 4u; ++i) {
+            b[1u + i].binding = 1u + i;
+            b[1u + i].descriptorType = own[i];
+            b[1u + i].descriptorCount = 1u;
+            b[1u + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        b[37].binding = 37u;   // the air's table
+        b[37].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[37].descriptorCount = 1u;
+        b[37].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        if (!plan.makeLayout(mVk, b, kEscapeBindings, sets, mEscSetLayout, err, "rayquery/glass-escape")) return false;
+    }
+    {
+        VkDescriptorSetLayoutBinding b[kEscapeAddBindings] = {};
+        const VkDescriptorType own[kEscapeAddBindings] = {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,   // 0 params
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,   // 1 the pixels' sums
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,    // 2 the pass's colour target
+        };
+        for (unsigned i = 0; i < kEscapeAddBindings; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = own[i];
+            b[i].descriptorCount = 1u;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        if (!plan.makeLayout(mVk, b, kEscapeAddBindings, sets, mEscAddSetLayout, err, "rayquery/glass-escape-add"))
+            return false;
+    }
+    const auto pipeline = [&](VkDescriptorSetLayout set, const uint32_t *code, size_t bytes, VkPipelineLayout &layout,
+                              VkShaderModule &module, VkPipeline &out, const char *name) {
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &set;
+        if (vkCreatePipelineLayout(mVk, &pli, nullptr, &layout) != VK_SUCCESS) {
+            err = "vkCreatePipelineLayout failed";
+            return false;
+        }
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = bytes;
+        smi.pCode = code;
+        if (vkCreateShaderModule(mVk, &smi, nullptr, &module) != VK_SUCCESS) {
+            err = "vkCreateShaderModule failed (the build-time SPIR-V is not loadable)";
+            return false;
+        }
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = module;
+        cpi.stage.pName = "main";
+        cpi.layout = layout;
+        if (createComputePipeline(cpi, &out, name) != VK_SUCCESS) {
+            err = "vkCreateComputePipelines failed";
+            return false;
+        }
+        return true;
+    };
+    if (!pipeline(mEscSetLayout, krq_glassEscapeSpv, sizeof(krq_glassEscapeSpv), mEscPipeLayout, mEscModule,
+                  mEscPipeline, "glass escape") ||
+        !pipeline(mEscAddSetLayout, krq_glassEscapeAddSpv, sizeof(krq_glassEscapeAddSpv), mEscAddPipeLayout,
+                  mEscAddModule, mEscAddPipeline, "glass escape add"))
+        return false;
+    return plan.create(mVk, "rayquery/glass-escape", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mEscPool, err);
+}
+
+void RayQueryTier::readGlassEscape(EscapeView &ev) {
+    if (!ev.readback.mapped) return;
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    int newest = -1;
+    uint32_t newestFrame = 0u;
+    for (unsigned f = 0; f < kFramesInFlight; ++f)
+        for (unsigned l = 0; l < 2u; ++l) {
+            EscapeView::Pending &pd = ev.pending[f][l];
+            if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
+            const uint32_t *w = reinterpret_cast<const uint32_t *>(static_cast<const unsigned char *>(ev.readback.mapped) +
+                                                                   (f * 2u + l) * kEscapeReadbackSlot);
+            // EVERY retired frame's demand, the newest or not (the list grows to hold it)
+            ev.demand[l] = std::max<unsigned long long>(ev.demand[l], w[0]);
+            if (newest < 0 || int32_t(pd.frame - newestFrame) > 0) {
+                newest = int(f);
+                newestFrame = pd.frame;
+            }
+        }
+    if (newest < 0) return;
+    ev.records = ev.dropped = ev.capacity = 0ull;
+    for (unsigned long long &c : ev.counts) c = 0ull;
+    for (unsigned l = 0; l < 2u; ++l) {
+        EscapeView::Pending &pd = ev.pending[unsigned(newest)][l];
+        if (!pd.live || pd.frame != newestFrame) continue;
+        const uint32_t *w = reinterpret_cast<const uint32_t *>(static_cast<const unsigned char *>(ev.readback.mapped) +
+                                                               (unsigned(newest) * 2u + l) * kEscapeReadbackSlot);
+        ev.records += w[0];
+        ev.dropped += w[0] > pd.capacity ? w[0] - pd.capacity : 0u;
+        ev.capacity += pd.capacity;
+        for (unsigned k = 0; k < kEscapeCounts; ++k) ev.counts[k] += w[1u + k];
+    }
+    ev.everRead = true;
+    ev.readDraw = ev.scene ? const_cast<OgreScene *>(ev.scene)->drawSerial() : 0u;
+    for (unsigned f = 0; f < kFramesInFlight; ++f)
+        for (unsigned l = 0; l < 2u; ++l)
+            if (ev.pending[f][l].live && uint32_t(now - ev.pending[f][l].frame) >= inFlight) ev.pending[f][l].live = false;
+}
+
+void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *next) {
+    auto known = mEscape.find(key);
+    if (known != mEscape.end())
+        for (EscapeList &l : known->second.lists) l.ready = false;
+    if (!isOpen() || !view || !next || mEscFailed) return;
+    const ChainDesc cd = view->chainDesc();
+    const bool floatScene = cd.hdr || cd.hdrReadback || cd.displayEncode;
+    OgreScene *scene = view->ogreScene();
+    const Ogre::TextureGpu *target = next->getAnyTargetTexture();
+    if (!scene || !target || !chainGlassEscape(cd.rayReflect, cd.probeGather, floatScene) ||
+        target->getPixelFormat() != Ogre::PFG_RGBA16_FLOAT)
+        return;
+    std::string err;
+    if (!mEscPipeline && !makeGlassEscapePipelines(err)) {
+        mEscFailed = true;
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: the blended passes' traced escapes are off: " + err +
+            " (their open shares are lit by the environment)");
+        return;
+    }
+    EscapeView &ev = mEscape[key];
+    ev.scene = scene;
+    readGlassEscape(ev);
+    const unsigned w = target->getWidth(), h = target->getHeight(),
+                   eyes = std::max<unsigned>(1u, target->getNumSlices());
+    // THE PIXELS' SUMS, the target's size (zeroed when made; the add zeroes what it reads)
+    bool zeroAccum = false;
+    if (ev.width != w || ev.height != h || ev.eyes != eyes || !ev.accum.buffer) {
+        retire(ev.accum);
+        if (!makeBuffer(VkDeviceSize(w) * h * eyes * 3u * sizeof(uint32_t),
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, false, ev.accum,
+                        err))
+            return;
+        ev.width = w;
+        ev.height = h;
+        ev.eyes = eyes;
+        zeroAccum = true;
+    }
+    if (!ev.readback.buffer &&
+        !makeBuffer(kEscapeReadbackSlot * kFramesInFlight * 2u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+                    ev.readback, err))
+        return;
+    // THE LISTS, by the demand law
+    for (unsigned li = 0; li < 2u; ++li) {
+        EscapeList &l = ev.lists[li];
+        unsigned want = l.capacity;
+        if (!want) {
+            const unsigned long long share = li == 0u ? (unsigned long long)w * h * eyes / 4ull : 0ull;
+            want = unsigned(std::max<unsigned long long>(kEscapeMinRecords, (share + 63ull) / 64ull * 64ull));
+        }
+        while (want < ev.demand[li] && want < (1u << 30)) want *= 2u;
+        if (!l.list.buffer || l.capacity != want) {
+            retire(l.list);
+            l.address = 0;
+            l.capacity = 0u;
+            if (!makeBuffer(kEscapeHeaderBytes + VkDeviceSize(want) * kEscapeRecordBytes,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            false, true, l.list, err))
+                return;
+            l.address = addressOf(l.list.buffer);
+            l.capacity = want;
+        }
+        if (!l.counts.buffer &&
+            !makeBuffer(kEscapeCounts * sizeof(uint32_t),
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        false, false, l.counts, err))
+            return;
+    }
+    mDev->_jahRecordQueue().endAllEncoders();
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    {
+        // after every earlier reader and writer (the last frame's fragments, traces, adds and copies)
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+                          VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    if (zeroAccum) vkCmdFillBuffer(cmd, ev.accum.buffer, 0, VK_WHOLE_SIZE, 0u);
+    for (EscapeList &l : ev.lists) {
+        // the header: no record, no trace group (y, z 1), no add group until a record arms it (y, z the target's)
+        const uint32_t header[8] = { 0u, 0u, 1u, 1u, 0u, (h + 7u) / 8u, eyes, (w + 7u) / 8u };
+        vkCmdUpdateBuffer(cmd, l.list.buffer, 0, sizeof(header), header);
+        vkCmdFillBuffer(cmd, l.counts.buffer, 0, VK_WHOLE_SIZE, 0u);
+        l.ready = true;
+    }
+    {
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                             0, 1, &b, 0, nullptr, 0, nullptr);
+    }
+    ++ev.frame;
+}
+
+void RayQueryTier::bindGlassEscape(const ReflectPassListener *key, OgreView *view, unsigned which) {
+    OgreScene *scene = view ? view->ogreScene() : nullptr;
+    if (!scene || which > 1u) return;
+    const ChainDesc cd = view->chainDesc();
+    if (!chainGlassEscape(cd.rayReflect, cd.probeGather, cd.hdr || cd.hdrReadback || cd.displayEncode)) return;
+    // THE PASS IS AN ESCAPE PASS whenever the chain carries them (its permutation follows that alone); the list's
+    // address only when it was reset this frame and the scene's structure is there to trace it
+    const auto it = mEscape.find(key);
+    const EscapeList *l = it != mEscape.end() ? &it->second.lists[which] : nullptr;
+    const SceneAs *sa = asOf(scene);
+    const bool live = l && l->ready && sa && sa->tlas && sa->st.enabled && sa->instanceCount > 0u &&
+                      !arm(ArmId::GlassEscapeOff, false);   // (the test door: no list, the same permutation)
+    FogHlmsListener::setGlassEscape(scene->sceneManager(), true, live ? l->address : 0ull, live ? l->capacity : 0u);
+}
+
+void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass,
+                                    unsigned which) {
+    OgreScene *scene = view ? view->ogreScene() : nullptr;
+    if (scene) FogHlmsListener::setGlassEscape(scene->sceneManager(), false, 0ull, 0u);
+    auto it = mEscape.find(key);
+    if (it == mEscape.end() || !scene || !pass || which > 1u || !isOpen()) return;
+    EscapeView &ev = it->second;
+    EscapeList &l = ev.lists[which];
+    if (!l.ready) return;
+    l.ready = false;
+    SceneAs *saP = asOf(scene);
+    Ogre::Camera *cam = view->camera();
+    // (the target the add writes: the pass's own colour attachment)
+    Ogre::TextureGpu *target = const_cast<Ogre::TextureGpu *>(pass->getAnyTargetTexture());
+    // (the same test as the registration's: a list the pass could append to is traced, every time)
+    if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u || !cam || !target ||
+        target->getPixelFormat() != Ogre::PFG_RGBA16_FLOAT)
+        return;
+    SceneAs &sa = *saP;
+    const unsigned ring = ev.frame % kReflectRing;
+    std::string err;
+    if ((!l.params[ring].buffer &&
+         !makeBuffer(sizeof(GlassEscapeParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, l.params[ring], err)) ||
+        (!l.addParams[ring].buffer && !makeBuffer(sizeof(GlassEscapeAddParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                                  true, false, l.addParams[ring], err)))
+        return;
+    for (VkDescriptorSet *set : { &l.sets[ring], &l.addSets[ring] }) {
+        if (*set) continue;
+        VkDescriptorSetAllocateInfo dai{};
+        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dai.descriptorPool = mEscPool;
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = set == &l.sets[ring] ? &mEscSetLayout : &mEscAddSetLayout;
+        if (vkAllocateDescriptorSets(mVk, &dai, set) != VK_SUCCESS) {
+            *set = VK_NULL_HANDLE;
+            return;
+        }
+    }
+
+    // ---- THE HIT SET (the one collection) with no hit list (a record appends nothing), the GPU scene's instance table
+    // and THE HIT'S SUN - the pass's (its shadow node's first directional caster), the casters, the frame's far plane:
+    // the hit list's own (prepareHitList)
+    HitSetSources hs;
+    hitStandIns(hs.hit);
+    detail::GpuScene &gs = scene->gpuScene();
+    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
+    if (instances) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
+        hs.hit.instances = bi->getVboName();
+        hs.hit.instancesOffset = VkDeviceSize(instances->_getFinalBufferStart()) * instances->getBytesPerElement();
+        hs.hit.instancesRange = instances->getTotalSizeBytes();
+        hs.hit.instanceEntries = gs.slotCount();
+    }
+    {
+        Ogre::Vector3 toSun;
+        hs.hit.sun = passSun(pass, toSun);
+        hs.hit.toSun[0] = toSun.x; hs.hit.toSun[1] = toSun.y; hs.hit.toSun[2] = toSun.z;
+        hs.hit.sunMask = kRayMaskCaster;
+        const float farClip = float(cam->getFarClipDistance());
+        hs.hit.sunRange = farClip > 0.0f ? std::max(farClip, 100.0f) : 10000.0f;
+        hs.hit.farLift = sa.farOverlap;
+    }
+    hitSetOf(scene, sa, hs);
+    uint32_t geomSlots = hs.geomRows && hs.geomRowOfSlot ? uint32_t(hs.geomRowOfSlot->size()) : 0u;
+    if (geomSlots) {
+        RawBuffer &rb = l.rowOfSlot[ring];
+        const VkDeviceSize want = VkDeviceSize(geomSlots) * sizeof(uint32_t);
+        if (rb.buffer && rb.size < want) retire(rb);
+        if (!rb.buffer && !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true,
+                                      false, rb, err))
+            geomSlots = 0u;
+        else
+            std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
+    }
+
+    // ---- THE PARAMETERS: the hit set's (a VIEW reader: the GI camera's level), the list, the reach rule's near length
+    // and the far copies' continuation (the reflection's: recordReflect), the target, the media
+    GlassEscapeParams pp{};
+    hitSetParams(hs, geomSlots, pp.hit, HitReader::View);
+    const unsigned voxCount = hs.cascadeCount;
+    const float nearLen = detail::photonRayReach(
+        voxCount ? Ogre::Vector3(hs.voxelSize[voxCount - 1u][0], hs.voxelSize[voxCount - 1u][1],
+                                 hs.voxelSize[voxCount - 1u][2]).length()
+                 : 0.0f,
+        cam->getFarClipDistance());
+    const float farPlane = cam->getFarClipDistance() > 0.0f ? float(cam->getFarClipDistance()) : 1000.0f;
+    pp.knobs[0] = float(l.capacity);
+    pp.knobs[1] = nearLen;
+    pp.knobs[2] = std::max(0.001f, nearLen - std::max(0.0f, sa.farOverlap));
+    pp.knobs[3] = farPlane > nearLen ? farPlane : 0.0f;
+    pp.knobs2[0] = float(ev.width);
+    pp.knobs2[1] = float(ev.height);
+    pp.knobs2[2] = float(ev.eyes);
+    pp.knobs2[3] = kEscapeFixedScale;
+    pp.knobs3[0] = float(frameNow() & 0xFFFFu);
+    pp.knobs3[1] = 2.0f * std::tan(0.5f * cam->getFOVy().valueRadians()) / float(std::max(ev.height, 1u));
+    pp.knobs3[2] = float(kRayMaskNearField | kRayMaskFar);
+    Ogre::TextureGpu *fogAerial = nullptr;
+    scene->fogAlong(pp.fog, fogAerial);
+    std::memcpy(l.params[ring].mapped, &pp, sizeof(pp));
+    GlassEscapeAddParams ap{};
+    ap.knobs[0] = float(ev.width);
+    ap.knobs[1] = float(ev.height);
+    ap.knobs[2] = float(ev.eyes);
+    ap.knobs[3] = 1.0f / kEscapeFixedScale;
+    std::memcpy(l.addParams[ring].mapped, &ap, sizeof(ap));
+
+    // ---- THE SETS: the trace's own four, the hit set through its one writer, the air; the add's three
+    VkWriteDescriptorSet w[kEscapeBindings] = {};
+    HitSetWrite hitSet;
+    if (!hitSet.write(*this, l.sets[ring], kCardGatherHitSlots, hs, geomSlots ? l.rowOfSlot[ring].buffer : VK_NULL_HANDLE,
+                      w, err))
+        return;
+    VkDescriptorBufferInfo ub{}, lb{}, sb{}, cb{}, aub{};
+    ub.buffer = l.params[ring].buffer;
+    ub.range = sizeof(GlassEscapeParams);
+    lb.buffer = l.list.buffer;
+    lb.range = VK_WHOLE_SIZE;
+    sb.buffer = ev.accum.buffer;
+    sb.range = VK_WHOLE_SIZE;
+    cb.buffer = l.counts.buffer;
+    cb.range = VK_WHOLE_SIZE;
+    aub.buffer = l.addParams[ring].buffer;
+    aub.range = sizeof(GlassEscapeAddParams);
+    VkDescriptorImageInfo fogImg{}, targetImg{};
+    fogImg.sampler = mLinearSampler;
+    if (fogAerial) {
+        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        slot.texture = fogAerial;
+        fogImg.imageView = static_cast<Ogre::VulkanTextureGpu *>(fogAerial)->createView(slot, false);
+        retireView(fogImg.imageView);
+    } else {
+        fogImg.imageView = mDummyVolume.view;
+    }
+    fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    targetImg.imageView = layerView(target, true);
+    targetImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!fogImg.imageView || !targetImg.imageView) return;
+    const auto own = [&](VkWriteDescriptorSet &e, VkDescriptorSet set, uint32_t binding,
+                         VkDescriptorType type) -> VkWriteDescriptorSet & {
+        e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        e.dstSet = set;
+        e.dstBinding = binding;
+        e.descriptorCount = 1;
+        e.descriptorType = type;
+        return e;
+    };
+    own(w[1], l.sets[ring], 1u, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &ub;
+    own(w[2], l.sets[ring], 2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &lb;
+    own(w[3], l.sets[ring], 3u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &sb;
+    own(w[4], l.sets[ring], 4u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &cb;
+    own(w[37], l.sets[ring], 37u, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &fogImg;
+    vkUpdateDescriptorSets(mVk, kEscapeBindings, w, 0, nullptr);
+    VkWriteDescriptorSet aw[kEscapeAddBindings] = {};
+    own(aw[0], l.addSets[ring], 0u, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo = &aub;
+    own(aw[1], l.addSets[ring], 1u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &sb;
+    own(aw[2], l.addSets[ring], 2u, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &targetImg;
+    vkUpdateDescriptorSets(mVk, kEscapeAddBindings, aw, 0, nullptr);
+
+    // ---- THE LAYOUTS through Ogre's solver (the pass's render encoder closed first): the hit set read, the air read,
+    // the pass's colour target read and written by the add - the next pass that reads it is ordered after by its own
+    // barrier analysis
+    mDev->_jahRecordQueue().endAllEncoders();
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        hitSetTransitions(solver, trans, hs);
+        if (instances) solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
+        if (fogAerial)
+            solver.resolveTransition(trans, fogAerial, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                     computeStage);
+        solver.resolveTransition(trans, target, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::ReadWrite,
+                                 computeStage);
+        mRs->executeResourceTransition(trans);
+    }
+    VkCommandBuffer cmd = frameCmd();
+    if (!cmd) return;
+    clearDummyImages(cmd);
+    initHitDummies(cmd);
+    {
+        // the pass's fragments' appends, read by the trace and its indirect arguments
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &b, 0,
+                             nullptr, 0, nullptr);
+    }
+    {
+        detail::monitor::CacheScope work(CacheKind::Gi, WorkReason::Camera, 0,
+                                         which == 0u ? "escape.blended" : "escape.refractives", mRs, scene);
+        work.setUnits(unsigned(std::min<unsigned long long>(ev.records, 0xFFFFFFFFull)));
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mEscPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mEscPipeLayout, 0, 1, &l.sets[ring], 0, nullptr);
+        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
+        vkCmdDispatchIndirect(cmd, l.list.buffer, 4u);
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b,
+                             0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mEscAddPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mEscAddPipeLayout, 0, 1, &l.addSets[ring], 0,
+                                nullptr);
+        JAH_GPU_CHECKPOINT(cmd);
+        vkCmdDispatchIndirect(cmd, l.list.buffer, 16u);
+    }
+    {
+        // THE COUNTS on their way to the host (read several frames late): the records appended, the job's counts
+        VkMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0,
+                             nullptr, 0, nullptr);
+        const unsigned slot = ev.frame % kFramesInFlight;
+        const VkDeviceSize base = (VkDeviceSize(slot) * 2u + which) * kEscapeReadbackSlot;
+        VkBufferCopy head{}, counts{};
+        head.dstOffset = base;
+        head.size = sizeof(uint32_t);
+        counts.dstOffset = base + sizeof(uint32_t);
+        counts.size = kEscapeCounts * sizeof(uint32_t);
+        vkCmdCopyBuffer(cmd, l.list.buffer, ev.readback.buffer, 1, &head);
+        vkCmdCopyBuffer(cmd, l.counts.buffer, ev.readback.buffer, 1, &counts);
+        VkMemoryBarrier h{};
+        h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        h.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        h.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &h, 0, nullptr, 0,
+                             nullptr);
+        EscapeView::Pending &pd = ev.pending[slot][which];
+        pd.frame = frameNow();
+        pd.live = true;
+        pd.capacity = l.capacity;
+    }
+}
+
+void RayQueryTier::forgetGlassEscape(const ReflectPassListener *key) {
+    auto it = mEscape.find(key);
+    if (it == mEscape.end()) return;
+    EscapeView &ev = it->second;
+    retire(ev.accum);
+    retire(ev.readback);
+    for (EscapeList &l : ev.lists) {
+        retire(l.list);
+        retire(l.counts);
+        for (unsigned i = 0; i < kReflectRing; ++i) {
+            retireSet(l.sets[i], mEscPool);
+            retireSet(l.addSets[i], mEscPool);
+            retire(l.params[i]);
+            retire(l.addParams[i]);
+            retire(l.rowOfSlot[i]);
+        }
+    }
+    mEscape.erase(it);
+}
+
+void RayQueryTier::glassEscapeStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
+    // LIVE VIEWS ONLY (the hit list's rule): a view whose readings stopped keeps counters nobody has now
+    const uint32_t now = scene ? const_cast<OgreScene *>(scene)->drawSerial() : 0u, stale = 2u * kFramesInFlight + 2u;
+    for (const auto &kv : mEscape) {
+        const EscapeView &ev = kv.second;
+        if (ev.scene != scene || !ev.everRead || uint32_t(now - ev.readDraw) > stale) continue;
+        st.escapeRecords += ev.records;
+        st.escapeDropped += ev.dropped;
+        st.escapeCapacity = std::max<unsigned long long>(st.escapeCapacity, ev.capacity);
+        st.escapeTraced += ev.counts[0];
+        st.escapeCard += ev.counts[1];
+        st.escapeVoxel += ev.counts[2];
+        st.escapeDirect += ev.counts[3];
+        st.escapeFar += ev.counts[4];
+        st.escapeSky += ev.counts[5];
+        st.escapeBack += ev.counts[6];
+        st.escapeNoSample += ev.counts[7];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12042,6 +12707,7 @@ RayQueryStatus OgreScene::rayQueryStatus() const {
     // the one answer giStatus asks for.
     mEngine->mRayTier->reflectStatsInto(this, st);
     mEngine->mRayTier->hitStatsInto(this, st);
+    mEngine->mRayTier->glassEscapeStatsInto(this, st);
     return st;
 }
 

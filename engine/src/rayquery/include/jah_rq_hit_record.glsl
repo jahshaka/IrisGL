@@ -141,14 +141,7 @@ bool jahHitIsMetal( uint slot )
 	return ( jahHitFlags( slot ) & kJahHitGpuMetal ) != 0u;
 }
 
-vec2 jahOctEncode( vec3 n )
-{
-	n /= max( abs( n.x ) + abs( n.y ) + abs( n.z ), 1e-20 );
-	vec2 e = n.xy;
-	if( n.z < 0.0 )
-		e = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
-	return e;
-}
+#include "jah_oct_dir.glsl"
 
 /// A destination: x in bits 0-14, y in 15-29, THE EYE'S LAYER in bit 30 (a
 /// stereo target is a two-layer array, LAYERED-STEREO-1; a probe-atlas

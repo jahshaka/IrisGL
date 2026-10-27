@@ -443,6 +443,31 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h.d"
         COMMENT "Compiling the cards' TLAS gather at SPIR-V 1.4"
         VERBATIM)
+    # THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, design (D)): a record a blended fragment's open
+    # specular share appended, traced from where the voxel chain's read ended, its hit read through the hit set; then
+    # every pixel's fixed-point sum added to the pass's colour target.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_glassEscapeSpv -o "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape.comp"
+                "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h.d"
+        COMMENT "Compiling the blended passes' escapes at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_glassEscapeAddSpv -o "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape_add.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape_add.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h.d"
+        COMMENT "Compiling the blended passes' escape add at SPIR-V 1.4"
+        VERBATIM)
     # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
     # slot writes its near and far instance from the table.
     add_custom_command(
@@ -533,6 +558,8 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
@@ -870,6 +897,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_card_sunvis.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
@@ -953,6 +981,7 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl
             -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl
             -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
     # sets, the start bias and the escape weight - read by the pixel shader's

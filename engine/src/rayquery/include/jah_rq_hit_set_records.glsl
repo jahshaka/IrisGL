@@ -46,3 +46,12 @@ layout( set = 0, binding = 35 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
 #include "jah_rq_hit_radiance.glsl"
 #include "jah_rq_panes.glsl"
+// THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl: the includer's): the store's table, through the hit table.
+void jahCardLobeHemi( float r, out float a, out float b )
+{
+	a = 0.0;
+	b = 0.0;
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) != 0u )
+		jahSpecularAlbedoHemi( r, a, b );
+}

@@ -430,6 +430,14 @@ void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigne
 void FogHlmsListener::setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis) {
     if (SceneBinds *b = bindsOf(sm)) b->fogSkyVis = skyVis;
 }
+void FogHlmsListener::setGlassEscape(const Ogre::SceneManager *sm, bool on, unsigned long long list,
+                                     unsigned capacity) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->escapePass = on;
+        b->escapeList = on && capacity ? list : 0ull;
+        b->escapeCapacity = b->escapeList ? capacity : 0u;
+    }
+}
 bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
     return b && b->lampRaysOn;
@@ -690,6 +698,10 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         hlms->_setProperty(Ogre::Hlms::kNoTid, "glslvk_460", 1);
         // (the PBS template's head takes the extensions from our piece; HlmsAtom's template defines that hook itself)
         if (hlms->getType() == Ogre::HLMS_PBS) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays_pbs", 1);
+        // THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): the ray tier's blended pass and its refractives append their
+        // open shares' records (PhotonVct_piece_ps.any) - the PBS template's passes (its PhotonVct reads the volumes)
+        if (rec->escapePass && !casterPass && hlms->getType() == Ogre::HLMS_PBS)
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_glass_escape", 1);
     }
     // ...AND AT THE NO-RAY TIER, THE VOXEL CHAIN'S MARCH (the lead's ruling, 2026-10-27): every colour pass of a scene
     // that does not trace and binds its voxel chain - the lamp seen through the voxels' own shadow march
@@ -973,7 +985,9 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them
     // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
     // Plus THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): one float4 after the chain (s, the sun's share).
-    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + (56u + kLampChainFloats + 4u) * sizeof(float);
+    // Plus THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): one uint4 after it (the address, the capacity).
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) +
+           (56u + kLampChainFloats + 4u + 4u) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1112,6 +1126,16 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
             inscatter[0] = open > 0.0 ? float(eSun / open) : 0.0f;
         }
         std::memcpy(passBufferPtr, inscatter, sizeof(inscatter));
+        passBufferPtr += 4;
+        // THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): its address' bits and its capacity (zeros: no list - the
+        // fragment appends nothing and lights its open share by the environment)
+        Ogre::uint32 escape[4] = { 0u, 0u, 0u, 0u };
+        if (!casterPass && b && b->escapePass && b->escapeList) {
+            escape[0] = Ogre::uint32(b->escapeList & 0xFFFFFFFFull);
+            escape[1] = Ogre::uint32(b->escapeList >> 32u);
+            escape[2] = b->escapeCapacity;
+        }
+        std::memcpy(passBufferPtr, escape, sizeof(escape));
         passBufferPtr += 4;
     }
     return passBufferPtr;

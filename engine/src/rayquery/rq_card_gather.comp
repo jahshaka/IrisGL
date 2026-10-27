@@ -96,15 +96,6 @@ const uint kCardReadsBlock = 1u + 2u * kCardReadsK;
 // cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL
 #include "jah_rq_hit_set_records.glsl"
-// THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
-void jahCardLobeHemi( float r, out float a, out float b )
-{
-	a = 0.0;
-	b = 0.0;
-	const uvec2 t = JAH_HIT_TABLE;
-	if( ( t.x | t.y ) != 0u )
-		jahSpecularAlbedoHemi( r, a, b );
-}
 
 // THE RAY SET AND ITS FRAME (the voxel ray's own text)
 #include "jah_ray_set.glsl"

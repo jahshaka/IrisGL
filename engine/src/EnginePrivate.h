@@ -1246,6 +1246,14 @@ constexpr Ogre::uint32 kScreenIntegratePassIdentifier = 25005u;
 /// THE BLENDED PASS ("Jahshaka blended", OgreChain.cpp: the blended queues after the opaque pass on a screen-GI chain) -
 /// the pass the measured sky visibility is registered for beside the opaque one (PHOTON-7 10-4 R11: its fog's sky share).
 constexpr Ogre::uint32 kBlendedPassIdentifier = 25004u;
+/// THE REFRACTIVES ("Jahshaka refractives", OgreChain.cpp: the refractive queues into the refraction target) - with the
+/// blended pass, where the ray tier's escape list is registered and traced after (PHOTON-7 10-4 R4).
+constexpr Ogre::uint32 kRefractivesPassIdentifier = 25008u;
+/// THE CHAIN CARRIES THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): a ray-traced gather chain whose scene target is
+/// linear float - its blended pass's and its refractives' targets take the Uav flag, the escape add writes them.
+inline bool chainGlassEscape(bool rayReflect, bool probeGather, bool floatScene) {
+    return rayReflect && probeGather && floatScene;
+}
 /// ...its job and its three targets (the node's names; the pixel binds them as jahProbeIrradiance, jahRoughSpec and
 /// jahConeHit through the Hlms listener's registration).
 constexpr const char *kScreenIntegrateJob = "Jahshaka/ScreenIntegrate";
@@ -2251,6 +2259,7 @@ private:
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
+    X(GlassEscapeOff, "rq.glassEscapeOff") /* the blended passes' escapes lit by the environment, no record (a test door, gi.glass_escape) */ \
     X(GiScreenBindMissing, "gi.screenBindMissing") /* the no-ray screen passes read their inputs as missing: they stand down (a test door, gi.screen_bind) */ \
     X(GiScreenZeroUnmarked, "gi.screenZeroUnmarked") /* the screen integrate dispatches no group WITHOUT the stood-down mark: the fork's BUGS-6 guard throws (a test door, gi.screen_bind) */ \
     X(GiScreenShaderCold, "gi.screenShaderCold") /* each time it comes on, the no-ray screen passes' jobs take a permutation never built: a background compile (a test door, gi.screen_bind) */ \
@@ -3696,6 +3705,8 @@ public:
     static bool lampRaysOn(const Ogre::SceneManager *sm);
     /// THE BLENDED PASS'S SKY VISIBILITY (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): pass-scoped, null to take it away.
     static void setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis);
+    /// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4; SceneBinds::escapePass): pass-scoped, `on` false takes it away.
+    static void setGlassEscape(const Ogre::SceneManager *sm, bool on, unsigned long long list, unsigned capacity);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3802,6 +3813,13 @@ public:
         /// screen products' producer in front of the blended pass and taken away when it ends (the opaque pixel's
         /// behind each blended fragment - its fog's sky share; a named limit). Null otherwise.
         Ogre::TextureGpu *fogSkyVis = nullptr;
+        /// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): registered by the ray tier in front of the blended pass and
+        /// the refractives (RayQueryTier::bindGlassEscape) and taken away when each ends - `escapePass` the pass is one
+        /// (its PROPERTY jah_glass_escape follows this alone: a list not made yet is a zero address, the same
+        /// permutation), the list's device address and its capacity in records.
+        bool escapePass = false;
+        unsigned long long escapeList = 0ull;
+        unsigned escapeCapacity = 0u;
     };
     /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
@@ -3812,6 +3830,9 @@ public:
         b.sunContact = SunContactBind();
         b.areaVis = nullptr;
         b.fogSkyVis = nullptr;
+        b.escapePass = false;
+        b.escapeList = 0ull;
+        b.escapeCapacity = 0u;
     }
 private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only

@@ -1913,6 +1913,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     const bool floatScene = desc.hdr || desc.hdrReadback || desc.displayEncode;
     {
         auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        // (THE BLENDED PASSES' ESCAPES, PHOTON-7 10-4 R4: the ray tier's add writes the blended pass's target)
+        if (chainGlassEscape(desc.rayReflect, desc.probeGather, floatScene)) td->textureFlags |= Ogre::TextureFlags::Uav;
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
@@ -2292,6 +2294,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         {
             auto *td = addTex(n, kRefractOut,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+            // (THE BLENDED PASSES' ESCAPES, PHOTON-7 10-4 R4: the ray tier's add writes the refractives' target)
+            if (chainGlassEscape(desc.rayReflect, desc.probeGather, floatScene))
+                td->textureFlags |= Ogre::TextureFlags::Uav;
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -2782,6 +2787,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLastRQ  = kOverlayRenderQueue;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka refractives";
+            p->mIdentifier = kRefractivesPassIdentifier;   // (its escape list: PHOTON-7 10-4 R4)
         }
         sceneResult = kRefractOut;
     }
