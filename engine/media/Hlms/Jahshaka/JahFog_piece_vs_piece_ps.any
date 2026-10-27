@@ -451,6 +451,7 @@
 	/// The sun's shadow at the view-space point `posVS` of the eye ray: the PSSM split holding its depth
 	float jahFogSunAt( float3 posVS )
 	{
+		if( posVS.z < 1e30 ) return 1.0;   // MEASURING ARM (reverted after): the march's taps compiled out
 		const float depth = -posVS.z;
 		const float4 wp = float4( dot( passBuf.jahLampInvView0.xyz, posVS ) + passBuf.jahLampInvView0.w,
 								  dot( passBuf.jahLampInvView1.xyz, posVS ) + passBuf.jahLampInvView1.w,
