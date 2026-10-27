@@ -399,6 +399,10 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
     const Ogre::uint8 spotMask        = Ogre::uint8(1u << Ogre::Light::LT_SPOTLIGHT);
+    // A FOCUSED MAP's single-map pass serves a spot OR A SECOND DIRECTIONAL (PHOTON-7 10-4 R8; upstream's path: HlmsPbs
+    // shades every casting directional after the first from one map, DarkenWithShadow, and Ogre's light list hands the
+    // directionals out first, to the first free slots that accept one). The point maps' cube faces stay point-only.
+    const Ogre::uint8 focusedMask     = Ogre::uint8(spotMask | directionalMask);
     const char *clearMaterial = shadowClearMaterialName();
     // THE TRANSMITTANCE LAYER's passes (PHOTON-7 10-4 R8): each map's rectangle of atlasT, set by hand - Ogre forces a
     // shadow map's viewport only on a pass that draws into the map's own texture.
@@ -480,7 +484,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     }
     for (unsigned m = 0u; panes && perMapClears && m < numMaps; ++m) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(transRtv);
-        target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask : Ogre::uint8(pointMask | spotMask));
+        target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask : Ogre::uint8(pointMask | focusedMask));
         target->setNumPasses(1u);
         Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(target->addPass(Ogre::PASS_QUAD));
         quad->mMaterialIsHlms = false;
@@ -500,7 +504,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     for (unsigned m = 0u; perMapClears && m < numMaps; ++m) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask
-                                                       : Ogre::uint8(pointMask | spotMask));
+                                                       : Ogre::uint8(pointMask | focusedMask));
         target->setNumPasses(1u);
         Ogre::CompositorPassDef *passDef = target->addPass(Ogre::PASS_QUAD);
         Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(passDef);
@@ -525,13 +529,13 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         if (panes) addPanePass(j, directionalMask);
     }
 
-    // (c) The focused maps: a spot pass, then the point-light cubemap + copy.
+    // (c) The focused maps: a spot (or second directional) pass, then the point-light cubemap + copy.
     //     Upstream renders every directional/spot pass before every point pass;
     //     the order between maps does not matter here because each map clears
     //     itself, but keeping it makes the two definitions comparable.
     for (unsigned i = 0u; i < N; ++i) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
-        target->setShadowMapSupportedLightTypes(spotMask);
+        target->setShadowMapSupportedLightTypes(focusedMask);
         target->setNumPasses(atomCasters ? 2u : 1u);
         Ogre::CompositorPassSceneDef *scene =
             static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
@@ -541,7 +545,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mIncludeOverlays = false;
         scene->mVisibilityMask = casterMask;
         addAtomCaster(target, scene);
-        if (panes) addPanePass(3u + i, spotMask);
+        if (panes) addPanePass(3u + i, focusedMask);
     }
     for (unsigned i = 0u; i < N; ++i) {
         for (Ogre::uint32 face = 0u; face < 6u; ++face) {
@@ -790,7 +794,7 @@ unsigned OgreEngine::shadowMapDemand(unsigned *castersOut) {
         mWarnedShadowCasters = casters;
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka shadows: " + Ogre::StringConverter::toString(casters) +
-            " shadow-casting point/spot lights but only " +
+            " focused-map shadow casters (point/spot lights, directionals after the sun) but only " +
             Ogre::StringConverter::toString(budget) +
             " shadow maps are budgeted; the farthest lights render no shadow. "
             "Raise the Shadow Map Budget or turn off Cast Shadows on distant lights.");
@@ -1032,8 +1036,9 @@ ShadowStatus OgreEngine::shadowStatus() const {
 // planar mirror reuse its lamp maps at rest. Marking is lazy by construction:
 // a probe that does not capture this frame keeps the dirty flag until it does.
 //
-// THE SLOT RULE (planCachedSlots). Every point before every spot (HlmsPbs's
-// type order); a lamp keeps the slot it has whenever that order allows, so an
+// THE SLOT RULE (planCachedSlots). The second directionals' slots first (left
+// free: Ogre fills them, a directional's map is not cached), then every point
+// before every spot (HlmsPbs's type order); a lamp keeps the slot it has whenever that order allows, so an
 // added or hidden lamp re-renders nothing but itself; otherwise the canonical
 // layout, start-aligned (points by id, then spots by id).
 //
@@ -1181,7 +1186,9 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
             if (lightIdx < lights.size() && lights[lightIdx].light) {
                 const Ogre::Light *l = lights[lightIdx].light;
                 switch (l->getType()) {
-                case Ogre::Light::LT_DIRECTIONAL: label += " sun s" + std::to_string(td->split); break;
+                case Ogre::Light::LT_DIRECTIONAL:
+                    label += lightIdx == 0u ? " sun s" + std::to_string(td->split) : std::string(" directional");
+                    break;
                 case Ogre::Light::LT_POINT:       label += " point"; break;
                 case Ogre::Light::LT_SPOTLIGHT:   label += " spot"; break;
                 default:                          label += " ?"; break;
@@ -1430,7 +1437,12 @@ namespace {
 /// map alone in the common case, and hiding one re-fixes nothing.
 // (`plan` and `placed` are the caller's scratch — this runs per instance per
 // frame for ever, so neither is built here; clean-2 lane, 2026-09-13.)
-void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
+// THE LAMPS' SLOTS START AFTER THE SECOND DIRECTIONALS (PHOTON-7 10-4 R8):
+// HlmsPbs reads directionals before points before spots, and Ogre hands a
+// casting directional the first FREE slot that accepts one, so the first `dirs`
+// focused slots are left free for them: plan[j] is focused slot dirs + j, and
+// `maps` counts the lamps' slots only.
+void planCachedSlots(const Ogre::LightClosestArray &held, size_t dirs, size_t maps,
                      const std::vector<Ogre::Light *> &want, size_t fixed,
                      std::vector<Ogre::Light *> &plan, std::vector<char> &placed) {
     plan.assign(maps, nullptr);
@@ -1439,7 +1451,7 @@ void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
     // 1. Keep every lamp that is still wanted where it is.
     placed.assign(want.size(), 0);
     for (size_t j = 0; j < maps; ++j) {
-        const Ogre::LightClosest &e = held[j + 1u];
+        const Ogre::LightClosest &e = held[dirs + j + 1u];
         if (!e.isStatic || !e.light) continue;
         const auto it = std::find(want.begin(), want.end(), e.light);
         if (it == want.end()) continue;
@@ -1635,11 +1647,15 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             if (instances.empty()) continue;
             OgreScene::ShadowCacheFrame &f = mShadowFrameScratch;
             s->collectShadowCacheFrame(f);
+            const unsigned secondaryDirs = s->countSecondaryShadowDirectionals();
             for (const ShadowInstance &in : instances) {
                 const unsigned k = unsigned(in.kind);
                 const Ogre::LightClosestArray &held = in.node->getShadowCastingLights();
                 if (held.size() < 2u) continue;                  // a PSSM-only node
-                const size_t maps = held.size() - 1u;            // light slots 1..maps
+                const size_t slots = held.size() - 1u;           // light slots 1..slots
+                // the first `dirs` of them are the second directionals' (planCachedSlots' note)
+                const size_t dirs = std::min<size_t>(secondaryDirs, slots);
+                const size_t maps = slots - dirs;                // the lamps' slots
                 std::vector<Ogre::Light *> &want = mShadowWantScratch;
                 want.clear();
                 want.reserve(f.lights.size());
@@ -1686,7 +1702,7 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 // dynamic entry is free — the next update refills the dynamic
                 // slots from lamps the cache does not hold.
                 if (cache)
-                    for (size_t j = 0; j < maps; ++j) {
+                    for (size_t j = 0; j < slots; ++j) {
                         const Ogre::LightClosest &e = held[j + 1u];
                         if (e.light && !e.isStatic &&
                             std::find(want.begin(), want.end(), e.light) != want.end()) {
@@ -1695,11 +1711,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         }
                     }
                 std::vector<Ogre::Light *> &plan = mShadowPlanScratch;
-                planCachedSlots(held, maps, want, fixed, plan, mShadowPlacedScratch);
-                for (size_t j = 0; j < maps; ++j) {
+                planCachedSlots(held, dirs, maps, want, fixed, plan, mShadowPlacedScratch);
+                for (size_t j = 0; j < slots; ++j) {
                     const size_t slot = j + 1u;
                     const size_t mapIdx = slot + 2u;             // 3 PSSM maps first
-                    Ogre::Light *w = plan[j];
+                    Ogre::Light *w = j < dirs ? nullptr : plan[j - dirs];   // a directional's slot: Ogre's to fill
                     Ogre::Light *have = held[slot].isStatic ? held[slot].light : nullptr;
                     if (w != have) {
                         // A NEW assignment (or a release). setLightFixedToShadowMap

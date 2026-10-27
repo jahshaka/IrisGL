@@ -5523,25 +5523,21 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     d.doubleSided = light->doubleSided;
     // The asset binding travels as a resolved absolute path — the engine has no
     // database. The backend decides what each light type can actually honour
-    // (profiles: spot always, point only unshadowed).
+    // (profiles: spot and point lights, shadowed or not; never directional or area).
     d.iesProfilePath = light->iesProfilePath.toStdString();
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     d.castShadows = light->lightType != iris::LightType::Area &&
                     light->shadowMap.shadowType != iris::ShadowMapType::None;
     // ---- THE SUN, and the secondary directionals -----------------------
-    // Our shadow node declares exactly ONE directional slot (three PSSM splits
-    // at slot 0; every focused slot accepts spot/point only — OgreShadow.cpp).
-    // With two shadow-casting directionals Ogre filled that slot by its own
-    // castShadows-then-light-id sort, i.e. by engine creation order, which can
-    // flip across a reload: one of the two suns cast, silently, and which one
-    // was luck. The document's ONE resolver decides instead, and a directional
-    // that is not the sun is pushed as a non-caster — Ogre's sort then has a
-    // single candidate and the answer is the same on every frame and reload.
-    // (This is Unreal's Forward Shading Priority semantic exactly: one main
-    // directional casts. A SECOND PSSM set is out of scope — it is three more
-    // full-view-frustum scene passes EVERY frame, the most expensive shadow we
-    // render.)
+    // EVERY directional casts what its own flag says (PHOTON-7 10-4 R8: a light
+    // is blocked by geometry on every path). The shadow node gives the PSSM
+    // splits (slot 0) to ONE directional and a focused map to each further one
+    // (upstream's path: HlmsPbs shades every casting directional after the first
+    // from a single map). Which one gets the splits is the document's ONE
+    // resolver's answer, `primaryDirectional`, which the backend turns into the
+    // light's shadow sort priority (the fork's Light::setShadowSortPriority) —
+    // never Ogre's creation-order id, which flips across a reload.
     if (light->lightType == iris::LightType::Directional) {
         d.forwardShadingPriority = light->forwardShadingPriority;
         // Through the light's OWN scene, which is what makes this a pure
@@ -5558,7 +5554,6 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
             resolved = own.data();
         }
         d.primaryDirectional = !resolved || resolved == light;
-        if (!d.primaryDirectional) d.castShadows = false;
         // ...AND A SUN THAT CANNOT MOVE A PIXEL CASTS NOTHING (round-2 review
         // item 4; made ABSOLUTE by lane SKY-SMALL). Three full-view-frustum
         // PSSM passes every frame buy a shadow whose depth is the difference

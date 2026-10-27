@@ -347,6 +347,9 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@end
 @end
 @piece( custom_ps_darkenNonCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+// (and every CASTING directional after the first, the fork's custom_ps_darkenCasterDirectional: a second
+// directional that casts a shadow crosses the same sheet - PHOTON-7 10-4 R8)
+@piece( custom_ps_darkenCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 @end
 
 @property( hlms_fog )

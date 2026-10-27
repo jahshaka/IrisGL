@@ -5087,10 +5087,15 @@ public:
     void collectLightInfo(std::vector<SnapshotLight> &out) const;
 
     /// This scene's shadow-casting POINT and SPOT lights — the input to the
-    /// derived focused-map count (SHADOW_TOOLING_SPEC.md §4.1). Directional
-    /// lights ride the PSSM block and area lights can never cast, so neither
-    /// counts. Fills `out` with the node ids when it is non-null.
+    /// derived focused-map count (SHADOW_TOOLING_SPEC.md §4.1): every casting
+    /// point/spot light and every casting directional after the first (the
+    /// first rides the PSSM block; area lights can never cast). Fills `out`
+    /// with the node ids when it is non-null.
     unsigned countLocalShadowCasters(std::vector<NodeId> *out) const;
+    /// The casting directionals after the first: the focused slots right after
+    /// the PSSM set that Ogre fills with them (OgreShadow.cpp, the lamp-map
+    /// cache keeps its lamps clear of them).
+    unsigned countSecondaryShadowDirectionals() const;
     // ---- THE LAMP-MAP CACHE (ENGINE_CACHE_POLICY_SPEC P2/P3; OgreLights.cpp) --
     //
     // EVERY point/spot shadow map is a CACHE (lead decision D1 = A, 2026-09-12;
@@ -9075,7 +9080,7 @@ public:
     /// would be the first of a burst — see the definition.
     void deriveShadowMapCount();
     /// The focused-map count the scenes about to be drawn WANT right now:
-    /// stepped {2,4,8,16} from their shadow-casting point/spot lights and
+    /// stepped {2,4,8,16} from their focused-map casters (countLocalShadowCasters) and
     /// clamped to effectiveShadowMapBudget(). No debounce — the raw demand, so
     /// the clear-strategy flip can size the atlas in the SAME rebuild instead
     /// of leaving a second one to the derivation. It also owns the over-budget
