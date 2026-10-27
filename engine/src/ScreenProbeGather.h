@@ -267,6 +267,9 @@ struct HitSetSources {
     float cloudSun[4] = {};
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): a cut-out's candidates; 0 = none.
     uint64_t alphaTable = 0u;
+    /// THE TIER'S COUNTERS' device address (jah_rq_alpha.glsl's JahTierCounters: [0] the reading rays' pane-list
+    /// overflows - the one read's F4); 0 = none.
+    uint64_t tierCounters = 0u;
     /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs where a job asks for it).
     bool movers = false;
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
@@ -287,7 +290,7 @@ struct HitSetParams {
     float hitSun[4] = {};      ///< toward the sun, a sun
     float hitSun2[4] = {};     ///< the hit's sun-ray mask, 0, its length, a far copy's lift
     float tables[4] = {};      ///< the alpha table's address, the hit table's (float bits)
-    float surface[4] = {};     ///< the texture pool bound, the cloud field bound
+    float surface[4] = {};     ///< the texture pool bound, the cloud field bound, the tier's counters' address (zw bits)
     float cloudMap[4] = {};
     float cloudSun[4] = {};
     float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule (w: HitReader's code)

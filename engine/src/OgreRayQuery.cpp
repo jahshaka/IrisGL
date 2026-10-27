@@ -1745,6 +1745,11 @@ private:
     ReflectImage mHitDummyState;
     bool mHitDummiesReady = false;
     bool mHitDummiesNeedInit = false;
+    /// THE TIER'S COUNTERS (jah_rq_alpha.glsl's JahTierCounters; host-visible, coherent; the shaders' atomics, read with
+    /// no wait - a few frames late): [0] the reading rays whose pane list filled (the one read's F4), cumulative over
+    /// the tier's life. Created at the first hit set, dropped at close().
+    RawBuffer mTierCounters;
+    uint64_t tierCountersAddress();
     // ---- THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) ----------------
     // One dispatch per scene per frame a mover moved, recorded from the
     // surface cache's workspacePosUpdate — after the capture's copies (it reads
@@ -2762,6 +2767,7 @@ void RayQueryTier::close() {
     }
     mHitDummiesReady = false;
     mHitDummiesNeedInit = false;
+    dropBuffer(mTierCounters);
     // THE SUN CONTACT's views (PHOTON-RAYS-1): each takes its registration
     // away first (the listener holds a raw texture pointer) and retires its
     // texture into the bin that is emptied below. The sets are DROPPED, not
@@ -5056,6 +5062,7 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     st.tlasMs = monitor::lastGpuMs("rq.tlas", owner);
     st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
     st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
+    st.panesOverflow = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[0] : 0u;
     return st;
 }
 
@@ -7742,6 +7749,16 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     }
     out.alphaTable = alphaTableOf(scene);
     out.movers = rayMoversOf(scene);
+    out.tierCounters = tierCountersAddress();
+}
+
+uint64_t RayQueryTier::tierCountersAddress() {
+    if (!mTierCounters.buffer) {
+        std::string err;
+        if (!makeBuffer(16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mTierCounters, err)) return 0u;
+        std::memset(mTierCounters.mapped, 0, 16u);
+    }
+    return uint64_t(addressOf(mTierCounters.buffer));
 }
 
 uint64_t RayQueryTier::tlasAddressOf(const OgreScene *scene) const {

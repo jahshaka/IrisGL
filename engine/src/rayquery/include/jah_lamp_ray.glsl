@@ -3,7 +3,8 @@
 // visibility at all in the pixel: its light reached every pixel in its range through any wall. A point lamp is a
 // point, so ONE ray from the surface to it is the exact answer (no strata, no history, no noise): 0 behind an opaque
 // caster, the product of the panes' transmittance between (Ogre's blend: 1 - alpha a pane, jah_rq_alpha.glsl's
-// JAH_RQ_PROCEED_PANES), 1 in the open. The ray tier's TLAS, reached by its device address (the pass buffer carries it:
+// JAH_RQ_PROCEED_TRANSMIT: every pane met, no cap), 1 in the open. The ray tier's TLAS, reached by its device address
+// (the pass buffer carries it:
 // FogHlmsListener, OgreFog.cpp - no descriptor; the fork's Forward+ hook custom_ps_fwdplus_lamp multiplies the lamp's
 // attenuation by it). Only the shadow casters stop it (kRayMaskCaster), as every lamp's shadow ray (the cards' lamps).
 // The origin is lifted along the geometric normal on the lamp's side by its float bound (jahRayOrigin, ONE FORM AT EVERY
@@ -30,11 +31,11 @@ float jahLampRay( uvec2 tlasAddress, vec3 surface, vec3 geomN, float carried, ve
 	rayQueryEXT rq;
 	rayQueryInitializeEXT( rq, accelerationStructureEXT( tlasAddress ), jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 						   0x01u, origin, 0.0, d * ( 1.0 / len ), len );
-	JahPanes panes = jahPanesNone();
-	JAH_RQ_PROCEED_PANES( rq, panes )
+	float T = 1.0;
+	JAH_RQ_PROCEED_TRANSMIT( rq, T )
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 		return 0.0;
-	return jahPanesTransmit( panes, len );
+	return T;
 }
 
 #endif   // JAH_LAMP_RAY_GLSL

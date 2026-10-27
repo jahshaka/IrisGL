@@ -5574,6 +5574,11 @@ struct RayQueryStatus {
     unsigned long long escapeSky = 0;
     unsigned long long escapeBack = 0;
     unsigned long long escapeNoSample = 0;
+    /// THE PANE LIST'S OVERFLOW (the one read's F4): the reading rays (a gather's, a reflection's, a card's, the voxel
+    /// sides', the escape's) that met more panes than they list (jah_rq_alpha.glsl kJahPanesMax, the nearest kept): the
+    /// rest are applied - their transmittance multiplied, their own light left out. Cumulative over the tier's life (every
+    /// scene), read a few frames late; 0 = no ray met more. A light ray has no list (no cap) and is never counted.
+    unsigned long long panesOverflow = 0;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append

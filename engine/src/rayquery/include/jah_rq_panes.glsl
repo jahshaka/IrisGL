@@ -59,7 +59,8 @@ vec3 jahPanesOwnLight( JahPanes p, vec3 origin, vec3 dir, out float throughput )
 		}
 		T *= jahPaneT( w );
 	}
-	throughput = T;
+	// (the overflow's panes past the list: their T, applied by jahPanesBetween; their own light is left out - jah_rq_alpha)
+	throughput = T * p.overApplied;
 	return own;
 }
 

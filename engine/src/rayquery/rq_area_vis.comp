@@ -60,10 +60,9 @@ float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 	rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), uint( p.knobs.z ), originQ,
 						   0.0, wq, reachQ );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8)
-	JahPanes panes = jahPanesNone();
-	JAH_RQ_PROCEED_PANES( rqa, panes )
-	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
-			   ? 0.0 : jahPanesTransmit( panes, reachQ );
+	float T = 1.0;
+	JAH_RQ_PROCEED_TRANSMIT( rqa, T )
+	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
 }
 #define JAH_AREA_DEPTH( pix ) texelFetch( sceneDepth, pix, 0 ).x
 #define JAH_AREA_NORMAL( pix ) texelFetch( gBufNormals, pix, 0 ).xyz

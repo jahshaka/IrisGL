@@ -232,6 +232,8 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
     std::memcpy(out.tables, a, sizeof(a));
     out.surface[0] = src.hitPool ? 1.0f : 0.0f;
     out.surface[1] = src.cloudField ? 1.0f : 0.0f;
+    const uint32_t c[2] = { uint32_t(src.tierCounters & 0xFFFFFFFFu), uint32_t(src.tierCounters >> 32u) };
+    std::memcpy(&out.surface[2], c, sizeof(c));
     std::memcpy(out.cloudMap, src.cloudMap, sizeof(out.cloudMap));
     std::memcpy(out.cloudSun, src.cloudSun, sizeof(out.cloudSun));
 }

@@ -35,12 +35,11 @@ float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range 
 	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
 						   mask, origin, 0.0, toSun, hardEnd );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8): a pane is crossed, its T multiplied (an opaque hit still answers 0; with none
-	// the traversal ran whole, so every pane on the way is listed)
-	JahPanes panes = jahPanesNone();
-	JAH_RQ_PROCEED_PANES( rq, panes )
+	// the traversal ran whole, so every pane on the way was met - the product has no cap)
+	float vis = 1.0;
+	JAH_RQ_PROCEED_TRANSMIT( rq, vis )
 	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 		return 0.0;
-	float vis = jahPanesTransmit( panes, hardEnd );
 	if( range > hardEnd && vis > 0.0 )
 	{
 		rayQueryEXT rqFade;
