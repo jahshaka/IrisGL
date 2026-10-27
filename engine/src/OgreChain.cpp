@@ -2618,6 +2618,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // opaque surfaces only), so the blended queues leave the opaque pass for their OWN pass right after it,
         // "Jahshaka blended", which reads the world caches as the refractives pass does (the field's irradiance and
         // the cone, Lumen's translucency reading its own volume) - the spec's "blended and refractive fragments" rule.
+        // L4's ONE EXCEPTION (PHOTON-7 10-4 R9, the lead's ruling 2026-10-27): L4's reason is the LIGHT - the opaque
+        // pixel never reads the chain's radiance, so the picture stays the screen products' - and a lamp's visibility
+        // reads the chain's GEOMETRY alone. In a scene that does not trace, the opaque pass and the screen decode bind
+        // the chain's coverage and surface position per half (`jah_lamp_chain`: PhotonPassBinding::lampChainOf; never
+        // a lighting volume) and see each Forward+ lamp through the voxels' own shadow march (jah_inject_visibility.glsl).
         const bool screenGi = desc.screenGi();
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.

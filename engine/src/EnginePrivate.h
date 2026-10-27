@@ -3683,6 +3683,9 @@ public:
     /// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the scene's TLAS and alpha-table device addresses this frame
     /// (0, 0: none - its colour passes trace no lamp ray). JahLampRay_piece_ps.any reads them from the pass buffer.
     static void setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas, unsigned long long alpha);
+    /// ...whether the scene drawn through `sm` traces its lamps (setLampRays' `on`); false for a manager no scene holds.
+    /// A scene that does not trace sees its Forward+ lamps through the voxel chain (PhotonPassBinding::lampVoxelsOf).
+    static bool lampRaysOn(const Ogre::SceneManager *sm);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in

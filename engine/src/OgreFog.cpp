@@ -428,6 +428,10 @@ void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigne
         b->lampAlpha = b->lampTlas ? alpha : 0ull;
     }
 }
+bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
+    const SceneBinds *b = bindsOf(sm);
+    return b && b->lampRaysOn;
+}
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
     if (SceneBinds *b = bindsOf(sm)) b->photonIsolation = mode <= 0 ? 0 : mode;
@@ -670,6 +674,11 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         // (the PBS template's head takes the extensions from our piece; HlmsAtom's template defines that hook itself)
         if (hlms->getType() == Ogre::HLMS_PBS) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays_pbs", 1);
     }
+    // ...AND AT THE NO-RAY TIER, THE VOXEL CHAIN'S MARCH (the lead's ruling, 2026-10-27): every colour pass of a scene
+    // that does not trace and binds its voxel chain - the lamp seen through the voxels' own shadow march
+    // (jah_inject_visibility.glsl, JahLampRay_piece_ps.any's jahLampVoxelView); the chain rides the pass buffer
+    else if (hlms && !casterPass && PhotonPassBinding::lampVoxelsOf(casterPass, sceneManager))
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_voxels", 1);
     // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is
     // the mode (1 the indirect diffuse alone, 2 the specular environment alone),
     // read by JahPhotonView_piece_ps.any. Empty in every scene whose view is not
@@ -908,6 +917,12 @@ void FogHlmsListener::releaseSamplers() {
     PhotonPassBinding::releaseSamplers();
 }
 
+/// THE NO-RAY TIER'S LAMP CHAIN in the pass buffer (PHOTON-7 10-4 R9): four entries' corners and cells, four
+/// resolutions and shell ends, cascade 0's world corner - JahFog_piece_vs_piece_ps.any's jahLampChain* members.
+/// Four entries: every tier's chain (kGiTierMaxCascades).
+static_assert(kGiTierMaxCascades == 4, "the pass block's lamp chain holds four entries");
+constexpr Ogre::uint32 kLampChainFloats = 4u * (4u + 4u + 1u);
+
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
                                                 bool, Ogre::SceneManager *sceneManager) const {
     // Constant, fog on or off, caster or not: the shader's struct may be SHORTER
@@ -938,8 +953,9 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // here keeps every byte where the shader's struct (DeclVctUniform,
     // DeclIrradianceFieldUniform, then custom_passBuffer) has always put it.
     // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): four float4 after the cloud block - the pass camera's
-    // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them.
-    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + 56u * sizeof(float);
+    // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them
+    // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + (56u + kLampChainFloats) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1027,17 +1043,35 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     {
         const SceneBinds *b = bindsOf(sceneManager);
         const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
-        if (b && b->lampRaysOn && b->lampTlas && cam && !casterPass) {
+        // (the no-ray tier's: the pass's voxel chain, as the hash's jah_lamp_voxels saw it bound)
+        Ogre::PhotonVoxelLighting *vct = PhotonPassBinding::lampVoxelsOf(casterPass, sceneManager);
+        if (cam && !casterPass && ((b && b->lampRaysOn && b->lampTlas) || vct)) {
             const Ogre::Matrix4 inv = cam->getVrViewMatrix(0).inverseAffine();
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 4; ++c) *passBufferPtr++ = float(inv[r][c]);
-            const Ogre::uint32 words[4] = { Ogre::uint32(b->lampTlas & 0xFFFFFFFFull), Ogre::uint32(b->lampTlas >> 32u),
-                                            Ogre::uint32(b->lampAlpha & 0xFFFFFFFFull), Ogre::uint32(b->lampAlpha >> 32u) };
+            const unsigned long long tlas = vct ? 0ull : b->lampTlas, alpha = vct ? 0ull : b->lampAlpha;
+            const Ogre::uint32 words[4] = { Ogre::uint32(tlas & 0xFFFFFFFFull), Ogre::uint32(tlas >> 32u),
+                                            Ogre::uint32(alpha & 0xFFFFFFFFull), Ogre::uint32(alpha >> 32u) };
             std::memcpy(passBufferPtr, words, sizeof(words));
             passBufferPtr += 4;
         } else {
             for (int i = 0; i < 16; ++i) *passBufferPtr++ = 0.0f;
         }
+        // THE CHAIN (jahLampChainOrigin[4], jahLampChainRes[4], jahLampChainCorner): zeros without one - a cell not
+        // positive is no chain, and the march answers 1
+        float chain[kLampChainFloats] = {};
+        if (vct && cam) {
+            float origin[4u * 8u] = {}, res[4u * 8u] = {};
+            vct->chainMarchParams(origin, res);
+            std::memcpy(chain, origin, 16u * sizeof(float));
+            std::memcpy(chain + 16u, res, 16u * sizeof(float));
+            const Ogre::Vector3 corner = vct->getVoxelizer()->getVoxelOrigin();
+            chain[32] = float(corner.x);
+            chain[33] = float(corner.y);
+            chain[34] = float(corner.z);
+        }
+        std::memcpy(passBufferPtr, chain, sizeof(chain));
+        passBufferPtr += kLampChainFloats;
     }
     return passBufferPtr;
 }

@@ -2,7 +2,8 @@
 // (every point or spot light past the shadow-map budget, and every one that casts no shadow) is multiplied, in the
 // fork's hook on its term (custom_ps_fwdplus_lamp, 200.ForwardPlus_piece_ps.any), by ONE ray from the pixel to it on the
 // ray tier's TLAS (jah_lamp_ray.glsl: 0 behind an opaque caster, the panes' transmittance between, 1 in the open).
-// `jah_lamp_rays` is the listener's pass property (OgreFog.cpp): a colour pass of a scene whose TLAS is built this frame.
+// `jah_lamp_rays` is the listener's pass property (OgreFog.cpp): a colour pass of a scene whose TLAS is built this frame;
+// a scene that does not trace takes the voxel chain's march instead (`jah_lamp_voxels`, below).
 // The pass works in VIEW space; the ray in world space, through the pass camera's view-to-world rows the listener writes
 // (jahLampInvView0..2) - the fragment's view position, its geometric normal, the lamp's position.
 // THE AT-SIGN RULE: no directive mark in any comment of this file.
@@ -41,5 +42,91 @@ float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
 			if( atten > _h( 0.0 ) &&
 				max( dot( float3( pixelData.normal ), lightDir ), dot( float3( pixelData.geomNormal ), lightDir ) ) > 0.0 )
 				atten *= midf_c( jahLampRayView( inPs.pos.xyz, posAndType.xyz, float3( pixelData.geomNormal ) ) );
+@end
+@end
+
+// THE NO-RAY TIER (`jah_lamp_voxels`, the listener's: a colour pass of a scene that does not trace, its voxel chain
+// bound). A scene that does not trace has no TLAS for the lamp's shadow ray, so the lamp is seen through THE VOXEL
+// CHAIN'S OWN SHADOW MARCH - the law the voxels' own lamp light is shadowed by and the no-ray area strata see by
+// (jah_inject_visibility.glsl): the transmittance from the fragment to the lamp over the face model, ending ON the lamp
+// (a face is taken only where its plane lies inside the segment), a pane passing its 1 - alpha (its coverage is its
+// area x its alpha) as the TLAS ray does. Its accuracy is cascade 0's cell and VOXEL-LEAK-1's thin wall, the area job's
+// limits - named, not hidden. THE CHAIN: an opaque pass binds its GEOMETRY alone (`jah_lamp_chain`, the cascades: the
+// coverage and the surface position per half - PhotonPassBinding::lampChainOf, L4's one exception: never its light);
+// a pass that reads the GI (the blended one) reads its own bound volumes. Its corners and shells ride the pass buffer
+// (OgreFog.cpp). JahFog's custom_ps_functions inserts this after the volumes' declarations.
+@property( jah_lamp_voxels )
+@piece( JahLampVoxelFuncs )
+	@property( jah_lamp_chain )
+		vulkan_layout( ogre_t@value(jahLampCovP) ) uniform texture3D jahLampCovP[@value( jah_lamp_chain )];
+		vulkan_layout( ogre_t@value(jahLampCovN) ) uniform texture3D jahLampCovN[@value( jah_lamp_chain )];
+		vulkan_layout( ogre_t@value(jahLampPosP) ) uniform texture3D jahLampPosP[@value( jah_lamp_chain )];
+		vulkan_layout( ogre_t@value(jahLampPosN) ) uniform texture3D jahLampPosN[@value( jah_lamp_chain )];
+		#define chainCovP jahLampCovP
+		#define chainCovN jahLampCovN
+		#define chainPosP jahLampPosP
+		#define chainPosN jahLampPosN
+		#define JAH_INJ_CHAIN @value( jah_lamp_chain )
+		// THE ONE VOXEL READER's text the march calls (its origin gate) over the chain's geometry: the light reads
+		// absent, the geometry's by texel (no sampler bound) - the light injection's convention
+		#define JAH_VOX_SAMPLE_ISO( c, u, l ) float4( 0.0, 0.0, 0.0, 0.0 )
+		#define JAH_VOX_SAMPLE_X( c, u, l ) float4( 0.0, 0.0, 0.0, 0.0 )
+		#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0, 0.0, 0.0, 0.0 )
+		#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0, 0.0, 0.0, 0.0 )
+		#define JAH_VOX_SAMPLE_BACK( c, u, l ) float4( 0.0, 0.0, 0.0, 0.0 )
+		#define JAH_LAMP_TEXEL( t, c, u ) texelFetch( t[c], int3( floor( ( u ) * float3( textureSize( t[c], 0 ) ) ) ), 0 )
+		#define JAH_VOX_SAMPLE_COVP( c, u, l ) JAH_LAMP_TEXEL( jahLampCovP, c, u )
+		#define JAH_VOX_SAMPLE_COVN( c, u, l ) JAH_LAMP_TEXEL( jahLampCovN, c, u )
+		#define JAH_VOX_SAMPLE_POSP( c, u, l ) JAH_LAMP_TEXEL( jahLampPosP, c, u )
+		#define JAH_VOX_SAMPLE_POSN( c, u, l ) JAH_LAMP_TEXEL( jahLampPosN, c, u )
+		#define JAH_VOX_INVRES( c ) ( float3( 1.0, 1.0, 1.0 ) / passBuf.jahLampChainRes[c].xyz )
+		@insertpiece( JahVoxelFaces )
+		@insertpiece( JahVoxelSample )
+	@else
+		#define chainCovP vctProbeCovP
+		#define chainCovN vctProbeCovN
+		#define chainPosP vctProbePosP
+		#define chainPosN vctProbePosN
+		#define JAH_INJ_CHAIN @value( vct_num_probes )
+	@end
+	#define p_chainSelf 0u
+	#define p_chainOrigin passBuf.jahLampChainOrigin
+	#define p_chainRes passBuf.jahLampChainRes
+	@insertpiece( JahInjectVisibility )
+
+	/// What reaches the fragment at `viewPos` of the lamp at `viewLamp` (the pass's view space; `viewGeomN` the
+	/// fragment's geometric normal, either side): the march from one cell of cascade 0 off the surface along the
+	/// geometric normal on the lamp's side (the voxels' own start bias: the start is past its own surface's planes) to
+	/// the lamp.
+	float jahLampVoxelView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
+	{
+		const float3 wp = float3( dot( passBuf.jahLampInvView0.xyz, viewPos ) + passBuf.jahLampInvView0.w,
+								  dot( passBuf.jahLampInvView1.xyz, viewPos ) + passBuf.jahLampInvView1.w,
+								  dot( passBuf.jahLampInvView2.xyz, viewPos ) + passBuf.jahLampInvView2.w );
+		const float3 wl = float3( dot( passBuf.jahLampInvView0.xyz, viewLamp ) + passBuf.jahLampInvView0.w,
+								  dot( passBuf.jahLampInvView1.xyz, viewLamp ) + passBuf.jahLampInvView1.w,
+								  dot( passBuf.jahLampInvView2.xyz, viewLamp ) + passBuf.jahLampInvView2.w );
+		float3 wn = float3( dot( passBuf.jahLampInvView0.xyz, viewGeomN ), dot( passBuf.jahLampInvView1.xyz, viewGeomN ),
+							dot( passBuf.jahLampInvView2.xyz, viewGeomN ) );
+		const float cell0 = passBuf.jahLampChainOrigin[0].w;
+		// (no chain described - a cell not positive, by its bits: nothing the voxels hold can stop the lamp)
+		if( floatBitsToInt( cell0 ) <= 0 || jahInjNonFinite( cell0 ) || !( dot( wn, wn ) > 0.0 ) )
+			return 1.0;
+		wn = normalize( wn );
+		if( dot( wn, wl - wp ) < 0.0 )
+			wn = -wn;
+		const float3 start = wp + wn * cell0;
+		const float3 d = wl - start;
+		const float len = length( d );
+		if( !( len > 0.0 ) || jahInjNonFinite( len ) )
+			return 1.0;
+		const float3 sW = start - passBuf.jahLampChainCorner.xyz;
+		return jahInjectVisibility( sW, d * ( 1.0 / len ), len, int3( floor( sW / cell0 ) ), -1, 0.0, 0.0 );
+	}
+@end
+@piece( custom_ps_fwdplus_lamp )
+			if( atten > _h( 0.0 ) &&
+				max( dot( float3( pixelData.normal ), lightDir ), dot( float3( pixelData.geomNormal ), lightDir ) ) > 0.0 )
+				atten *= midf_c( jahLampVoxelView( inPs.pos.xyz, posAndType.xyz, float3( pixelData.geomNormal ) ) );
 @end
 @end

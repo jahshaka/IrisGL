@@ -133,9 +133,9 @@
 		float4 jahCloudMap;			// x = 1 / tile (1/m), y = shadow strength, zw = scroll (m)
 		float4 jahCloudSun;			// xy = toSun.xz / toSun.y, z = altitude (m), w = 1 / mu_s
 	@end
-	@property( jah_lamp_rays )
+	@property( jah_lamp_rays || jah_lamp_voxels )
 		// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9), after the cloud block - everything before it padded
-		// when its own feature is absent, the same rule
+		// when its own feature is absent, the same rule (the ray tier's TLAS, or the no-ray tier's voxel chain)
 		@property( !jah_cloud_shadow )
 			@property( !jah_shader_clock && !irradiance_field && !jah_env )
 				@property( !hlms_fog )
@@ -162,6 +162,14 @@
 		uint4 jahLampAddr;			// the TLAS's device address (xy) and the alpha table's (zw), as uints: never
 									// through floatBitsToUint - the SPIR-V optimiser folds that bitcast into the
 									// pointer's own, an invalid one (VUID-VkShaderModuleCreateInfo-pCode-08737)
+		@property( jah_lamp_voxels )
+			// THE VOXEL CHAIN the no-ray tier's lamp march runs through (PhotonVoxelLighting::chainMarchParams, at most
+			// kGiTierMaxCascades = 4 entries): per entry its box corner relative to cascade 0's (metres; w its cell)
+			// and its resolution (xyz) with the world distance its shell ends at (w); cascade 0's corner in the world
+			float4 jahLampChainOrigin[4];
+			float4 jahLampChainRes[4];
+			float4 jahLampChainCorner;
+		@end
 	@end
 @end
 
@@ -362,8 +370,20 @@
 // kernel as wide as the altitude -- uniform across any scene -- and that
 // uniform part is already in the ambient, because the environment capture
 // photographs the sheet.
-@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+// THE ONE custom_ps_functions (upstream inserts it once, after every texture's declaration, the voxel volumes' too): the
+// cloud sheet's transmittance below and the no-ray tier's lamp march (JahLampRay_piece_ps.any's JahLampVoxelFuncs)
+@property( ( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass ) || jah_lamp_voxels )
 @piece( custom_ps_functions )
+@property( jah_lamp_voxels )
+@insertpiece( JahLampVoxelFuncs )
+@end
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@insertpiece( JahCloudSunFunctions )
+@end
+@end
+@end
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@piece( JahCloudSunFunctions )
 #define JAH_CLOUD_TAU( uv ) OGRE_SampleLevel( jahCloudField, jahCloudSampler, uv, 0.0 ).x
 @insertpiece( JahCloudShadow )
 midf jahCloudSunTransmittance( float3 viewPos )
