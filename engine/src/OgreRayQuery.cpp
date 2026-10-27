@@ -11836,6 +11836,7 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     // ONLY WHERE A RECORD CAN BE MADE: a scene with no blended material appends none and holds no list (the pixels'
     // sums are 12 bytes a pixel). Its pipelines were built ahead at the tier's open (startAhead).
     if (!scene->hasBlended()) return;
+    joinAhead(kAheadGlassEscape);   // (the worker writes mEscPipeline: joined before it is read - the read's F10)
     std::string err;
     if (!mEscPipeline && !makeGlassEscapePipelines(err)) {
         mEscFailed = true;
