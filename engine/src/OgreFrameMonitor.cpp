@@ -1632,6 +1632,10 @@ constexpr ArmDef kArms[] = {
       "THE NO-RAY ROUTE'S A/B (PHOTON-7 stage 7, 7-6; a measuring door): 1 = a chain that does not gather shades its "
       "opaque passes with the pixel's own cones and field cage (the voxel route) instead of the screen integrate's "
       "products - the picture the producer is held against. 0 = shipped." },
+    { ArmId::LampVoxels, 1.0, 0.0, 1.0,
+      "MEASURING ARM (PHOTON-7 10-4 R9's no-ray price; reverted after the measurement): 1 = the Forward+ lamps seen "
+      "through the voxel chain's march; 0 = the pass buffer's chain block is zeros, the march answers 1 at once (the "
+      "same permutation)." },
     { ArmId::AreaVisReadback, 0.0, 0.0, 1.0,
       "THE PIXEL'S AREA LIGHT VISIBILITY READ BACK (PHOTON-7 stage 7, 7-A; a test door, gi.card_lamp_shadow's pixel arms): "
       "1 = every frame the ray tier copies its jahAreaVis (RG32_UINT: x the forward LTC light i's diffuse visible share in "
