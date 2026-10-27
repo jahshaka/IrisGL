@@ -52,6 +52,7 @@
 // (JAH_RAY_QUERY, set by CMake — macOS takes that path, because MoltenVK
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
 #include "AtomPass.h"
+#include <thread>
 #include "ReadbackDecode.h"
 #include "EnginePrivate.h"
 #include "GpuCheckpoints.h"
@@ -412,6 +413,13 @@ inline uint32_t coarsestLevelOf(const Ogre::Mesh *mesh) {
 /// process-wide, the acceleration structures are per SCENE (each scene draws
 /// its own items, and a probe preview or a thumbnail scene must never appear in
 /// the editor's structure).
+/// One pipeline an ahead build made on a worker (RayQueryTier::startAhead): logged by the render thread at the join.
+struct RayAheadNote {
+    std::string name;
+    double ms = 0.0;
+    VkResult r = VK_SUCCESS;
+};
+
 class RayQueryTier final : public GatherHost {
 public:
     ~RayQueryTier() { close(); }
@@ -828,6 +836,36 @@ private:
     VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out, const char *name);
     unsigned mPipelinesBuilt = 0;
     double   mPipelineBuildMs = 0.0;
+    /// THE HEAVY PIPELINES ARE BUILT AHEAD, ON WORKERS (the lead's ruling, 2026-10-27; samples.cold_open): the
+    /// driver's compile of the ray pipelines was ~14 s of every cold boot, SERIAL on the render thread at each
+    /// feature's first frame. open() starts the four whose setup is pure Vulkan of our own - the reflection's six
+    /// (rq_reflect and its compact twin, ~8 s cold), the cards' gather and movers, the voxel sides - each its
+    /// make*Pipeline on its own std::thread: our VkPipeline / layout / module / pool objects only (DOCS/traps/
+    /// ENGINE.md, OGRE_THREAD_SUPPORT IS 0: no Ogre object is made or touched there - the shared samplers are made
+    /// on the render thread before), the device's VkPipelineCache (internally synchronised: Ogre creates it without
+    /// EXTERNALLY_SYNCHRONIZED). A worker LOGS NOTHING (Ogre's log is not thread-safe here): its builds' lines and
+    /// the shader cache's dirt note are written by the render thread when it JOINS - at the first function that
+    /// reads the setup's members (joinAhead), before any of them is read. The same create infos, the same cache
+    /// key, the same pipelines: the picture and the shader cache are unchanged.
+    enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadCount };
+    struct Ahead {
+        std::thread th;
+        bool started = false, joined = false, ok = false;
+        std::string err;
+        std::vector<RayAheadNote> notes;   // the worker's own, read after the join
+    };
+    Ahead mAhead[kAheadCount];
+    void startAhead();
+    void joinAhead(AheadId id);
+    /// make*Pipeline's front door: the ahead build's answer once joined, else the build now.
+    template <class F> bool aheadOr(AheadId id, std::string &err, F now) {
+        joinAhead(id);
+        if (mAhead[id].started) {
+            if (!mAhead[id].ok) err = mAhead[id].err;
+            return mAhead[id].ok;
+        }
+        return now(err);
+    }
 public:
     /// THE MEASUREMENT ARMS (lane TEST-1): the engine's registry, latched each frame.
     void setArms(const ArmRegistry *arms) { mArms = arms; }
@@ -1198,7 +1236,10 @@ private:
         std::vector<float> histHostSe;
     };
 
-    bool makeReflectPipeline(std::string &err);
+    bool makeReflectPipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
+        return aheadOr(kAheadReflect, err, [this](std::string &e) { return makeReflectPipelineNow(e); });
+    }
+    bool makeReflectPipelineNow(std::string &err);
     /// The point and linear samplers every job of the tier binds (made once).
     bool ensureSamplers(std::string &err);
     bool ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, unsigned layers, bool reference,
@@ -1715,7 +1756,10 @@ private:
         RawBuffer       records[kReflectRing];
         unsigned frame = 0;
     };
-    bool makeCardMoverPipeline(std::string &err);
+    bool makeCardMoverPipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
+        return aheadOr(kAheadCardMovers, err, [this](std::string &e) { return makeCardMoverPipelineNow(e); });
+    }
+    bool makeCardMoverPipelineNow(std::string &err);
     /// Per scene, one view per MODE of the job (rq_card_movers.comp): the movers'
     /// trace and the still world's — each its own ring and sets, since
     /// both record in one frame.
@@ -1756,7 +1800,10 @@ private:
         unsigned frame = 0;
         CardCacheStatus::GatherCounts total;
     };
-    bool makeCardGatherPipeline(std::string &err);
+    bool makeCardGatherPipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
+        return aheadOr(kAheadCardGather, err, [this](std::string &e) { return makeCardGatherPipelineNow(e); });
+    }
+    bool makeCardGatherPipelineNow(std::string &err);
     void foldCardGatherCounts(CardGatherView &v);
     std::unordered_map<const OgreScene *, CardGatherView> mCardGather;
     VkDescriptorSetLayout mCgSetLayout = VK_NULL_HANDLE;
@@ -1788,7 +1835,10 @@ private:
         unsigned call = 0;
         GiStatus::VoxelSideCounts total;
     };
-    bool makeVoxelSidePipeline(std::string &err);
+    bool makeVoxelSidePipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
+        return aheadOr(kAheadVoxelSides, err, [this](std::string &e) { return makeVoxelSidePipelineNow(e); });
+    }
+    bool makeVoxelSidePipelineNow(std::string &err);
     void foldVoxelSideCounts(VoxelSideView &v);
     std::unordered_map<const OgreScene *, VoxelSideView> mVoxelSides;
     VkDescriptorSetLayout mVsSetLayout = VK_NULL_HANDLE;
@@ -2027,7 +2077,10 @@ void RayQueryTier::retireView(VkImageView v) {
     mRetireBin.push_back(r);
 }
 
-void RayQueryTier::retireSet(VkDescriptorSet set) { retireSet(set, mReflectPool); }
+void RayQueryTier::retireSet(VkDescriptorSet set) {
+    joinAhead(kAheadReflect);   // (mReflectPool is the ahead build's)
+    retireSet(set, mReflectPool);
+}
 
 void RayQueryTier::retireSet(VkDescriptorSet set, VkDescriptorPool pool) {
     if (!set) return;
@@ -2329,11 +2382,20 @@ void RayQueryTier::drainRetired() {
     mRetireBin.resize(out);
 }
 
+namespace {
+/// The ahead build a worker runs (RayQueryTier::startAhead), null on every other thread.
+thread_local std::vector<RayAheadNote> *tAheadNotes = nullptr;
+}   // namespace
+
 VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out,
                                              const char *name) {
     const auto t0 = std::chrono::steady_clock::now();
     const VkResult r = vkCreateComputePipelines(mVk, mDev ? mDev->mPipelineCache : VK_NULL_HANDLE, 1, &cpi, nullptr, out);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (tAheadNotes) {   // a worker: noted for the join, never logged here
+        tAheadNotes->push_back({ name ? name : "", ms, r });
+        return r;
+    }
     ++mPipelinesBuilt;
     mPipelineBuildMs += ms;
     if (r == VK_SUCCESS) ShaderCache::noteEnginePipeline(ms, name);   // dirt for the pipeline layer
@@ -2467,7 +2529,48 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     }
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka: hardware ray-query tier open (PHOTON R1)");
+    startAhead();
     return true;
+}
+
+void RayQueryTier::startAhead() {
+    // THE SHARED SAMPLERS FIRST, HERE (the setups read them; a worker never makes a shared object)
+    std::string err;
+    if (!ensureSamplers(err)) return;   // every setup would fail the same way: they run now, as before
+    const auto launch = [this](AheadId id, bool (RayQueryTier::*make)(std::string &)) {
+        Ahead &a = mAhead[id];
+        a.started = true;
+        a.th = std::thread([this, &a, make]() {
+            tAheadNotes = &a.notes;
+            a.ok = (this->*make)(a.err);
+            tAheadNotes = nullptr;
+        });
+    };
+    launch(kAheadReflect, &RayQueryTier::makeReflectPipelineNow);
+    launch(kAheadCardGather, &RayQueryTier::makeCardGatherPipelineNow);
+    launch(kAheadCardMovers, &RayQueryTier::makeCardMoverPipelineNow);
+    launch(kAheadVoxelSides, &RayQueryTier::makeVoxelSidePipelineNow);
+}
+
+void RayQueryTier::joinAhead(AheadId id) {
+    Ahead &a = mAhead[id];
+    if (!a.started || a.joined) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (a.th.joinable()) a.th.join();
+    a.joined = true;
+    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    // ITS BUILDS' LINES, in the order they were made, as the render thread would have written them
+    for (const RayAheadNote &n : a.notes) {
+        ++mPipelinesBuilt;
+        mPipelineBuildMs += n.ms;
+        if (n.r == VK_SUCCESS) ShaderCache::noteEnginePipeline(n.ms, n.name.c_str());
+        Ogre::LogManager::getSingleton().logMessage(
+            "rayquery: compute pipelines " + std::to_string(mPipelinesBuilt) + " built, this one (" + n.name + ") " +
+            std::to_string(n.ms) + " ms, " + std::to_string(mPipelineBuildMs) + " ms in all" +
+            (mDev && mDev->mPipelineCache ? " (through the device's pipeline cache)" : " (no pipeline cache)") +
+            " - built ahead on a worker, the render thread waited " + std::to_string(waited) + " ms");
+    }
+    a.notes.clear();
 }
 
 bool RayQueryTier::makePipeline(std::string &err) {
@@ -2558,6 +2661,8 @@ void RayQueryTier::releaseScene(OgreScene *scene) {
 
 void RayQueryTier::close() {
     if (!mVk) return;
+    // the ahead builds first: they write the members this destroys
+    for (unsigned i = 0; i < kAheadCount; ++i) joinAhead(AheadId(i));
     // EVERY STRUCTURE DIES WHILE THE DEVICE IS STILL ALIVE. This runs from
     // OgreEngine::shutdownRayQuery, before Root is deleted — the same rule the
     // engine's MeshPtrs obey, and for the same reason.
@@ -5736,7 +5841,7 @@ static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IM
 static_assert(kReflectTypes[kReflectPhotonBinding] == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
               "the writer's storage-image bindings are the layout's");
 
-bool RayQueryTier::makeReflectPipeline(std::string &err) {
+bool RayQueryTier::makeReflectPipelineNow(std::string &err) {
     // THE HIT SET laid out by its one function (kReflectHitSlots), the set's own bindings by the table.
     VkDescriptorSetLayoutBinding b[kReflectBindings] = {};
     hitSetLayout(kReflectHitSlots, b);
@@ -6087,6 +6192,7 @@ void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned
 
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  Ogre::CompositorPass *pass, const HitListBinding &hit) {
+    joinAhead(kAheadReflect);   // (its members are read below: the ahead build is joined first)
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -7755,6 +7861,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
 }
 
 void RayQueryTier::finishReflect(const ReflectPassListener *key) {
+    joinAhead(kAheadReflect);   // (its members are read below: the ahead build is joined first)
     auto it = mReflects.find(key);
     if (it == mReflects.end() || !it->second.finishPending) return;
     ReflectView &rv = it->second;
@@ -9448,7 +9555,7 @@ constexpr unsigned kCardMoverMaxRecords = 1024u;
 constexpr unsigned kCardMoverRecordFloats = 36u;   // the relight's record: five vec4, then the card's 16 lamp ids
 }   // namespace
 
-bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
+bool RayQueryTier::makeCardMoverPipelineNow(std::string &err) {
     if (!mDev || !mDev->mPhysicalDevice || !sunContactFormatStores(mDev->mPhysicalDevice)) {
         err = "the device cannot store to R8_UNORM (VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)";
         return false;
@@ -9522,6 +9629,7 @@ bool RayQueryTier::makeCardMoverPipeline(std::string &err) {
 }
 
 bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
+    joinAhead(kAheadCardMovers);   // (its members are read below: the ahead build is joined first)
     if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis ||
         !job.shadowRough || !job.lights || !job.sunVis)
         return false;
@@ -9787,7 +9895,7 @@ constexpr unsigned kCardGatherCountWords = kCardGatherCounts + kCardGatherMaxRec
 constexpr float kCardGatherSunRange = 10000.0f;
 }   // namespace
 
-bool RayQueryTier::makeCardGatherPipeline(std::string &err) {
+bool RayQueryTier::makeCardGatherPipelineNow(std::string &err) {
     if (!ensureSamplers(err)) return false;
     VkDescriptorSetLayoutBinding b[kCardGatherBindings] = {};
     hitSetLayout(kCardGatherHitSlots, b);
@@ -9866,6 +9974,7 @@ void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
 }
 
 CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTrace &job) {
+    joinAhead(kAheadCardGather);   // (its members are read below: the ahead build is joined first)
     // THE TIER: a scene that does not trace (the project's rays off, or no device) gathers by the voxel rays.
     if (!isOpen() || !scene || !scene->rayTracingResolved() || mCgFailed) return CardGatherResult::NoRays;
     if (!job.count || !job.records || !job.gather || !job.reads) return CardGatherResult::Wait;
@@ -10130,7 +10239,7 @@ static_assert(kVoxelSideBindings == kHitSetBindings + 4u, "the sides' gather set
 constexpr unsigned kVoxelSideCounts = 9u;
 }   // namespace
 
-bool RayQueryTier::makeVoxelSidePipeline(std::string &err) {
+bool RayQueryTier::makeVoxelSidePipelineNow(std::string &err) {
     if (!ensureSamplers(err)) return false;
     VkDescriptorSetLayoutBinding b[kVoxelSideBindings] = {};
     hitSetLayout(kCardGatherHitSlots, b);
@@ -10200,6 +10309,7 @@ void RayQueryTier::foldVoxelSideCounts(VoxelSideView &v) {
 }
 
 int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSideTrace &job, unsigned cascade) {
+    joinAhead(kAheadVoxelSides);   // (its members are read below: the ahead build is joined first)
     // THE TIER: a scene that does not trace keeps the voxel rays (the no-ray route); one whose structure is not there
     // this pass WAITS (the voxel rays this pass, counted)
     if (!isOpen() || !scene || !scene->rayTracingResolved() || mVsFailed) return 0;
