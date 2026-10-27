@@ -147,7 +147,7 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9] )
 		float through = 1.0;
 		vec3 paneLight = vec3( 0.0 );
 		if( jahPanesInFront( panes, committed ? rayQueryGetIntersectionTEXT( rq, true ) : p.knobs.y ) > 0 )
-			paneLight = jahPanesOwnLight( panes, origin, dir, spread, through );
+			paneLight = jahPanesOwnLight( panes, origin, dir, through );
 		if( !committed )
 		{
 			sum += paneLight + through * jahEnvCone( dir, binTan );

@@ -790,12 +790,11 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		const bool crossedPanes = panes.n + panesFar.n > 0;
 		if( crossedPanes )
 		{
-			const float paneSpread = reflectFootprint( lobeAlpha, 1.0 );
 			// the near list, then the far one, through ONE call of the fold (its shading inlined once)
 			[[dont_unroll]] for( int list = 0; list < 2; ++list )
 			{
 				float th = 1.0;
-				const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, L, paneSpread, th );
+				const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, L, th );
 				paneLight += through * own;
 				through *= th;
 			}

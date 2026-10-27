@@ -397,11 +397,14 @@ void main()
 		vec3 paneLight = vec3( 0.0 );
 		if( panes.n + panesFar.n > 0 )
 		{
-			paneLight = jahPanesOwnLight( panes, origin, dir, spread, through );
-			float throughFar = 1.0;
-			const vec3 farLight = jahPanesOwnLight( panesFar, origin, dir, spread, throughFar );
-			paneLight += through * farLight;
-			through *= throughFar;
+			// the near list, then the far one, through ONE call of the fold
+			[[dont_unroll]] for( int list = 0; list < 2; ++list )
+			{
+				float th = 1.0;
+				const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, dir, th );
+				paneLight += through * own;
+				through *= th;
+			}
 		}
 		vec3 radiance = vec3( 0.0 );
 		uint source = 0u;		// the instrument's (FAR-SUN-1): what answered this ray
