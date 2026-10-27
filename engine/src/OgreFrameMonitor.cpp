@@ -1517,9 +1517,9 @@ constexpr ArmDef kArms[] = {
       "THE DECODE'S DISCRIMINATOR (a test door, ATOM-BLACK-FRAMES-1): 1 = a colour code per failed "
       "validity term instead of the discard, 2 = also the code chart. 0 = shipped. scale's decode "
       "rows. Was JAHSHAKA_ATOM_DISCRIMINATE (a per-pass read)." },
-    { ArmId::AtomHitWorldLights, 0.0, 0.0, 2.0,
-      "The ray-hit decode's light list: 0 = shipped (the world list where the hit has no cell), "
-      "1 = off (the picture before the list), 2 = all (every hit the world list, no Forward+ cell). "
+    { ArmId::AtomHitWorldLights, 0.0, 0.0, 1.0,
+      "The ray-hit decode's light list: 0 = shipped (every hit the world list, each lamp traced from the hit - "
+      "PHOTON-7 10-4 R9 deleted the hit's Forward+ cell), 1 = off (the picture before the list). "
       "gi.hit_shade. Was JAHSHAKA_HIT_WORLD_LIGHTS (a per-pass read)." },
     { ArmId::AtomHitVctSpecular, 1.0, 0.0, 1.0,
       "The voxel specular (the roughness split: K(alpha) rays and the field along R) in the ray-hit decode. 0 = "

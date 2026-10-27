@@ -1131,14 +1131,11 @@ Ogre::HlmsCache HlmsAtom::preparePassHash(const Ogre::CompositorShadowNode *shad
     //   atom.hitWorldLights = 1   the world light list is not read (the picture
     //                             before that lane: a hit with no cell gets no
     //                             point or spot light);
-    //   atom.hitWorldLights = 2   EVERY hit takes the world list and no Forward+
-    //                             cell (the "one list" arm);
     //   atom.hitVctSpecular = 0   the VCT specular cone compiled out of the hit
     //                             decode (vct_disable_specular).
     if (mArms) {
         const int w = int(mArms->value(ArmId::AtomHitWorldLights));
         if (w == 1) setProperty(props, Ogre::IdString("atom_hit_world_off"), 1);
-        else if (w == 2) setProperty(props, Ogre::IdString("atom_hit_world_all"), 1);
         if (!mArms->on(ArmId::AtomHitVctSpecular))
             setProperty(props, Ogre::IdString("vct_disable_specular"), 1);
     }
