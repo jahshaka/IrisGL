@@ -700,7 +700,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         if (hlms->getType() == Ogre::HLMS_PBS) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays_pbs", 1);
         // THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): the ray tier's blended pass and its refractives append their
         // open shares' records (PhotonVct_piece_ps.any) - the PBS template's passes (its PhotonVct reads the volumes)
-        if (rec->escapePass && !casterPass && hlms->getType() == Ogre::HLMS_PBS)
+        if (false && rec->escapePass && !casterPass && hlms->getType() == Ogre::HLMS_PBS)   // MEASURING ARM (reverted after)
             hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_glass_escape", 1);
     }
     // ...AND AT THE NO-RAY TIER, THE VOXEL CHAIN'S MARCH (the lead's ruling, 2026-10-27): every colour pass of a scene
