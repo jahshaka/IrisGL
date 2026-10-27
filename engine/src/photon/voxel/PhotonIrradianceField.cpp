@@ -1295,6 +1295,11 @@ namespace Ogre
             fillChainParams();
             fillEnvironmentParams();
             fillProbeTransform();
+            // THE WORLD's BOX (PHOTON-7 10-3 R4 (a)): a probe ray's escape is the sky only past the world's exit
+            float world[8];
+            mVctLighting->getWorldBoxNormalised( world );
+            mIfGenParams.worldLsMin = float4( Vector4( world[0], world[1], world[2], world[3] ) );
+            mIfGenParams.worldLsMax = float4( Vector4( world[4], world[5], world[6], world[7] ) );
         }
 
         mIfGenParams.numProcessedProbes = listStart;

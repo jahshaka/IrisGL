@@ -937,6 +937,10 @@ public:
     void updateSurfaceCacheFrame(bool &built);
     /// THE CACHE RAYS' LAST WORLD SHELL, metres (PHOTON-7 stage 10, 10-1): the outermost cascade's guaranteed radius.
     float rayLastShellMetres() const;
+    /// THE WORLD's BOX (PHOTON-7 10-3 R4; L9: "ran out of distance" is not a miss): the union of the world AABBs of every
+    /// item a ray can hit (its GPU-scene slot) - where a ray EXITS the world, the only place it reads the sky. The sky is
+    /// a pass, never an instance. False with no such item. Pushed into every cascade's lighting each frame (plan).
+    bool worldBox(float lo[3], float hi[3]) const;
     void notePhotonView(const void *view, bool presents, const PhotonViewShape &shape);
     bool readCardTexel(NodeId node, unsigned card, float u, float v,
                        CardSample &out);

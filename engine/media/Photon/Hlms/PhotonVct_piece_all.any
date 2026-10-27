@@ -39,6 +39,10 @@
 		float4 xformCube_row0;
 		float4 xformCube_row1;
 		float4 xformCube_row2;
+
+		// PHOTON-7 10-3 R4 (a): the world's box in the probe's normalised space (xyz; the minimum's w 1 = known)
+		float4 worldLsMin;
+		float4 worldLsMax;
 	};
 @end
 @piece( DeclVctUniform )

@@ -383,6 +383,31 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 	return r;
 }
 
+/// AN ESCAPE IS THE SKY ONLY PAST THE WORLD's EXIT (PHOTON-7 10-3 R4 (a); L9: "ran out of distance" is not a miss): a
+/// ray that left the chain (ESCAPED, `tEscape` along unit `dirLS` from `startLS`, the start's normalised units) before
+/// it left the world's box - the traced instances' union, which the caller binds in the start's normalised space as
+/// JAH_WORLD_LS_ON / _MIN / _MAX - has run out of the chain, not out of the world: no sample, never the sky. Without the
+/// box every escape is an exit.
+#ifndef JAH_WORLD_LS_ON
+#define JAH_WORLD_LS_ON false
+#define JAH_WORLD_LS_MIN vec3( 0.0, 0.0, 0.0 )
+#define JAH_WORLD_LS_MAX vec3( 0.0, 0.0, 0.0 )
+#endif
+bool jahEscapeIsExit( vec3 startLS, vec3 dirLS, float tEscape )
+{
+	if( !( JAH_WORLD_LS_ON ) )
+		return true;
+	const vec3 lo = JAH_WORLD_LS_MIN, hi = JAH_WORLD_LS_MAX;
+	float tExit = 1e30;
+	for( int a = 0; a < 3; ++a )
+	{
+		if( dirLS[a] == 0.0 )
+			continue;
+		tExit = min( tExit, ( ( dirLS[a] > 0.0 ? hi[a] : lo[a] ) - startLS[a] ) / dirLS[a] );
+	}
+	return tEscape >= tExit;
+}
+
 // (THE WORLD CACHES' DIRECTIONS - jahRayCosineDir - are jah_ray_set.glsl's, with the frame they are lifted in.)
 
 #endif   // JAH_VOXEL_RAY_GLSL

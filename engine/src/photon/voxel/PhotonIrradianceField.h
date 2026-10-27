@@ -229,6 +229,9 @@ namespace Ogre
             // precision (the 95 % t interval / mean), y = the fewest samples a stop follows (0: off), z = the
             // no-light mean floor (such a texel never stops its probe), w unused (setVarianceStop).
             float4 varianceStop;
+            // PHOTON-7 10-3 R4 (a): the world's box in cascade 0's normalised space ( corner, 1 = known ), ( far corner )
+            float4 worldLsMin;
+            float4 worldLsMax;
         };
 
         struct IfdBorderMirrorParams

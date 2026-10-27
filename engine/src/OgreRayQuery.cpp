@@ -7607,22 +7607,8 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     out = HitSetSources{};
     out.hit = hit;
     out.tlas = sa.tlas;
-    // THE WORLD's BOX: every item a ray can hit (its GPU-scene slot: the TLAS's instance set), its world AABB - the
-    // sky is a pass, never an instance, and an instance's extent IS world a ray can hit
-    for (const auto *np : scene->itemNodes()) {
-        const Ogre::Item *item = np ? np->item : nullptr;
-        if (!item || np->itemSlot == size_t(-1)) continue;
-        const Ogre::Aabb wa = item->getWorldAabb();
-        if (!std::isfinite(wa.mHalfSize.x) || !std::isfinite(wa.mHalfSize.y) || !std::isfinite(wa.mHalfSize.z) ||
-            !std::isfinite(wa.mCenter.x) || !std::isfinite(wa.mCenter.y) || !std::isfinite(wa.mCenter.z))
-            continue;
-        const Ogre::Vector3 lo = wa.getMinimum(), hi = wa.getMaximum();
-        for (int k = 0; k < 3; ++k) {
-            out.worldMin[k] = out.worldOn ? std::min(out.worldMin[k], lo[k]) : lo[k];
-            out.worldMax[k] = out.worldOn ? std::max(out.worldMax[k], hi[k]) : hi[k];
-        }
-        out.worldOn = true;
-    }
+    // THE WORLD's BOX (PhotonComponent::worldBox: the traced instances' union - the sky is a pass, never an instance)
+    out.worldOn = scene->photon().worldBox(out.worldMin, out.worldMax);
     // ---- THE VOXEL CACHE THE HITS ARE SHADED FROM: each cascade of the Photon chain is its OWN PhotonVoxelLighting
     // (chained with addCascade, OgreGi.cpp), innermost first - the order the shaders want: they take the first volume
     // that contains the hit, so the finest one that can answer does.

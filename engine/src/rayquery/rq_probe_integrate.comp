@@ -221,6 +221,10 @@ layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
 #define JAH_VOX_FROM_PREV_SCALE( c ) vec4( JAH_VOX_INVSIZE( c ).xyz / JAH_VOX_INVSIZE( (c) - 1 ).xyz, 0.0 )
 #define JAH_VOX_FROM_PREV_OFFSET( c ) \
 	vec4( ( JAH_VOX_ORIGIN( (c) - 1 ).xyz - JAH_VOX_ORIGIN( c ).xyz ) * JAH_VOX_INVSIZE( c ).xyz, 0.0 )
+// THE WORLD's BOX (PHOTON-7 10-3 R4 (a)) in cascade 0's normalised space: an escape is the sky only past its exit
+#define JAH_WORLD_LS_ON JAH_WORLD_ON
+#define JAH_WORLD_LS_MIN ( ( p.hit.worldMin.xyz - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz )
+#define JAH_WORLD_LS_MAX ( ( p.hit.worldMax.xyz - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz )
 #include "jah_ray_set.glsl"
 #include "jah_voxel_ray.glsl"
 // the cone frame is built in WORLD space (jahConeBasisWorld): a direction reaches cascade 0's normalised space through

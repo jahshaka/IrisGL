@@ -112,6 +112,9 @@ struct ScreenGiParams
 	vec4 fieldWin;
 	// THE FOG LAW (OgreScene::fogAlong's eight: jah_fog_along.glsl's JAH_FOG_P)
 	vec4 fog[8];
+	// THE WORLD's BOX (PHOTON-7 10-3 R4 (a)), cascade 0's normalised space: xyz the corners, the minimum's w 1 = known
+	vec4 worldLsMin;
+	vec4 worldLsMax;
 };
 layout( std430, ogre_U3 ) readonly restrict buffer screenGiLayout { ScreenGiParams p; };
 
@@ -173,6 +176,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) p.chainFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	#define JAH_WORLD_LS_ON ( p.worldLsMin.w > 0.5 )
+	#define JAH_WORLD_LS_MIN p.worldLsMin.xyz
+	#define JAH_WORLD_LS_MAX p.worldLsMax.xyz
 	@insertpiece( JahVoxelRay )
 	#define JAH_CONES_TO_LS( d ) normalize( ( d ) * p.volumeInvSize.xyz )
 	#define JAH_CONES_TO_WORLD( d ) ( d )

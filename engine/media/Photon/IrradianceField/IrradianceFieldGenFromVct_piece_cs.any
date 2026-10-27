@@ -52,6 +52,9 @@
 		// fewest samples a stop may follow (0: the stop is off), z = the mean at or below
 		// which a texel has read no light (it never stops its probe), w unused.
 		float4 varianceStop;
+		// PHOTON-7 10-3 R4 (a): the world's box in cascade 0's normalised space (xyz; minimum's w 1 = known)
+		float4 worldLsMin;
+		float4 worldLsMax;
 	}
 	CONST_BUFFER_STRUCT_END( p );
 
@@ -94,6 +97,9 @@
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) p.vctFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	#define JAH_WORLD_LS_ON ( p.worldLsMin.w > 0.5 )
+	#define JAH_WORLD_LS_MIN p.worldLsMin.xyz
+	#define JAH_WORLD_LS_MAX p.worldLsMax.xyz
 	@insertpiece( JahVoxelRay )
 
 	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped
@@ -356,9 +362,11 @@
 		// room's last 1.76 % of sky). A probe is a point in free space: no surface, no own cell.
 		const JahVoxelRayResult ray = jahVoxelRay( posLS + startBias, dirLS, float3( 0, 0, 0 ), float3( 0, 0, 0 ), 0.0,
 												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w, true );
-		// (a ray no cascade held - OUTSIDE - is no sample here: a probe beyond the chain is not the chain's to answer)
-		const bool sampled = ray.exitReason == kJahRayHit || ray.exitReason == kJahRayEscaped;
-		const float3 sky = ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
+		// (a ray no cascade held - OUTSIDE - is no sample here: a probe beyond the chain is not the chain's to answer;
+		// nor is an escape before the world's exit: R4 (a), only an exit is the sky)
+		const bool exits = ray.exitReason == kJahRayEscaped && jahEscapeIsExit( posLS + startBias, dirLS, ray.tC0 );
+		const bool sampled = ray.exitReason == kJahRayHit || exits;
+		const float3 sky = exits ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
 		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's
 		// age converted back into cascade 0's normalised units, plus the start bias's
 		// own length - and BOUNDED at cascade 0's diagonal, 1.414, the old march's own

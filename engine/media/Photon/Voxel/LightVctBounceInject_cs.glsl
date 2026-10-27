@@ -140,6 +140,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	// cascade is the finest (its planar cells take the ray's plane test)
 	uniform float4 rayParams;
 	uniform float4 rayCounts;
+	// PHOTON-7 10-3 R4 (a): the world's box in this cascade's normalised space (xyz; the minimum's w 1 = known)
+	uniform float4 worldLsMin;
+	uniform float4 worldLsMax;
 vulkan( }; )
 
 #define p_voxelCellSize voxelCellSize
@@ -151,6 +154,8 @@ vulkan( }; )
 #define p_envSh envSh
 #define p_rayParams rayParams
 #define p_rayCounts rayCounts
+#define p_worldLsMin worldLsMin
+#define p_worldLsMax worldLsMax
 #define p_brickMark brickMark
 
 @insertpiece( HeaderCS )

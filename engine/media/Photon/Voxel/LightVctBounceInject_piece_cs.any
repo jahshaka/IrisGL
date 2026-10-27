@@ -43,6 +43,9 @@
 	@end
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	#define JAH_WORLD_LS_ON ( p_worldLsMin.w > 0.5 )
+	#define JAH_WORLD_LS_MIN p_worldLsMin.xyz
+	#define JAH_WORLD_LS_MAX p_worldLsMax.xyz
 	@insertpiece( JahVoxelRay )
 
 	// THE ONE ENVIRONMENT (Jahshaka, PHOTON-ENV-1; jah_environment.glsl, wrapped

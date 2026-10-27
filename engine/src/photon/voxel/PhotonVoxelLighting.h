@@ -252,6 +252,9 @@ namespace Ogre
         bool              mFeedbackOn = true;
         /// THE CACHE RAYS (PHOTON-7 stage 10, 10-1; setCacheRays): the last world shell, metres, and the rays a side.
         float             mCacheRayShell = 0.0f;
+        /// THE WORLD's BOX (PHOTON-7 10-3 R4 (a); setWorldBox): the traced instances' union, world metres.
+        float             mWorldMin[3] = { 0.0f, 0.0f, 0.0f }, mWorldMax[3] = { 0.0f, 0.0f, 0.0f };
+        bool              mWorldOn = false;
         float             mCacheRayBias = 0.0f;
         float             mCacheRayFirstShell = 0.0f;
         bool              mCacheRayFinest = true;
@@ -327,6 +330,8 @@ namespace Ogre
         ShaderParams::Param *mBounceBrickMark = nullptr;
         ShaderParams::Param *mBounceRayParams = nullptr;
         ShaderParams::Param *mBounceRayCounts = nullptr;
+        ShaderParams::Param *mBounceWorldMin = nullptr;   // PHOTON-7 10-3 R4 (a): the world's box, this cascade's space
+        ShaderParams::Param *mBounceWorldMax = nullptr;
         void ensureBrickMask();
         void requestBrickReading();
         ShaderParams::Param *mInjectKeepLo = nullptr;
@@ -500,6 +505,21 @@ namespace Ogre
         /// guaranteed radius: PhotonComponent::rayLastShellMetres), each started `biasMetres` off its surface (the
         /// finest cascade's cell, at every cascade), this cascade's own rays reading it to the WORLD's shell end
         /// `firstShellMetres` (the sum of eight cells of every cascade up to this one).
+        /// THE WORLD's BOX (PHOTON-7 10-3 R4 (a); L9: "ran out of distance" is not a miss): where a ray EXITS the world -
+        /// a voxel ray that leaves the chain before it is no sample, only one past it the sky (jah_voxel_cones.glsl's
+        /// jahEscapeIsExit). PhotonComponent pushes it every frame; `on` false: no instance (every escape an exit).
+        void setWorldBox( const float lo[3], const float hi[3], bool on )
+        {
+            for( int k = 0; k < 3; ++k )
+            {
+                mWorldMin[k] = lo[k];
+                mWorldMax[k] = hi[k];
+            }
+            mWorldOn = on;
+        }
+        /// ...in THIS cascade's normalised space (its voxeliser's box): two float4s - ( the corner, 1 = known ), ( the
+        /// far corner, 0 ) - what a shader's JAH_WORLD_LS_ON / _MIN / _MAX read.
+        void getWorldBoxNormalised( float *RESTRICT_ALIAS out8 ) const;
         void setCacheRays( float lastShellMetres, uint32 rays, float biasMetres, float firstShellMetres, bool finest )
         {
             mCacheRayFinest = finest;

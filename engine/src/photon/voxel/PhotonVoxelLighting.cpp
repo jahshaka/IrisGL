@@ -274,8 +274,11 @@ namespace Ogre
 
         mBounceShaderParams = &mLightVctBounceInject->getShaderParams( "default" );
 
-        // RESERVED FOR EVERY PARAM BELOW: the members are pointers INTO this vector.
-        mLocalBounceShaderParams.reserve( 10u );
+        // RESERVED FOR EVERY PARAM BELOW: the members are pointers INTO this vector - one more than reserved
+        // reallocates it and leaves every earlier member dangling (PHOTON-7 10-3 R4 (a): a bounce dispatch read freed
+        // memory), so the count is one constant and the last add is checked against it.
+        const size_t kBounceParams = 12u;
+        mLocalBounceShaderParams.reserve( kBounceParams );
 
         mBounceVoxelCellSize = addLocalBounceShaderParam( "voxelCellSize" );
         mBounceInvVoxelResolution = addLocalBounceShaderParam( "invVoxelResolution" );
@@ -287,6 +290,14 @@ namespace Ogre
         mBounceBrickMark = addLocalBounceShaderParam( "brickMark" );
         mBounceRayParams = addLocalBounceShaderParam( "rayParams" );
         mBounceRayCounts = addLocalBounceShaderParam( "rayCounts" );
+        mBounceWorldMin = addLocalBounceShaderParam( "worldLsMin" );
+        mBounceWorldMax = addLocalBounceShaderParam( "worldLsMax" );
+        if( mLocalBounceShaderParams.size() > kBounceParams )
+        {
+            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
+                         "the bounce job's parameters outgrew their reservation: the members point into the vector",
+                         "PhotonVoxelLighting" );
+        }
 
         // THE FEEDBACK'S JOBS (PHOTON-7 stage 4; Voxelizer.material.json), shared by name like the bounce's.
         mFeedbackJob = hlmsCompute->findComputeJob( "Photon/BrickFeedback" );
@@ -1224,6 +1235,11 @@ namespace Ogre
                                          size.x > 0.0f ? mCacheRayFirstShell / size.x : 0.0f,
                                          mCacheRayFinest ? 1.0f : 0.0f };
             mBounceRayCounts->setManualValue( rayCounts, 4u );
+            // THE WORLD's BOX in this cascade's normalised space (R4 (a): an escape is the sky only past its exit)
+            float world[8];
+            getWorldBoxNormalised( world );
+            mBounceWorldMin->setManualValue( world, 4u );
+            mBounceWorldMax->setManualValue( world + 4u, 4u );
         }
 
         mBounceShaderParams->mParams.swap( mLocalBounceShaderParams );
@@ -2316,8 +2332,8 @@ namespace Ogre
     //-------------------------------------------------------------------------
     size_t PhotonVoxelLighting::getConstBufferSize() const
     {
-        // Jahshaka (CONE-FRAME-2): + xformCube_row0..2, three float4s.
-        size_t retVal = 11u * 4u * sizeof( float );
+        // Jahshaka (CONE-FRAME-2): + xformCube_row0..2, three float4s; (PHOTON-7 10-3 R4 (a)) + the world's box, two.
+        size_t retVal = 13u * 4u * sizeof( float );
         retVal += ( 4u + 4u * 2u ) * sizeof( float ) * mExtraCascades.size();
         return retVal;
     }
@@ -2481,6 +2497,23 @@ namespace Ogre
             for( size_t i = 0; i < 12u; ++i )
                 *passBufferPtr++ = rows[i];
         }
+        // float4 worldLsMin; float4 worldLsMax; (PHOTON-7 10-3 R4 (a): the world's box, the probe's normalised space)
+        getWorldBoxNormalised( passBufferPtr );
+        passBufferPtr += 8u;
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::getWorldBoxNormalised( float *RESTRICT_ALIAS out8 ) const
+    {
+        const Vector3 o = mVoxelizer->getVoxelOrigin();
+        const Vector3 size = mVoxelizer->getVoxelSize();
+        for( int k = 0; k < 3; ++k )
+        {
+            const float s = size[k] > 0.0f ? size[k] : 1.0f;
+            out8[k] = mWorldOn ? ( mWorldMin[k] - o[k] ) / s : 0.0f;
+            out8[4 + k] = mWorldOn ? ( mWorldMax[k] - o[k] ) / s : 0.0f;
+        }
+        out8[3] = mWorldOn ? 1.0f : 0.0f;
+        out8[7] = 0.0f;
     }
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::shouldEnableSpecularSdfQuality() const

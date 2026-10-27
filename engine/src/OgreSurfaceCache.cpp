@@ -1935,7 +1935,7 @@ unsigned lampIdOf(const Ogre::Light *l) {
 /// The chain's parameter block (CardGiParams in the shader): chainInvRes[8],
 /// chainFromPrev[14], the volume's origin and inverse size, the counts, the
 /// environment's gain and mips, its nine SH coefficients — 35 vec4.
-constexpr unsigned kGiParamFloats = 37u * 4u;   // ... + the cloud shadow's map and sun (CLOUDS-2D-2)
+constexpr unsigned kGiParamFloats = 39u * 4u;   // ... + the cloud shadow's map and sun (CLOUDS-2D-2), the world's box (10-3 R4 (a))
 constexpr unsigned kMaxCardCascades = 8u;
 /// A light's record: position, diffuse, attenuation, spot direction, spot parameters, and an AREA light's rectangle
 /// (its four corners, the first's w its double-sidedness: PHOTON-7 stage 5, 5-3).
@@ -2438,6 +2438,9 @@ void SurfaceCache::relightCards() {
         mGiCpu[140u + unsigned(k)] = mCloudMap[k];
         mGiCpu[144u + unsigned(k)] = mCloudSun[k];
     }
+    // THE WORLD's BOX (PHOTON-7 10-3 R4 (a)): cascade 0's normalised space, the block's last two vec4s
+    if (vct && vct->getVoxelizer()) vct->getWorldBoxNormalised(&mGiCpu[148u]);
+    else std::fill(mGiCpu.begin() + 148, mGiCpu.begin() + 156, 0.0f);
     mIndirectOnLastRelight = numCascades > 0u;
     if (!mGiBuffer)
         mGiBuffer = vao->createUavBuffer(kGiParamFloats / 4u, 16u, 0, mGiCpu.data(), false);

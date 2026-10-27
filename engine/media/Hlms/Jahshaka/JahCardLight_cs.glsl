@@ -259,6 +259,8 @@ struct CardGiParams
 	vec4 envSh[9];			// the environment's nine SH coefficients, world axes
 	vec4 cloudMap;			// the cloud shadow: 1 / tile, strength, scroll xz (CLOUDS-2D-2)
 	vec4 cloudSun;			// ...and the sun's throw xz, the altitude, 1 / mu_s
+	vec4 worldLsMin;		// THE WORLD's BOX (PHOTON-7 10-3 R4 (a)), cascade 0's normalised space; w 1 = known
+	vec4 worldLsMax;
 };
 layout( std430, ogre_U2 ) readonly restrict buffer giLayout { CardGiParams gp; };
 // THE CARDS' MOVES (PHOTON-7 stage 10, 10-2c: the card-to-card re-listing): per atlas slot the largest change of any
@@ -320,6 +322,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_FROM_PREV_OFFSET( c ) gp.chainFromPrev[( (c) - 1 ) * 2 + 1]
 	@insertpiece( JahVoxelSample )
 	@insertpiece( JahVoxelMarch )
+	#define JAH_WORLD_LS_ON ( gp.worldLsMin.w > 0.5 )
+	#define JAH_WORLD_LS_MIN gp.worldLsMin.xyz
+	#define JAH_WORLD_LS_MAX gp.worldLsMax.xyz
 	@insertpiece( JahVoxelRay )
 
 	// THE ONE DIFFUSE CONE INTEGRATOR (JahVoxelCones), for its frame and its start: the frame is built from

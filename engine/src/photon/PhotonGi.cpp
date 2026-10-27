@@ -611,6 +611,25 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
 //  * a mobility FLIP's geometry move is adopted, never armed (MobilityChange::Soft's promise);
 //  * world.refreshGi() re-solves at once;
 //  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
+bool PhotonComponent::worldBox(float lo[3], float hi[3]) const {
+    bool on = false;
+    for (const auto *np : mScene.itemNodes()) {
+        const Ogre::Item *item = np ? np->item : nullptr;
+        if (!item || np->itemSlot == size_t(-1)) continue;
+        const Ogre::Aabb wa = item->getWorldAabb();
+        if (!std::isfinite(wa.mHalfSize.x) || !std::isfinite(wa.mHalfSize.y) || !std::isfinite(wa.mHalfSize.z) ||
+            !std::isfinite(wa.mCenter.x) || !std::isfinite(wa.mCenter.y) || !std::isfinite(wa.mCenter.z))
+            continue;
+        const Ogre::Vector3 a = wa.getMinimum(), b = wa.getMaximum();
+        for (int k = 0; k < 3; ++k) {
+            lo[k] = on ? std::min(lo[k], a[k]) : a[k];
+            hi[k] = on ? std::max(hi[k], b[k]) : b[k];
+        }
+        on = true;
+    }
+    return on;
+}
+
 void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
     GiPlan &g = mGiPlan;
     g.frame = giWriterFrame();
@@ -4000,6 +4019,14 @@ void PhotonComponent::recordFrame(const FrameWork &w) {
 // THE ENGINE'S PER-FRAME GI STEP (the authoritative view, engine.pre): the readouts that
 // landed (harvest), the frame's decisions (planFrame), its work (recordFrame).
 void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) {
+    // THE WORLD's BOX into every cascade's lighting, once a frame, before the step's work (R4 (a): its bounce, the pixel's pass buffer, the
+    // field, the screen integrate and the card job read it in their cascade's normalised space)
+    {
+        float lo[3] = {}, hi[3] = {};
+        const bool on = worldBox(lo, hi);
+        for (VctCascade &c : mVctCascades)
+            if (c.lighting) c.lighting->setWorldBox(lo, hi, on);
+    }
     // A FRAME THAT DRAINED NO RECORD OF THIS SCENE IS STILL (ENGINE-UPGRADE-2B stage 4): nothing the scheduler
     // reads changed, so it runs once for it as for a record that carries no change - a pending re-solve's
     // stability window advances and the re-solve lands. A screenshot's settle drains no record (the document's

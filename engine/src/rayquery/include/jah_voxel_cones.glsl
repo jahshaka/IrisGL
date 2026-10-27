@@ -90,8 +90,11 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 	for( int i = 0; i < n; ++i )
 	{
 		const vec3 d = basis * jahRayCosineDir( i, n );
+		const vec3 dLS = JAH_CONES_TO_LS( d );
 		const JahVoxelRayResult r =
-			jahVoxelRay( startLS, JAH_CONES_TO_LS( d ), surfLS, nLS, epsC0, ownCell, firstShellC0, lastShellC0, planeTest0 );
+			jahVoxelRay( startLS, dLS, surfLS, nLS, epsC0, ownCell, firstShellC0, lastShellC0, planeTest0 );
+		if( r.exitReason == kJahRayEscaped && !jahEscapeIsExit( startLS, dLS, r.tC0 ) )
+			continue;   // out of the chain before the world's exit: no sample (R4 (a))
 		if( r.exitReason == kJahRayHit )
 		{
 			sum += r.radiance;
@@ -178,8 +181,10 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 			wSum += w;   // stopped by the surface itself
 			continue;
 		}
-		const JahVoxelRayResult r = jahVoxelRay( startLS, JAH_CONES_TO_LS( JAH_CONES_TO_WORLD( L ) ), surfLS, nLS, epsC0,
-												 ivec4( 0 ), 0.0, lastShellC0, planeTest0 );
+		const vec3 lLS = JAH_CONES_TO_LS( JAH_CONES_TO_WORLD( L ) );
+		const JahVoxelRayResult r = jahVoxelRay( startLS, lLS, surfLS, nLS, epsC0, ivec4( 0 ), 0.0, lastShellC0, planeTest0 );
+		if( r.exitReason == kJahRayEscaped && !jahEscapeIsExit( startLS, lLS, r.tC0 ) )
+			continue;   // out of the chain before the world's exit: no sample (R4 (a))
 		if( r.exitReason == kJahRayHit )
 		{
 			o.radiance += r.radiance * w;

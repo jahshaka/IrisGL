@@ -49,8 +49,8 @@ void put3(float out[4], const Ogre::Vector3 &v, float w) {
     out[3] = w;
 }
 /// JahScreenIntegrate_cs.glsl's ScreenGiParams, in vec4s: the camera 10, the chain 22 + 4, the environment's SH 9, the
-/// field 7, the fog 8.
-constexpr size_t kScreenGiVec4 = 10u + 8u + 14u + 4u + 9u + 7u + 8u;
+/// field 7, the fog 8, the world's box 2 (PHOTON-7 10-3 R4 (a)).
+constexpr size_t kScreenGiVec4 = 10u + 8u + 14u + 4u + 9u + 7u + 8u + 2u;
 constexpr size_t kScreenGiFloats = kScreenGiVec4 * 4u;
 /// The most cascades the job binds (the longest shipped tier chain).
 constexpr unsigned kScreenGiMaxCascades = unsigned(kGiTierMaxCascades);
@@ -339,6 +339,9 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
         std::memcpy(at, fog, sizeof(fog));
         at += 32;
     }
+    // ---- THE WORLD's BOX (PHOTON-7 10-3 R4 (a)): cascade 0's normalised space - an escape is the sky only past its exit
+    if (vct && vct->getVoxelizer()) vct->getWorldBoxNormalised(at);
+    at += 8;
     const bool fogOn = g[(10u + 8u + 14u + 4u + 9u + 7u + 3u) * 4u + 3u] > 0.5f;
 
     // ---- THE PARAMETERS' BUFFER (one a view: the job is shared, every binding is set here) ----
