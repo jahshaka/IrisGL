@@ -453,7 +453,11 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     {
         Ogre::HlmsMacroblock caster = *db->getMacroblock();
         if (p.alphaMode == PbrAlphaMode::Cutout) caster.mCullMode = Ogre::CULL_NONE;
-        if (pane) caster.mDepthWrite = false;
+        // EVERY OTHER CASTER WRITES DEPTH (the one read's F2): the colour pass's copy has none for EVERY blended mode
+        // (above: a blended surface occludes nothing in the picture), so a blended material that is not a pane - alpha
+        // 1, whose pixel passes nothing of what lies behind it - cast no shadow on the stock caster's path (a skinned
+        // item, a front-culled caster); its caster is an opaque silhouette, the Atom cut's own answer
+        caster.mDepthWrite = !pane;
         const Ogre::HlmsMacroblock *cur = db->getMacroblock(true);
         if (!cur || *cur != caster) db->setMacroblock(caster, true);
     }
