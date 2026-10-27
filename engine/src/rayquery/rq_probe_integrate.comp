@@ -125,6 +125,9 @@
 // step, which is exactly what a temporal mean is for (gi.gather_motion measures
 // the truck and the yaw).
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -195,32 +198,68 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 #include "jah_field_window.glsl"
 #include "jah_field_read.glsl"
 
-// THE VOXEL CHAIN (PHOTON-7 10-3 R3 (b); L9: the renderer follows the ray): where the field's confidence fades, the
-// share a probe did not answer is gathered by the world caches' rays (jah_voxel_cones.glsl's jahRayDiffuse at
-// kJahPixelDiffuseRays - the no-ray route's screen integrate's one estimator), never the sky unoccluded and never
-// nothing: the hit set's volumes by kind (bindings 18 - 24: the front, coverage +/-, position +/-, the back, the
-// normal - what an occupancy ray reads), its uniforms the trace's (p.hit: the chain's boxes).
-layout( set = 0, binding = 18 ) uniform sampler3D voxelIso[kMaxCascades];
-layout( set = 0, binding = 19 ) uniform sampler3D voxelCovP[kMaxCascades];
-layout( set = 0, binding = 20 ) uniform sampler3D voxelCovN[kMaxCascades];
-layout( set = 0, binding = 21 ) uniform sampler3D voxelPosP[kMaxCascades];
-layout( set = 0, binding = 22 ) uniform sampler3D voxelPosN[kMaxCascades];
-layout( set = 0, binding = 23 ) uniform sampler3D voxelBack[kMaxCascades];
-layout( set = 0, binding = 24 ) uniform sampler3D voxelNrm[kMaxCascades];
-#include "jah_rq_finite.glsl"
+// THE VOXEL CHAIN AND THE TLAS (PHOTON-7 10-3 R3 (b), R4 (c1) and (iii); L9: the renderer follows the ray): where the
+// field's confidence fades, the share a probe did not answer is gathered by the world caches' rays - the chain's
+// occupancy rays (jah_voxel_ray.glsl, kJahPixelDiffuseRays cosine directions, jahRayDiffuse's set), and a ray the chain
+// cannot answer (a start no cascade holds, an escape inside the world's box) continues through the TLAS to the world's
+// exit, its hit read by the caches' one reader (jahHitRadianceStore: the card, the cascades where none answers) - never
+// the sky unoccluded, never nothing. THE HIT SET (bindings 18 - 50, OgreScreenProbeGather.cpp's kIntegrateHitSlots), its
+// uniforms the trace's (p.hit).
+layout( set = 0, binding = 18 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 19 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 20 ) uniform sampler3D voxelX[kMaxCascades];
+layout( set = 0, binding = 21 ) uniform sampler3D voxelY[kMaxCascades];
+layout( set = 0, binding = 22 ) uniform sampler3D voxelZ[kMaxCascades];
+layout( set = 0, binding = 23 ) uniform sampler3D voxelCovP[kMaxCascades];
+layout( set = 0, binding = 24 ) uniform sampler3D voxelCovN[kMaxCascades];
+layout( set = 0, binding = 25 ) uniform sampler3D voxelPosP[kMaxCascades];
+layout( set = 0, binding = 26 ) uniform sampler3D voxelPosN[kMaxCascades];
+layout( set = 0, binding = 27 ) uniform sampler3D voxelBack[kMaxCascades];
+layout( set = 0, binding = 28 ) uniform sampler3D voxelNrm[kMaxCascades];
+layout( set = 0, binding = 29 ) uniform sampler3D voxelDirect[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+layout( set = 0, binding = 30 ) uniform sampler3D voxelDirectBack[kMaxCascades];
+#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
+layout( set = 0, binding = 31 ) uniform samplerCube skyCube;
 #define JAH_VOX_MAX_CASCADES 4   // a PREPROCESSOR integer (kMaxCascades): #if reads an identifier as 0
-#define JAH_VOX_SAMPLE_ISO( c, u, l ) textureLod( voxelIso[c], u, l )
-#define JAH_VOX_SAMPLE_COVP( c, u, l ) textureLod( voxelCovP[c], u, l )
-#define JAH_VOX_SAMPLE_COVN( c, u, l ) textureLod( voxelCovN[c], u, l )
-#define JAH_VOX_SAMPLE_POSP( c, u, l ) textureLod( voxelPosP[c], u, l )
-#define JAH_VOX_SAMPLE_POSN( c, u, l ) textureLod( voxelPosN[c], u, l )
-#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( voxelBack[c], u, l )
-#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( voxelNrm[c], u, l )
-#define JAH_VOX_INVRES( c ) ( JAH_VOX_INVSIZE( c ).xyz * JAH_VOX_INVSIZE( c ).w )
+#include "jah_rq_hit.glsl"
+#define JAH_CARD_BINDING_BASE 32
+#define JAH_CARD_VIEW_BINDING_BASE 36
+#include "jah_rq_card_bindings.glsl"
+#include "jah_rq_card.glsl"
+layout( std430, set = 0, binding = 43 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 44 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
+layout( std430, set = 0, binding = 45 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
+layout( rgba32ui, set = 0, binding = 46 ) uniform writeonly uimage2D jahHitIds;
+layout( r32ui, set = 0, binding = 47 ) uniform writeonly uimage2D jahHitDest;
+layout( std430, set = 0, binding = 48 ) buffer JahHitBuf { uint jahHitBuf[]; };
+#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
+#include "jah_rq_sun_ray.glsl"
+#include "jah_rq_hit_record.glsl"
+layout( set = 0, binding = 49 ) uniform sampler2DArray jahHitPool;
+layout( set = 0, binding = 50 ) uniform sampler2D jahHitCloud;
+#define JAH_HIT_LOBE_INTEGRAL
+#include "jah_rq_hit_radiance.glsl"
+void jahCardLobeHemi( float r, out float a, out float b )
+{
+	a = 0.0;
+	b = 0.0;
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) != 0u )
+		jahSpecularAlbedoHemi( r, a, b );
+}
+#include "jah_world_exit.glsl"
 // cascade c - 1's normalised space to cascade c's, from the two boxes (the chain's table, derived)
 #define JAH_VOX_FROM_PREV_SCALE( c ) vec4( JAH_VOX_INVSIZE( c ).xyz / JAH_VOX_INVSIZE( (c) - 1 ).xyz, 0.0 )
 #define JAH_VOX_FROM_PREV_OFFSET( c ) \
 	vec4( ( JAH_VOX_ORIGIN( (c) - 1 ).xyz - JAH_VOX_ORIGIN( c ).xyz ) * JAH_VOX_INVSIZE( c ).xyz, 0.0 )
+// THE WORLD's BOX (R4) in cascade 0's normalised space: an escape past its exit is the sky without a trace
+#define JAH_WORLD_LS_ON JAH_WORLD_ON
+#define JAH_WORLD_LS_MIN ( ( p.hit.worldMin.xyz - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz )
+#define JAH_WORLD_LS_MAX ( ( p.hit.worldMax.xyz - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz )
 #include "jah_ray_set.glsl"
 #include "jah_voxel_ray.glsl"
 // the cone frame is built in WORLD space (jahConeBasisWorld): a direction reaches cascade 0's normalised space through
@@ -358,6 +397,85 @@ vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, iv
 /// 10-3 R3; L9: a sky read with no visibility is light through a wall) - and for a moment nothing (light by omission
 /// on thin geometry: Bistro's curtains). The eye's direction for the sample point's bias: towards the camera, or the
 /// view's axis orthographic.
+/// THE UNANSWERED SHARE'S RAYS (R3 (b), R4 (c1) and (iii)): the cosine-weighted mean radiance over the pixel's hemisphere
+/// by kJahPixelDiffuseRays fixed directions (jahRayDiffuse's set and frame). Each walks the voxel chain first: a HIT reads
+/// the side facing it; an ESCAPE past the world's exit is the sky over the ray's bin; an escape INSIDE the world's box and
+/// a start NO CASCADE holds continue through the TLAS from the surface to the world's exit - a hit read by
+/// jahHitRadianceStore (a back face of a one-sided surface 0; nothing to shade it no sample), a miss the sky; an EXHAUSTED
+/// ray is no sample. The mean is over the rays that are.
+vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
+{
+	const int n = kJahPixelDiffuseRays;
+	const vec3 surfLS = ( worldPos - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz;
+	const vec3 nLS = jahConeBiasDir( normalize( worldNormal * JAH_VOX_INVSIZE( 0 ).xyz ) );
+	const float epsC0 = JAH_VOX_INVRES( 0 ).x;
+	const vec3 startLS = surfLS + nLS * epsC0;
+	const mat3 basis = jahConeBasisWorld( worldNormal );
+	const float binCos = 1.0 - 1.0 / float( n );
+	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
+	// the TLAS rays' start: one finest cell off the surface along its normal, the voxel rays' own start bias
+	const vec3 origin = worldPos + worldNormal * JAH_VOX_INVSIZE( 0 ).w;
+	vec3 sum = vec3( 0.0 );
+	float taken = 0.0;
+	for( int i = 0; i < n; ++i )
+	{
+		const vec3 d = normalize( basis * jahRayCosineDir( i, n ) );
+		const vec3 dLS = JAH_CONES_TO_LS( d );
+		const JahVoxelRayResult vr = jahVoxelRay( startLS, dLS, surfLS, nLS, epsC0, ivec4( 0 ), 0.0, 0.0, true );
+		if( vr.exitReason == kJahRayHit )
+		{
+			sum += vr.radiance;
+			taken += 1.0;
+			continue;
+		}
+		if( vr.exitReason == kJahRayExhausted )
+			continue;
+		if( vr.exitReason == kJahRayEscaped && jahEscapeIsExit( startLS, dLS, vr.tC0 ) )
+		{
+			sum += jahEnvCone( d, binTan );
+			taken += 1.0;
+			continue;
+		}
+		// THE TLAS ANSWERS what the chain cannot: from the surface to the world's exit
+		rayQueryEXT rq;
+		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, d,
+							   jahWorldExitT( origin, d, 1.0e4 ) );
+		JAH_RQ_PROCEED( rq )
+		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		{
+			sum += jahEnvCone( d, binTan );   // an exit: the sky
+			taken += 1.0;
+			continue;
+		}
+		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+		const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+		const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+		const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+		const vec2 bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+		const mat4x3 toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+		vec3 wound;
+		const bool known = jahHitWoundNormal( slot, geomIdx, prim, toWorld, wound );
+		if( known && dot( wound, d ) > 0.0 && ( jahHitFlags( slot ) & kJahHitGpuTwoSided ) == 0u )
+		{
+			taken += 1.0;   // a one-sided surface seen from behind: the inside of a closed shell holds no light
+			continue;
+		}
+		const vec3 hitN = known ? ( dot( wound, d ) > 0.0 ? -wound : wound ) : -d;
+		jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
+		jahHitSeed = 0u;
+		jahHitAreaSeq = uint( i ) * 83492791u;
+		bool ok = false;
+		uint source = 0u;
+		const vec3 radiance = jahHitRadianceStore( slot, origin + d * tHit, hitN, d,
+												   max( tHit * sqrt( 2.0 / float( n ) ), 1e-4 ), false, ok, source );
+		if( !ok || !finite3( radiance ) )
+			continue;   // nothing to shade it: no sample
+		sum += radiance;
+		taken += 1.0;
+	}
+	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0 );
+}
+
 bool gJahFallbackMemo = false;   // one pixel a thread: its fallback is traced once, whichever composition asks
 vec3 gJahFallback = vec3( 0.0 );
 vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
@@ -377,14 +495,7 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 										   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
 	vec3 r = a.irradiance;
 	if( a.confidence < 1.0 && JAH_VOX_COUNT > 0 )
-	{
-		// THE CHAIN'S RAYS for the share the field does not cover (the screen integrate's construction, in world space)
-		const vec3 surfLS = ( worldPos - JAH_VOX_ORIGIN( 0 ).xyz ) * JAH_VOX_INVSIZE( 0 ).xyz;
-		const vec3 biasDirLS = jahConeBiasDir( normalize( worldNormal * JAH_VOX_INVSIZE( 0 ).xyz ) );
-		r += jahRayDiffuse( surfLS, biasDirLS, jahConeBasisWorld( worldNormal ), kJahPixelDiffuseRays,
-							JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0, 0.0, true ) *
-			 ( 1.0 - a.confidence );
-	}
+		r += fallbackRays( worldPos, worldNormal ) * ( 1.0 - a.confidence );
 	gJahFallbackMemo = true;
 	gJahFallback = r;
 	return r;

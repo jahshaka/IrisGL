@@ -79,7 +79,9 @@
 #endif
 #include "jah_voxel_sample.glsl"
 
-// THE ONE ENVIRONMENT, bound to the ray jobs' own names.
+// THE ONE ENVIRONMENT, bound to the ray jobs' own names (a job that binds its own first - the probe integrate's SH:
+// PHOTON-7 10-3 R4 (c1) - keeps it).
+#ifndef JAH_ENV_CUBE_ON
 #define JAH_ENV_CUBE_ON JAH_SKY_ON
 #define JAH_ENV_SAMPLE( d, l ) textureLod( skyCube, d, l ).xyz
 #define JAH_ENV_MIPS float( textureQueryLevels( skyCube ) )
@@ -95,6 +97,7 @@
 #define JAH_ENV_SH_C6 vec3( 0.0 )
 #define JAH_ENV_SH_C7 vec3( 0.0 )
 #define JAH_ENV_SH_C8 vec3( 0.0 )
+#endif
 #include "jah_environment.glsl"
 
 #ifndef JAH_HIT_GATE_DECLARED

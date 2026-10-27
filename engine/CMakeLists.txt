@@ -349,10 +349,12 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h.d" --target-env spirv1.4 -S comp -x
-                "-I${JAH_RQ_INCLUDE}"
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_probeIntegrateSpv -o "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_integrate.comp"
+                "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h.d"
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)

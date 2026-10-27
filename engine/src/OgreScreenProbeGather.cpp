@@ -149,16 +149,26 @@ constexpr unsigned kFilterBindings = 5u;
 /// the photon view's overlay (PHOTON-VIEW-1), the frame's counter, the
 /// irradiance field's two atlases (10, 11: the fallback it composes, PHOTON-7 7-2),
 /// and THE ROUGH SPECULAR's six (12 - 17, 7-3): the prepass's shadow / roughness,
-/// the prefiltered maps, the output, the lobe's history pair and its rest mean; and THE VOXEL CHAIN's seven (18 - 24,
-/// PHOTON-7 10-3 R3 (b): the volumes an occupancy ray reads, kGatherMaxCascades each - the unanswered share past the
-/// field's window gathered by the chain's rays).
-constexpr unsigned kIntegrateVoxelFirst = 18u, kIntegrateVoxelKinds = 7u;
-constexpr unsigned kIntegrateBindings = kIntegrateVoxelFirst + kIntegrateVoxelKinds;
-/// The hit set's kinds the integrate binds, at its bindings (the kinds' order: kGatherVoxelKinds' comment)
-constexpr uint32_t kIntegrateVoxelBinding[kGatherVoxelKinds] = {
-    kIntegrateVoxelFirst, HitSetWrite::kNoBinding, HitSetWrite::kNoBinding, HitSetWrite::kNoBinding,
-    kIntegrateVoxelFirst + 1u, kIntegrateVoxelFirst + 2u, kIntegrateVoxelFirst + 3u, kIntegrateVoxelFirst + 4u,
-    kIntegrateVoxelFirst + 5u, kIntegrateVoxelFirst + 6u, HitSetWrite::kNoBinding, HitSetWrite::kNoBinding };
+/// the prefiltered maps, the output, the lobe's history pair and its rest mean; and THE HIT SET (18 - 50, PHOTON-7 10-3
+/// R3 (b), R4 (c1) and (iii): the unanswered share past the field's window gathered by the voxel chain's rays and,
+/// where the chain cannot answer, continued through the TLAS - its one writer, kIntegrateHitSlots).
+constexpr unsigned kIntegrateHitFirst = 18u;
+constexpr unsigned kIntegrateBindings = kIntegrateHitFirst + kHitSetBindings;
+/// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
+/// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
+constexpr HitSetSlots kIntegrateHitSlots = {
+    18u,
+    { 19u, 20u, 21u, 22u, 23u, 24u, 25u, 26u, 27u, 28u, 29u, 30u },
+    31u,
+    { 32u, 33u, 34u, 35u },
+    36u,
+    { 43u, 44u },
+    { 45u, 46u, 47u, 48u },
+    49u,
+    50u,
+};
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateBindings == 51u,
+              "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
 /// of the ping-pong — the shared-exponent mean and the geometry word.
 constexpr unsigned kHistoryTexelBytes = 8u;
@@ -166,9 +176,9 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
 /// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3).
 constexpr unsigned kIntegrateStorageImages = 9u;
-static_assert(kIntegrateBindings == 9u + kIntegrateStorageImages + kIntegrateVoxelKinds,
+static_assert(kIntegrateBindings == 9u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
-              "roughness and the prefiltered maps, the chain's seven volumes");
+              "roughness and the prefiltered maps, the hit set");
 /// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
 /// maps prefiltered at perceptual roughness 0.3, 0.5 and 0.7 (a lobe sharper than 0.3 reads the first level: the 8 x 8
 /// hemisphere resolves no sharper one), and DiffuseLerp's two ends (Lumen's) - from 0.6 the lobe hands over linearly
@@ -415,8 +425,10 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
-    {   // rq_probe_integrate.comp
-        const VkDescriptorType t[kIntegrateBindings] = {
+    {   // rq_probe_integrate.comp: its own eighteen, then the hit set (kIntegrateHitSlots) laid out by its one function
+        VkDescriptorSetLayoutBinding hb[kIntegrateBindings] = {};
+        hitSetLayout(kIntegrateHitSlots, hb);
+        const VkDescriptorType own[kIntegrateHitFirst] = {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 1 records
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 normals
@@ -435,17 +447,13 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 15 the lobe's last frame's history
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 16 ...this frame's
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 17 ...its rest mean
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 18 - 24 the chain's volumes (10-3 R3 (b))
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         };
-        unsigned counts[kIntegrateBindings];
-        for (unsigned i = 0; i < kIntegrateBindings; ++i)
-            counts[i] = i >= kIntegrateVoxelFirst ? kGatherMaxCascades : 1u;
+        VkDescriptorType t[kIntegrateBindings] = {};
+        unsigned counts[kIntegrateBindings] = {};
+        for (unsigned i = 0; i < kIntegrateBindings; ++i) {
+            t[i] = i < kIntegrateHitFirst ? own[i] : hb[i].descriptorType;
+            counts[i] = i < kIntegrateHitFirst ? 1u : ( hb[i].descriptorCount ? hb[i].descriptorCount : 1u );
+        }
         if (!makeLayout(kIntegrateBindings, t, counts, mIntegrateLayout, "integrate")) return false;
     }
 
@@ -1996,10 +2004,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         roughRest.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[17].pImageInfo = &roughRest;
-        // THE CHAIN'S VOLUMES (18 - 24): the hit set's own views and stand-ins (its one writer's volume half)
-        HitSetWrite volumes;
-        std::string volErr;
-        if (!volumes.writeVolumes(mHost, v.integrateSets[ring], kIntegrateVoxelBinding, in.hits, w, volErr)) return;
+        // THE HIT SET (18 - 50): its one writer, the trace's sources and its per-slot row copy for this frame in flight
+        HitSetWrite integrateHits;
+        std::string ihErr;
+        if (!integrateHits.write(mHost, v.integrateSets[ring], kIntegrateHitSlots, in.hits,
+                                 geomSlots ? v.geomRowOfSlot[ring] : VK_NULL_HANDLE, w, ihErr))
+            return;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
