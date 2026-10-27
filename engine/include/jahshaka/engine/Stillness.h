@@ -115,6 +115,10 @@ struct StillnessSpec {
     /// written - no .dist / .flg / .gsize / .cls (a walk compared byte for byte - gi.walk's L1 - reads nothing else) - and
     /// the gather's history is NOT read back: so L1 also proves the readback leaves every picture as it was.
     bool        dumpRgbOnly = false;
+    /// ...AND THESE WINDOW FRAMES (PHOTON-7 10-3 R12, the lag law at a stop: rtreflect.still_after_stop (a2)): each
+    /// listed frame of every window (its index from the stop, 0 the first) dumped as <out>-w<W>-f<NNN>.rgb (and .cls
+    /// with classesAt) beside the trail's - the picture after the stop against its converged hold. Needs dumpDir.
+    std::vector<unsigned> dumpWindowFrames;
     float       fovYDegrees = 45.0f;   ///< the view's vertical field of view (the cams file's)
     /// THE FROZEN WALK (M1's baseline, PHOTON-2 round 4 - the read's P2-1): the run switches the arm "gi.freeze" on
     /// at the script's FIRST WALK FRAME, and only from a CONVERGED state - on the frame before, the gather HELD (its

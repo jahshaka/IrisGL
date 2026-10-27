@@ -268,6 +268,12 @@ struct StillnessRun::Impl {
             fl.write(reinterpret_cast<const char *>(flags.data()), std::streamsize(flags.size()));
             std::ofstream sz(dumpPath(tag + ".gsize"));
             sz << g.historyCountW << " " << g.historyCountH << "\n";
+            // ...and THE GATHER'S HISTORY COUNT N a texel (one byte, clamped), the lag law's N for what the gather's
+            // history carries - the diffuse and the rough lobe riding it (PHOTON-7 10-3 R12: gi.walk_rough), on .gsize's grid
+            std::vector<unsigned char> n(g.historyCount.size());
+            for (size_t i = 0; i < n.size(); ++i) n[i] = (unsigned char)std::min<unsigned>(g.historyCount[i], 255u);
+            std::ofstream hc(dumpPath(tag + ".ghc"), std::ios::binary);
+            hc.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
         }
         int px = 0, rs = 0;
         for (size_t i = 0; i < g.historyCount.size(); ++i)
@@ -1162,6 +1168,22 @@ bool StillnessRun::frameDone(std::string &err)
         if (!m.readPicture(pic, err)) return false;
         f.periodMs = periodMs;
         f.readMs = m.readMsNow;
+        // THE WINDOW'S DUMPED FRAMES (StillnessSpec::dumpWindowFrames): the picture, and its classes
+        if (!m.spec.dumpDir.empty() && std::find(m.spec.dumpWindowFrames.begin(), m.spec.dumpWindowFrames.end(),
+                                                 unsigned(p.index)) != m.spec.dumpWindowFrames.end()) {
+            char tag[32];
+            std::snprintf(tag, sizeof(tag), "-w%d-f%03u", p.window, unsigned(p.index));
+            std::vector<unsigned char> rgb(size_t(pic.width) * pic.height * 3u);
+            for (size_t i = 0, n = size_t(pic.width) * pic.height; i < n; ++i)
+                for (size_t c = 0; c < 3u; ++c) rgb[i * 3u + c] = pic.rgba[i * 4u + c];
+            std::ofstream o(m.dumpPath(std::string(tag) + ".rgb"), std::ios::binary);
+            o.write(reinterpret_cast<const char *>(rgb.data()), std::streamsize(rgb.size()));
+            if (m.spec.classesAt && !m.spec.dumpRgbOnly) {
+                const std::vector<unsigned char> cls = m.spec.classesAt(p.eye, p.target, pic.width, pic.height);
+                std::ofstream c(m.dumpPath(std::string(tag) + ".cls"), std::ios::binary);
+                c.write(reinterpret_cast<const char *>(cls.data()), std::streamsize(cls.size()));
+            }
+        }
         if (p.index == 0) {
             if (m.picW && (m.picW != pic.width || m.picH != pic.height)) {
                 err = "stillness: the view changed size between the windows";
