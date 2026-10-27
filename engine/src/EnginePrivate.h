@@ -5241,6 +5241,10 @@ public:
     /// A lit material in a pane's mode (PHOTON-7 10-4 R8: OgreMaterials.cpp).
     bool hasPanes() const;
     mutable int mPaneMaterials = -1;   ///< hasPanes' count; -1 = recount at the next read
+    /// A lit material that BLENDS (Blend, Glass, Additive, Refractive - PHOTON-7 10-4 R4: the blended passes' escapes are
+    /// traced only where one exists, and their pipelines built only then). Counted like hasPanes, never per frame.
+    bool hasBlended() const;
+    mutable int mBlendedMaterials = -1;   ///< hasBlended's count; -1 = recount at the next read
     /// Re-render every cached lamp map of this scene on the next frame.
     void dirtyAllShadowMaps() { mShadowDirtyAll = true; }
     /// A depth-relevant change to what the items wearing `mat` cast — alpha

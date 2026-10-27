@@ -853,11 +853,13 @@ private:
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
+        std::atomic<bool> done{ false };   ///< the worker finished (read without a join: a build started late, R4)
         std::string err;
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
     };
     Ahead mAhead[kAheadCount];
     void startAhead();
+    void launchAhead(AheadId id, bool (RayQueryTier::*make)(std::string &));
     void joinAhead(AheadId id);
     /// make*Pipeline's front door: the ahead build's answer once joined, else the build now.
     template <class F> bool aheadOr(AheadId id, std::string &err, F now) {
@@ -2603,20 +2605,24 @@ void RayQueryTier::startAhead() {
     // THE SHARED SAMPLERS FIRST, HERE (the setups read them; a worker never makes a shared object)
     std::string err;
     if (!ensureSamplers(err)) return;   // every setup would fail the same way: they run now, as before
-    const auto launch = [this](AheadId id, bool (RayQueryTier::*make)(std::string &)) {
-        Ahead &a = mAhead[id];
-        a.started = true;
-        a.th = std::thread([this, &a, make]() {
-            tAheadNotes = &a.notes;
-            a.ok = (this->*make)(a.err);
-            tAheadNotes = nullptr;
-        });
-    };
+    const auto launch = [this](AheadId id, bool (RayQueryTier::*make)(std::string &)) { launchAhead(id, make); };
     launch(kAheadReflect, &RayQueryTier::makeReflectPipelineNow);
     launch(kAheadCardGather, &RayQueryTier::makeCardGatherPipelineNow);
     launch(kAheadCardMovers, &RayQueryTier::makeCardMoverPipelineNow);
     launch(kAheadVoxelSides, &RayQueryTier::makeVoxelSidePipelineNow);
-    launch(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);   // (PHOTON-7 10-4 R4: 3.3 s cold on the render thread)
+    // (the blended passes' escapes: launched by the first scene that holds a blended material - prepareGlassEscape)
+}
+
+void RayQueryTier::launchAhead(AheadId id, bool (RayQueryTier::*make)(std::string &)) {
+    Ahead &a = mAhead[id];
+    if (a.started) return;
+    a.started = true;
+    a.th = std::thread([this, &a, make]() {
+        tAheadNotes = &a.notes;
+        a.ok = (this->*make)(a.err);
+        tAheadNotes = nullptr;
+        a.done.store(true);
+    });
 }
 
 void RayQueryTier::joinAhead(AheadId id) {
@@ -11819,7 +11825,6 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     if (known != mEscape.end())
         for (EscapeList &l : known->second.lists) l.ready = false;
     if (!isOpen() || !view || !next || mEscFailed) return;
-    joinAhead(kAheadGlassEscape);   // (its members are read below: the ahead build is joined first)
     const ChainDesc cd = view->chainDesc();
     const bool floatScene = cd.hdr || cd.hdrReadback || cd.displayEncode;
     OgreScene *scene = view->ogreScene();
@@ -11827,7 +11832,19 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     if (!scene || !target || !chainGlassEscape(cd.rayReflect, cd.probeGather, floatScene) ||
         target->getPixelFormat() != Ogre::PFG_RGBA16_FLOAT)
         return;
+    // ONLY WHERE A RECORD CAN BE MADE: a scene with no blended material appends none, and its pipelines are not built
+    // (their cold driver compile is seconds: the cold app rows). The first scene that holds one launches the build on a
+    // worker; until it is done the blended passes light their open share by the environment, as before - the one
+    // switch, at the first blended material's arrival (the review list).
+    if (!scene->hasBlended()) return;
     std::string err;
+    if (!mEscPipeline) {
+        if (!mAhead[kAheadGlassEscape].started) {
+            launchAhead(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);
+            return;
+        }
+        if (!mAhead[kAheadGlassEscape].done.load()) return;
+    }
     if (!mEscPipeline && !makeGlassEscapePipelines(err)) {
         mEscFailed = true;
         Ogre::LogManager::getSingleton().logMessage(

@@ -609,6 +609,20 @@ bool OgreScene::hasPanes() const {
     return mPaneMaterials > 0;
 }
 
+bool OgreScene::hasBlended() const {
+    if (mBlendedMaterials < 0) {
+        int n = 0;
+        for (const auto &kv : mMaterials) {
+            const PbrAlphaMode m = kv.second.params.alphaMode;
+            if (!kv.second.unlit && (m == PbrAlphaMode::Blend || m == PbrAlphaMode::Glass ||
+                                     m == PbrAlphaMode::Additive || m == PbrAlphaMode::Refractive))
+                ++n;
+        }
+        mBlendedMaterials = n;
+    }
+    return mBlendedMaterials > 0;
+}
+
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
     if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message
         const MaterialId mid = id ? id : reserveMaterialId();
@@ -617,6 +631,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
     }
     if (id && mMaterials.count(id)) { mError = "createPbrMaterial: the id is already a material of this scene"; return 0; }
     mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    mBlendedMaterials = -1;   // (hasBlended, R4)
     JAH_TRY {
         MaterialRec rec;
         rec.params = p;
@@ -671,6 +686,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     if (it == mMaterials.end()) return false;
     if (paneCasterLevel(it->second.params.alphaMode, it->second.params.alpha) != paneCasterLevel(p.alphaMode, p.alpha))
         mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    if (it->second.params.alphaMode != p.alphaMode) mBlendedMaterials = -1;   // (hasBlended, R4)
     // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
     // all. A material whose SHADING MODEL is Unlit does — it just renders them
     // through the other family.
@@ -1198,6 +1214,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
     mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    mBlendedMaterials = -1;   // (hasBlended, R4)
     JAH_TRY {
         // WHAT A DYING MATERIAL COSTS THE VOLUME IS THE GEOMETRY THAT WORE IT
         // (MATERIAL-SWAP-GI-1). This used to invalidate the GI caches with no
