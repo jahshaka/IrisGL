@@ -608,6 +608,7 @@ struct JahReflectSample
 	vec2 recBary;
 	float hitT, sampleT, screenT, blendVouch;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
+	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -624,6 +625,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.screenT = 0.0;
 	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
+	o.recPane = vec4( 0.0, 0.0, 0.0, 1.0 );
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -830,15 +832,13 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !record )
 				traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
 									  length( world - thisEye.camPos ) );
-			// ...THROUGH THE PANES IN FRONT (PHOTON-7 10-4 R7). A record's write-back carries no throughput, so a hit
-			// the decode must shade BEHIND a pane is NO SAMPLE (counted out like the screen's: the rest fills it).
+			// ...THROUGH THE PANES IN FRONT (PHOTON-7 10-4 R7; the one read's F6): a hit the decode must shade behind
+			// panes keeps its record, the panes' light and throughput in it (words 6-7: the write-back's ray share is
+			// the panes' light plus the throughput x the decoded light - the gather's rule, its weight x through)
 			if( crossedPanes )
 			{
 				if( record )
-				{
-					noSample = true;
-					record = false;
-				}
+					o.recPane = vec4( paneLight, through );
 				else
 					traced = paneLight + through * traced;
 			}
@@ -996,7 +996,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const float sunVis = s.sunVis;   // (reflectSampleAt's: the sun leg at the hit)
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
-											length( hitPos - world ), length( world - thisEye.camPos ) );
+											length( hitPos - world ), length( world - thisEye.camPos ), s.recPane );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
 			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -1481,7 +1481,7 @@ void main()
 										 s.blend ? -( 1.0 - s.blendVouch ) : -1.0,
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
-										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ) );
+										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recPane );
 							fit = 1u;
 						}
 						else

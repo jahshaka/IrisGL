@@ -444,7 +444,7 @@ void main()
 				const ivec2 dest = block + texel;
 				recorded = jahHitAppend( hitSlot, far, hitPrim,
 										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight * through,
-										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0 );
+										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0, vec4( 0.0, 0.0, 0.0, 1.0 ) );
 				// THE COMPOSITE ADDS the hit's radiance x the record's weight (the re-weight x the panes' throughput) to
 				// what this trace wrote - the panes' own light (PHOTON-7 10-4 R7; 0 where no pane is crossed); a DROPPED
 				// record (the list was full — counted) is NO SAMPLE (PHOTON-2 stage 2's tail, 1.6 A2): its

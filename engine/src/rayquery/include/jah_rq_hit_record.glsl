@@ -33,7 +33,7 @@
 //                        (float bits, the trace's: the write-back folds a
 //                        texel's RECORD RUN in the same space), [7] = the run
 //                        records the decode left unshaded (their index lost);
-//                        then kJahHitAuxWords (SIX) WORDS PER RECORD from word
+//                        then kJahHitAuxWords (EIGHT) WORDS PER RECORD from word
 //                        kJahHitAuxBase:
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
 //                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
@@ -57,7 +57,14 @@
 //                        distance ): THE SCREEN'S SHARE of a BLENDED sample
 //                        whose ray rides a rest run (the write-back folds the
 //                        whole sample, screen and ray, as ONE: the moments are
-//                        not linear in the parts); 0 on every other record.
+//                        not linear in the parts); 0 on every other record;
+//                        [6] packHalf2x16( the crossed PANES' own light r, g )
+//                        and [7] packHalf2x16( ...its b, the panes' THROUGHPUT ):
+//                        a REFLECTION's record seen through panes (the one
+//                        read's F6) - the write-back's ray share is the panes'
+//                        light plus the throughput x the decoded light; (0, 1)
+//                        on every other record (the gather carries its
+//                        throughput in its weight and writes its panes' light).
 //                        2 words = 8 B a record: 2.3 MB at the list's capacity
 //                        at 1080p (291,840 records).
 // WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and its
@@ -102,7 +109,7 @@ const uint kJahHitDiffuseOnlyBit = 1u << 28u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 8u;
-const uint kJahHitAuxWords = 6u;
+const uint kJahHitAuxWords = 8u;
 /// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
@@ -170,10 +177,10 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// its texel's rest mean takes it in the write-back, in its run's order), its
 /// magnitude the ray's share; `screenShare` = the screen's share of that sample
 /// (vouch x the screen's radiance, vouch x its distance; 0 unblended and on every
-/// other record).
+/// other record); `pane` = a reflection's crossed panes (their own light, their throughput; (0, 1) none).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare )
+				  vec4 screenShare, vec4 pane )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -188,6 +195,8 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 4u] = packHalf2x16( clamp( screenShare.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 5u] = packHalf2x16( clamp( screenShare.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 6u] = packHalf2x16( clamp( pane.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 7u] = packHalf2x16( clamp( pane.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -195,7 +204,8 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 /// counted) or not bound this dispatch — the caller then treats the hit as the
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
-				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance )
+				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
+				   vec4 pane )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -206,7 +216,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ) );
+				 vec4( 0.0 ), pane );
 	return true;
 }
 

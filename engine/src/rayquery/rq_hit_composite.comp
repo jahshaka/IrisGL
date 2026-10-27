@@ -48,7 +48,7 @@ layout( set = 0, binding = 0 ) uniform Params
 	vec4 fog[8];
 } p;
 /// The list's buffer: [0] the records appended, then the records' words from
-/// word 8, six a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
+/// word 8, eight a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
 /// this job reads the weight (the gather's re-weight; the reflection's records carry
 /// their ray's share), the fog's two and a run record's screen share.
 layout( std430, set = 0, binding = 1 ) buffer JahHitBuf { uint jahHitBuf[]; };
@@ -92,7 +92,7 @@ float gExposure = 1.0;
 const uint kDestGather = 0x80000000u;
 /// jah_rq_hit_record.glsl kJahHitAuxBase and kJahHitAuxWords.
 const uint kAuxBase = 8u;
-const uint kAuxWords = 6u;
+const uint kAuxWords = 8u;
 
 void main()
 {
@@ -105,7 +105,7 @@ void main()
 	const uint w = max( uint( p.list.y ), 1u );
 	const ivec2 at = ivec2( int( i % w ), int( i / w ) );
 	const uint dest = texelFetch( jahHitDest, at, 0 ).x;
-	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 8, six a record).
+	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 8, eight a record).
 	const uint aux = kAuxBase + kAuxWords * i;
 	const float weight = uintBitsToFloat( jahHitBuf[aux + 1u] );
 	const vec4 rad = texelFetch( jahHitRadiance, at, 0 );
@@ -180,7 +180,9 @@ void main()
 				const vec2 lengthsj = unpackHalf2x16( jahHitBuf[auxj + 3u] );
 				const vec3 fogged = jahFogAlong( clamp( radj.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ),
 												 uintBitsToFloat( jahHitBuf[auxj + 2u] ), dirj, lengthsj.x, lengthsj.y );
-				sampleJ = screenShare.xyz + rayShare * fogged;
+				// (through the panes the ray crossed, words 6-7: their light plus the throughput x the hit's - F6)
+				const vec4 paneJ = vec4( unpackHalf2x16( jahHitBuf[auxj + 6u] ), unpackHalf2x16( jahHitBuf[auxj + 7u] ) );
+				sampleJ = screenShare.xyz + rayShare * ( paneJ.xyz + paneJ.w * fogged );
 				tj = max( screenShare.w + rayShare * max( lengthsj.x, 1e-3 ), 1e-3 );
 			}
 			else if( rayShare < 1.0 )
@@ -224,7 +226,9 @@ void main()
 		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( imageLoad( jahHitIds, at ).w ) );
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
-		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
+		// (through the panes the ray crossed, words 6-7: their light plus the throughput x the hit's - the one read's F6)
+		const vec4 pane = vec4( unpackHalf2x16( jahHitBuf[aux + 6u] ), unpackHalf2x16( jahHitBuf[aux + 7u] ) );
+		const vec3 fogged = pane.xyz + pane.w * jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
 		const vec4 was = share ? imageLoad( reflectSample, at3 ) : vec4( 0.0 );
 		imageStore( reflectSample, at3,
 					share ? vec4( was.xyz + weight * fogged, was.w + weight * max( lengths.x, 1e-3 ) )
