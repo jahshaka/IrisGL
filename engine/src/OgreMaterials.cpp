@@ -770,8 +770,13 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
                  o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved ||
                  o.uvVelocity[0] != p.uvVelocity[0] || o.uvVelocity[1] != p.uvVelocity[1]);
+            // ...AND A PANE's ALPHA IS ITS SHADOW (PHOTON-7 10-4 R8; the fix round's F12 row): the caster writes its 1 - alpha
+            // into the transmittance layer, so an alpha edit on either side of a pane redraws the maps holding it (a
+            // cached lamp map kept the old transmittance: the alpha drag's shadow stood still)
+            const bool paneAlpha = o.alpha != p.alpha &&
+                                   (isPaneMaterial(o.alphaMode, o.alpha) || isPaneMaterial(p.alphaMode, p.alpha));
             if (it->second.paramsPushed &&
-                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
+                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs || paneAlpha))
                 noteShadowShapeChanged(id);
         }
         const Ogre::uint8 rqBefore = renderQueueFor(it->second);
