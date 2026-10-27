@@ -861,6 +861,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_inject_visibility.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
@@ -934,6 +935,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelFaces
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelFaces_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE VOXEL CHAIN'S SHADOW MARCH TO A LAMP (PHOTON-7 10-4 R9): one text for the light injection's direct term, the
+    # no-ray area strata and the colour passes' Forward+ lamps at the no-ray tier (jah_inject_visibility.glsl)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahInjectVisibility
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahInjectVisibility_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_inject_visibility.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE LAMP'S SHADOW RAY IN THE FRAGMENT (PHOTON-7 10-4 R9): the colour passes' Forward+ lamps, one TLAS ray each
     # (jah_lamp_ray.glsl), with the alpha machinery and the origin rule the compute rays use - their includes stripped
