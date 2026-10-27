@@ -1468,9 +1468,6 @@ constexpr ArmDef kArms[] = {
       "casters are tested against the previous frame's depth pyramid of that map, the rejected tested again "
       "against this frame's once the map holds the survivors, and only the visible drawn - the map is the "
       "frustum-only map texel for texel. 0 = frustum only (the parity arm: the pyramids are still built)." },
-    { ArmId::LampRays, 1.0, 0.0, 1.0,
-      "MEASURING ARM (PHOTON-7 10-4 R9's price; reverted after the measurement): 1 = the Forward+ lamps' shadow rays "
-      "traced; 0 = the pass buffer carries a zero TLAS address, the fragment traces nothing (the same permutation)." },
     { ArmId::ShadowLightDepth, 1.0, 0.0, 1.0,
       "THE SUN MAPS' LIGHT-DEPTH PATH (ENGINE-UPGRADE-U5 stages 4 + 4b) as one paired arm: 1 = shipped, each sun map "
       "keeps its depth pyramid, runs the late cut against it and builds its receiver grid. 0 = none of the three is "

@@ -2207,7 +2207,6 @@ private:
     X(GiHitLevelMargin, "gi.hitLevelMargin") /* the hit read's level margin M in cells past the step (-1 = the measured default; a measuring door, PHOTON-7 stage 10, 10-2e) */ \
     X(GiFeedbackCarriedRoute, "gi.feedbackCarriedRoute") /* a brick its injection moved this frame is carried, never passed; the stopped bricks accumulate the carried section alone (a test door) */ \
     X(ShadowCasterCull, "shadow.casterCull") /* a sun map's Atom casters culled by the light's own depth (0: frustum only, the parity arm) */ \
-    X(LampRays, "lamp.rays") /* MEASURING ARM (PHOTON-7 10-4 R9's price, reverted after): 0 = the Forward+ lamps' rays traced nowhere (a zero TLAS address) */ \
     X(ShadowLightDepth, "shadow.lightDepth") /* a sun map's light-depth path: its pyramid, the late cut, the receiver grid (0: none of them built, the pre-U5 caster pass) */ \
     X(ShadowCasterPbsProbe, "shadow.casterPbsProbe") /* a sun map's PBS casters TESTED against the light's depth and counted (a measuring door) */ \
     X(GiFieldRays, "gi.fieldRays") /* the field's rays per depth texel (0 = shipped) */ \

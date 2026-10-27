@@ -11648,9 +11648,7 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
         mRayTier->updateScene(s);
         // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): this frame's TLAS, after its build (the property follows
         // the scene's tracing, the address may be 0)
-        FogHlmsListener::setLampRays(s->sceneManager(), true,
-                                     mArms.on(ArmId::LampRays) ? mRayTier->tlasAddressOf(s) : 0ull,
-                                     mRayTier->alphaTableOf(s));
+        FogHlmsListener::setLampRays(s->sceneManager(), true, mRayTier->tlasAddressOf(s), mRayTier->alphaTableOf(s));
     }
 }
 
