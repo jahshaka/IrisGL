@@ -152,39 +152,8 @@ FogHlmsListener gFogListener;
 // The first comes from a count only buildClosestLightList maintains, the second
 // from the array setLightFixedToShadowMap writes — which is why fork 6130df9d1 (was 0025)
 // makes the second invalidate the first's cache.
-// G3-a — THE CONE DIFFUSE COMES BACK UNDER A CASCADE CHAIN (PHOTON_SPEC §13 G3,
-// the decided option; audit B1 is the finding).
-//
-// `vct_disable_diffuse` is set whenever an irradiance field is bound (upstream
-// HlmsPbs's rule, kept by PhotonPassBinding::preparePassHash) and the whole
-// cone-diffuse block in
-// Vct_piece_ps.any is `@property( !vct_disable_diffuse )`. For ONE volume that
-// is right: the field covers the entire lit box, so the cones would be a second
-// computation of the same term. For a CHAIN it is wrong — the field rides
-// cascade 0 (a 10 m box at the High table) and every pixel from there out to the
-// outermost cascade would get specular cones and ambient and NO diffuse bounce
-// at all, which is the reason the outer cascades exist, discarded by the field's
-// binding.
-//
-// So under a chain the gate is re-opened here, and the two terms are blended by
-// the field's own confidence in our JahIfd piece: inside cascade 0 the field
-// wins (and its leak fix with it), outside it the chain's cone bounce does.
-//
-// WHY THIS IS CACHE-SAFE, which the hook's documentation is strict about ("you
-// can only set new properties that are DERIVED from existing properties ... a
-// property set from external information will break caches"): the condition is
-// exactly that. `irradiance_field` and `vct_num_probes` are both already in the
-// merged set — the second is the bound voxel lighting's cascade count, carried by the
-// pass property `jah_vct_cascades` (PhotonPassBinding, which runs first in this hook)
-// — so two passes with the same properties always generate the same shader, and a
-// pass that turns the chain on or off changes `jah_vct_cascades` and therefore the
-// pass hash.
-//
-// WHY NOT A SOURCE PATCH on HlmsPbs, which would be the other honest answer
-// (ledger §325): the decision "does a bound field replace the cone diffuse
-// everywhere" belongs to whoever placed the field, and here that is us. Upstream
-// has one field over one volume and its rule is right for that case; there is
-// no defect to fix and no hook missing. This is the hook.
+// (G3-a's gate re-opening is deleted: no pass sets `vct_disable_diffuse` any more - a bound field never disables the
+// chain's diffuse, at any cascade count; PHOTON-7 10-3 R3, JahIfd_piece_ps.any.)
 void FogHlmsListener::propertiesMergedPreGenerationStep(
     Ogre::Hlms *hlms, const Ogre::HlmsCache &, const Ogre::HlmsPropertyVec &,
     const Ogre::PiecesMap *, const Ogre::HlmsPropertyVec &, const Ogre::QueuedRenderable &,
@@ -267,12 +236,6 @@ void FogHlmsListener::propertiesMergedPreGenerationStep(
         static const Ogre::IdString kAreaVis("jah_area_vis");
         hlms->_setProperty(tid, kAreaVis, 0);
     }
-    static const Ogre::IdString kIrradianceField("irradiance_field");
-    static const Ogre::IdString kVctNumProbes("vct_num_probes");
-    static const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
-    if (!hlms->_getProperty(tid, kIrradianceField)) return;
-    if (hlms->_getProperty(tid, kVctNumProbes) <= 1) return;
-    hlms->_setProperty(tid, kVctDisableDiffuse, 0);
 }
 
 // THE SKY IS THE ENVIRONMENT WHEREVER NO PROBE COVERS THE PIXEL — the host half

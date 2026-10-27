@@ -9,7 +9,7 @@
 // BRDF multiplies it by kD and by pi, 200.BRDFs_piece_ps.any:305). So the
 // whole pixel side is an add, and the weight is the texel's own coverage - 1
 // at every pixel since PHOTON-7 7-2: the integrate composes the irradiance
-// field (and the field's own environment fallback) where no probe answered,
+// field's cage (at its confidence; no sample past it) where no probe answered,
 // after its temporal mean, so the texture IS the pixel's diffuse GI.
 //
 // WHY THIS PIECE IS `applyIrradianceVolumes`. It is upstream's own insertion
@@ -87,7 +87,7 @@
 // sky's SH at the normal, AmbientLighting_piece_ps.any) has ONE gate on a Photon pass - "outside every voxel volume",
 // vctSpecular.w == 0 - and the bound cone closes it everywhere (computeVctProbe writes the coverage w = 1 with or without
 // its specular). A pass that reads the gather binds no world cache (7-5: the gather is its diffuse, the integrate composes
-// the field and the field's own environment fallback where no probe answered, 7-2), so the gate is gone with the cone and
+// the field's cage where no probe answered, 7-2), so the gate is gone with the cone and
 // the SH would add the sky's irradiance, unoccluded, on top of the gather that already carries it (its rays escape to the
 // sky). On a pass that reads the gather the piece is compiled out whole: one diffuse term a pixel - and on EVERY pass of
 // a screen-GI chain (jah_screen_gi_pass, the chain's own flag: OgreFog.cpp), whether or not a producer registered this

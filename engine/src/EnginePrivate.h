@@ -355,7 +355,7 @@ public:
     /// The registration this listener makes in `passPreExecute` names a
     /// FULL-RESOLUTION texture belonging to ONE view, and it is keyed by
     /// SceneManager — so every later colour pass on that manager in the same
-    /// frame would inherit the property, the binding and `vct_disable_diffuse`
+    /// frame would inherit the property and the binding
     /// unless it is taken away the moment the pass it was made for is over: a
     /// second View on the same scene (the Player IS one), an offscreen
     /// screenshot view, a VR eye whose own gather was declined, a PCC probe
@@ -3424,13 +3424,10 @@ public:
     void preparePassHash(const Ogre::CompositorShadowNode *shadowNode, bool casterPass,
                          bool dualParaboloid, Ogre::SceneManager *sceneManager,
                          Ogre::Hlms *hlms) override;
-    /// G3-a (PHOTON_SPEC §13 G3): under a CASCADE CHAIN with an irradiance
-    /// field bound, re-open the cone-diffuse gate HlmsPbs closes for any bound
-    /// field. The field rides cascade 0, so leaving the gate shut would leave
-    /// every pixel in the ring out to the outermost cascade with no diffuse
-    /// bounce at all. Derived from properties already in the merged set
-    /// (`irradiance_field`, `vct_num_probes`), which is what the hook's own
-    /// documentation requires of anything set here — see the definition.
+    /// The per-renderable step: the Photon volumes' registers, and the blended
+    /// fragment's withdrawals (the prepass, SSR, the area visibility) - see the
+    /// definition. (G3-a's re-opening of the cone-diffuse gate is deleted: no
+    /// pass closes it, PHOTON-7 10-3 R3.)
     void propertiesMergedPreGenerationStep(Ogre::Hlms *hlms, const Ogre::HlmsCache &passCache,
                                            const Ogre::HlmsPropertyVec &renderableCacheProperties,
                                            const Ogre::PiecesMap renderableCachePieces[Ogre::NumShaderTypes],

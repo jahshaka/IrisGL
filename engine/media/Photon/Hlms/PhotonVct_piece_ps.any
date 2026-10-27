@@ -183,7 +183,6 @@
 		return posLS;
 	}
 
-	@property( !vct_disable_diffuse )
 	// THE DIFFUSE THE FIELD DOES NOT COVER, GATHERED BY THE WORLD CACHES' RAYS (PHOTON-7 stage 10, 10-1; the refresh's
 	// paths 4 and 7; L5: ONE estimator - jah_voxel_cones.glsl's jahRayDiffuse, the card relight's, the bounce's and the
 	// no-ray route's screen integrate's, at kJahPixelDiffuseRays), radiance. It was the four diffuse cones, whose
@@ -199,7 +198,6 @@
 		outDiffuse.xyz += jahRayDiffuse( surfLS, biasDirLS, TBN, kJahPixelDiffuseRays, eps, int4( 0, 0, 0, 0 ), 0.0,
 										 probeParams.rayLastShell, true ) * probeParams.blendFade;
 	}
-	@end
 
 	INLINE void computeVctProbe
 	(
@@ -227,7 +225,7 @@
 		// commented-out fade is deleted.
 		const float blend = 1.0f;
 
-		@property( !vct_disable_diffuse && !irradiance_field )
+		@property( !irradiance_field )
 			jahVctDiffuse( outDiffuse, posLS, jahOrigin, TBN, probeParams );
 		@end
 
@@ -428,7 +426,6 @@
 				@end
 					 jahSpecAnswered, jahFieldSpec, passBuf.vctProbeParams );
 
-	@property( !vct_disable_diffuse )
 		@property( irradiance_field )
 			// Jahshaka fork 8f09c0cd4 (was 0045): an irradiance field over PART of what the
 			// cones cover. With a cascade chain the field rides the innermost
@@ -440,13 +437,12 @@
 			// cones into `vctDiffuse` (declared here, with `jahConeBasis`) only
 			// where its fallback weight is above zero (SPEED-GPU, audit PH-2).
 			//
-			// Nothing changes for upstream's own arrangement: with one volume
-			// HlmsPbs sets vct_disable_diffuse for any bound field and this
-			// whole block is absent from the generated shader.
+			// One rule for any cascade count (PHOTON-7 10-3 R3): a bound field
+			// never disables this block - its single-volume arm, the environment's
+			// unoccluded diffuse past the field, is deleted (JahIfd_piece_ps.any).
 		@else
 			pixelData.envColourD.xyz += vctDiffuse.xyz;
 		@end
-	@end
 	@property( !vct_disable_specular )
 		pixelData.envColourS.xyz += vctSpecular.xyz;
 	@end

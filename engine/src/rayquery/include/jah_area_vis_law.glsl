@@ -45,7 +45,8 @@
 //   JAH_AREA_PREV_S / _U / _S2 / _U2 ( pc ) (vec4) and JAH_AREA_PREV_G( pc ) (uvec4) - the previous frame's history,
 //   JAH_AREA_STORE_CUR( tc, S, U, S2, U2, G ) - this frame's,
 //   JAH_AREA_REST_LOAD( tc, S, U, S2, U2 ) and JAH_AREA_REST_STORE( tc, S, U, S2, U2 ) - the rest means,
-//   JAH_AREA_VISIBLE( originQ, dirQ, reachQ ) - a stratum's visibility in [0, 1] from originQ along dirQ for reachQ;
+//   JAH_AREA_VISIBLE( originQ, dirQ, reachQ ) - a stratum's visibility in [0, 1] from originQ along dirQ for reachQ
+//   (negative: NO SAMPLE - nothing can see yet; the stratum enters neither sum);
 // and - for the resolve - JAH_AREA_DEPTH, JAH_AREA_NORMAL, JAH_AREA_CUR_S / _U / _S2 / _U2 ( t ) (vec4),
 // JAH_AREA_CUR_G( t ) (uvec4) - this frame's history - and JAH_AREA_STORE_VIS( pix, words ) (uvec2).
 #ifndef JAH_AREA_VIS_LAW_GLSL
@@ -131,6 +132,8 @@ void jahAreaVisTrace( ivec2 tc )
 		const float f = jahAreaStratumAt( P, liftN, N, lift, c0, eu, ev, p.light[i].emit.xyz, p.light[i].c0.w != 0.0, n,
 										  k, key, kAreaLampEnd, wq, clr2, originQ, wv, reachQ );
 		const float V = f > 0.0 && reachQ > 0.0 ? JAH_AREA_VISIBLE( originQ, wv, reachQ ) : 1.0;
+		if( V < 0.0 )
+			continue;   // NO SAMPLE (no visibility can be read yet: the no-ray route before its chain): neither sum
 		sampleS[i] = f * V * dc2;
 		sampleU[i] = f * dc2;
 		if( f > 0.0 )
@@ -258,7 +261,10 @@ void jahAreaVisResolve( ivec2 pix )
 			S2 += JAH_AREA_CUR_S2( t ) * w;
 			U2 += JAH_AREA_CUR_U2( t ) * w;
 		}
-	vec4 vis = vec4( 1.0 ), visS = vec4( 1.0 );
+	// A LIGHT WITH NO VISIBILITY YET GIVES NOTHING (PHOTON-7 10-3 R3): U = 0 is a light no stratum was SEEN for - none
+	// in its range, none above the horizon (where its LTC is zero either way), or none whose visibility could be read
+	// (the no-ray route before its chain) - and it reads 0, never "unshadowed": an unknown occluder is not an absent one
+	vec4 vis = vec4( 0.0 ), visS = vec4( 0.0 );
 	for( int i = 0; i < kAreaVisLights; ++i )
 	{
 		if( U[i] > 0.0 )

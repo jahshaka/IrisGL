@@ -7,9 +7,10 @@
 // writes the SAME screen products a gathering chain reads:
 //   jahProbeIrradiance (u0, RGBA16F) - THE DIFFUSE, E/pi at the pixel's normal, w = 1 (the gather's convention):
 //       the irradiance field's cage where one is bound (jah_field_read.glsl, the one text) and, where its confidence
-//       fades, its fallback - the cone diffuse x (1 - confidence) under a cascade chain, the environment's diffuse x
-//       (1 - confidence) under a single volume (JahIfd_piece_ps.any's two regimes; the cones are marched only where
-//       that weight is above zero) - or, with no field, the cone diffuse (the four-cone set, JahVoxelCones);
+//       fades, the voxel chain's rays x (1 - confidence) (jahRayDiffuse, traced only where that weight is above zero;
+//       one rule for any cascade count) - or, with no field, the rays alone. NO VOLUME BUILT YET (the chain's first
+//       frames): NO SAMPLE, w = 0 - a sky read with no visibility is light through a wall (PHOTON-7 10-3 R3; it was
+//       the environment's diffuse, unoccluded, and so was the field's fallback under a single volume, deleted);
 //   jahRoughSpec (u1, RGBA16F) - THE SPECULAR (stage 10-3's roughness split): rgb the lobe's light from what stopped it
 //       - the K(alpha) rays' hits (fogged along their leg by the one fog law) and, for the widest lobes, the irradiance
 //       field read along R - w the lobe's OPEN share (the rays' escapes) - JahScreenCone_piece_ps.any composes the
@@ -233,6 +234,7 @@ void main()
 	const float eyeDist = length( P - p.camPos.xyz );
 
 	vec3 diffuse = vec3( 0.0 );
+	float diffuseW = 1.0;   // 0: no sample (no volume built yet)
 	vec4 specular = vec4( 0.0, 0.0, 0.0, 1.0 );
 	float hitT = 0.0;
 @property( hlms_num_vct_cascades )
@@ -257,16 +259,12 @@ void main()
 											   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
 		diffuse = a.irradiance;
 		const float fallback = 1.0 - a.confidence;
-	@property( hlms_num_vct_cascades > 1 )
-		// UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3): the rays, traced only
+	@property( hlms_num_vct_cascades )
+		// THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3), one volume or a chain: the rays, traced only
 		// where the field's confidence leaves them a weight (SPEED-GPU, audit PH-2)
 		if( fallback > 0.0 )
 			diffuse += jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
 									  p.counts.w, true ) * fallback;
-	@else
-		// ...UNDER A SINGLE VOLUME, the environment's diffuse (what an unoccluded surface had before the field)
-		if( fallback > 0.0 )
-			diffuse += jahEnvIrradiance( N ) * fallback;
 	@end
 	}
 @else
@@ -274,8 +272,8 @@ void main()
 		diffuse = jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
 								 p.counts.w, true );
 	@else
-		// NO VOLUME BUILT YET (the chain's first frames): the environment's diffuse
-		diffuse = jahEnvIrradiance( N );
+		// NO VOLUME BUILT YET (the chain's first frames): NO SAMPLE - nothing has seen what lies around the pixel
+		diffuseW = 0.0;
 	@end
 @end
 
@@ -339,7 +337,7 @@ void main()
 	}
 @end
 
-	imageStore( outIrradiance, pix, vec4( diffuse, 1.0 ) );
+	imageStore( outIrradiance, pix, vec4( diffuse, diffuseW ) );
 	imageStore( outSpecular, pix, specular );
 	imageStore( outConeHit, pix, vec4( hitT, 0.0, 0.0, 0.0 ) );
 }

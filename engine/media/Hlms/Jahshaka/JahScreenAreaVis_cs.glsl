@@ -82,20 +82,22 @@ uvec4 jahAreaPackSums( vec4 a, vec4 b )
 vec4 jahAreaSumA( uvec4 w ) { return vec4( unpackHalf2x16( w.x ), unpackHalf2x16( w.y ) ); }
 vec4 jahAreaSumB( uvec4 w ) { return vec4( unpackHalf2x16( w.z ), unpackHalf2x16( w.w ) ); }
 
-/// A STRATUM SEEN THROUGH THE VOXEL CHAIN: the transmittance from its start along its direction for its reach (no
-/// chain built yet: unshadowed - the voxels hold nothing to stop it). The march starts in cascade 0 (a start its box
+/// A STRATUM SEEN THROUGH THE VOXEL CHAIN: the transmittance from its start along its direction for its reach. NO CHAIN
+/// BUILT YET (the chain's first frames - this job runs only with GI on): NO SAMPLE, -1 - an unknown occluder is not an
+/// absent one, and the stratum enters neither sum (jah_area_vis_law.glsl); it read 1, unshadowed, and an area light
+/// outside a sealed room lit its inside until the chain was built (PHOTON-7 10-3 R3). The march starts in cascade 0 (a start its box
 /// does not hold reads on in the first cascade that does); no origin gate (oAxis -1): the start is a cell off the
 /// surface, past its own voxel's planes.
 float jahAreaVoxelVisible( vec3 originQ, vec3 wq, float reachQ )
 {
 @property( hlms_num_vct_cascades )
 	if( areaChain.count.x < 0.5 )
-		return 1.0;
+		return -1.0;
 	const vec3 sW = originQ - areaChain.corner0.xyz;
 	const ivec3 iv = ivec3( floor( sW / areaChain.origin[0].w ) );
 	return jahInjectVisibility( sW, wq, reachQ, iv, -1, 0.0, 0.0 );
 @else
-	return 1.0;
+	return -1.0;
 @end
 }
 

@@ -49,7 +49,6 @@ const Ogre::IdString kVctNumProbes("vct_num_probes");
 const Ogre::IdString kVctAnisotropic("vct_anisotropic");
 const Ogre::IdString kVctSdfQuality("vct_enable_specular_sdf_quality");
 const Ogre::IdString kVctDisableSpecular("vct_disable_specular");
-const Ogre::IdString kVctDisableDiffuse("vct_disable_diffuse");
 const Ogre::IdString kIrradianceField("irradiance_field");
 const Ogre::IdString kNormalMap("normal_map");
 const Ogre::IdString kNeedsReflDir("needs_refl_dir");
@@ -218,7 +217,8 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
         fieldSampler(hlms->getHlmsManager());
         hb.ifd = b->ifd;
         hlms->_setProperty(tid, kJahIfd, 1);
-        hlms->_setProperty(tid, kVctDisableDiffuse, 1);
+        // (vct_disable_diffuse is never set: a bound field does not disable the chain's diffuse at any cascade count -
+        // where its confidence fades, the chain's rays answer, never the unoccluded environment: PHOTON-7 10-3 R3)
     }
 }
 

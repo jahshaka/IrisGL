@@ -83,61 +83,15 @@
 // order of every term in this file is what it was when the body was a copy.
 @piece( custom_ps_ifdCagePost )
 @property( vct_num_probes )
-	// AND THE FALLBACK (P9). Binding a field sets VctDisableDiffuse
-	// (OgreHlmsPbs.cpp:1846-1850), which deletes the ENTIRE voxel-cone diffuse
-	// block from the generated shader -- including the one term that block
-	// contributes outside the voxel volume, where every cone escapes without
-	// hitting anything: ambient x the escape weight, which is ambient x 1
-	// (Vct_piece_ps.any:470-477, then x blendFade x multiplier at :480-483,
-	// with `blend` hardcoded to 1). That term is exactly what a surface out
-	// here had BEFORE the field existed, and fading the field to zero without
-	// it would leave the roof flat and BLACK (measured on the base binary with
-	// intensity 0: 2/255 against 36/255 with no field at all).
-	//
-	// It is written as the closed form rather than by re-enabling the cone
-	// block, because the block is four cone marches per pixel and this is a
-	// lerp: the fallback costs nothing where it is not used (1 - confidence is
-	// 0 inside the field) and nothing that scales with anything where it is.
-	//
-	// NOT DOUBLE-COUNTED, and here is the whole accounting. envColourD receives
-	// exactly one diffuse-GI term in every regime: the field's irradiance (the
-	// bounce AND the sky its probes' rays escape to) x confidence, plus this x
-	// (1 - confidence). At confidence 1 this line contributes zero; at confidence
-	// 0 the field contributes zero and the pixel gets precisely the term
-	// VctDisableDiffuse took from it. DoAmbientLighting is not involved in either
-	// regime -- it is gated on `vctSpecular.w == 0`, which upstream never sets
-	// while VCT is bound (AmbientLighting_piece_ps.any).
+	// AND THE FALLBACK: WHERE THE FIELD'S CONFIDENCE FADES, THE VOXEL CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3, option
+	// (a) as decided; PHOTON-7 10-3 R3: one rule for any cascade count). The field rides cascade 0, and the voxels
+	// around it hold real, voxelised, light-injected radiance out to the outermost box; the two terms are blended by
+	// the field's confidence - the field inside its window, the cones outside it, never both: envColourD receives
+	// exactly ONE diffuse-GI term in every regime. (A SINGLE VOLUME took the environment's diffuse there instead -
+	// "what an unoccluded surface had before the field" - which is the sky through a wall wherever the field's window
+	// ends inside a building; that arm and the gate it rode, vct_disable_diffuse, are deleted: the cone block is never
+	// disabled by a field, PhotonPassBinding no longer sets the property.)
 	float ifdFallbackAmbient = 1.0 - ifdConfidence;
-@property( vct_disable_diffuse )
-	if( ifdFallbackAmbient > 0.0 )
-	{
-		// The environment's diffuse lookup for this normal (the SH, the cosine
-		// convolution of the sky -- jah_environment.glsl), in radiance: what an
-		// unoccluded surface out here had before the field existed.
-		float3 ifdAmbientOutside =
-			jahEnvIrradiance( jahViewToWorldDir( float3( pixelData.normal ) ) );
-		pixelData.envColourD.xyz += ifdAmbientOutside * ( passBuf.vctProbeParams.blendFade *
-														 ifdFallbackAmbient );
-	}
-@else
-	// ...AND UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE, not
-	// its ambient (PHOTON_SPEC §13 G3, option (a) as decided).
-	//
-	// The paragraph above is the single-volume case, where the field covers the
-	// whole lit box and the only thing outside its confidence is the world
-	// beyond the volume -- for which an unoccluded ambient IS the answer the
-	// pixel had before the field existed. A chain is a different geometry: the
-	// field rides cascade 0 and the cascades around it hold real, voxelised,
-	// light-injected radiance out to the outermost box. Handing the ring a flat
-	// ambient there would throw away exactly what the outer cascades were built
-	// to compute.
-	//
-	// So the cone-traced diffuse is switched back on for a chain (the engine's
-	// Hlms listener re-opens the gate HlmsPbs closes for any bound field -- see
-	// FogHlmsListener::propertiesMergedPreGenerationStep) and the two terms are
-	// blended by the field's confidence: the field inside cascade 0, the cones
-	// outside it, never both -- envColourD receives exactly ONE diffuse-GI term
-	// in every regime.
 	//
 	// `vctDiffuse` is the cone block's result, and it already carries the sky:
 	// every cone's escape reads the one environment in its own direction
@@ -161,7 +115,6 @@
 					   passBuf.vctProbeParams );
 		pixelData.envColourD.xyz += vctDiffuse.xyz * ifdFallbackAmbient;
 	}
-@end
 @end
 
 @end

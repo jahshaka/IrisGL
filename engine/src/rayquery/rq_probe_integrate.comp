@@ -19,8 +19,8 @@
 // pixels is what keeps a bounce on the side of a silhouette it belongs to —
 // "leaks confined to the plane", the property the whole probe shape exists for.
 // A pixel whose weights sum below the floor (p.knobs4.y) gets NO answer and takes
-// the FALLBACK — the irradiance field's cage where one is bound, and where the
-// field's confidence fades the environment's diffuse — composed HERE, after the
+// the FALLBACK — the irradiance field's cage where one is bound, at its confidence
+// (where it fades, no sample: 10-3 R3) — composed HERE, after the
 // temporal mean (PHOTON-7 stage 7, 7-2: the opaque passes read only screen
 // products, L4; the field's reader is one text, jah_field_read.glsl).
 //
@@ -158,8 +158,8 @@ layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOve
 /// NO SAMPLE there, below).
 layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } gatherCounter;
 /// THE IRRADIANCE FIELD (PHOTON-7 stage 7, 7-2; bindings 10, 11): the fallback of the pixels no probe answers is the
-/// field's cage - jah_field_read.glsl, the one text the PBS pixel's reader runs too - and where its confidence fades the
-/// environment's diffuse, composed into this texture AFTER the temporal mean (the history stays the gather's one
+/// field's cage at its confidence - jah_field_read.glsl, the one text the PBS pixel's reader runs too; where it fades,
+/// no sample (10-3 R3) - composed into this texture AFTER the temporal mean (the history stays the gather's one
 /// estimator): out = the history's premultiplied mean + ( 1 - its coverage ) x the fallback, w = 1 (the shading pass
 /// binds no field, 7-5). p.fieldWin.w 0: no field bound - the coverage as w, no fallback.
 layout( set = 0, binding = 10 ) uniform sampler2D fieldIrradiance;
@@ -318,9 +318,11 @@ vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, iv
 }
 
 /// THE FALLBACK OF A PIXEL NO PROBE ANSWERS (7-2): the field's cage at the pixel's point and normal (grid space through
-/// the field's world-to-grid rows), plus the environment's diffuse where the field's confidence fades - exactly what the
-/// shading pass's reader gives a pixel on a gather pass when no probe answered (PhotonIfd_piece_ps.any, its blend
-/// fade 1). The eye's direction for the sample point's bias: towards the camera, or the view's axis orthographic.
+/// the field's world-to-grid rows), at its confidence - and where the confidence fades (past the field's window) NO
+/// SAMPLE: the share adds nothing, the convention the integrate keeps with no field bound (rgb x w is what was sampled).
+/// It added the environment's diffuse there, unoccluded - the sky through a wall past c0's window in any hall wider
+/// than it (PHOTON-7 10-3 R3; L9: a sky read with no visibility is light through a wall). The eye's direction for the
+/// sample point's bias: towards the camera, or the view's axis orthographic.
 vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 {
 	const vec3 gridPos = vec3( dot( p.fieldRow0, vec4( worldPos, 1.0 ) ), dot( p.fieldRow1, vec4( worldPos, 1.0 ) ),
@@ -334,7 +336,7 @@ vec3 fieldFallback( vec3 worldPos, vec3 worldNormal, vec3 toEye )
 										   vec3( p.fieldProbes.x, p.fieldWin.y, p.fieldWin.z ),
 										   uvec3( packed & 127u, ( packed >> 7u ) & 127u, ( packed >> 14u ) & 127u ),
 										   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
-	return a.irradiance + jahEnvIrradiance( worldNormal ) * ( 1.0 - a.confidence );
+	return a.irradiance;
 }
 
 /// THE BILINEAR READ'S TAPS (GATHER-1a; one text for the diffuse's own read and the rough specular's lobe, 7-3): the
