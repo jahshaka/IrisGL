@@ -89,52 +89,13 @@ layout( std430, set = 0, binding = 37 ) buffer CardReads { uint cardReads[]; };
 const uint kCardReadsK = 32u;
 const uint kCardReadsBlock = 1u + 2u * kCardReadsK;
 
-// ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
-layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
-layout( set = 0, binding = 6 ) uniform sampler3D voxelX[kMaxCascades];
-layout( set = 0, binding = 7 ) uniform sampler3D voxelY[kMaxCascades];
-layout( set = 0, binding = 8 ) uniform sampler3D voxelZ[kMaxCascades];
-layout( set = 0, binding = 9 ) uniform sampler3D voxelCovP[kMaxCascades];
-layout( set = 0, binding = 10 ) uniform sampler3D voxelCovN[kMaxCascades];
-layout( set = 0, binding = 11 ) uniform sampler3D voxelPosP[kMaxCascades];
-layout( set = 0, binding = 12 ) uniform sampler3D voxelPosN[kMaxCascades];
-layout( set = 0, binding = 13 ) uniform sampler3D voxelBack[kMaxCascades];
-layout( set = 0, binding = 14 ) uniform sampler3D voxelNrm[kMaxCascades];
-layout( set = 0, binding = 15 ) uniform sampler3D voxelDirect[kMaxCascades];
-#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
-layout( set = 0, binding = 16 ) uniform sampler3D voxelDirectBack[kMaxCascades];
-#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
-layout( set = 0, binding = 17 ) uniform samplerCube skyCube;
-
-#include "jah_rq_hit.glsl"
-
-#define JAH_CARD_BINDING_BASE 18
-#define JAH_CARD_VIEW_BINDING_BASE 22
-#include "jah_rq_card_bindings.glsl"
-// (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read)
-#include "jah_rq_card.glsl"
-
-layout( std430, set = 0, binding = 29 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
-layout( std430, set = 0, binding = 30 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
-#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
-#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
-#include "jah_rq_geom.glsl"
-
-layout( std430, set = 0, binding = 31 ) readonly buffer JahHitInstances { uvec4 jahHitInstances[]; };
-layout( rgba32ui, set = 0, binding = 32 ) uniform writeonly uimage2D jahHitIds;
-layout( r32ui, set = 0, binding = 33 ) uniform writeonly uimage2D jahHitDest;
-layout( std430, set = 0, binding = 34 ) buffer JahHitBuf { uint jahHitBuf[]; };
-#define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
-#include "jah_rq_sun_ray.glsl"
-#include "jah_rq_hit_record.glsl"
-layout( set = 0, binding = 35 ) uniform sampler2DArray jahHitPool;
-layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
+// THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots): the records jobs' one
+// text. (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read.)
 // A CACHE RAY TRACES NO MOVER (the mask's law above): the hit's mover gate never runs.
 // AN IRRADIANCE ESTIMATOR READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (the gather's rule, PHOTON-3: a few stochastic rays
 // cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL
-#include "jah_rq_hit_radiance.glsl"
-#include "jah_rq_panes.glsl"
+#include "jah_rq_hit_set_records.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
 {
