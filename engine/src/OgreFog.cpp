@@ -692,7 +692,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     }
     // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): every colour pass of a scene that traces (the ray tier open, its
     // row on) - JahLampRay_piece_ps.any; the TLAS's address rides the pass buffer (a zero address answers 1)
-    if (false && rec && rec->lampRaysOn) {   // MEASURING ARM (reverted after)
+    if (rec && rec->lampRaysOn) {
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays", 1);
         // (the ray query needs GLSL 4.60: the fork's glslvk_460 raises the shader's version line)
         hlms->_setProperty(Ogre::Hlms::kNoTid, "glslvk_460", 1);

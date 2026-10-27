@@ -451,7 +451,6 @@
 	/// The sun's shadow at the view-space point `posVS` of the eye ray: the PSSM split holding its depth
 	float jahFogSunAt( float3 posVS )
 	{
-		if( posVS.z < 1e30 ) return 1.0;   // MEASURING ARM (reverted after): the march's taps compiled out
 		const float depth = -posVS.z;
 		const float4 wp = float4( dot( passBuf.jahLampInvView0.xyz, posVS ) + passBuf.jahLampInvView0.w,
 								  dot( passBuf.jahLampInvView1.xyz, posVS ) + passBuf.jahLampInvView1.w,
@@ -496,7 +495,6 @@
 	/// The share of the medium's light reaching it along this pixel's eye ray (the header), `pix` the pixel
 	float jahFogLitAt( float3 posVS, int2 pix )
 	{
-		if( posVS.z < 1e30 ) return 1.0;   // MEASURING ARM (reverted after): the in-scatter weights compiled out
 		const float s = saturate( passBuf.jahFogInscatter.x );
 		float wSun = 1.0;
 		@property( hlms_num_shadow_map_lights && hlms_pssm_splits )
