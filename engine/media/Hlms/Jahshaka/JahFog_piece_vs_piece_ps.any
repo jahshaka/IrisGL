@@ -626,32 +626,14 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@end
 @end
 
-// THE PANE CASTER's VERTEX STAGE (PHOTON-7 10-4 R8, the one read's F12; JahShadowTransmit_piece_ps.any's writer): its
-// material declared (bound for it by ScenePbs::fillBuffersForV2), its transmittance 1 - alpha read per renderable and
-// handed flat to the pixel - ONE caster shader for every alpha. In this file because both stages read it.
-@property( hlms_shadowcaster && jah_pane_caster == 1 && !hlms_render_depth_only )
-@piece( custom_vs_uniformStructDeclaration )
-	@insertpiece( MaterialStructDecl )
-@end
-@piece( JahPaneCasterVs )
-	outVs.jahPaneT = 1.0 - clamp( materialArray[worldMaterialIdx[inVs_drawId].x & 0x1FFu].F0.w, 0.0, 1.0 );
-@end
-@piece( JahPaneCasterVStoPS )
-	FLAT_INTERPOLANT( float jahPaneT, @counter(texcoord) );
-@end
-@end
-// (the two vertex hooks are ONE definition each - a piece is defined once)
-@piece( custom_vs_posExecution )
-	@property( hlms_normal || hlms_qtangent )
+// (a colour pass's: the shadow casters' vertex hooks are the pane caster's, below this block)
+@property( !hlms_shadowcaster && ( hlms_normal || hlms_qtangent ) )
+	@piece( custom_vs_posExecution )
 		outVs.jahFogWorldY = worldPos.y;
 	@end
-	@insertpiece( JahPaneCasterVs )
-@end
-@piece( custom_VStoPS )
-	@property( hlms_normal || hlms_qtangent )
+	@piece( custom_VStoPS )
 		INTERPOLANT( float jahFogWorldY, @counter(texcoord) );
 	@end
-	@insertpiece( JahPaneCasterVStoPS )
 @end
 
 @property( hlms_normal || hlms_qtangent )
@@ -793,4 +775,21 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@property( emissive_as_lightmap )
 	#define UV_EMISSIVE(x) (x)
 	@end
+@end
+
+// THE PANE CASTER's VERTEX STAGE (PHOTON-7 10-4 R8, the one read's F12; JahShadowTransmit_piece_ps.any's writer): its
+// material declared (bound for it by ScenePbs::fillBuffersForV2), its transmittance 1 - alpha read per renderable and
+// handed flat to the pixel - ONE caster shader for every alpha. In this file because both stages read it; outside every
+// fog block (a caster pass sets no fog), and the two vertex hooks are the colour pass's above otherwise (a piece is
+// defined once).
+@property( hlms_shadowcaster && jah_pane_caster == 1 && !hlms_render_depth_only )
+@piece( custom_vs_uniformStructDeclaration )
+	@insertpiece( MaterialStructDecl )
+@end
+@piece( custom_vs_posExecution )
+	outVs.jahPaneT = 1.0 - clamp( materialArray[worldMaterialIdx[inVs_drawId].x & 0x1FFu].F0.w, 0.0, 1.0 );
+@end
+@piece( custom_VStoPS )
+	FLAT_INTERPOLANT( float jahPaneT, @counter(texcoord) );
+@end
 @end
