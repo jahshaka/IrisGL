@@ -489,9 +489,12 @@ void OgreScene::placeAtomCaster(const Node &n, bool casterInCut) const {
     Ogre::Item *item = n.item;
     if (!item) return;
     // The pair follows the world channels the item carries now (stockCasterBits): none for a helper, a backdrop or
-    // a distortion item, which no shadow pass draws either way.
+    // a distortion item, which no shadow pass draws either way. A PANE (PHOTON-7 10-4 R8: paneTransmittance) takes the
+    // pane pair instead: it occludes no light, so it is in no depth map, only in the transmittance layer's passes.
     const Ogre::uint32 cur = item->getVisibilityFlags();
-    const Ogre::uint32 want = (cur & ~kStockCasterBits) | (casterInCut ? 0u : stockCasterBits(cur));
+    const bool pane = item->getNumSubItems() && paneTransmittance(item->getSubItem(0)->getDatablock()) >= 0.0f;
+    const Ogre::uint32 want = (cur & ~(kStockCasterBits | kPaneCasterBits)) |
+                              (pane ? paneCasterBits(cur) : casterInCut ? 0u : stockCasterBits(cur));
     if (want != cur) item->setVisibilityFlags(want);
 }
 

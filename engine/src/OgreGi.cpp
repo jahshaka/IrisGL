@@ -143,6 +143,16 @@ void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
 #endif
 }
 
+void ScenePbs::calculateHashForPreCaster(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces,
+                                         const Ogre::PiecesMap *normalPassPieces) {
+    Ogre::HlmsPbs::calculateHashForPreCaster(renderable, inOutPieces, normalPassPieces);
+    const float T = paneTransmittance(renderable->getDatablock());
+    if (T >= 0.0f) {
+        static const Ogre::IdString kPaneCaster("jah_pane_caster");
+        setProperty(kNoTid, kPaneCaster, Ogre::int32(std::lround(T * 255.0f)) + 1);
+    }
+}
+
 // THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in
 // media/Hlms/Jahshaka/JahshakaPcc.compositor (both face passes). Gizmos and
 // selection outlines live at RQ 210 and are never captured; keep in step.

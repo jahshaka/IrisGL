@@ -1075,7 +1075,11 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     const bool moving = n.movable || n.dragMover;
     // ...AND THE STOCK CASTER'S CHANNEL beside it (kStockCasterBit): every world item starts on the stock shadow
     // passes; the GPU scene's compose takes the pair away when the caster cut draws its caster (placeAtomCaster).
-    const Ogre::uint32 channel = (moving ? kMovableBit : kVisibleBit) | stockCasterBits(moving ? kMovableBit : kVisibleBit);
+    // (a PANE - PHOTON-7 10-4 R8 - starts on the pane pair instead: it occludes no light, placeAtomCaster's rule)
+    const bool pane = n.item && n.item->getNumSubItems() &&
+                      paneTransmittance(n.item->getSubItem(0)->getDatablock()) >= 0.0f;
+    const Ogre::uint32 world = moving ? kMovableBit : kVisibleBit;
+    const Ogre::uint32 channel = world | (pane ? paneCasterBits(world) : stockCasterBits(world));
     if (unlit) return channel;
     // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
     // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which

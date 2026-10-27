@@ -75,6 +75,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_sun_contact",  "jahSunVis" },
     { "jah_area_vis",     "jahAreaVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
+    { "jah_shadow_transmit", "jahShadowTransmit" },   // PHOTON-7 10-4 R8: the shadow node's transmittance layer
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
 // THE PASS-TEXTURE TABLE (BUGS-1; preflight-atom-3 §A). Set 0 — the pass's
@@ -134,6 +135,7 @@ const Ogre::IdString &extraSlotProperty(size_t i) {
         Ogre::IdString(kExtraPassSlots[5].property),
         Ogre::IdString(kExtraPassSlots[6].property),
         Ogre::IdString(kExtraPassSlots[7].property),
+        Ogre::IdString(kExtraPassSlots[8].property),
     };
     return ids[i];
 }
@@ -369,6 +371,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.sunVis, pb.sunVisSampler },
         { pb.areaVis, pb.areaVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
+        { pb.shadowTransmit, pb.shadowTransmitSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
                   "one binding per extra pass slot, in kExtraPassSlots' order");
@@ -626,6 +629,30 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             pb.areaVis = rec->areaVis;
             pb.areaVisSampler = point;
             hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_area_vis", 1);
+        }
+    }
+    // THE SHADOWS' TRANSMITTANCE (PHOTON-7 10-4 R8): the pass's shadow node holds a transmittance layer (atlasT,
+    // OgreShadow.cpp: built only while a drawn scene holds a pane) - the product of the panes' 1 - alpha between each
+    // map's light and its nearest opaque caster, in the depth atlas's own layout - and JahShadowTransmit_piece_ps.any
+    // multiplies every shadow lookup by it at the lookup's uv (the fork's custom_shadow_transmit hooks in getShadow).
+    // A LINEAR sampler: one bilinear read where the depth is PCF-filtered. Absent in every node without the layer:
+    // one lookup per colour pass and every generated shader is the one it was.
+    pb.shadowTransmit = nullptr;
+    pb.shadowTransmitSampler = nullptr;
+    if (shadowNode && !casterPass) {
+        static const Ogre::IdString kAtlasT("atlasT");
+        // (only a node DEFINED with the layer has it: getDefinedTexture throws for a name its definition lacks)
+        bool defined = false;
+        for (const auto &td : shadowNode->getDefinition()->getLocalTextureDefinitions())
+            defined = defined || td.getName() == kAtlasT;
+        Ogre::TextureGpu *t = defined ? shadowNode->getDefinedTexture(kAtlasT) : nullptr;
+        if (t) {
+            const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
+            if (linear) {
+                pb.shadowTransmit = t;
+                pb.shadowTransmitSampler = linear;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_shadow_transmit", 1);
+            }
         }
     }
     // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is

@@ -444,11 +444,31 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // colour pass keeps its cull; the caster draws both faces. An opaque material keeps the
     // copy - a one-sided opaque surface is the face of a closed shape, whose other side casts.
     // LAST in applyPbr: every macroblock set above resets the caster to the copy.
+    // A PANE's CASTER (PHOTON-7 10-4 R8: paneTransmittance) draws only into the shadow node's TRANSMITTANCE layer
+    // (atlasT, OgreShadow.cpp): it MULTIPLIES the layer by its transmittance (the caster's blendblock: dest x src - its
+    // pixel writes 1 - alpha, JahShadowTransmit_piece_ps.any) and writes no depth (it occludes nothing: the layer's
+    // passes test the map's opaque depth read-only). Every other caster keeps the depth-writing copy, and a blendblock
+    // this rule set is taken back when the material stops being a pane.
+    const bool pane = paneTransmittance(db) >= 0.0f;
     {
         Ogre::HlmsMacroblock caster = *db->getMacroblock();
         if (p.alphaMode == PbrAlphaMode::Cutout) caster.mCullMode = Ogre::CULL_NONE;
+        if (pane) caster.mDepthWrite = false;
         const Ogre::HlmsMacroblock *cur = db->getMacroblock(true);
         if (!cur || *cur != caster) db->setMacroblock(caster, true);
+    }
+    {
+        const Ogre::HlmsBlendblock *cur = db->getBlendblock(true);
+        const bool ours = cur && cur->mSourceBlendFactor == Ogre::SBF_DEST_COLOUR &&
+                          cur->mDestBlendFactor == Ogre::SBF_ZERO && !cur->mSeparateBlend;
+        if (pane && !ours) {
+            Ogre::HlmsBlendblock multiply;
+            multiply.mSourceBlendFactor = Ogre::SBF_DEST_COLOUR;
+            multiply.mDestBlendFactor = Ogre::SBF_ZERO;
+            db->setBlendblock(multiply, true);
+        } else if (!pane && ours) {
+            db->setBlendblock(Ogre::HlmsBlendblock(), true);
+        }
     }
 }
 
@@ -577,6 +597,18 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
 }
 
 // ---- Materials ----
+/// DOES THIS SCENE HOLD A PANE (PHOTON-7 10-4 R8: the shadow nodes' transmittance layer is built once one does):
+/// a lit material in a pane's mode under alpha 1. Counted over the materials when one changed, never per frame.
+bool OgreScene::hasPanes() const {
+    if (mPaneMaterials < 0) {
+        int n = 0;
+        for (const auto &kv : mMaterials)
+            if (!kv.second.unlit && paneCasterLevel(kv.second.params.alphaMode, kv.second.params.alpha) > 0) ++n;
+        mPaneMaterials = n;
+    }
+    return mPaneMaterials > 0;
+}
+
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
     if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message
         const MaterialId mid = id ? id : reserveMaterialId();
@@ -584,6 +616,7 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
         return mid;
     }
     if (id && mMaterials.count(id)) { mError = "createPbrMaterial: the id is already a material of this scene"; return 0; }
+    mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
     JAH_TRY {
         MaterialRec rec;
         rec.params = p;
@@ -636,6 +669,8 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     JAH_HOST_CALL("Scene::setPbrMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
+    if (paneCasterLevel(it->second.params.alphaMode, it->second.params.alpha) != paneCasterLevel(p.alphaMode, p.alpha))
+        mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
     // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
     // all. A material whose SHADING MODEL is Unlit does — it just renders them
     // through the other family.
@@ -777,6 +812,22 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         if (wasMetal != gpuIsMetal(db) || paneMoved)
             for (auto &kv : mNodes)
                 if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
+        // ...AND THE PANE's CASTER PERMUTATION (PHOTON-7 10-4 R8): its pixel writes the transmittance as a compile-time
+        // value (ScenePbs::calculateHashForPreCaster), and an alpha edit inside one mode re-hashes nothing - so its
+        // wearers' renderables are re-hashed here (Hlms::calculateHashFor + Renderable::_setHlmsHashes: what a datablock's
+        // flush does, through the public door). Only when the baked level moved.
+        if (paneMoved && paneCasterLevel(o0Mode, o0Alpha) != paneCasterLevel(p.alphaMode, p.alpha))
+            for (auto &kv : mNodes) {
+                if (kv.second.materialRef != id || !kv.second.item) continue;
+                for (size_t i = 0, e = kv.second.item->getNumSubItems(); i < e; ++i) {
+                    Ogre::SubItem *sub = kv.second.item->getSubItem(i);
+                    Ogre::HlmsDatablock *worn = sub->getDatablock();
+                    if (!worn) continue;
+                    Ogre::uint32 hash = 0, casterHash = 0;
+                    worn->getCreator()->calculateHashFor(sub, hash, casterHash);
+                    sub->_setHlmsHashes(hash, casterHash);
+                }
+            }
         if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
@@ -1146,6 +1197,7 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     JAH_HOST_CALL("Scene::destroyMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
+    mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
     JAH_TRY {
         // WHAT A DYING MATERIAL COSTS THE VOLUME IS THE GEOMETRY THAT WORE IT
         // (MATERIAL-SWAP-GI-1). This used to invalidate the GI caches with no

@@ -131,3 +131,39 @@ material Jahshaka/DepthSeedRev
 		}
 	}
 }
+
+// THE TRANSMITTANCE LAYER's PER-MAP CLEAR (PHOTON-7 10-4 R8): atlasT's map rectangle to 1, colour only - the depth atlas
+// is bound read-only beside it (OgreShadow.cpp's atlasTRtv).
+fragment_program Jahshaka/ShadowTransmitClear_ps_GLSL glsl
+{
+	source JahShadowTransmitClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitClear_ps_VK glslvk
+{
+	source JahShadowTransmitClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitClear_ps unified
+{
+	delegate Jahshaka/ShadowTransmitClear_ps_GLSL
+	delegate Jahshaka/ShadowTransmitClear_ps_VK
+}
+material Jahshaka/ShadowTransmitClear
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitClear_ps
+			{
+			}
+		}
+	}
+}

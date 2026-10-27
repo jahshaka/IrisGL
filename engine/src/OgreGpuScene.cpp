@@ -942,17 +942,12 @@ uint32_t OgreScene::gpuPaneWordFor(const Node &n) {
     const Ogre::Item *item = n.item;
     if (!item || !item->getNumSubItems()) return 0u;
     const Ogre::HlmsDatablock *db = item->getSubItem(0)->getDatablock();
-    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return 0u;
-    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
-    const Ogre::HlmsPbsDatablock::TransparencyModes mode = pbs->getTransparencyMode();
-    if (mode == Ogre::HlmsPbsDatablock::None) return 0u;
-    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE) return 0u;   // Additive
-    const float alpha = std::min(std::max(pbs->getTransparency(), 0.0f), 1.0f);
-    if (!(alpha < 1.0f)) return 0u;
-    const uint32_t T = uint32_t(std::lround((1.0f - alpha) * float(kGpuPaneSteps)));
-    const uint32_t own = uint32_t(std::lround(alpha * float(kGpuPaneSteps)));
+    const float T = paneTransmittance(db);
+    if (T < 0.0f) return 0u;
+    const uint32_t t = uint32_t(std::lround(T * float(kGpuPaneSteps)));
+    const uint32_t own = uint32_t(std::lround((1.0f - T) * float(kGpuPaneSteps)));
     const bool twoSided = db->getMacroblock()->mCullMode == Ogre::CULL_NONE;
-    return kGpuPaneOn | (twoSided ? kGpuPaneTwoSided : 0u) | T | (own << 11);
+    return kGpuPaneOn | (twoSided ? kGpuPaneTwoSided : 0u) | t | (own << 11);
 }
 
 bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
@@ -1035,7 +1030,8 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
             // colour macroblock, the caster cut's from the caster's (a cut-out's caster draws both faces).
             if (db0->getMacroblock()->mCullMode == Ogre::CULL_NONE) f |= kGpuTwoSided;
             if (db0->getMacroblock(true)->mCullMode == Ogre::CULL_NONE) f |= kGpuCasterTwoSided;
-        } else if (atomCasterThroughCut(n, f, route)) {
+        } else if (atomCasterThroughCut(n, f, route) && paneTransmittance(db0) < 0.0f) {
+            // (a PANE casts through neither: it occludes no light - the transmittance layer's, PHOTON-7 10-4 R8)
             // THE CASTER ALONE THROUGH THE CUT (ENGINE-POLISH-ATOM-1 stage 2): its colour stays on PBS.
             f |= kGpuAtomCaster;
             if (db0->getMacroblock(true)->mCullMode == Ogre::CULL_NONE) f |= kGpuCasterTwoSided;

@@ -158,7 +158,7 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog || jah_shadow_transmit )
 @piece( custom_ps_uniformDeclaration )
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
@@ -190,6 +190,14 @@
 		vulkan_layout( ogre_t@value(jahCloudField) ) uniform texture2D jahCloudField;
 		@property( syntax == glslvk )
 			layout( ogre_s@value(jahCloudField) ) uniform sampler jahCloudSampler;
+		@end
+	@end
+	// THE SHADOWS' TRANSMITTANCE (PHOTON-7 10-4 R8): R8, the product of the panes' 1 - alpha between a shadow map's
+	// light and its nearest opaque caster, in the depth atlas's layout (JahShadowTransmit_piece_ps.any reads it)
+	@property( jah_shadow_transmit )
+		vulkan_layout( ogre_t@value(jahShadowTransmit) ) uniform texture2D jahShadowTransmit;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahShadowTransmit) ) uniform sampler jahShadowTransmitSampler;
 		@end
 	@end
 	// THE SUN CONTACT VISIBILITY (PHOTON-RAYS-1): R8, 1 = the sun reaches the

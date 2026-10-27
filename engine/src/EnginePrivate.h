@@ -647,6 +647,29 @@ constexpr Ogre::uint32 kStockCasterBits     = kStockCasterBit | kStockMoverCaste
 inline Ogre::uint32 stockCasterBits(Ogre::uint32 channels) {
     return ((channels & kVisibleBit) ? kStockCasterBit : 0u) | ((channels & kMovableBit) ? kStockMoverCasterBit : 0u);
 }
+// THE PANE CASTER CHANNEL (PHOTON-7 10-4 R8). Bits 14 and 15, the stock pair's twins: a PANE (a surface that blends
+// with what is behind it: paneTransmittance) occludes no light, so it leaves the depth maps (the stock pair and the
+// caster cut) and casts only into the shadow node's TRANSMITTANCE layer (atlasT, OgreShadow.cpp), whose scene passes
+// ask for these. Set by placeAtomCaster where the stock pair would be.
+constexpr Ogre::uint32 kPaneCasterBit      = 1u << 14;
+constexpr Ogre::uint32 kPaneMoverCasterBit = 1u << 15;
+constexpr Ogre::uint32 kPaneCasterBits     = kPaneCasterBit | kPaneMoverCasterBit;
+inline Ogre::uint32 paneCasterBits(Ogre::uint32 channels) {
+    return ((channels & kVisibleBit) ? kPaneCasterBit : 0u) | ((channels & kMovableBit) ? kPaneMoverCasterBit : 0u);
+}
+/// A PANE's TRANSMITTANCE (PHOTON-7 10-4 R7/R8; L9: a transparent surface transmits light, attenuated by its
+/// material): Ogre's blend passes 1 - alpha of what lies behind a Fade (Blend) or Transparent (Glass) surface and of a
+/// Refractive one's refraction - NEUTRAL, by Ogre's own glass model (a tinted, RGB transmittance is on the owner's
+/// review list). -1 for a surface that occludes: an opaque or cut-out material, Modulate and Additive (out of R7/R8),
+/// an alpha of 1, anything not HlmsPbs's. Sub-item 0's datablock is the item's (the material word's rule).
+inline float paneTransmittance(const Ogre::HlmsDatablock *db) {
+    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return -1.0f;
+    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
+    if (pbs->getTransparencyMode() == Ogre::HlmsPbsDatablock::None) return -1.0f;
+    if (db->getBlendblock()->mDestBlendFactor == Ogre::SBF_ONE) return -1.0f;   // Additive
+    const float alpha = std::min(std::max(pbs->getTransparency(), 0.0f), 1.0f);
+    return alpha < 1.0f ? 1.0f - alpha : -1.0f;
+}
 
 // ---------------------------------------------------------------------------
 // THE SHADOW ATLAS (SPECS/SHADOW_TOOLING_SPEC.md; built in OgreShadow.cpp)
@@ -725,6 +748,10 @@ inline Ogre::uint32 shadowCasterChannels(ShadowNodeKind kind) {
 /// Within RESERVED_VISIBILITY_FLAGS by construction (trap 6).
 inline Ogre::uint32 shadowPassMask(ShadowNodeKind kind) {
     return stockCasterBits(shadowCasterChannels(kind)) & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
+}
+/// ...and THE TRANSMITTANCE LAYER's scene passes' mask (PHOTON-7 10-4 R8): the panes of the same channels.
+inline Ogre::uint32 paneShadowPassMask(ShadowNodeKind kind) {
+    return paneCasterBits(shadowCasterChannels(kind)) & Ogre::VisibilityFlags::RESERVED_VISIBILITY_FLAGS;
 }
 inline Ogre::uint32 allShadowCasterChannels() {
     return shadowCasterChannels(ShadowNodeKind::View) |
@@ -3703,6 +3730,8 @@ private:
         const Ogre::HlmsSamplerblock *areaVisSampler = nullptr;
         Ogre::TextureGpu             *atmoAerial = nullptr;             // SKY-ATMOSPHERE-1
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
+        Ogre::TextureGpu             *shadowTransmit = nullptr;         // PHOTON-7 10-4 R8 (the shadow node's atlasT)
+        const Ogre::HlmsSamplerblock *shadowTransmitSampler = nullptr;
         /// PHOTON-3: the constant-buffer slot of the specular lobe's albedo table
         /// (PhotonSpecularAlbedoBuffer.h) in this pass, -1 for a pass that declares none.
         int                           specAlbedoSlot = -1;
@@ -4091,6 +4120,10 @@ protected:
     /// renderable's OWN scene's PlanarReflections is bound for the call and the
     /// pass's pointer put back after it.
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
+    /// A PANE's CASTER (PHOTON-7 10-4 R8): `jah_pane_caster` = its transmittance on 255 steps + 1 (paneTransmittance), the
+    /// value its pixel writes into the shadow node's transmittance layer (JahShadowTransmit_piece_ps.any).
+    void calculateHashForPreCaster(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces,
+                                   const Ogre::PiecesMap *normalPassPieces) override;
 private:
     std::vector<HashNote> mHashNotes;
     bool mHashNotesOverflow = false;
@@ -5135,6 +5168,9 @@ public:
     /// "Does this scene have anything to cache?" — decides the clear strategy
     /// (per-map quads only while some drawn scene holds a cacheable lamp).
     bool hasCacheableShadowLights() const;
+    /// A lit material in a pane's mode (PHOTON-7 10-4 R8: OgreMaterials.cpp).
+    bool hasPanes() const;
+    mutable int mPaneMaterials = -1;   ///< hasPanes' count; -1 = recount at the next read
     /// Re-render every cached lamp map of this scene on the next frame.
     void dirtyAllShadowMaps() { mShadowDirtyAll = true; }
     /// A depth-relevant change to what the items wearing `mat` cast — alpha
@@ -5927,6 +5963,13 @@ private:
     /// A mode that BLENDS over what is behind it (every mode but Opaque and Cutout): its surface is drawn after the
     /// opaque ones, in the blended queue, and occludes nothing.
     static bool isBlendedMode(PbrAlphaMode m) { return m != PbrAlphaMode::Opaque && m != PbrAlphaMode::Cutout; }
+    /// The pane caster's baked level for a material's mode and alpha (ScenePbs::calculateHashForPreCaster's value):
+    /// round((1 - alpha) x 255) + 1 for a pane's modes (Blend, Glass, Refractive) under alpha 1, 0 otherwise.
+    static int paneCasterLevel(PbrAlphaMode m, float alpha) {
+        const bool paneMode = m == PbrAlphaMode::Blend || m == PbrAlphaMode::Glass || m == PbrAlphaMode::Refractive;
+        const float a = std::min(std::max(alpha, 0.0f), 1.0f);
+        return paneMode && a < 1.0f ? int(std::lround((1.0f - a) * 255.0f)) + 1 : 0;
+    }
     /// Re-files every item that uses this material after its alpha mode changed.
     void refileItems(MaterialId id, const MaterialRec &m);
 
@@ -9018,7 +9061,7 @@ public:
     /// count by dropping every workspace that instantiates the shadow node,
     /// replacing the definitions and re-creating them. Returns true when a
     /// rebuild actually happened.
-    bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool perMapClears);
+    bool rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool perMapClears, bool force = false);
     /// The EFFECTIVE budget: what the host asked for (setShadowMapBudget),
     /// clamped to the engine's hard maximum and to what the current
     /// resolution can afford — 16 maps at 1024, 8 at 2048, 4 at 4096, 2 at
@@ -9280,6 +9323,11 @@ private:
     /// upstream's pass list exactly; then true for the rest of the session
     /// (one-way — applyShadowCache).
     bool            mShadowPerMapClears = false;
+    /// THE TRANSMITTANCE LAYER (PHOTON-7 10-4 R8): the shadow nodes hold atlasT and its passes - set ONE WAY, like the
+    /// per-map clears, once a drawn scene with a shadow node holds a pane (applyShadowCache's debounced flip; a process
+    /// that never drew glass builds none of it).
+    bool            mShadowPanes = false;
+    unsigned        mShadowPaneFlipFrames = 0;
     /// Set each frame by applyShadowCache while the clear strategy is still
     /// upstream's: a drawn, PRESENTING scene holds a cacheable lamp, so the
     /// per-map-clear flip WILL happen — it is only waiting out its debounce.
