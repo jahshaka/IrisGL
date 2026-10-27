@@ -849,7 +849,7 @@ private:
     /// the shader cache's dirt note are written by the render thread when it JOINS - at the first function that
     /// reads the setup's members (joinAhead), before any of them is read. The same create infos, the same cache
     /// key, the same pipelines: the picture and the shader cache are unchanged.
-    enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadCount };
+    enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadGlassEscape, kAheadCount };
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
@@ -1868,7 +1868,10 @@ private:
         uint32_t readDraw = 0u;
         bool everRead = false;
     };
-    bool makeGlassEscapePipelines(std::string &err);
+    bool makeGlassEscapePipelines(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
+        return aheadOr(kAheadGlassEscape, err, [this](std::string &e) { return makeGlassEscapePipelinesNow(e); });
+    }
+    bool makeGlassEscapePipelinesNow(std::string &err);
     void readGlassEscape(EscapeView &ev);
     std::unordered_map<const ReflectPassListener *, EscapeView> mEscape;
     VkDescriptorSetLayout mEscSetLayout = VK_NULL_HANDLE, mEscAddSetLayout = VK_NULL_HANDLE;
@@ -2613,6 +2616,7 @@ void RayQueryTier::startAhead() {
     launch(kAheadCardGather, &RayQueryTier::makeCardGatherPipelineNow);
     launch(kAheadCardMovers, &RayQueryTier::makeCardMoverPipelineNow);
     launch(kAheadVoxelSides, &RayQueryTier::makeVoxelSidePipelineNow);
+    launch(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);   // (PHOTON-7 10-4 R4: 3.3 s cold on the render thread)
 }
 
 void RayQueryTier::joinAhead(AheadId id) {
@@ -11692,7 +11696,7 @@ struct GlassEscapeAddParams {
 };
 }   // namespace
 
-bool RayQueryTier::makeGlassEscapePipelines(std::string &err) {
+bool RayQueryTier::makeGlassEscapePipelinesNow(std::string &err) {
     if (!ensureSamplers(err)) return false;
     DescriptorPoolPlan plan;
     const uint32_t sets = kMaxTimedScenes * kReflectRing * 2u;
@@ -11815,6 +11819,7 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     if (known != mEscape.end())
         for (EscapeList &l : known->second.lists) l.ready = false;
     if (!isOpen() || !view || !next || mEscFailed) return;
+    joinAhead(kAheadGlassEscape);   // (its members are read below: the ahead build is joined first)
     const ChainDesc cd = view->chainDesc();
     const bool floatScene = cd.hdr || cd.hdrReadback || cd.displayEncode;
     OgreScene *scene = view->ogreScene();
@@ -11937,6 +11942,7 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
     if (scene) FogHlmsListener::setGlassEscape(scene->sceneManager(), false, 0ull, 0u);
     auto it = mEscape.find(key);
     if (it == mEscape.end() || !scene || !pass || which > 1u || !isOpen()) return;
+    joinAhead(kAheadGlassEscape);
     EscapeView &ev = it->second;
     EscapeList &l = ev.lists[which];
     if (!l.ready) return;
@@ -12174,6 +12180,7 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
 void RayQueryTier::forgetGlassEscape(const ReflectPassListener *key) {
     auto it = mEscape.find(key);
     if (it == mEscape.end()) return;
+    joinAhead(kAheadGlassEscape);   // (mEscPool is the ahead build's)
     EscapeView &ev = it->second;
     retire(ev.accum);
     retire(ev.readback);
