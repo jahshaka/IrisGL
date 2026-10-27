@@ -242,7 +242,7 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
     out.counts[1] = src.sky ? 1.0f : 0.0f;
     out.counts[2] = float(geomSlots);
     out.counts[3] = src.movers ? 1.0f : 0.0f;
-    // the cube's gain, or the flat environment with no cube (jah_rq_hit.glsl's JAH_SKY_COLOUR contract)
+    // the flat environment with no cube (jah_rq_hit.glsl's JAH_SKY_COLOUR contract)
     for (int i = 0; i < 3; ++i) out.skyColour[i] = std::max(0.0f, src.skyColour[i]);
     out.cards[0] = src.cardsBound() ? float(src.cardSlots) : 0.0f;
     out.cards[1] = src.cardsBound() ? float(src.cardRecords) : 0.0f;

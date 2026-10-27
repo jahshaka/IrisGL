@@ -184,7 +184,6 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
 #define JAH_ENV_MIPS 1.0
-#define JAH_ENV_GAIN vec3( 0.0 )
 #define JAH_ENV_SH_C0 p.envSh[0].xyz
 #define JAH_ENV_SH_C1 p.envSh[1].xyz
 #define JAH_ENV_SH_C2 p.envSh[2].xyz

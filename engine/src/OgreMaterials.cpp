@@ -2218,17 +2218,13 @@ Ogre::TextureGpu *OgreScene::reflectionTexFor(const MaterialRec &rec) const {
     const TextureId override_ = rec.boundTextures[size_t(PbrTextureSlot::Reflection)];
     if (override_) {
         auto it = mTextures.find(override_);
-        // AN AUTHORED MAP IS NOT THE SKY and is never gated on the Sky Light:
-        // it is the material's own environment (round-2 review item 2).
+        // AN AUTHORED MAP IS NOT THE SKY: it is the material's own environment
+        // (round-2 review item 2).
         if (it != mTextures.end() && it->second.texture) return it->second.texture;
     }
-    // THE SKY CUBE IS A LIGHT, so it goes out with the Sky Light — by not being
-    // BOUND, not by being scaled by zero. envmapScaleForPass explains why the
-    // gate has to live here as well: the scale is a pass value and a pass can
-    // hold both kinds of material, so the only per-material lever is the
-    // binding. Rebinding happens on the zero edge only
-    // (OgreScene::setEnvironmentLight).
-    if (mEnvLightScale <= 0.0f) return nullptr;
+    // THE SKY'S CUBE: the capture of the sky as drawn, so it carries the Sky
+    // Light's gain itself - black at zero - and is bound as it is (PHOTON-7
+    // 10-3 R5: OgreScene::setEnvironmentLight).
     return mReflectionTex;
 }
 

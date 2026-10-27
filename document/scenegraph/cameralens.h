@@ -319,7 +319,8 @@ float greyCardFilmInput();
 ///
 /// The SKY LIGHT is an integral rather than a beam: a uniform sky of radiance
 /// `L_sky` puts `PI * L_sky` on an unshadowed upward-facing surface, scaled by
-/// the Sky Light's own intensity.
+/// the Sky Light's gain - the same gain the engine draws the sky at (1 with no
+/// Sky Light node: PHOTON-7 10-3 R5, the sky emits what it shows).
 ///
 ///     E_key = PI * ( sunIntensity + skyLightIntensity * skyRadiance )
 ///

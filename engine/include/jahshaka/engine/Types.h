@@ -1277,37 +1277,18 @@ struct SkyDesc {
     TextureId equirect = 0;
     /// SkyMode::Cubemap: six face textures, in the order +X, -X, +Y, -Y, +Z,
     /// -Z, each face seen from INSIDE the cube looking down that WORLD axis
-    /// (the backend converts to whatever handedness its cubemaps use). They
-    /// also feed environment reflections — a cubemap sky needs no
-    /// `reflectionFaces`. Ignored in every other mode.
+    /// (the backend converts to whatever handedness its cubemaps use). Ignored
+    /// in every other mode.
     TextureId faces[6] = { 0, 0, 0, 0, 0, 0 };
 
     /// SkyMode::Atmosphere: the planet's atmosphere. Ignored otherwise.
     AtmosphereSky atmosphere;
 
-    /// ENVIRONMENT REFLECTIONS (IBL), independently of the sky.
-    ///
-    /// `reflections == false` means "this description says nothing about
-    /// reflections": whatever is bound stays bound. That is the state a
-    /// cubemap sky is in (its own faces are the source), and it is also what a
-    /// host says when it could not produce reflection faces this time and
-    /// prefers the previous ones to no reflections at all.
-    ///
-    /// With `reflections == true`, `reflectionFaces` are six square, equally
-    /// sized world-axis faces (same order as `faces`) which become the
-    /// GGX-prefiltered cubemap every PBR material samples — this is how
-    /// equirectangular and CPU-baked skies get what a cubemap sky gets for
-    /// free; the host resamples its equirect image into six faces and pushes
-    /// them here. The mip chain is a roughness PREFILTER, not a box mip chain,
-    /// so a rough metal reads the hemisphere around its reflection vector
-    /// instead of one blurred face. Six zeros CLEAR the reflections. The face
-    /// textures are copied; the caller may destroy them afterwards.
-    bool      reflections = false;
-    TextureId reflectionFaces[6] = { 0, 0, 0, 0, 0, 0 };
+    /// THE ENVIRONMENT (IBL and the ambient) is not described here: it is the
+    /// CAPTURE of this sky as drawn, for every mode (PHOTON-7 10-3 R5 - the sky
+    /// emits what it shows). A host never states an environment the sky does not
+    /// show; the explicit reflection faces that once could are deleted.
 
-    /// Exact equality, like every other change-guard on this boundary. Texture
-    /// ids are monotonic per scene and never recycled, so equal ids really are
-    /// the same pixels.
     /// THE SUN DISC, drawn over this sky (SunDisc above). A THIRD independent
     /// half: it changes every time the sun light is rotated, and re-uploading
     /// the sky or rebuilding the IBL cubemap for that would be absurd.
@@ -1317,15 +1298,16 @@ struct SkyDesc {
     /// the sky down, and a wind change must not even re-capture it.
     CloudLayerDesc clouds;
 
+    /// Exact equality, like every other change-guard on this boundary. Texture
+    /// ids are monotonic per scene and never recycled, so equal ids really are
+    /// the same pixels.
     bool operator==(const SkyDesc &o) const {
-        return sameSky(o) && sameReflections(o) && sun == o.sun && clouds == o.clouds;
+        return sameSky(o) && sun == o.sun && clouds == o.clouds;
     }
     bool operator!=(const SkyDesc &o) const { return !(*this == o); }
 
-    /// The two halves, separately: the backend rebuilds the sky and the
-    /// reflection cubemap independently (they were two verbs for exactly that
-    /// reason), so a description that changes only its reflection faces must
-    /// not tear the sky down and back up.
+    /// The sky half alone: a description that changes only its sun disc or its
+    /// cloud layer must not tear the sky down and back up.
     bool sameSky(const SkyDesc &o) const {
         if (mode != o.mode) return false;
         if (mode == SkyMode::Equirectangular) return equirect == o.equirect;
@@ -1333,13 +1315,6 @@ struct SkyDesc {
             for (int i = 0; i < 6; ++i) if (faces[i] != o.faces[i]) return false;
         }
         if (mode == SkyMode::Atmosphere) return atmosphere == o.atmosphere;
-        return true;
-    }
-    bool sameReflections(const SkyDesc &o) const {
-        if (reflections != o.reflections) return false;
-        if (!reflections) return true;
-        for (int i = 0; i < 6; ++i)
-            if (reflectionFaces[i] != o.reflectionFaces[i]) return false;
         return true;
     }
 };

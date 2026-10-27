@@ -103,12 +103,10 @@
 		@property( !irradiance_field )
 			float4 jahIfdUnused;
 		@end
-		float4 jahEnv;			// THE ONE ENVIRONMENT (PHOTON-ENV-1): rgb = the cube's
-								// gain per channel (the Sky Light's intensity times its
-								// tint), w = the cube's own mip count. The gain cannot
-								// ride ambientUpperHemi.w: that pass scale is a single
-								// channel, and it is pinned to 1.0 while a probe grid is
-								// bound because it also scales the probe samples.
+		float4 jahEnv;			// THE ONE ENVIRONMENT (PHOTON-ENV-1): w = the cube's own
+								// mip count; xyz the pad (the cube is the capture of the
+								// sky as drawn and holds the Sky Light's gain itself:
+								// PHOTON-7 10-3 R5).
 	@end
 	@property( jah_cloud_shadow )
 		// THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1), the LAST members, so

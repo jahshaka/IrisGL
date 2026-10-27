@@ -592,10 +592,9 @@ namespace Ogre
         // In RADIANCE: the march returns the rays' colour in it (the voxels hold radiance, PHOTON-7 stage 1), so the sky
         // an escaping ray adds is added as it is (the bounce job does the same, PhotonVoxelLighting::runBounce).
         TextureGpu *envCube = mVctLighting->getEnvironmentCube();
-        const float *gain = mVctLighting->getEnvironmentGain();
         const float *sh = mVctLighting->getEnvironmentSh();
-        mIfGenParams.envGainMips = float4(
-            Vector4( gain[0], gain[1], gain[2], envCube ? Real( envCube->getNumMipmaps() ) : Real( 1 ) ) );
+        mIfGenParams.envMips = float4(
+            Vector4( 0.0f, 0.0f, 0.0f, envCube ? Real( envCube->getNumMipmaps() ) : Real( 1 ) ) );
         for( size_t i = 0u; i < 9u; ++i )
             mIfGenParams.envSh[i] = float4( Vector4( sh[i * 3u + 0u], sh[i * 3u + 1u], sh[i * 3u + 2u], 0.0f ) );
     }

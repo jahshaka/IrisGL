@@ -218,7 +218,7 @@
                 ["vctInvResMaxLod",         [1, 1, 1, 256],     "float"],
 
                 ["fromPreviousProbeToNext", [1],        "float"],
-                ["envGainMips",             [0, 0, 0, 1], "float"],
+                ["envMips",                 [0, 0, 0, 1], "float"],
                 ["envSh",                   [0, 0, 0, 0], "float"]
             ],
 

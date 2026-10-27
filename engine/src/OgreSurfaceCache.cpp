@@ -2412,8 +2412,7 @@ void SurfaceCache::relightCards() {
         g[97] = mRayLastShell / size.x;
         g[98] = float(std::max(mIndirectRays, 1u));
         envCube = vct->getEnvironmentCube();
-        const float *gain = vct->getEnvironmentGain();
-        g[100] = gain[0]; g[101] = gain[1]; g[102] = gain[2];
+        g[100] = g[101] = g[102] = 0.0f;   // the pad: the cube holds the sky's gain (R5)
         g[103] = envCube ? float(envCube->getNumMipmaps()) : 1.0f;
         const float *sh = vct->getEnvironmentSh();
         for (unsigned k = 0; k < 9u; ++k) {

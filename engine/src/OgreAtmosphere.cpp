@@ -333,6 +333,13 @@ void JahAtmosphere::setSkyBrightness(float b) {
     mDirtyBuffer = mDirtyQuad = true;
 }
 
+void JahAtmosphere::setSkyGain(const Ogre::Vector3 &gain) {
+    const Ogre::Vector3 g(std::max(0.0f, gain.x), std::max(0.0f, gain.y), std::max(0.0f, gain.z));
+    if (g == mSkyGain) return;
+    mSkyGain = g;
+    mDirtyBuffer = mDirtyQuad = true;
+}
+
 void JahAtmosphere::setFogBlock(float density, float breakMin, float breakFalloff) {
     if (density == mFogDensity && breakMin == mFogBreakMin && breakFalloff == mFogBreakFalloff) return;
     mFogDensity = density;

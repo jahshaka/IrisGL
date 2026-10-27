@@ -59,8 +59,7 @@
 		#define JAH_ENV_CUBE_ON false
 		#define JAH_ENV_SAMPLE( d, l ) float3( 0, 0, 0 )
 	@end
-	#define JAH_ENV_MIPS p_envGainMips.w
-	#define JAH_ENV_GAIN p_envGainMips.xyz
+	#define JAH_ENV_MIPS p_envMips.w
 	#define JAH_ENV_SH_C0 p_envSh[0].xyz
 	#define JAH_ENV_SH_C1 p_envSh[1].xyz
 	#define JAH_ENV_SH_C2 p_envSh[2].xyz

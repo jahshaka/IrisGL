@@ -99,7 +99,7 @@ struct ScreenGiParams
 	vec4 volumeOrigin;	// xyz = cascade 0's volume origin, world
 	vec4 volumeInvSize;	// xyz = 1 / its size, world
 	vec4 counts;		// x = cascades, y = the specular SDF's max mip, z = its factor, w = the rays' last world shell
-	vec4 envGainMips;	// xyz = the Sky Light's gain on the cube, w = its mips
+	vec4 envMips;		// w = the environment cube's mips (xyz the pad: the cube holds the sky's gain, R5)
 	vec4 envSh[9];		// the environment's nine SH coefficients, world axes
 	// THE IRRADIANCE FIELD for an IDENTITY view (PhotonIrradianceField::fillConstBufferData: three rows world to grid,
 	// ( Nx, Nx * Ny ), the depth and irradiance atlases) and its window word ( slot packed, Ny, Nz )
@@ -127,8 +127,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_ENV_CUBE_ON false
 	#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0, 0.0, 0.0 )
 @end
-#define JAH_ENV_MIPS p.envGainMips.w
-#define JAH_ENV_GAIN p.envGainMips.xyz
+#define JAH_ENV_MIPS p.envMips.w
 #define JAH_ENV_SH_C0 p.envSh[0].xyz
 #define JAH_ENV_SH_C1 p.envSh[1].xyz
 #define JAH_ENV_SH_C2 p.envSh[2].xyz

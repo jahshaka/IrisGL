@@ -3579,15 +3579,9 @@ public:
     /// fork 4d5fbef16+8f09c0cd4 (was 0048). The state is per scene because the sky is.
     struct SkyEnvState {
         /// The scene's prefiltered sky cube (`mReflectionTex`), or null: null
-        /// is "this scene has no sky reflection", which is also what a Sky
-        /// Light at zero gain means (the sky goes out by not being BOUND).
+        /// is "this scene has no sky reflection". The cube is the capture of the
+        /// sky as drawn, so the Sky Light's gain is in it (PHOTON-7 10-3 R5).
         Ogre::TextureGpu *cube = nullptr;
-        /// The Sky Light's gain per channel (PHOTON-ENV-1: every escape reads
-        /// the cube at it). It rides here and NOT in `passBuf.ambientUpperHemi.w`
-        /// because that pass scale is one channel and is 1.0 while a PCC is
-        /// bound, deliberately (envmapScaleForPass: a probe photographs real
-        /// radiance and must not be scaled by the skylight dial).
-        float gain[3] = { 1.0f, 1.0f, 1.0f };
         /// The cube's own mip count, for the roughness->LOD map. NOT
         /// `passBuf.envMapNumMipmaps`: that is a MAX over every bound
         /// reflection texture and belongs to the probe array here.
@@ -4214,9 +4208,8 @@ public:
     /// SceneManager::setSky throws on setNamedConstant AFTER attaching the sky.
     ///
     /// ONE entry point (SkyDesc), and it owns what the host used to: the
-    /// dispatch on mode, the ordering (sky first, then reflections — a NoSky
-    /// push destroys the reflections with the sky), and the "already applied"
-    /// comparison, per half.
+    /// dispatch on mode and the "already applied" comparison, per half. A NoSky
+    /// push destroys the environment with the sky.
     bool setSky(const SkyDesc &desc) override;
     SkyDesc sky() const override { return mSkyDesc; }
     /// The description currently applied — the idempotency guard, and the
@@ -4225,11 +4218,8 @@ public:
     /// The two halves of setSky, each only reached when its half of the
     /// description actually changed.
     bool applySkyMode(const SkyDesc &desc);
-    /// Cubemap sky from six world-axis faces; also its own IBL source.
+    /// Cubemap sky from six world-axis faces (its environment is its capture, at the faces' size).
     bool applySkyCubemap(const TextureId faces[6]);
-    /// Environment reflections divorced from the sky: six resampled faces of
-    /// the host's equirect/baked sky image. Six zero ids clear.
-    bool applySkyReflectionFaces(const TextureId faces[6]);
     /// THE PLANET'S ATMOSPHERE (AtmosphereSky) as the scene's sky: the
     /// component's model, sun and quad. The component is the same instance the
     /// FOG uses — one per scene — so the two halves negotiate through
@@ -4263,8 +4253,8 @@ public:
         JAH_HOST_CALL("Scene::setReflectionFogEnabled"); mReflectionFogOn = on; }
 
     /// THE SKY, CAPTURED ON THE GPU (SKY-GPU) — the one source of a scene's
-    /// environment reflections and its ambient SH, for every sky that is not
-    /// already a cubemap.
+    /// environment reflections and its ambient SH, for every sky (a cubemap sky
+    /// at its faces' size: PHOTON-7 10-3 R5).
     ///
     /// Six render_scene passes over render queue 0 alone (the sky's queue),
     /// into the six faces of a small cube: whatever the viewport shows as sky
@@ -4388,8 +4378,8 @@ public:
     void destroyPendingReflection();
     /// No sky, no sky light: every SH this scene holds, the one in force too.
     void forgetSkySh();
-    /// The ambient the pixel reads: the SH in force x mEnvLightGain, or zeros —
-    /// only while the engine owns the ambient (mSkyAmbientOwned).
+    /// The ambient the pixel reads: the SH in force (the capture's: sky x gain), or
+    /// zeros - only while the engine owns the ambient (mSkyAmbientOwned).
     void applySkyAmbient(GiStaleReason why);
     /// WHO WRITES THE AMBIENT. setEnvironmentLight hands it to the engine (a
     /// host modelling a Sky Light: SceneMirror, the previews); setAmbient /
@@ -4409,12 +4399,11 @@ public:
     OgreEngine *mEngine = nullptr;
     /// Builds the NEXT GGX-prefiltered reflection cubemap (mReflPendingTex) by
     /// convolving `srcCube`; the cube in force stays bound until the whole next
-    /// environment set has landed (landEnvironmentIfComplete). `ownsSource`
-    /// means the source is ours to destroy once the convolution has run (the
-    /// cubemap-sky path passes false: there the source IS the sky texture).
-    /// The prefilter runs in applyPendingIbl: inside the capture's own frame for
-    /// a captured sky, at the top of the next frame for a host-pushed cube.
-    void buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource);
+    /// environment set has landed (landEnvironmentIfComplete). The source is the
+    /// sky's capture - every sky's environment (PHOTON-7 10-3 R5) - and is ours:
+    /// destroyed once the convolution has run. The prefilter runs in
+    /// applyPendingIbl, inside the capture's own frame.
+    void buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube);
     /// Unbinds and destroys the reflection cubemap and any pending next one.
     void destroyReflection();
     /// Binds (or clears, when mReflectionTex is null) the scene's sky reflection
@@ -4442,24 +4431,21 @@ public:
     void convolvePendingIbl();
     Ogre::TextureGpu *mReflectionTex = nullptr;   // prefiltered cube on PBSM_REFLECTION
     /// THE ONE ENVIRONMENT AS THE RAY JOBS BIND IT (PHOTON-ENV-1): the cube (null
-    /// while there is none or the Sky Light is out) and ONE colour whose meaning
-    /// follows it — with the cube, the environment light's gain on it; without,
-    /// the environment's flat radiance (the SH's constant band, gain applied).
+    /// while there is none) - the capture of the sky as drawn, its gain in it - and,
+    /// with no cube, the environment's flat radiance (the SH's constant band).
     /// jah_rq_hit.glsl's JAH_SKY_COLOUR contract.
     struct RayEnvironment {
         Ogre::TextureGpu *cube = nullptr;
         float colour[3] = { 0.0f, 0.0f, 0.0f };
     };
     RayEnvironment rayEnvironment() const;
-    /// The environment light's gain per channel (Scene::setEnvironmentLight):
-    /// what every escape multiplies the environment cube by (the pass's `jahEnv`
-    /// slot, the bounce job, the ray jobs).
-    Colour mEnvLightGain { 1.0f, 1.0f, 1.0f, 1.0f };
-    /// ...and its Rec.709 luminance, the one number HlmsPbs' own env-probe
-    /// sample can carry: it rides `ambientUpperHemi.w` (envmapScale), which
-    /// scales everything in the env-probe slot. At exactly 1.0 HlmsPbs does not
-    /// even set the `envmap_scale` shader property.
-    float mEnvLightScale = 1.0f;
+    /// THE SKY'S GAIN per channel (Scene::setEnvironmentLight; PHOTON-7 10-3 R5): the
+    /// Sky Light's tint x intensity, applied WHERE THE PICTURE IS FORMED - Ogre's sky
+    /// material (`skyGain`), the atmosphere's radiance scale, the cloud sheet's sun
+    /// term - so the capture, its SH and its convolved cube hold sky x gain by
+    /// construction and no reader scales anything (applySkyGain).
+    Colour mSkyGain { 1.0f, 1.0f, 1.0f, 1.0f };
+    void applySkyGain();
     void destroySky();
     bool removeNode(NodeId id) override;
 
@@ -5895,16 +5881,10 @@ private:
     /// so a PCC change cannot leave a per-material cubemap behind — which would
     /// not merely look wrong, it would fail to compile the shader.
     Ogre::TextureGpu *reflectionTexFor(const MaterialRec &rec) const;
-    /// HlmsPbs' envmapScale for the next pass: the environment light's gain,
-    /// except while PCC owns the env-probe slot (see the note at the definition).
-    float envmapScaleForPass() const;
-    /// Re-writes the ambient pass data with the CURRENT envmapScaleForPass().
-    /// Runs on every PCC binding transition, not only on a Sky Light edit.
-    void refreshEnvmapScale();
-    /// Any live PBR material carrying its OWN reflection cubemap. Such a pass
-    /// keeps envmapScale at 1.0 (see the note at envmapScaleForPass): the
-    /// author's map is not the sky and the Sky Light's gain must not dim it.
-    bool hasAuthoredReflectionMap() const;
+    /// Re-writes the sky's pass-level env slot (FogHlmsListener::SkyEnvState: the cube for the passes where the
+    /// env-probe slot is the probe array's) and notes a swapped cube to the bounce. Runs on every edge that can
+    /// move the sky's environment: a sky rebuild and a PCC transition (applyReflectionToAllImpl).
+    void refreshSkyEnv();
 public:
     /// Is a refraction pass present in EVERY view that draws this scene?
     ///
@@ -6451,11 +6431,11 @@ private:
     /// means "derive it" (inheritedShown), non-null means the host walked its
     /// tree parent-first and already knows.
     void setNodeVisibleImpl(NodeId id, bool visible, const bool *parentShown);
-    /// Pushes the environment (cube, gain, SH) into every cascade's bounce job
+    /// Pushes the environment (cube, SH) into every cascade's bounce job
     /// (no-op without a VCT arm). Called before every PhotonVoxelLighting::update and on
     /// every environment change.
     void applyVctEnvironment();
-    /// The environment's cube, gain or coefficients changed: the injection's
+    /// The environment's cube or coefficients changed: the injection's
     /// serial moves and a bouncing chain re-settles (PHOTON-ENV-1).
     void noteEnvironmentChanged();
     /// The environment cube the last push saw (its identity, to notice a swap).
@@ -6664,11 +6644,9 @@ private:
     /// Textures WE own for Ogre's sky renderable (the equirect Type2DArray copy /
     /// the converted cube). Null when the sky uses a host texture directly.
     Ogre::TextureGpu *mSkyOwnedTex = nullptr;
-    /// The un-prefiltered cube the ibl_specular pass convolves into mReflectionTex.
-    /// May alias mSkyOwnedTex (a cubemap sky is its own IBL source); mIblSourceOwned
-    /// says whether it is ours to destroy.
+    /// The un-prefiltered cube the ibl_specular pass convolves into mReflectionTex:
+    /// the sky's capture, ours to destroy once it is read.
     Ogre::TextureGpu *mIblSourceTex = nullptr;
-    bool              mIblSourceOwned = false;
     bool              mIblPending = false;   // convolve into mReflPendingTex
     /// One-shot ibl_specular workspace; kept null between runs.
     Ogre::Camera *mIblCamera = nullptr;

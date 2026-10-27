@@ -213,7 +213,7 @@ namespace Ogre
         mBounceIterationDampening( 0 ),
         mBounceInvResMaxLod( 0 ),
         mBounceFromPreviousProbeToNext( 0 ),
-        mBounceEnvGainMips( 0 ),
+        mBounceEnvMips( 0 ),
         mBounceEnvSh( 0 ),
         mBounceShaderParams( 0 ),
         mSpecularSdfQuality( 0.875f ),
@@ -222,7 +222,6 @@ namespace Ogre
         memset( mLightVoxel, 0, sizeof( mLightVoxel ) );
         memset( mLightDirectDir, 0, sizeof( mLightDirectDir ) );
         mEnvCube = 0;
-        memset( mEnvGain, 0, sizeof( mEnvGain ) );
         memset( mEnvSh, 0, sizeof( mEnvSh ) );
 
         OGRE_ASSERT_LOW( mVoxelizer->getAlbedoVox() &&
@@ -286,7 +285,7 @@ namespace Ogre
         mBounceIterationDampening = addLocalBounceShaderParam( "iterationDampening" );
         mBounceInvResMaxLod = addLocalBounceShaderParam( "vctInvResMaxLod" );
         mBounceFromPreviousProbeToNext = addLocalBounceShaderParam( "fromPreviousProbeToNext" );
-        mBounceEnvGainMips = addLocalBounceShaderParam( "envGainMips" );
+        mBounceEnvMips = addLocalBounceShaderParam( "envMips" );
         mBounceEnvSh = addLocalBounceShaderParam( "envSh" );
         mBounceBrickMark = addLocalBounceShaderParam( "brickMark" );
         mBounceRayParams = addLocalBounceShaderParam( "rayParams" );
@@ -1207,8 +1206,8 @@ namespace Ogre
         // (PHOTON-7 stage 4: the separate sky pass is deleted; the sky is a light the feedback converges like a lamp's).
         {
             const float mips = mEnvCube ? float( mEnvCube->getNumMipmaps() ) : 1.0f;
-            const float gainMips[4] = { mEnvGain[0], mEnvGain[1], mEnvGain[2], mips };
-            mBounceEnvGainMips->setManualValue( gainMips, 4u );
+            const float envMips[4] = { 0.0f, 0.0f, 0.0f, mips };
+            mBounceEnvMips->setManualValue( envMips, 4u );
             float sh[36];
             for( size_t i = 0u; i < 9u; ++i )
             {
@@ -2540,12 +2539,9 @@ namespace Ogre
     //-------------------------------------------------------------------------
     bool PhotonVoxelLighting::getDebugVisualizationMode() const { return mDebugVoxelVisualizer != 0; }
     //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::setEnvironment( TextureGpu *cube, const ColourValue &gain, const float sh[27] )
+    void PhotonVoxelLighting::setEnvironment( TextureGpu *cube, const float sh[27] )
     {
         mEnvCube = cube;
-        mEnvGain[0] = static_cast<float>( gain.r );
-        mEnvGain[1] = static_cast<float>( gain.g );
-        mEnvGain[2] = static_cast<float>( gain.b );
         if( sh )
             memcpy( mEnvSh, sh, sizeof( mEnvSh ) );
         else

@@ -347,11 +347,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
 void FogHlmsListener::setSkyEnv(const Ogre::SceneManager *sm, const SkyEnvState &state) {
     SceneBinds *b = bindsOf(sm);
     if (!b) return;
-    if (!state.cube || (state.gain[0] <= 0.0f && state.gain[1] <= 0.0f && state.gain[2] <= 0.0f)) {
-        b->skyEnv = SkyEnvState();
-        return;
-    }
-    b->skyEnv = state;
+    b->skyEnv = state.cube ? state : SkyEnvState();
 }
 
 FogHlmsListener::SkyEnvState FogHlmsListener::skyEnv(const Ogre::SceneManager *sm) {
@@ -448,9 +444,8 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // or an automatic PCC holding the env-probe slot (its no-probe fallback;
     // `hlms_enable_cubemaps_auto` is HlmsPbs's own pass property, set for a bound
     // PCC that is not itself capturing). Both are set earlier in the same
-    // HlmsPbs::preparePassHash call. A scene with neither — or with no cube, or a
-    // Sky Light at zero gain (setSkyEnv drops the state) — claims nothing, and its
-    // shaders are those of a build without the slot.
+    // HlmsPbs::preparePassHash call. A scene with neither — or with no cube —
+    // claims nothing, and its shaders are those of a build without the slot.
     //
     // ITS OWN SAMPLER, acquired ONCE per manager and never per pass (the
     // samplerblock reference count is a uint16 — DOCS/traps/ENGINE.md): the slot
@@ -803,8 +798,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // written always, because this hook cannot know which materials the pass
     // will draw, and sixteen unconditional bytes are cheaper than a size that
     // varies per pass.
-    // Plus jahEnv (PHOTON-ENV-1): the environment cube's gain per channel and
-    // mip count, declared only by a pass that claimed the environment's slot.
+    // Plus jahEnv (PHOTON-ENV-1): the environment cube's mip count, declared only
+    // by a pass that claimed the environment's slot.
     //
     // Nothing here compensates for the irradiance field's block any more: its
     // own getConstBufferSize() under-reported by one float4 until fork ae2ed529f+822d538f5
@@ -864,19 +859,15 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
     *passBufferPtr++ = ifd.numProbesY;
     *passBufferPtr++ = ifd.numProbesZ;
     *passBufferPtr++ = 0.0f;                       // w: the pad
-    // jahEnv (PHOTON-ENV-1): rgb = the environment light's gain per channel on
-    // the cube, w = the cube's own mip count. Written unconditionally like every
-    // field above — the shader declares it only when it claimed the slot, and a
-    // buffer longer than the struct is fine (a struct longer than the buffer is
-    // not).
-    //
-    // The gain does NOT ride passBuf.ambientUpperHemi.w: that pass scale is one
-    // channel, and it is pinned to 1.0 while a PCC is bound because it also
-    // multiplies the probe samples (envmapScaleForPass's note).
+    // jahEnv (PHOTON-ENV-1): w = the cube's own mip count, xyz the pad (the cube
+    // is the capture of the sky as drawn and holds the Sky Light's gain itself:
+    // PHOTON-7 10-3 R5). Written unconditionally like every field above — the
+    // shader declares it only when it claimed the slot, and a buffer longer than
+    // the struct is fine (a struct longer than the buffer is not).
     const SkyEnvState sky = skyEnv(sceneManager);
-    *passBufferPtr++ = sky.cube ? sky.gain[0] : 0.0f;
-    *passBufferPtr++ = sky.cube ? sky.gain[1] : 0.0f;
-    *passBufferPtr++ = sky.cube ? sky.gain[2] : 0.0f;
+    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = 0.0f;
+    *passBufferPtr++ = 0.0f;
     *passBufferPtr++ = sky.cube ? sky.numMipmaps : 1.0f;
     // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1): the pass camera's
     // view-to-world rows (the pixel shader holds only the view-space position),
@@ -918,6 +909,7 @@ void OgreScene::ensureAtmosphere() {
     // Engine::createView(), so the window and the Hlms are up.
     JAH_TRY {
         mAtmosphere = new JahAtmosphere(mRoot, mSceneMgr, kVisibleBit);
+        mAtmosphere->setSkyGain(Ogre::Vector3(mSkyGain.r, mSkyGain.g, mSkyGain.b));   // the Sky Light's (R5)
         // The state the two customers left behind decides what happens next
         // (ONE component, two customers — syncAtmosphere's header).
         syncAtmosphere();

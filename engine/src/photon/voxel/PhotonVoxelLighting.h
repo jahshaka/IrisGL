@@ -356,7 +356,6 @@ namespace Ogre
         /// environment (jah_environment.glsl), and the pixel shader binds its own copy
         /// of it per pass. Set by the host before update(); read only by the bounce job.
         TextureGpu *mEnvCube;
-        float       mEnvGain[3];
         float       mEnvSh[27];  ///< world basis {1,y,z,x,xy,yz,3z^2-1,zx,x^2-y^2}, radiance units
 
         /// When we do multiple bounces, cascades can be used to improve accuracy
@@ -393,7 +392,7 @@ namespace Ogre
         ShaderParams::Param                      *mBounceIterationDampening;
         ShaderParams::Param                      *mBounceInvResMaxLod;
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
-        ShaderParams::Param *mBounceEnvGainMips;  ///< Jahshaka (PHOTON-ENV-1): rgb gain (radiance), w mips
+        ShaderParams::Param *mBounceEnvMips;      ///< Jahshaka (PHOTON-ENV-1): w the cube's mips (xyz the pad)
         ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4 (radiance)
         ShaderParams        *mBounceShaderParams;
 
@@ -786,18 +785,16 @@ namespace Ogre
         @param cube
             The disc-free, GGX-prefiltered environment cube, or null (no sky: the SH
             below is the whole environment). Not owned; the host keeps it alive and
-            calls this again before it dies.
-        @param gain
-            The environment light's gain per channel (applied to the cube only).
+            calls this again before it dies. It is the capture of the sky as drawn,
+            the Sky Light's gain in it (Jahshaka, PHOTON-7 10-3 R5).
         @param sh
-            27 floats: the environment's nine-band SH in WORLD axes and radiance units,
-            the gain already applied (the host's own ambient coefficients).
+            27 floats: the environment's nine-band SH in WORLD axes and radiance units
+            (the host's own ambient coefficients).
         */
-        void setEnvironment( TextureGpu *cube, const ColourValue &gain, const float sh[27] );
+        void setEnvironment( TextureGpu *cube, const float sh[27] );
         /// The environment setEnvironment was handed (Jahshaka, PHOTON-ENV-1): the
         /// irradiance field's generation job reads the same one for its escaping rays.
         TextureGpu  *getEnvironmentCube() const { return mEnvCube; }
-        const float *getEnvironmentGain() const { return mEnvGain; }
         const float *getEnvironmentSh() const { return mEnvSh; }
 
         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }

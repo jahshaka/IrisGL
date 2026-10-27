@@ -22,11 +22,11 @@
 //                                 the per-cascade multiplier DRAG-1 undid)
 //     JAH_VOX_INVSIZE(c)   vec4   xyz = 1/the box's world size, w = one cell
 //     JAH_SKY_ON           bool   the environment cube is bound
-//     JAH_SKY_COLOUR       vec3   with the cube bound, the environment light's
-//                                 gain on it (the Sky Light's intensity times
-//                                 its tint); with none, the environment's own
-//                                 flat radiance (the SH's constant band) — the
-//                                 host hands whichever of the two applies
+//     JAH_SKY_COLOUR       vec3   with no cube bound, the environment's own flat
+//                                 radiance (the SH's constant band); unread with
+//                                 the cube, which is the capture of the sky as
+//                                 drawn and holds the Sky Light's gain itself
+//                                 (PHOTON-7 10-3 R5)
 //
 // ...and the sampler arrays `voxelIso/voxelX/voxelY/voxelZ/voxelCovP/N/voxelPosP/N/voxelBack/
 // voxelNrm` and the combined
@@ -85,7 +85,6 @@
 #define JAH_ENV_CUBE_ON JAH_SKY_ON
 #define JAH_ENV_SAMPLE( d, l ) textureLod( skyCube, d, l ).xyz
 #define JAH_ENV_MIPS float( textureQueryLevels( skyCube ) )
-#define JAH_ENV_GAIN JAH_SKY_COLOUR
 // With no cube the environment is FLAT here (the host's constant band): the
 // only coefficient the ray jobs are handed.
 #define JAH_ENV_SH_C0 JAH_SKY_COLOUR

@@ -665,9 +665,9 @@ int Scene::nextForwardShadingPriority() const
 // consumers each with their own idea of "which one is the skylight" is how the
 // sun's three rules came to disagree with nobody being told. One rule, here:
 // the FIRST VISIBLE Sky Light in creation order. A hidden Sky Light does not
-// light (hiding one is how a user turns the skylight off without deleting it,
-// and how the `sky.duplicate` issue clears), and NO Sky Light means no ambient
-// at all — 27 zero coefficients, a black ambient term, as decided (D14).
+// act (how the `sky.duplicate` issue clears), and NO Sky Light means gain 1:
+// the sky as authored, lighting the scene as it looks (PHOTON-7 10-3 R5 - the
+// sky emits what it shows; D14's "no node = no ambient" is deleted).
 //
 // No pin: there is no `skyLightGuid` and there should not be one. The sun's pin
 // exists because a directional light is also a normal light an author places

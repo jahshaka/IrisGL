@@ -10,8 +10,9 @@
 //   * THE DIFFUSE ENVIRONMENT is the nine-band SH irradiance, the cosine
 //     convolution of the same sky — exact for a cosine lobe about a NORMAL
 //     (jahEnvIrradiance).
-// Both are scaled by the scene's Sky Light (intensity times tint) at their
-// source, so "no Sky Light, no environment" holds for both at once.
+// Both are the CAPTURE of the sky as drawn, and the sky is drawn at the scene's
+// Sky Light gain (intensity times tint: PHOTON-7 10-3 R5, the sky emits what it
+// shows), so both carry that gain by construction and nothing here scales them.
 //
 // WHO READS IT: the pixel shader's voxel cones (their escape, diffuse and
 // specular), the probe-array pass's no-probe fallback, the bounce-injection job
@@ -28,12 +29,11 @@
 //     JAH_ENV_SAMPLE( d, lod ) vec3: the cube in CUBE-FRAME direction d at mip lod
 //                              (the caller's own texture and sampler)
 //     JAH_ENV_MIPS             float: the cube's mip count
-//     JAH_ENV_GAIN             vec3: the Sky Light's gain on the cube
 //     JAH_ENV_SH_C0 .. JAH_ENV_SH_C8
 //                              vec3: the environment's nine SH coefficients in
 //                              the engine's WORLD basis {1, y, z, x, xy, yz,
 //                              3z^2 - 1, zx, x^2 - y^2} (Scene::setAmbientSh's
-//                              order), already carrying the Sky Light's gain:
+//                              order), the capture's (the gain in it):
 //                              the COSINE-CONVOLVED irradiance over pi, which is
 //                              what the engine pushes and HlmsPbs evaluates
 //
@@ -66,7 +66,7 @@ vec3 jahEnvDominantDir( vec3 n, vec3 r, float alpha )
 
 // THE REST NEEDS THE CALLER'S BINDINGS (the macros above), so an includer that
 // has none — HlmsPbs's pixel shader without VCT — gets the helper only.
-#if !defined( JAH_ENVIRONMENT_GLSL ) && defined( JAH_ENV_GAIN )
+#if !defined( JAH_ENVIRONMENT_GLSL ) && defined( JAH_ENV_CUBE_ON )
 #define JAH_ENVIRONMENT_GLSL
 
 /// The nine-band evaluation in the engine's WORLD basis, with a scale per BAND.
@@ -206,15 +206,15 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle )
 		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
 		const float t = max( tanHalfAngle, 0.0 );
 		if( t <= 0.0 )
-			return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( t ) ), vec3( 0.0 ) ) * JAH_ENV_GAIN;
+			return max( JAH_ENV_SAMPLE( d, jahEnvLodForCone( t ) ), vec3( 0.0 ) );
 		// 1 - cos(atan t), cancellation-free.
 		const float root = sqrt( 1.0 + t * t );
 		const float omega = t * t / ( root * ( 1.0 + root ) );
 		const vec3 seven = jahEnvConeCells( d, omega, 1 );
 		if( t <= kJahEnvCells19Lo )
-			return seven * JAH_ENV_GAIN;
+			return seven;
 		const float w = smoothstep( kJahEnvCells19Lo, kJahEnvCells19Hi, t );
-		return mix( seven, jahEnvConeCells( d, omega, 2 ), w ) * JAH_ENV_GAIN;
+		return mix( seven, jahEnvConeCells( d, omega, 2 ), w );
 	}
 	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
 }
@@ -264,7 +264,7 @@ vec3 jahEnvQuadrant( vec3 coneWorld, vec3 normalWorld )
 				sum += max( JAH_ENV_SAMPLE( vec3( w.x, w.y, -w.z ), lod ), vec3( 0.0 ) );
 			}
 		}
-		return sum * ( 1.0 / 9.0 ) * JAH_ENV_GAIN;
+		return sum * ( 1.0 / 9.0 );
 	}
 	return jahEnvShEval( coneWorld, 1.41421356, 4.0 );
 }
@@ -280,7 +280,7 @@ vec3 jahEnvLobe( vec3 dirWorld, float r )
 		const float rr = clamp( r, 0.0, 1.0 );
 		const float lod = max( JAH_ENV_MIPS - 1.0, 0.0 ) * rr * ( 2.0 - rr );
 		const vec3 d = vec3( dirWorld.x, dirWorld.y, -dirWorld.z );
-		return max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) ) * JAH_ENV_GAIN;
+		return max( JAH_ENV_SAMPLE( d, lod ), vec3( 0.0 ) );
 	}
 	return max( jahEnvShEval( dirWorld, 1.5, 4.0 ), vec3( 0.0 ) );
 }

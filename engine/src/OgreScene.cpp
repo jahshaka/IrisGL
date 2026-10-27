@@ -155,20 +155,15 @@ void OgreScene::applyCascadeEnvironment(Ogre::PhotonVoxelLighting *lighting) {
     // on the shared job for THIS volume, beside its environment.
     bindCloudInjection(lighting);
     JAH_TRY {
-        Ogre::TextureGpu *cube = (mReflectionTex && mEnvLightScale > 0.0f) ? mReflectionTex : nullptr;
-        lighting->setEnvironment(cube,
-                                 Ogre::ColourValue(mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b, 1.0f),
-                                 mLastAmbientSh);
+        // The cube carries the Sky Light's gain itself: it is the capture of the sky as drawn (PHOTON-7 10-3 R5).
+        lighting->setEnvironment(mReflectionTex, mLastAmbientSh);
     } JAH_CATCH(mError, );
 }
 
 OgreScene::RayEnvironment OgreScene::rayEnvironment() const {
     RayEnvironment env;
-    if (mReflectionTex && mEnvLightScale > 0.0f) {
-        env.cube = mReflectionTex;
-        env.colour[0] = mEnvLightGain.r;
-        env.colour[1] = mEnvLightGain.g;
-        env.colour[2] = mEnvLightGain.b;
+    if (mReflectionTex) {
+        env.cube = mReflectionTex;   // the capture of the sky as drawn: its gain is in it (R5)
     } else {
         // The constant band IS the mean radiance in this basis (irradianceSH's
         // first term): what a direction-free environment answers.
@@ -256,9 +251,10 @@ void OgreScene::applyAmbientSh(const float sh[27], GiStaleReason why) {
         for (int i = 0; i < 9; ++i)
             coeffs[i] = Ogre::Vector3(sh[i * 3 + 0], sh[i * 3 + 1], sh[i * 3 + 2]) * kAxisSign[i];
         mSceneMgr->setSphericalHarmonics(coeffs);
-        // The two-colour ambient still drives envmapScale (it rides
-        // ambientUpperHemi.w) and is what a non-SH Hlms would read; keep it at
-        // the SH constant band so nothing reads stale colours.
+        // The two-colour ambient is what a non-SH Hlms would read; keep it at
+        // the SH constant band so nothing reads stale colours. Its envmapScale
+        // (ambientUpperHemi.w) is 1: the cube holds the sky's gain itself
+        // (setEnvironmentLight), and at exactly 1 HlmsPbs sets no envmap_scale.
         //
         // envFeatures = 0, NOT the 0xffffffff default: that default turns on
         // EnvFeatures_DiffuseGiFromReflectionProbe, which adds the reflection
@@ -271,176 +267,66 @@ void OgreScene::applyAmbientSh(const float sh[27], GiStaleReason why) {
         // exactly this: "do not set this flag ... because the diffuse GI is
         // already gathered from another source of information".
         const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
-        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, envmapScaleForPass(), 0u);
+        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
     } JAH_CATCH(mError, );
 }
 
-// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT (SMOKE-ENGINE-1 item 2, the
-// owner's "with all lights off the GPU sky still lights the scene").
-//
-// The DIFFUSE half of the sky has been gated on the Sky Light since SKY-GPU:
-// the mirror scales the sky's own integral by the light's intensity and tint
-// and pushes the product through setAmbientSh, so with no Sky Light it pushes
-// 27 zeros and a matte surface goes black. The SPECULAR half had no gate at
-// all — reflectionTexFor handed every material the sky's captured cube
-// whatever the scene's lights were doing, and a mirror sphere reflected the sky
-// BYTE-IDENTICALLY with every light hidden, the Sky Light included.
-//
-// One number closes it, because the pin already has the right one:
-// `SceneManager::setAmbientLight`'s fourth argument is HlmsPbs' envmapScale, it
-// rides `ambientUpperHemi.w`, and the pixel shader multiplies every env-probe
-// sample by it (`envS.xyz *= midf3_c( passBuf.ambientUpperHemi.w )`, plus the
-// `ApplyEnvMapScale` piece on the clear-coat and diffuse-GI paths). So the sky
-// reflects at the Sky Light's gain and vanishes with it, while the sky itself
-// stays VISIBLE: it is a picture until a Sky Light makes it a light.
-//
-// AT EXACTLY 1.0 NOTHING MOVES, and that is not a hope: HlmsPbs sets the
-// `envmap_scale` property only `if( envMapScale != 1.0f )`, so a default scene
-// (Sky Light intensity 1, white) generates the identical shader it always did
-// and renders the identical pixels.
+// THE SKY LIGHT IS ONE GAIN ON THE SKY ITSELF (PHOTON-7 10-3 R5, the lead's ruling (B)): the sky EMITS WHAT IT
+// SHOWS. The gain - the Sky Light's tint x intensity, 1 with no node - scales the sky where its picture is formed
+// (applySkyGain: Ogre's sky material, the atmosphere's radiance, the cloud sheet's sun term; the sun disc is a light
+// and is not in it), and the environment is the capture of that picture: its SH, its convolved cube and every
+// escape that reads them hold sky x gain by construction. A gain change is a sky change: one recapture. Nothing
+// downstream scales anything - the separate emission plumbing this replaces (the gain on the SH in
+// applySkyAmbient, HlmsPbs' envmap_scale, the listener's per-pass cube gain, the bounce's, the field's, the cards'
+// and the ray jobs' cube gains, the unbind at zero) is deleted, and with it the two places that plumbing could not
+// follow: a tint on HlmsPbs' own env sample (a scalar there) and a pass with an authored reflection map (where the
+// scale had to stay 1). An authored map is the material's own environment and was never scaled; the sky's cube now
+// needs no scale to be right beside it.
 void OgreScene::setEnvironmentLight(const Colour &gain) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
     if (postScene([=](OgreScene &s) { s.setEnvironmentLight(gain); return true; })) return;
-    // THE FIELD'S PER-CHANNEL INPUTS ARE GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1,
-    // F5): a non-finite gain would reach every probe ray's escape and the field's
-    // running mean would carry it until the next change. Refused, the previous gain
-    // kept, one log line. (A negative channel is clamped to 0 below, as before.)
+    // GUARDED AT THE SOURCE (PHOTON-FIELD-ROTATE-1, F5): a non-finite gain would reach every escape through the
+    // capture. Refused, the previous gain kept, one log line. A negative channel is clamped to 0.
     if (!std::isfinite(gain.r) || !std::isfinite(gain.g) || !std::isfinite(gain.b)) {
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka GI: a non-finite environment-light gain was refused; the previous gain stands");
         return;
     }
     const Colour c(std::max(gain.r, 0.0f), std::max(gain.g, 0.0f), std::max(gain.b, 0.0f), 1.0f);
-    // Rec.709 luminance; the weights sum to exactly 1.0f in float, so a white
-    // gain of 1 is exactly 1.0f and HlmsPbs sets no envmap_scale property.
-    const float g = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
-    // THE AMBIENT IS SH x THIS GAIN, AND THE ENGINE FORMS IT (PHOTON-SKY-TRANSIENT-1):
-    // this push hands the ambient to the engine and re-asserts it even when the
-    // gain did not move (a host's first push, a page return) — what replaces the
-    // host's own SH push.
+    // THE ENGINE FORMS THE AMBIENT (PHOTON-SKY-TRANSIENT-1): this push hands it to the engine and re-asserts it
+    // even when the gain did not move (a host's first push, a page return).
     mSkyAmbientOwned = true;
-    if (c.r == mEnvLightGain.r && c.g == mEnvLightGain.g && c.b == mEnvLightGain.b) {
+    if (c.r == mSkyGain.r && c.g == mSkyGain.g && c.b == mSkyGain.b) {
         applySkyAmbient(GiStaleReason::Ambient);
         return;
     }
-    const bool wasLit = mEnvLightScale > 0.0f;
-    mEnvLightGain = c;
-    mEnvLightScale = g;
+    mSkyGain = c;
+    applySkyGain();
+    // ...and the environment follows the picture: a recapture (the cloud sheet's clear sky too - its ambient is
+    // that sky's light). The previous set stays bound until the new one lands (landEnvironmentIfComplete).
+    if (mSkyDesc.mode != SkyMode::NoSky) {
+        mCloudClearPending = true;
+        requestSkyCapture();
+    }
     applySkyAmbient(GiStaleReason::Ambient);
-    // Every escape reads the environment at this gain, the bounce injection
-    // included: what the voxels hold changes with it.
-    noteEnvironmentChanged();
-    // CROSSING ZERO UNBINDS THE SKY CUBE, it does not merely scale it by zero
-    // (reflectionTexFor carries that gate). Rebinding is what makes "no Sky
-    // Light, no sky reflection" EXACT even in a pass whose scale has to stay at
-    // 1.0 for somebody else's sake — see envmapScaleForPass. Only on the edge:
-    // a slider drag between two lit values costs one float.
-    if (wasLit != (g > 0.0f)) applyReflectionToAll();
-    else                      refreshEnvmapScale();
 }
 
-// THE SCALE IS A SNAPSHOT AND THE EXEMPTION IS NOT (round-1 self-review, caught
-// by gi.budget and gi.probe_inputs going red). envmapScaleForPass() asks
-// whether PCC owns the env-probe slot, and that answer changes when the hybrid
-// arm is built or torn down — long after the Sky Light was last pushed. The
-// scale lives in the ambient pass data, which is written once per push, so a
-// scene that acquired its probes after its ambient kept the sky-cube answer and
-// dimmed its PROBE reflections with the sky's gain: a closed room whose Sky
-// Light is 0 (gi.probe_inputs) or which has none at all (gi.budget) stopped
-// reflecting its own walls. So the binding change re-pushes, through the one
-// funnel that already runs on every PCC transition.
-void OgreScene::refreshEnvmapScale() {
-    // THE SKY'S PASS-LEVEL SLOT RIDES THE SAME FUNNEL (lane SKY-FALLBACK-1).
-    // This function is the one place every edge that can move the sky's
-    // environment passes through: a sky rebuild and a PCC transition reach it
-    // via applyReflectionToAllImpl, and a Sky Light gain change between two
-    // non-zero values reaches it directly (setEnvironmentLight's else
-    // branch). The listener holds the cube for the passes where the env-probe
-    // slot is the probe array's — see FogHlmsListener::SkyEnvState.
-    {
-        FogHlmsListener::SkyEnvState sky;
-        if (mReflectionTex && mEnvLightScale > 0.0f) {
-            sky.cube = mReflectionTex;
-            sky.gain[0] = mEnvLightGain.r;
-            sky.gain[1] = mEnvLightGain.g;
-            sky.gain[2] = mEnvLightGain.b;
-            sky.numMipmaps = float(mReflectionTex->getNumMipmaps());
-        }
-        FogHlmsListener::setSkyEnv(mSceneMgr, sky);
-        // ...and the same cube to every cascade's bounce (the cube's identity is
-        // what changes on this funnel's edges; its contents move with the SH,
-        // which notes the change itself).
-        if (sky.cube != mEnvCubeSeen) {
-            mEnvCubeSeen = sky.cube;
-            noteEnvironmentChanged();
-        }
+// THE SKY'S PASS-LEVEL SLOT (lane SKY-FALLBACK-1): the one place every edge that can move the sky's environment
+// passes through - a sky rebuild and a PCC transition reach it via applyReflectionToAllImpl. The listener holds the
+// cube for the passes where the env-probe slot is the probe array's (FogHlmsListener::SkyEnvState).
+void OgreScene::refreshSkyEnv() {
+    FogHlmsListener::SkyEnvState sky;
+    if (mReflectionTex) {
+        sky.cube = mReflectionTex;
+        sky.numMipmaps = float(mReflectionTex->getNumMipmaps());
     }
-    // Re-push what we already hold rather than waiting for the next ambient
-    // edit. setAmbientSh's own change guard compares the COEFFICIENTS, which
-    // have not moved, so this costs no probe re-capture and no raster-field
-    // re-integration — exactly right, because a probe capture is not lit by
-    // envmapScale.
-    JAH_TRY {
-        const float *sh = mLastAmbientSh;
-        const Ogre::ColourValue flat(sh[0], sh[1], sh[2], 1.0f);
-        mSceneMgr->setAmbientLight(flat, flat, Ogre::Vector3::UNIT_Y, envmapScaleForPass(), 0u);
-    } JAH_CATCH(mError, );
-}
-
-// WHY PCC IS EXEMPT. Under automatic parallax-corrected cubemaps the env-probe
-// slot holds a cube ARRAY of probe captures, not the sky — reflectionTexFor
-// returns nullptr for the sky cube there, deliberately (OgreSky.cpp's note on
-// the slot having one occupant). A probe capture is a photograph of the scene's
-// real radiance, most of it GEOMETRY lit by the scene's own lamps, and
-// upstream's shader scales those samples by the same `ambientUpperHemi.w`
-// (ForwardPlus_DecalsCubemaps_piece_ps.any:372). Applying the sky's gain there
-// would put a lamp-lit room out because its skylight was turned down, which is
-// a worse error than the one this gate fixes. The residual is recorded: a probe
-// PHOTOGRAPHS the sky as drawn, so at a tier that places probes a sky with no
-// Sky Light can still reach a rough metal through one. Closing that means
-// drawing the sky into probe captures at the Sky Light's gain, which is a probe
-// capture change with its own cache-invalidation contract.
-// ...AND AN AUTHORED REFLECTION MAP IS EXEMPT FOR THE SAME REASON (round-2
-// review item 2, the lead's decision). `ambientUpperHemi.w` is a PASS value and
-// HlmsPbs has no per-datablock env scale, so it scales EVERY PBSM_REFLECTION
-// texture in the pass — including a cubemap the author assigned to one
-// material. That map is not the sky: it is the material's own environment, and
-// the sky's gain has no business touching it. A scene with no Sky Light was
-// zeroing it.
-//
-// THE PASS IS THE UNIT AND MATERIALS MIX IN IT, so this cannot be decided per
-// material through the scale. It is decided in two places instead:
-//
-//   * the SCALE stays at 1.0 as soon as ANY live material carries an authored
-//     map, because 1.0 is the only value that is right for that material and
-//     the alternative is silently wrong for it; and
-//   * the SKY CUBE is UNBOUND when the gain is zero (reflectionTexFor), so "no
-//     Sky Light, no sky reflection" stays exact in that mixed pass too — it is
-//     done by not binding rather than by scaling, and binding IS per material.
-//
-// THE DOCUMENTED LIMITATION, because there is one: in a scene that mixes an
-// authored reflection map with sky-lit materials, the sky's reflection no
-// longer follows Sky Light INTENSITY between 0 and 1 — it is full or it is off.
-// Zero is exact, one is exact, and the in-between is not. Closing that needs a
-// per-datablock env scale, which this pin does not have; the alternatives are a
-// second pass for the authored-map materials (a real cost for a rare scene) or
-// pre-scaling the sky cube at convolution time (a reconvolution per slider
-// frame). Neither is worth it until a scene asks.
-bool OgreScene::hasAuthoredReflectionMap() const {
-    for (const auto &kv : mMaterials) {
-        if (kv.second.unlit) continue;
-        if (kv.second.boundTextures[size_t(PbrTextureSlot::Reflection)]) return true;
+    FogHlmsListener::setSkyEnv(mSceneMgr, sky);
+    // ...and the same cube to every cascade's bounce (the cube's identity is what changes on this funnel's edges;
+    // its contents move with the SH, which notes the change itself).
+    if (sky.cube != mEnvCubeSeen) {
+        mEnvCubeSeen = sky.cube;
+        noteEnvironmentChanged();
     }
-    return false;
-}
-
-float OgreScene::envmapScaleForPass() const {
-    // This scene's grid, for the same reason reflectionTexFor asks that way: the
-    // scale multiplies whatever the env slot holds, and while this scene's
-    // passes bind a PCC that is a probe array.
-    if (probeGridBound()) return 1.0f;
-    if (hasAuthoredReflectionMap()) return 1.0f;
-    return mEnvLightScale;
 }
 
 bool OgreScene::removeNode(NodeId id) {

@@ -231,7 +231,7 @@ struct HitSetSources {
     /// it world-anchored); a footprint past it hands to the next one out
     float levelMaxLod[kGatherMaxCascades] = {};
     bool levelOn = false;
-    /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the Sky Light's cube (null: the flat colour).
+    /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the sky's captured cube (null: the flat colour).
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
     /// THE SURFACE CACHE THE HITS READ FIRST (PHOTON-CARDS-2, GA-1e): the card table, the instance table, the Depth

@@ -56,7 +56,7 @@
 	// cube read at the mip whose lobe matches the cone, or (no cube bound) the
 	// radiance the SH describes in the cone's direction (the coefficients
 	// de-convolved: they are the cosine-convolved irradiance). The cube and its
-	// gain come from the pass slot
+	// mip count come from the pass slot
 	// Jahshaka's Hlms listener claims (jah_env); the SH is HlmsPbs's own
 	// coefficients, stored in HlmsPbs's frame -- the world turned half a turn
 	// about Y, which the engine writes by multiplying each world coefficient by
@@ -69,12 +69,10 @@
 		#define JAH_ENV_CUBE_ON true
 		#define JAH_ENV_SAMPLE( d, l ) float3( OGRE_SampleLevelF16( jahEnvCube, jahEnvSampler, d, l ).xyz )
 		#define JAH_ENV_MIPS passBuf.jahEnv.w
-		#define JAH_ENV_GAIN passBuf.jahEnv.xyz
 	@else
 		#define JAH_ENV_CUBE_ON false
 		#define JAH_ENV_SAMPLE( d, l ) float3( 0, 0, 0 )
 		#define JAH_ENV_MIPS 1.0
-		#define JAH_ENV_GAIN float3( 0, 0, 0 )
 	@end
 	@property( ambient_sh && !ambient_sh_monochrome )
 		#define JAH_ENV_SH_C0 passBuf.sh0.xyz

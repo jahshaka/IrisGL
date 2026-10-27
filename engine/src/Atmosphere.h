@@ -96,6 +96,11 @@ public:
     /// sky quad, the aerial in-scatter and the World fog's sky colour); a
     /// constant, never a rebuild.
     void setSkyBrightness(float b);
+    /// THE SKY LIGHT'S GAIN per channel (Scene::setEnvironmentLight; PHOTON-7 10-3 R5: the gain on the sky
+    /// itself, where its picture is formed): on the SCATTERED light exactly as the brightness is - the sky quad,
+    /// the aerial in-scatter (the air between the camera and a surface is the same light the sky pixel beside it
+    /// shows), the cloud sheet's air. Never the sun disc (a light). A constant, never a rebuild.
+    void setSkyGain(const Ogre::Vector3 &gain);
     /// The World fog's distance block, in upstream's packing (0 = none).
     void setFogBlock(float density, float breakMinBrightness, float breakFalloff);
     /// THE HEIGHT FOG (HeightFogDesc; SKY-DEFAULTS-1): its block in this
@@ -153,9 +158,9 @@ public:
     const Ogre::Vector3 &sunDir() const { return mToSun; }
     /// The sun at the top of the air, in the renderer's units (0 with no sun).
     Ogre::Vector3 topOfAir() const { return topIlluminance(); }
-    /// The sun at the top of the air times the sky's brightness: what the
+    /// The sun at the top of the air times the sky's brightness and gain: what the
     /// tables' unit-illuminance SCATTERED radiance is multiplied by.
-    Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness; }
+    Ogre::Vector3 skyRadianceScale() const { return topIlluminance() * mSkyBrightness * mSkyGain; }
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
     /// The const buffer the passes read (JahFog's `JahAtmoSettings`), as floats:
@@ -201,6 +206,7 @@ private:
     Ogre::Vector3 mSunNoon = Ogre::Vector3::ZERO;
     float mAerialScale = 0.0f;
     float mSkyBrightness = 1.0f;
+    Ogre::Vector3 mSkyGain = Ogre::Vector3::UNIT_SCALE;
     float mObserverKm = kMinObserverKm;
     float mDrawnObserverKm = kMinObserverKm;   ///< held across a capture's environment observer
     unsigned mObserverRebuilds = 0;

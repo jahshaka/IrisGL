@@ -128,9 +128,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	@end
 
 	// JAHSHAKA (PHOTON-ENV-1): the environment as radiance, the store's units
-	// (PHOTON-7 stage 1): rgb = the cube's gain, w = its mip count; and the
-	// nine-band SH in world axes.
-	uniform float4 envGainMips;
+	// (PHOTON-7 stage 1): w = the cube's mip count (xyz the pad: the cube holds the
+	// sky's gain itself, PHOTON-7 10-3 R5); and the nine-band SH in world axes.
+	uniform float4 envMips;
 	uniform float4 envSh[9];
 	// PHOTON-7 stage 3: yz = the bricks along x and y (the mask's and the state's index).
 	uniform uint4 brickMark;
@@ -147,7 +147,7 @@ vulkan( }; )
 #define p_iterationDampening iterationDampening
 #define p_vctInvResMaxLod vctInvResMaxLod
 #define p_vctFromPreviousProbeToNext fromPreviousProbeToNext
-#define p_envGainMips envGainMips
+#define p_envMips envMips
 #define p_envSh envSh
 #define p_rayParams rayParams
 #define p_rayCounts rayCounts

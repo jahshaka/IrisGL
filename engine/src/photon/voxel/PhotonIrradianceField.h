@@ -204,9 +204,9 @@ namespace Ogre
             float4 vctFromPrev[( kMaxChainCascades - 1u ) * 2u];
 
             // Jahshaka (PHOTON-ENV-1): THE ONE ENVIRONMENT the probe rays escape to,
-            // in cascade 0's stored units (fillEnvironmentParams): rgb gain, w mips;
+            // in cascade 0's stored units (fillEnvironmentParams): w mips (xyz the pad: R5);
             // then the nine SH coefficients, world axes (w unused).
-            float4 envGainMips;
+            float4 envMips;
             float4 envSh[9];
 
             // Jahshaka (PHOTON-FIELD-ROTATE-1): THE WINDOW'S PLACE ON THE WORLD LATTICE -

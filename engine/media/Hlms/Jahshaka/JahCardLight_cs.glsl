@@ -255,7 +255,7 @@ struct CardGiParams
 	vec4 volumeOrigin;		// xyz = cascade 0's volume origin, world
 	vec4 volumeInvSize;		// xyz = 1 / its size, world
 	vec4 counts;			// x = cascades, y = the rays' last world shell (cascade 0's units), z = the rays a texel, w padding
-	vec4 envGainMips;		// xyz = the Sky Light's gain on the cube, w = its mips
+	vec4 envMips;			// w = the environment cube's mips (xyz the pad: the cube holds the sky's gain, R5)
 	vec4 envSh[9];			// the environment's nine SH coefficients, world axes
 	vec4 cloudMap;			// the cloud shadow: 1 / tile, strength, scroll xz (CLOUDS-2D-2)
 	vec4 cloudSun;			// ...and the sun's throw xz, the altitude, 1 / mu_s
@@ -287,8 +287,7 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_ENV_CUBE_ON false
 	#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0, 0.0, 0.0 )
 @end
-#define JAH_ENV_MIPS gp.envGainMips.w
-#define JAH_ENV_GAIN gp.envGainMips.xyz
+#define JAH_ENV_MIPS gp.envMips.w
 #define JAH_ENV_SH_C0 gp.envSh[0].xyz
 #define JAH_ENV_SH_C1 gp.envSh[1].xyz
 #define JAH_ENV_SH_C2 gp.envSh[2].xyz

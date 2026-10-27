@@ -1167,17 +1167,18 @@ public:
 	int nextForwardShadingPriority() const;
 
 	// ---- THE SKY LIGHT -------------------------------------------------
-	// (SKY_LIGHT_SPEC.md §2, owner decision D14.) Ambient is SKYLIGHT ONLY:
+	// (SKY_LIGHT_SPEC.md §2; PHOTON-7 10-3 R5.) Ambient is THE SKY'S OWN LIGHT:
 	// there is no flat World-panel ambient colour and no "Ambient From Sky"
 	// switch any more. The scene's ambient is the sky's own cosine-convolved
-	// integral, tinted and scaled by a LIGHT NODE of type LightType::Sky — and
-	// a scene with no Sky Light has no ambient at all.
+	// integral; a LIGHT NODE of type LightType::Sky is one gain (tint x
+	// intensity) on the sky itself - the picture and its light alike - and a
+	// scene with no Sky Light is at gain 1.
 	//
 	// The same shape as sunLight(): ONE resolver, asked by everything.
 
 	/// The scene's skylight: the first VISIBLE LightType::Sky light by nodeId,
-	/// or null. Hidden Sky Lights do not light (that is how a user turns the
-	/// skylight off without deleting it, and how the duplicate issue clears).
+	/// or null. A hidden Sky Light does not act (how the duplicate issue
+	/// clears): the sky is then at gain 1, as with none.
 	LightNodePtr skyLight() const;
 
 	/// Why skyLight() answered as it did: "first", "none" or "allHidden".

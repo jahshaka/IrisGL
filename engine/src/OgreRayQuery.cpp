@@ -7674,7 +7674,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         out.levelOn = scene->photon().giCameraPos(cam);
         out.levelCam[0] = cam.x; out.levelCam[1] = cam.y; out.levelCam[2] = cam.z;
     }
-    // ---- THE ONE ENVIRONMENT (PHOTON-ENV-1): the Sky Light's cube and gain, or the flat environment when there is no
+    // ---- THE ONE ENVIRONMENT (PHOTON-ENV-1): the sky's captured cube, or the flat environment when there is no
     // cube (OgreScene::rayEnvironment). NO VOXELS IS NOT "NO RAYS": an escaping ray still reads the sky.
     {
         const OgreScene::RayEnvironment rayEnv = scene->rayEnvironment();

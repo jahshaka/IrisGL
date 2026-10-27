@@ -271,7 +271,7 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     Ogre::PhotonVoxelLighting *vct = scene->photon().voxelLighting();
     unsigned numCascades = 0u;
     Ogre::TextureGpu *envCube = nullptr;
-    float *chain = at;   // chainInvRes[8], chainFromPrev[14], volumeOrigin, volumeInvSize, counts, envGainMips, envSh[9]
+    float *chain = at;   // chainInvRes[8], chainFromPrev[14], volumeOrigin, volumeInvSize, counts, envMips, envSh[9]
     at += 4u * (8u + 14u + 4u + 9u);
     if (vct && vct->getLightVoxelTextures() && vct->getLightVoxelTextures()[0] && vct->getVoxelizer()) {
         const size_t chainLen = vct->getNumCascades();
@@ -297,8 +297,7 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
         // THE RAYS' LAST WORLD SHELL (PHOTON-7 stage 10, 10-1: the diffuse fallback's occupancy rays), cascade 0's units
         chain[99] = size.x > 0.0 ? float(scene->photon().rayLastShellMetres() / size.x) : 0.0f;
         envCube = vct->getEnvironmentCube();
-        const float *gain = vct->getEnvironmentGain();
-        chain[100] = gain[0]; chain[101] = gain[1]; chain[102] = gain[2];
+        chain[100] = chain[101] = chain[102] = 0.0f;   // the pad: the cube holds the sky's gain (R5)
         chain[103] = envCube ? float(envCube->getNumMipmaps()) : 1.0f;
         const float *sh = vct->getEnvironmentSh();
         for (unsigned k = 0; k < 9u; ++k) {

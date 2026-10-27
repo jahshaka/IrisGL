@@ -104,38 +104,24 @@ public:
     /// radiance L is sh[0..2] = L and the rest zero.
     /// This is the only ambient path the backend has: setAmbient() converts.
     virtual void        setAmbientSh(const float sh[27]) = 0;
-    /// THE ENVIRONMENT'S GAIN AS A SPECULAR LIGHT — the other half of
-    /// setAmbientSh, and the half that used to be missing.
+    /// THE SKY LIGHT: ONE GAIN ON THE SKY ITSELF (PHOTON-7 10-3 R5 - the sky
+    /// emits what it shows). Per channel (a Sky Light's intensity times its
+    /// linear tint; 1 with none), it scales the DRAWN sky where its picture is
+    /// formed: an image sky's material, the atmosphere's scattered light (its
+    /// sky, its aerial in-scatter), the cloud sheet. The sun disc is a light and
+    /// is not in it. The environment is the capture of that picture, so the
+    /// ambient SH, the reflection cube and every escape that reads them (the
+    /// voxel cones', the rays' miss, the bounce injection's, the field's, the
+    /// cards') hold sky x gain BY CONSTRUCTION: nothing downstream scales
+    /// anything. A gain change is a sky change - one recapture; the previous
+    /// environment stays bound until the new one has landed. 0 is a black sky
+    /// that lights nothing.
     ///
-    /// THE ENVIRONMENT LIGHT'S GAIN, and with a sky bound THE ENGINE FORMS THE
-    /// AMBIENT FROM IT (PHOTON-SKY-TRANSIENT-1): the scene's SH becomes
-    /// skyAmbientSh x this gain per channel — in the frame the sky's cube lands,
-    /// and again on every push of this call — so a host modelling a Sky Light
-    /// pushes the gain and never the product. Its SPECULAR contribution is the
-    /// prefiltered environment cube sampled at the same gain. 1.0 is "the
-    /// cube's own radiance" and 0.0 is "there is no environment light": zero
-    /// ambient, and the sky a BACKDROP — still drawn, reflecting nothing.
-    /// With no sky captured the ambient this forms is 27 zeros. WHO WRITES
-    /// THE AMBIENT is the last of the two calls: this one hands it to the
-    /// engine, setAmbient / setAmbientSh take it back for a host that lights
-    /// its scene with a colour of its own (a sky capture then leaves it alone).
-    ///
-    /// PER CHANNEL (the Sky Light's intensity times its linear tint — the same
-    /// gain the ambient SH is multiplied by): THE ONE ENVIRONMENT
-    /// (PHOTON-ENV-1) is one source for every escape — the voxel cones', the
-    /// rays' miss, the bounce injection's and the probe-array pass's no-probe
-    /// fallback all read the cube times this gain, so a tinted sky lights
-    /// through a cone exactly as it lights through the SH. ONE place cannot
-    /// follow the tint: HlmsPbs' own env-probe sample outside every volume rides
-    /// the pin's SCALAR envmapScale (`ambientUpperHemi.w`, broadcast over the
-    /// channels), which gets the gain's Rec.709 luminance.
-    ///
-    /// NOT APPLIED WHILE PARALLAX-CORRECTED PROBES ARE BOUND. A probe is a
-    /// photograph of the scene's real radiance — mostly of GEOMETRY lit by the
-    /// scene's own lamps — and dimming it with the sky's gain would put a room
-    /// out because its skylight was turned down. The gate is about the SKY, and
-    /// under PCC the sky reaches a surface only through what a probe captured.
-    /// 1.0 is the default, and the value is clamped at zero.
+    /// WHO WRITES THE AMBIENT is the last of the two calls: this one hands it
+    /// to the engine (the capture's SH, or 27 zeros with no sky), setAmbient /
+    /// setAmbientSh take it back for a host that lights its scene with a colour
+    /// of its own (a sky capture then leaves it alone). 1.0 is the default, and
+    /// the value is clamped at zero.
     virtual void        setEnvironmentLight(const Colour &gain) = 0;
     /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
     /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
@@ -148,21 +134,21 @@ public:
     /// start distance, over the sky's pixels too). Off by default and OFF IS
     /// EXACT: no shader carries its code. The enabled edge is a shader variant.
     virtual void        setHeightFog(const HeightFogDesc &) {}
-    /// THE SCENE'S SKY AND ITS ENVIRONMENT REFLECTIONS, as one description —
-    /// SkyDesc carries the whole model (modes, face order, what
-    /// `reflections == false` means, and why the flat colour and the CPU-baked
-    /// skies are not in it).
+    /// THE SCENE'S SKY, as one description — SkyDesc carries the whole model
+    /// (modes, face order, and why the flat colour and the CPU-baked skies are
+    /// not in it). Its ENVIRONMENT (the reflection cube, the ambient SH) is the
+    /// capture of the sky as drawn, for every mode (PHOTON-7 10-3 R5).
     ///
     /// IDEMPOTENT: a description equal to the live one does nothing — no
-    /// upload, no cube rebuild, no IBL reconvolution — and the two halves are
-    /// compared separately, so changing only the reflection faces never tears
-    /// the sky down. Hosts may therefore push every frame and let SkyDesc's
-    /// `operator==` be the change guard, instead of keeping "what did I push
-    /// last" bookkeeping of their own.
+    /// upload, no cube rebuild, no IBL reconvolution — and the sky, its sun
+    /// disc and its cloud layer are compared separately, so a disc or a cloud
+    /// edit never tears the sky down. Hosts may therefore push every frame and
+    /// let SkyDesc's `operator==` be the change guard, instead of keeping "what
+    /// did I push last" bookkeeping of their own.
     ///
-    /// False (see lastError()) leaves the scene's sky and reflections exactly
-    /// as they were: an unknown texture id, six faces that are not all the same
-    /// size, or a compressed face format.
+    /// False (see lastError()) leaves the scene's sky exactly as it was: an
+    /// unknown texture id, six faces that are not all the same size, or a
+    /// compressed face format.
     virtual bool        setSky(const SkyDesc &) = 0;
     /// THE SHADER-DRAWN EDITOR GRID (GridDesc). One quad per scene, drawn
     /// analytically from the camera ray, a helper (never in probes, shadows,
@@ -187,7 +173,7 @@ public:
     // capture, its convolution and its SH have all landed, then swaps the cube
     // and these coefficients in one step — never a cube nothing has written,
     // never a cube of one sky with the SH of another; the scene's ambient is
-    // set to this answer x the setEnvironmentLight gain in the same step. When that lands:
+    // set to this answer in the same step. When that lands:
     //
     //   * A LONE sky change lands INSIDE the frame that captured it (the
     //     capture, the convolution and a synchronous SH read all run before
@@ -199,9 +185,10 @@ public:
     //     exchange the capture frame does not block on the GPU (measured
     //     0.94 ms of flush and wait per change, i.e. per frame of a drag).
     //
-    // UNSCALED: this is the sky's mean incident radiance (the ambient the
-    // engine applies is this x the setEnvironmentLight gain). Read-only for a
-    // host: a status readout, never a value to push back.
+    // AS DRAWN: this is the sky's mean incident radiance at its
+    // setEnvironmentLight gain (the capture photographs the sky as drawn: R5) -
+    // the ambient the engine applies. Read-only for a host: a status readout,
+    // never a value to push back.
     // -> Scene::published().skyAmbientSh / skyAmbientShValid (ENGINE-UPGRADE-U3 stage 2b: the getter is deleted).
     // THE CLOUD LAYER'S LIVE STATE (SkyDesc::clouds; CloudStatus says what each
     // field means). A scene that never enabled the layer answers "off".
@@ -579,7 +566,7 @@ public:
                                       bool srgb, bool mipmaps = false, TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// A CUBEMAP from six square, same-size, same-format face textures, in
     /// WORLD-AXIS order (+X, -X, +Y, -Y, +Z, -Z) with image row 0 at the top —
-    /// exactly what SkyDesc::reflectionFaces takes, and built by the SAME code, so the
+    /// exactly what SkyDesc::faces takes, and built by the SAME code, so the
     /// left-handed remap the backend's cubemap lookups need is applied once and
     /// in one place (the 2026-09-03 fact: getting this wrong silently mirrors
     /// every reflection). Returns a TextureId the caller owns and destroys.

@@ -7684,26 +7684,15 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
     // and not a document value — inventory row AT-A14: `Scene::lodBias` had no
     // reader and no writer on disk, so it was a measurement knob living in the
     // document. `editor.setLodBias` writes the engine scene directly.)
-    // AMBIENT IS THE SKY LIGHT, AND NOTHING ELSE (SKY_LIGHT_SPEC.md §2, owner
-    // decision D14): the sky's own cosine-convolved integral scaled by the
-    // scene's Sky Light — its intensity times its tint, decoded sRGB->linear like
-    // every other colour a user picks (§4). THE ENGINE FORMS THAT PRODUCT
-    // (PHOTON-SKY-TRANSIENT-1, Engine.h skyAmbientSh): it integrates the sky it
-    // drew and multiplies by the gain pushed here, in the frame the new sky's
-    // cube lands — a host-side product arrived one sync later and put the cube
-    // of one sky beside the SH of another. The mirror pushes the GAIN only.
-    //
-    // NO SKY LIGHT = GAIN 0 = 27 ZEROS: a scene with no Sky Light has no ambient
-    // at all, which is the decided behaviour and the reason the two-light
-    // default scene goes black when both lights are deleted. The same gain is
-    // the CUBE half of the light (SMOKE-ENGINE-1 item 2; PHOTON-ENV-1): a
-    // mirror's reflection and every escape of the voxel cones, the rays and the
-    // bounce read the sky's cube at it (the engine derives the luminance the
-    // pin's scalar envmapScale needs). skyLight() is the first VISIBLE one, so
-    // hiding it takes the ambient and the reflections with it.
+    // THE SKY LIGHT IS ONE GAIN ON THE SKY ITSELF (PHOTON-7 10-3 R5, the lead's ruling (B); D14's "no node = no
+    // ambient" is deleted): its intensity times its tint, decoded sRGB->linear like every other colour a user picks
+    // (SKY_LIGHT_SPEC.md §4), scales the DRAWN sky - and the engine's environment is the capture of that picture, so
+    // the ambient, the reflections and every escape follow it by construction (Engine.h setEnvironmentLight). The sky
+    // emits what it shows at every gain. NO SKY LIGHT = GAIN 1: the sky as authored, lighting the scene as it looks.
+    // skyLight() is the first VISIBLE one, so hiding it is the same as deleting it.
     {
         const auto skyLight = mSource->skyLight();
-        Colour envGain(0.0f, 0.0f, 0.0f, 1.0f);
+        Colour envGain(1.0f, 1.0f, 1.0f, 1.0f);
         if (skyLight) {
             const iris::LinearColor tint = iris::linearOf(skyLight->color);
             envGain = Colour(tint.r * skyLight->intensity, tint.g * skyLight->intensity,
@@ -8408,7 +8397,7 @@ bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6
     const int W = src.width(), H = src.height();
     if (W <= 0 || H <= 0) return false;
     // Face basis in WORLD axes (+X,-X,+Y,-Y,+Z,-Z; dir = axis + right*u + up*v
-    // with image row 0 at the top) — exactly what SkyDesc::reflectionFaces takes;
+    // with image row 0 at the top) — exactly what SkyDesc::faces takes;
     // the engine converts to its cubemap handedness. The equirect fetch below
     // uses dirToEquirect, i.e. OGRE'S sky mapping, so a reflection lines up with
     // the sky pixel the camera sees in that direction.

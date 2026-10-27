@@ -109,6 +109,15 @@ const char *kSkyCaptureWorkspace = "JahshakaSkyCaptureWorkspace";
 const Ogre::uint32 kSkyCaptureSize = 128u;
 /// ...and the mip whose faces the ambient integral reads (128 >> 2 = 32).
 const Ogre::uint8  kSkyShMip = 2u;
+/// THE AMBIENT'S LEVEL OF A CAPTURE OF ANY SIZE (PHOTON-7 10-3 R5: a cubemap sky is captured at its faces' size):
+/// the first mip whose faces are no larger than 128 >> kSkyShMip (32^2), and that mip's edge.
+void skyShLevel(const Ogre::TextureGpu *cube, Ogre::uint8 &mip, Ogre::uint32 &n) {
+    const Ogre::uint32 want = kSkyCaptureSize >> kSkyShMip;
+    const Ogre::uint8 last = Ogre::uint8(std::max<int>(1, cube->getNumMipmaps()) - 1);
+    mip = 0u;
+    while (mip < last && (cube->getWidth() >> mip) > want) ++mip;
+    n = std::max(1u, cube->getWidth() >> mip);
+}
 
 // THE SIX CAPTURE FACES, in the camera basis Ogre's own
 // CompositorPass::CubemapRotations gives a `camera_cubemap_reorient` pass
@@ -157,24 +166,16 @@ struct ShAccum {
 };
 }  // namespace
 
-// THE ONE SKY ENTRY POINT (ENGINEERING_DEBT_SPEC.md item 4). It owns the three
-// things the host used to: the dispatch on mode, the ordering (sky first, then
-// reflections — destroySky takes the reflection cubemap with it, so the reverse
-// order would throw away reflections that were just built), and the
-// already-applied comparison, per HALF: a description that changes only its
-// reflection faces must not tear the sky down and back up, because that is a
-// texture upload plus a six-face cube build for nothing.
+// THE ONE SKY ENTRY POINT (ENGINEERING_DEBT_SPEC.md item 4). It owns the
+// things the host used to: the dispatch on mode and the already-applied
+// comparison, per HALF: a description that changes only its sun disc or its
+// cloud layer must not tear the sky down and back up. The environment is the
+// sky's capture, for every sky (PHOTON-7 10-3 R5).
 bool OgreScene::setSky(const SkyDesc &desc) {
     // THE HOST'S CALL IS A MESSAGE (U3 stage 4a, decision 39), applied at the drain; JAH_HOST_CALL counts a direct one.
     if (postScene([=](OgreScene &s) { return s.setSky(desc); })) return true;
     JAH_HOST_CALL("Scene::setSky");
-    // NoSky is a FULL clear: a description with no sky and no opinion on
-    // reflections must not leave an IBL-only reflection bound (the contract
-    // EnginePrivate.h states and the mirror's setSource relies on; code review
-    // 2026-09-10).
-    const bool noSkyClearsIbl = desc.mode == SkyMode::NoSky && mSkyDesc.reflections && !desc.reflections;
-    const bool skyChanged  = !mSkyDesc.sameSky(desc) || noSkyClearsIbl;
-    const bool reflChanged = !mSkyDesc.sameReflections(desc);
+    const bool skyChanged  = !mSkyDesc.sameSky(desc);
     // THE SUN DISC is the description's third independent half: it changes
     // every time the sun light is rotated, and re-uploading the sky or
     // re-convolving the IBL cubemap for that would be absurd. It also does NOT
@@ -242,7 +243,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             mCloudFramesSinceCapture = 0u;
         }
     }
-    if (!skyChanged && !reflChanged) return true;   // idempotent: nothing else to do
+    if (!skyChanged) return true;   // idempotent: nothing else to do
     // THE PROBE CACHE'S SKY INPUT (ENGINE_CACHE_POLICY_SPEC P7): the probe
     // faces capture the sky (RQ 0 is inside their range) and the reflection
     // cubemap lights what they capture. Nothing staled a probe on a sky change
@@ -258,10 +259,9 @@ bool OgreScene::setSky(const SkyDesc &desc) {
             // THE ENVIRONMENT COMES FROM THE SKY ITSELF (SKY-GPU). Every sky
             // there is gets CAPTURED on the GPU — six render_scene passes over
             // the sky's render queue — and that cube is what the ambient
-            // integral reads. For every sky but a cubemap it is ALSO the IBL
-            // convolution's input; a cubemap sky keeps feeding the convolution
-            // its own full-resolution faces, because re-rendering those into a
-            // 128^2 capture would throw reflection detail away for nothing.
+            // integral reads and what the IBL convolution convolves, for every
+            // sky (PHOTON-7 10-3 R5: a cubemap sky is captured at its faces'
+            // size, so no reflection detail is lost).
             // The layer is drawn over any sky there is (the HOST keeps it off
             // image skies, which carry their own clouds) — a mode change can
             // turn it on or off.
@@ -278,25 +278,6 @@ bool OgreScene::setSky(const SkyDesc &desc) {
                 forgetSkySh();
                 destroySkyShTicket();
             }
-            // Both of these paths REPLACE the reflection cubemap themselves —
-            // destroySky() unbinds and frees it, and a cubemap sky rebuilds it
-            // from its own faces — so whatever reflection description was in
-            // force no longer describes anything. Forgetting it here is what
-            // lets the host push the very same reflection faces afterwards and
-            // have them actually applied.
-            if (desc.mode != SkyMode::Equirectangular) {
-                mSkyDesc.reflections = false;
-                for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = 0;
-            }
-        } else {
-            ok = false;
-        }
-    }
-    // `reflections == false` is "no opinion": leave whatever is bound alone.
-    if (desc.reflections && !mSkyDesc.sameReflections(desc)) {
-        if (applySkyReflectionFaces(desc.reflectionFaces)) {
-            mSkyDesc.reflections = true;
-            for (int i = 0; i < 6; ++i) mSkyDesc.reflectionFaces[i] = desc.reflectionFaces[i];
         } else {
             ok = false;
         }
@@ -339,14 +320,9 @@ bool OgreScene::applySkyMode(const SkyDesc &desc) {
         if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyEquirectangular, use);
         tuneSkyRenderable();
-        // Only now is the old texture unreferenced by the sky material. If a
-        // reflection convolution was still PENDING from that texture (a cubemap
-        // sky is its own IBL source), it must not run against a destroyed one
-        // on the next frame (code review 2026-09-10).
-        if (previous && previous != owned) {
-            if (mIblSourceTex == previous && !mIblSourceOwned) destroyPendingReflection();
+        // Only now is the old texture unreferenced by the sky material.
+        if (previous && previous != owned)
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), previous);
-        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -368,26 +344,12 @@ bool OgreScene::applySkyCubemap(const TextureId faces[6]) {
                 mError = "setSky: the six cubemap faces must all be the same size";
                 return false;
             }
-        // ONE cube serves as both the sky and the IBL convolution input — the two
-        // hold identical pixels, and for a 2K cubemap sky that is 100 MB and a
-        // download/flip/upload round trip saved. Hence the mip chain and
-        // AllowAutomipmaps even though the sky itself only ever reads mip 0: the
-        // ibl_specular pass regenerates the input's mips before integrating.
-        const bool square = tex[0]->getWidth() == tex[0]->getHeight();
-        Ogre::TextureGpu *cube = buildCubeFromWorldFaces(
-            tex, "skycube",
-            square ? (Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps) : 0u,
-            square);
+        // THE SKY'S PICTURE ONLY (PHOTON-7 10-3 R5): its environment is its capture, like every sky's, taken at
+        // the faces' size (applyPendingSkyCapture) - so the sky's cube carries no IBL flags and only the mip the
+        // sky reads.
+        Ogre::TextureGpu *cube = buildCubeFromWorldFaces(tex, "skycube", 0u, false);
         if (!cube) return false;   // mError set
         Ogre::TextureGpu *previous = mSkyOwnedTex;
-        // destroyReflection() below must not free the cube we are about to hand
-        // the sky, so clear the alias before it runs.
-        mSkyOwnedTex = nullptr;
-        // Environment reflections: the same cube becomes the GGX-prefiltered
-        // cubemap on every PBR datablock's reflection slot, so metals and glass
-        // mirror the sky the way the legacy matcap/refraction shaders faked it.
-        if (square) buildReflectionCubemapFrom(cube, false);
-        else        destroyReflection();
         mSkyOwnedTex = cube;
         if (mAtmoSkyOn) { mAtmoSkyOn = false; syncAtmosphere(); }
         mSceneMgr->setSky(true, Ogre::SceneManager::SkyCubemap, cube);
@@ -433,9 +395,6 @@ bool OgreScene::applySkyAtmosphere(const AtmosphereSky &sky) {
         if (mSceneMgr->getSky())
             mSceneMgr->setSky(false, mSceneMgr->getSkyMethod(), static_cast<Ogre::TextureGpu *>(nullptr));
         if (mSkyOwnedTex) {
-            // A convolution still pending from that texture (a cubemap sky is its
-            // own IBL source) must not read it after it dies — applySkyMode's guard.
-            if (mIblSourceTex == mSkyOwnedTex && !mIblSourceOwned) destroyPendingReflection();
             destroyRecycled(mRoot->getRenderSystem()->getTextureGpuManager(), mSkyOwnedTex);
             mSkyOwnedTex = nullptr;
         }
@@ -737,19 +696,16 @@ void OgreScene::forgetSkySh() {
     pushHeightFog();   // ...and the height fog's in-scatter
 }
 
-// THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force
-// times the Sky Light gain the host pushed through setEnvironmentLight, or zeros
-// with no sky (no Sky Light = gain 0 = zeros: gi.sky_light). The host pushes the
-// gain only; it used to form this product itself, one sync after the engine had
-// integrated the SH, which put the cube of one sky beside the SH of another on
-// every change frame. Only while the engine owns the ambient (a host that never
-// pushed a gain, or lit its scene with setAmbient since, keeps its own), and not
-// during teardown (the write re-notes the GI arm).
+// THE SKY'S AMBIENT IS FORMED HERE (PHOTON-SKY-TRANSIENT-1): the SH in force, or
+// zeros with no sky. The SH is the capture's, and the capture photographs the sky
+// as drawn - at the Sky Light's gain (PHOTON-7 10-3 R5: setEnvironmentLight) - so
+// nothing multiplies it here. Only while the engine owns the ambient (a host that
+// never pushed a gain, or lit its scene with setAmbient since, keeps its own), and
+// not during teardown (the write re-notes the GI arm).
 void OgreScene::applySkyAmbient(GiStaleReason why) {
     if (!mSkyAmbientOwned || mDestroying) return;
-    const float gain[3] = { mEnvLightGain.r, mEnvLightGain.g, mEnvLightGain.b };
     float sh[27];
-    for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] * gain[i % 3] : 0.0f;
+    for (int i = 0; i < 27; ++i) sh[i] = mSkyShInForceValid ? mSkyShInForce[i] : 0.0f;
     applyAmbientSh(sh, why);
 }
 
@@ -872,11 +828,10 @@ void OgreScene::reapRetiredReflections(bool force) {
 void OgreScene::destroyPendingReflection() {
     mIblPending = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
-    if (mIblSourceTex && mIblSourceOwned) {
+    if (mIblSourceTex) {
         try { destroyRecycled(tm, mIblSourceTex); } catch (...) {}
     }
     mIblSourceTex = nullptr;
-    mIblSourceOwned = false;
     if (mReflPendingTex) {
         try { destroyRecycled(tm, mReflPendingTex); } catch (...) {}
         mReflPendingTex = nullptr;
@@ -960,8 +915,8 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
 
 // Six render_scene passes over render queue 0 into the six faces of a small
 // cube, then two readers of that cube: the ambient SH integral (its 32^2 mip)
-// and — for every sky that is not already a cubemap — the GGX convolution that
-// produces what every PBR datablock samples.
+// and the GGX convolution that produces what every PBR datablock samples - for
+// every sky (a cubemap sky captured at its faces' size: PHOTON-7 10-3 R5).
 //
 // WHY A SCENE PASS AND NOT SIX QUADS OF OUR OWN. The sky is whatever is bound:
 // Ogre's equirect material, Ogre's cube material, or the atmosphere's shader.
@@ -1010,7 +965,13 @@ void OgreScene::applyPendingSkyCapture() {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     Ogre::TextureGpu *cube = nullptr;
     JAH_TRY {
-        cube = renderSkyCaptureCube("skycapture", kSkyCaptureSize, true);
+        // THE CAPTURE'S SIZE: 128 for every sky but a CUBEMAP one, which is captured at its faces' own size
+        // (no less): its environment is its capture like every other sky's (PHOTON-7 10-3 R5, the sky emits what
+        // it shows), and a 128 capture would throw its detail away.
+        const Ogre::uint32 size = (mSkyDesc.mode == SkyMode::Cubemap && mSkyOwnedTex)
+                                      ? std::max(kSkyCaptureSize, mSkyOwnedTex->getWidth())
+                                      : kSkyCaptureSize;
+        cube = renderSkyCaptureCube("skycapture", size, true);
 
         // THE AMBIENT, off the sky the capture just took. The SUN DISC is
         // deliberately NOT in it (the compositor's queue range), and not in the
@@ -1018,28 +979,14 @@ void OgreScene::applyPendingSkyCapture() {
         // what that switch can and cannot reach today.
         integrateSkyShFromCube(cube);
 
-        // WHO OWNS THE ENVIRONMENT. Two descriptions say "not the capture":
-        //   * a CUBEMAP sky — its own faces are already the cube, at their full
-        //     resolution, and a 128^2 capture would throw detail away;
-        //   * a description that carries EXPLICIT reflectionFaces — the host
-        //     has stated what the environment is, and SkyDesc says that is what
-        //     a datablock samples. A visible sky and a reflected environment are
-        //     allowed to differ (gi.probe_open's two-toned sky rests on it), and
-        //     the capture must not quietly overrule the host.
-        // In both cases the capture still ran, because the AMBIENT is the sky's
-        // own light either way.
-        if (mSkyDesc.mode == SkyMode::Cubemap || mSkyDesc.reflections) {
-            destroyRecycled(tm, cube);
-        } else {
-            // ...and for every other sky the capture IS the environment. It
-            // is convolved HERE, in the capture's own frame and before any draw
-            // (we are inside the frame: a command buffer exists), into the next
-            // set's cube; the convolution frees the capture afterwards. It used
-            // to be queued for the top of the next frame with the newborn cube
-            // already bound — the change frame's flash (landEnvironmentIfComplete).
-            buildReflectionCubemapFrom(cube, true);
-            applyPendingIbl();
-        }
+        // THE CAPTURE IS THE ENVIRONMENT, for every sky (PHOTON-7 10-3 R5: the cube a cubemap sky's own faces
+        // used to be, and the host's explicit reflection faces, are deleted - an environment the sky does not show
+        // is against the law by design). It is convolved HERE, in the capture's own frame and before any draw (we
+        // are inside the frame: a command buffer exists), into the next set's cube; the convolution frees the
+        // capture afterwards. It used to be queued for the top of the next frame with the newborn cube already
+        // bound - the change frame's flash (landEnvironmentIfComplete).
+        buildReflectionCubemapFrom(cube);
+        applyPendingIbl();
         // The whole set lands now when the SH read was synchronous; a deferred
         // read lands it at its due frame or the next capture (readSkyShTicket).
         landEnvironmentIfComplete();
@@ -1151,8 +1098,9 @@ void OgreScene::issueSkyShRead(Ogre::TextureGpu *cube) {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     JAH_TRY {
         cube->_autogenerateMipmaps();
-        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
-        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        Ogre::uint8 mip = 0u;
+        Ogre::uint32 n = 1u;
+        skyShLevel(cube, mip, n);
         mSkyShTicket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
                                                     cube->getPixelFormat());
         // accurateTracking FALSE: no fence and no flush; the copy rides the
@@ -1247,8 +1195,9 @@ void OgreScene::integrateSkyShNow(Ogre::TextureGpu *cube) {
     JAH_TRY {
         cube->_autogenerateMipmaps();
         mRoot->getRenderSystem()->flushCommands();
-        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
-        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        Ogre::uint8 mip = 0u;
+        Ogre::uint32 n = 1u;
+        skyShLevel(cube, mip, n);
         ticket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
                                               cube->getPixelFormat());
         ticket->download(cube, mip, true);
@@ -1305,37 +1254,6 @@ void OgreScene::integrateSkyShFromBox(const Ogre::TextureBox &box, float *out) {
         }
         acc.finish(out ? out : mSkySh);
     }
-}
-
-bool OgreScene::applySkyReflectionFaces(const TextureId faces[6]) {
-    JAH_TRY {
-        bool anySet = false;
-        for (int i = 0; i < 6; ++i) if (faces[i]) anySet = true;
-        if (!anySet) { destroyReflection(); return true; }
-        Ogre::TextureGpu *tex[6];
-        for (int i = 0; i < 6; ++i) {
-            auto it = mTextures.find(faces[i]);
-            if (it == mTextures.end()) { mError = "setSky: unknown reflection face texture"; return false; }
-            tex[i] = it->second.texture;
-        }
-        // Same reason as the cubemap path: read, not bound.
-        for (int i = 0; i < 6; ++i) waitForTextureResident(tex[i]);
-        for (int i = 0; i < 6; ++i)
-            if (tex[i]->getWidth() != tex[0]->getWidth() || tex[i]->getHeight() != tex[0]->getWidth()) {
-                mError = "setSky: the six reflection faces must be square and the same size";
-                return false;
-            }
-        // The convolution INPUT: the world->Ogre cube, with AllowAutomipmaps
-        // because CompositorPassIblSpecular generates the input's mip chain
-        // itself and refuses an input that cannot
-        // (OgreCompositorPassIblSpecular.cpp:128).
-        Ogre::TextureGpu *cube = buildCubeFromWorldFaces(
-            tex, "skyiblsrc",
-            Ogre::TextureFlags::RenderToTexture | Ogre::TextureFlags::AllowAutomipmaps, true);
-        if (!cube) return false;   // mError set
-        buildReflectionCubemapFrom(cube, true);
-        return true;
-    } JAH_CATCH(mError, false);
 }
 
 // ADDENDUM A-5: a cubemap the HOST owns, from six world-axis faces.
@@ -1434,6 +1352,8 @@ void OgreScene::tuneSkyRenderable() {
     // Instant Radiosity casts rays with mVisibilityMask = kGiGeometryBit; the sky
     // must never be hit by them (nor counted as GI geometry anywhere else).
     sky->setVisibilityFlags(kVisibleBit);
+    // ...and the Sky Light's gain on the new sky's material (Ogre's setSky clones one per manager and method).
+    applySkyGain();
 }
 
 Ogre::TextureGpu *OgreScene::makeSkyArrayTexture(Ogre::TextureGpu *src) {
@@ -1631,11 +1551,10 @@ Ogre::TextureGpu *OgreScene::buildCubeFromWorldFaces(Ogre::TextureGpu *const tex
 // every dirty datablock. destroyReflection, which has no
 // successor, destroys FIRST (its TextureGpuListener::Deleted kills the stale
 // sets) and only then unbinds — do not "optimise" that order.
-void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube, bool ownsSource) {
+void OgreScene::buildReflectionCubemapFrom(Ogre::TextureGpu *srcCube) {
     // An unlanded next set is superseded by this one.
     destroyPendingReflection();
     mIblSourceTex = srcCube;
-    mIblSourceOwned = ownsSource;
     const Ogre::uint32 w = srcCube->getWidth(), h = srcCube->getHeight();
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     // The OUTPUT the PBR datablocks will sample: same size, mipped, and a UAV,
@@ -1667,26 +1586,25 @@ void OgreScene::applyPendingIbl() {
     if (!mIblPending) return;
     mIblPending = false;
     convolvePendingIbl();
-    // The convolution may have been the set's last part (a host-pushed cube, or
-    // a capture whose SH was read synchronously).
+    // The convolution may have been the set's last part (a capture whose SH was
+    // read synchronously).
     landEnvironmentIfComplete();
 }
 
 void OgreScene::convolvePendingIbl() {
     if (!mIblSourceTex || !mReflPendingTex) return;
     Ogre::TextureGpu *const target = mReflPendingTex;
-    // A cube we own is scratch: once the convolution has read it, its (mipped,
-    // full-size) VRAM is dead weight until the next sky change.
+    // The source (the capture) is scratch: once the convolution has read it, its
+    // (mipped, full-size) VRAM is dead weight until the next sky change.
     struct FreeSource {
         OgreScene *self = nullptr;
         ~FreeSource() {
-            if (!self || !self->mIblSourceOwned || !self->mIblSourceTex) return;
+            if (!self || !self->mIblSourceTex) return;
             try {
                 destroyRecycled(self->mRoot->getRenderSystem()->getTextureGpuManager(),
                                 self->mIblSourceTex);
             } catch (...) {}
             self->mIblSourceTex = nullptr;
-            self->mIblSourceOwned = false;
         }
     } freeSource{ this };
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
@@ -1857,7 +1775,7 @@ void OgreScene::applyReflectionToAll() { applyReflectionToAllImpl(); }
 // still has one occupant — and the sky is no longer lost by it.
 //
 // rebuildVct/teardownVct call applyReflectionToAll() so both bindings follow the
-// hybrid up and down (the pass-level one is pushed from refreshEnvmapScale,
+// hybrid up and down (the pass-level one is pushed from refreshSkyEnv,
 // which that call funnels through).
 //
 // THE RESIDUAL, recorded rather than fixed here: an AUTHORED reflection map on a
@@ -1916,14 +1834,10 @@ void OgreScene::resolveIblMipmaps() {
 }
 
 void OgreScene::applyReflectionToAllImpl() {
-    // THE ENV SLOT'S OCCUPANT JUST CHANGED, AND SO DID ITS SCALE. This runs on
-    // every PCC bind/unbind (rebuildVct/teardownVct call it for exactly that
-    // reason), and the Sky Light's gain applies to the SKY CUBE and not to a
-    // probe capture — see envmapScaleForPass(). The gain is written into the
-    // ambient pass data, which nothing else here touches, so it has to be
-    // re-written here or a scene that acquired its probes after its ambient
-    // keeps the sky-cube answer.
-    refreshEnvmapScale();
+    // THE ENV SLOT'S OCCUPANT JUST CHANGED. This runs on every PCC bind/unbind
+    // (rebuildVct/teardownVct call it for exactly that reason) and on every sky
+    // rebuild: the pass-level sky slot follows it here.
+    refreshSkyEnv();
     markIblMipmapsDirty();
     auto *hlmsPbs = mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS);
     for (auto &kv : mMaterials) {
@@ -2213,6 +2127,30 @@ bool OgreScene::cloudLayerDrawn() const {
            mCloudMaterial && mCloudField;
 }
 
+// THE SKY LIGHT'S GAIN WHERE THE PICTURE IS FORMED (PHOTON-7 10-3 R5; setEnvironmentLight says why): Ogre's sky
+// material (`skyGain`, the fork's Sky.material - both its programs), the atmosphere's scattered light (its sky quad,
+// the aerial in-scatter, the cloud sheet's air: JahAtmosphere::setSkyGain) and the cloud sheet's sun term (its sky
+// term is the clear sky's capture, which carries the gain already). The sun disc is a light and is not in it. Cheap,
+// idempotent: uniforms only.
+void OgreScene::applySkyGain() {
+    JAH_TRY {
+        if (mSceneMgr->getSky()) {
+            Ogre::MaterialPtr skyMat = mSceneMgr->getSkyMaterial();
+            if (skyMat && skyMat->getNumTechniques() > 0 && skyMat->getTechnique(0)->getNumPasses() > 0)
+                skyMat->getTechnique(0)->getPass(0)->getFragmentProgramParameters()->setNamedConstant(
+                    "skyGain", Ogre::Vector4(mSkyGain.r, mSkyGain.g, mSkyGain.b, 1.0f));
+        }
+        if (mAtmosphere) mAtmosphere->setSkyGain(Ogre::Vector3(mSkyGain.r, mSkyGain.g, mSkyGain.b));
+        if (mCloudMaterial) {
+            const CloudLayerDesc &c = mSkyDesc.clouds;
+            mCloudMaterial->getTechnique(0)->getPass(0)->getFragmentProgramParameters()->setNamedConstant(
+                "cloudSunE", Ogre::Vector4(c.sunIrradiance.r * mSkyGain.r, c.sunIrradiance.g * mSkyGain.g,
+                                           c.sunIrradiance.b * mSkyGain.b, kCloudSlabMetres));
+            bindCloudAir();   // the sheet's air: the atmosphere's scale, the gain in it
+        }
+    } JAH_CATCH(mError, );
+}
+
 void OgreScene::applyCloudLayer(bool fieldChanged) {
     const CloudLayerDesc &c = mSkyDesc.clouds;
     const unsigned period =
@@ -2319,8 +2257,9 @@ void OgreScene::applyCloudLayer(bool fieldChanged) {
         const Ogre::Vector3 toSun =
             Ogre::Vector3(c.sunDir[0], c.sunDir[1], c.sunDir[2]).normalisedCopy();
         ps->setNamedConstant("cloudSun", Ogre::Vector4(toSun.x, toSun.y, toSun.z, c.hasSun ? 1.0f : 0.0f));
-        ps->setNamedConstant("cloudSunE", Ogre::Vector4(c.sunIrradiance.r, c.sunIrradiance.g,
-                                                        c.sunIrradiance.b, kCloudSlabMetres));
+        // the sun on the sheet at the Sky Light's gain: the sheet is the sky's picture (applySkyGain)
+        ps->setNamedConstant("cloudSunE", Ogre::Vector4(c.sunIrradiance.r * mSkyGain.r, c.sunIrradiance.g * mSkyGain.g,
+                                                        c.sunIrradiance.b * mSkyGain.b, kCloudSlabMetres));
         // The forward lobe's normaliser for THIS sun (the shader's kG).
         const float lobeFlux = c.hasSun ? cloudForwardLobeFlux(toSun, kCloudForwardG) : 0.0f;
         ps->setNamedConstant("cloudPhase",
@@ -2546,8 +2485,9 @@ void OgreScene::captureCloudClearSky() {
         }
         mCloudQuad->setVisibilityFlags(kVisibleBit);
         cube->_autogenerateMipmaps();
-        const Ogre::uint8 mip = std::min<Ogre::uint8>(kSkyShMip, Ogre::uint8(cube->getNumMipmaps() - 1u));
-        const Ogre::uint32 n = std::max(1u, kSkyCaptureSize >> mip);
+        Ogre::uint8 mip = 0u;
+        Ogre::uint32 n = 1u;
+        skyShLevel(cube, mip, n);
         readCloudClearTicket(true);   // never overwrite one: it owns a staging buffer
         ticket = tm->createAsyncTextureTicket(n, n, 6u, Ogre::TextureTypes::TypeCube,
                                               cube->getPixelFormat());

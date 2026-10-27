@@ -28,19 +28,19 @@ enum class LightType:int
     Directional = 1,
     Spot = 2,
     Area = 3,       // rectangular area light (engine viewport only; legacy ignores it)
-    // THE SKY LIGHT (SKY_LIGHT_SPEC.md §2, owner decision D14). Unreal's model:
-    // the scene's SKY is the environment picture, and a Sky Light is the LIGHT
-    // that reads it and fills the scene with its diffuse ambient. It has no
-    // position, no direction, no range and casts no shadow — `color` is a TINT
-    // on the sky's own integral and `intensity` is the strength (1.0 = the sky
-    // at full physical strength). Every other LightNode field is meaningless on
-    // it and the panel hides them.
+    // THE SKY LIGHT (SKY_LIGHT_SPEC.md §2; PHOTON-7 10-3 R5): ONE GAIN ON THE
+    // SKY ITSELF. The scene's SKY is the environment picture and it emits what
+    // it shows; a Sky Light scales that picture - `color` a TINT, `intensity`
+    // the strength (1.0 = the sky as authored) - and the sky's light (its
+    // ambient, its reflections) follows the picture by construction. It has no
+    // position, no direction, no range and casts no shadow. Every other
+    // LightNode field is meaningless on it and the panel hides them.
     //
     // THE FIRST VISIBLE ONE IS THE SKYLIGHT (Scene::skyLight(), the same shape
     // as sunLight()); a second raises the `sky.duplicate` scene issue. NO Sky
-    // Light in a scene = no ambient at all: 27 zero SH coefficients, which is a
-    // black ambient term, which is the decided behaviour (a visible sky that
-    // does not light, as in Unreal).
+    // Light (or a hidden one) = gain 1: the sky as authored, lighting the scene
+    // as it looks. (D14's "no node = no ambient" - a visible sky that did not
+    // light - is deleted: a sky that shows and does not emit breaks physics.)
     Sky = 4,
 };
 
