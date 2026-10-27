@@ -13,6 +13,7 @@
 
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
+#include <OgreGpuProgram.h>
 #include "AtomPass.h"
 #include "HlmsAtom.h"
 
@@ -3537,6 +3538,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.compiledInForeground = foreground;
     if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
         out.paramsMisfits = hc->getJahParamsMisfits();
+    out.compileErrors = Ogre::GpuProgram::getJahCompileErrors();
     return out;
 }
 

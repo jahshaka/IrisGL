@@ -7134,6 +7134,11 @@ struct AsyncShaderStats {
     /// threads built one shared program's parameter definitions at once, and a dispatch read
     /// past its parameters until the GPU lost its context).
     unsigned long long paramsMisfits = 0;
+    /// Program loads that FAILED with a compile error, every program of the process (a running total: the fork's
+    /// GpuProgram::getJahCompileErrors). Ogre catches and logs a failed load and never throws it, so a compute job
+    /// whose shader does not compile never dispatches and the picture is merely wrong: 0 on a sound build - the
+    /// engine selftest's verdict (URGENT #83: a piece left out of the light injection's list killed the job silently).
+    unsigned long long compileErrors = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk
@@ -9491,6 +9496,9 @@ struct MonitorRecord {
     unsigned    shadowPassesProbe = 0;  ///< probes' shadow nodes
     unsigned    planarRenders = 0;
     unsigned    shaderCompiles = 0;
+    /// Program loads failed with a compile error, the process's running total at this frame's end
+    /// (AsyncShaderStats::compileErrors): any value above 0 is a dead shader in the running app.
+    unsigned long long shaderCompileErrors = 0;
     /// Was the render system COUNTING while this frame rendered? Recording is
     /// off in Ogre until something asks for `renderStats()`, and a frame
     /// rendered with it off reports zeros for every geometry counter — a fact

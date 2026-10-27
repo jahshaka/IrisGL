@@ -47,6 +47,7 @@
 #include <Compositor/Pass/OgreCompositorPassDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreCamera.h>
+#include <OgreGpuProgram.h>
 #include <OgreLight.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
@@ -247,6 +248,7 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     const auto t = std::chrono::steady_clock::now();
     mCurrent.totalMs = float(std::chrono::duration<double, std::milli>(t - mFrameStart).count());
     mCurrent.scenesUpdated = scenesUpdated;
+    mCurrent.shaderCompileErrors = Ogre::GpuProgram::getJahCompileErrors();
     // The counters the pass records imply, summed here so nothing downstream
     // has to re-derive them and `frames.jsonl` reads on its own.
     for (const FramePass &p : mCurrent.passes) {
