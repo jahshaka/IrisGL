@@ -2,6 +2,7 @@
 //#include "SyntaxHighlightingMisc.h"
 
 @piece( JahInjectionReader )
+	@insertpiece( JahVoxelFaces )
 	// THE ONE VOXEL READER'S TEXT (jah_voxel_sample.glsl, the piece JahVoxelSample) over this
 	// job's chain: the shadow march calls its origin gate (jahVoxelOriginGate) and its tent
 	// instead of carrying a copy of either. The job reads the coverage and the position per
@@ -230,38 +231,9 @@
 							++evN;
 						}
 					}
-					// IN THE ORDER THE RAY CROSSES THEM (at one place: the front first - a face the ray enters there).
-					for( int k = 1; k < evN; ++k )
-					{
-						const float kt = evT[k], kc = evC[k];
-						const bool kf = evFront[k];
-						int jj = k - 1;
-						while( jj >= 0 && ( evT[jj] > kt || ( evT[jj] == kt && !evFront[jj] && kf ) ) )
-						{
-							evT[jj + 1] = evT[jj];
-							evC[jj + 1] = evC[jj];
-							evFront[jj + 1] = evFront[jj];
-							--jj;
-						}
-						evT[jj + 1] = kt;
-						evC[jj + 1] = kc;
-						evFront[jj + 1] = kf;
-					}
-					for( int k = 0; k < evN; ++k )
-					{
-						const float c = evC[k];
-						if( evFront[k] )
-						{
-							T *= 1.0f - c;
-							fIn += c * ( 1.0f - fIn );
-						}
-						else
-						{
-							const float leave = min( c, fIn );
-							fIn -= leave;
-							T *= 1.0f - ( c - leave );
-						}
-					}
+					// IN THE ORDER THE RAY CROSSES THEM - the one face model (jah_voxel_faces.glsl, the piece JahVoxelFaces:
+					// the occupancy ray's transmissive cells take the same function, PHOTON-7 10-4 R7)
+					jahVoxelFacesCross( evT, evC, evFront, evN, T, fIn );
 				}
 				if( tOut >= tStop )
 					break;

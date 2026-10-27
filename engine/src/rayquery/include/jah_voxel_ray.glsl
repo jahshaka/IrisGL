@@ -91,11 +91,13 @@ const uint kJahRayOutside = 3u;		///< no cascade held its start: the chain says 
 
 struct JahVoxelRayResult
 {
-	vec3 radiance;		///< a HIT: the side of the voxel facing the ray, un-premultiplied; else 0
+	vec3 radiance;		///< a HIT: the side of the voxel facing the ray, un-premultiplied, x the throughput - plus the panes'
+						///< own light; an ESCAPE: the panes' own light alone; else 0
 	uint exitReason;	///< kJahRayHit / kJahRayEscaped / kJahRayExhausted
 	int cascade;		///< the cascade it ended in
 	float tC0;			///< from the start to the hit cell's entry (or to the exit), cascade 0's normalised units
 	int steps;			///< the cells it read - its price
+	float throughput;	///< what the PANE CELLS it crossed passed (1 with none): an escape's sky is the caller's x this
 };
 
 /// DOES AN OCCUPIED CELL STOP THE RAY (the header)? Cell `iv` of cascade `c` at its centre `uvw`; `surface` whether the
@@ -110,11 +112,16 @@ struct JahVoxelRayResult
 ///   THE START CELL and THE OWN CELL holding faces on several axes (`crossing`): a face where the segment CROSSES its plane.
 ///   ANY OTHER CELL: occupancy - stopped from every direction.
 bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes,
-					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut )
+					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut, uint skip )
 {
 	const vec3 an = abs( nLS );
 	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
-	const vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
+	vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
+	// THE PANE FACES are not the occluder's (jahVoxelPaneMask; the caller crosses them): their coverage out of every test
+	for( int h = 0; h < 2; ++h )
+		for( int b = 0; b < 3; ++b )
+			if( ( skip & ( 1u << uint( 3 * h + b ) ) ) != 0u )
+				cov[h][b] = 0.0;
 	const vec4 pos[2] = vec4[2]( JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 ) );
 	// the cell's centre, and its corner most in front of the tangent plane, relative to the surface point
 	const vec3 centre = uvw - sJ;
@@ -198,6 +205,84 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 	return false;
 }
 
+/// THE PANE FACES of a cell (PHOTON-7 10-4 R7; VoxelMerge_piece_cs.any THE PANE FACES): bit h x 3 + a set where half h
+/// (0 the faces looking +a, 1 looking -a) of axis a holds a pane's faces and no occluder's - axes x and y in the
+/// coverage's alpha (two bits: the value x 3), axis z in the surface position's sixteenth bit.
+uint jahVoxelPaneMask( int c, vec3 uvw )
+{
+	const uint p = uint( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ).w * 3.0 + 0.5 ) |
+				   ( ( uint( JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 ).w * 65535.0 + 0.5 ) >> 15u ) << 2u );
+	const uint n = uint( JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ).w * 3.0 + 0.5 ) |
+				   ( ( uint( JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 ).w * 65535.0 + 0.5 ) >> 15u ) << 2u );
+	return ( p & 7u ) | ( ( n & 7u ) << 3u );
+}
+
+/// THE PANE FACES A RAY CROSSES IN A CELL (PHOTON-7 10-4 R7; the lead's cell rule, 2026-10-27; VoxelMerge_piece_cs.any
+/// THE PANE FACES): a pane's face - a surface its material blends with what is behind it - TRANSMITS the ray, by the one
+/// face model the light injection's march takes (jah_voxel_faces.glsl): each pane face (`mask`) the segment crosses (its
+/// stored plane per half and axis, inside [tIn, tOut]), a front face x (1 - c), the inside fraction for a back one - c the face's
+/// coverage, its projected area x its alpha, so a pane crossed whole passes 1 - alpha. What it stops returns the side of
+/// the cell facing the ray (un-premultiplied: the pane's own light, the row's kD x alpha for a glass - its pixel's alpha^2
+/// kD over the coverage's alpha). The faces the ray LEFT are not crossed: a face behind the tangent plane (the surface's
+/// own, the header's gate). The OCCLUDERS' faces of the cell are the caller's (occupancy or the plane test, as every face
+/// was: a wall's end beside a window still stops the ray). `T` / `fIn` the ray's throughput and inside fraction,
+/// carried; returns the light stopped here (none where `light` is false: the side's own cell, never read).
+vec3 jahVoxelPaneCross( int c, vec3 uvw, ivec3 iv, vec4 iso, uint mask, bool light, bool surface, vec3 sJ, vec3 nLS,
+						float epsJ, vec3 invRes, vec3 pJ, vec3 dS, vec3 dirLS, float tIn, float tOut, inout float T,
+						inout float fIn )
+{
+	const vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
+	const vec4 pos[2] = vec4[2]( JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 ) );
+	const vec3 an = abs( nLS );
+	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
+	const vec3 centre = uvw - sJ;
+	const vec3 front = centre + 0.5 * invRes * sign( nLS );
+	float evT[6], evC[6];
+	bool evFront[6];
+	int evN = 0;
+	for( int b = 0; b < 3; ++b )
+	{
+		if( dS[b] == 0.0 )
+			continue;
+		const float slack = 1e-3 * invRes[b] / abs( dS[b] );
+		for( int h = 0; h < 2; ++h )
+		{
+			const float o = cov[h][b];
+			if( !( o > 0.0 ) || ( mask & ( 1u << uint( 3 * h + b ) ) ) == 0u )
+				continue;
+			const float qb = ( float( iv[b] ) + clamp( pos[h][b] / o, 0.0, 1.0 ) ) * invRes[b];
+			const float tx = ( qb - pJ[b] ) / dS[b];
+			if( !( tx >= tIn - slack && tx <= tOut + slack ) )
+				continue;
+			if( surface )
+			{
+				vec3 q = b == dom ? centre : front;
+				q[b] = qb - sJ[b];
+				if( !( dot( q, nLS ) > epsJ ) )
+					continue;	// the surface's own face
+			}
+			evT[evN] = tx;
+			evC[evN] = min( o, 1.0 );
+			// the faces looking +b (the P half) face a ray travelling -b: it enters through them
+			evFront[evN] = h == 0 ? dS[b] < 0.0 : dS[b] > 0.0;
+			++evN;
+		}
+	}
+	if( evN == 0 )
+		return vec3( 0.0, 0.0, 0.0 );
+	const float before = T;
+	jahVoxelFacesCross( evT, evC, evFront, evN, T, fIn );
+	if( !light )
+		return vec3( 0.0, 0.0, 0.0 );
+	// THE SIDE FACING THE RAY (the hit's rule, by the travel: a pane cell's faces are one sheet's)
+	const vec4 bk = JAH_VOX_SAMPLE_BACK( c, uvw, 0.0 );
+	const vec3 nv = JAH_VOX_SAMPLE_NRM( c, uvw, 0.0 ).xyz * 2.0 - 1.0;
+	const float along = dot( nv, -dirLS );
+	const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
+	const vec3 L = side * ( 1.0 / iso.w );
+	return finite3( L ) ? ( before - T ) * L : vec3( 0.0, 0.0, 0.0 );
+}
+
 /// THE RAY from `posLS0` (cascade 0's normalised space; a cache's caller starts it `epsC0` off its surface) along the
 /// unit `dirLS` (the same space; the chain's cascades are cubes, so it is every cascade's direction); the surface it left
 /// - its point `surfLS0` and unit normal `nLS` (zero: a ray in free space, no surface) - and the voxel side's own cell
@@ -213,6 +298,7 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 	r.cascade = 0;
 	r.tC0 = 0.0;
 	r.steps = 0;
+	r.throughput = 1.0;
 	if( !finite3( posLS0 ) || !finite3( dirLS ) || !finite1( lastShellC0 ) || !finite3( surfLS0 ) || !finite3( nLS ) ||
 		!finite1( epsC0 ) || !finite1( firstShellC0 ) )
 		return r;
@@ -223,6 +309,9 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 	float shellC0 = 0.0;	// D_j, cascade 0's units from the start
 	float tCur = 0.0;		// how far the ray has been read, cascade 0's units
 	bool entered = false;	// a cascade has read: the next one enters past the hand-over's plane
+	float paneT = 1.0;		// THE THROUGHPUT past the pane cells crossed (PHOTON-7 10-4 R7), and the inside fraction
+	float paneIn = 0.0;
+	vec3 paneLight = vec3( 0.0, 0.0, 0.0 );	// ...and the light they stopped
 	for( int j = 0; j < JAH_VOX_COUNT; ++j )
 	{
 		const vec3 invRes = JAH_VOX_INVRES( j );
@@ -299,12 +388,40 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 				// THE START CELL AND THE OWN CELL take a face only where the ray crosses it (the header)
 				const bool crossing = own || ( firstDda && it == 0 );
 				const float tCell = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
-				const bool front = iso.w > 0.0 && jahVoxelRayFront( j, uvw, iv, surface, surfJ, nLS, epsC0 * s0j, invRes,
-																	   crossing, planeTest0 && j == 0, posJ, dirLS * s0j,
-																	   tIn, tCell );
+				// THE PANE FACES (jahVoxelPaneMask): out of the occluders' test, crossed after it (jahVoxelPaneCross)
+				const uint paneMask = iso.w > 0.0 ? jahVoxelPaneMask( j, uvw ) : 0u;
+				bool occluders = iso.w > 0.0;
+				if( paneMask != 0u )
+				{
+					const vec4 cP = JAH_VOX_SAMPLE_COVP( j, uvw, 0.0 ), cN = JAH_VOX_SAMPLE_COVN( j, uvw, 0.0 );
+					occluders = false;
+					for( int b = 0; b < 3; ++b )
+						occluders = occluders || ( cP[b] > 0.0 && ( paneMask & ( 1u << uint( b ) ) ) == 0u ) ||
+									( cN[b] > 0.0 && ( paneMask & ( 1u << uint( 3 + b ) ) ) == 0u );
+				}
+				const bool front = occluders && jahVoxelRayFront( j, uvw, iv, surface, surfJ, nLS, epsC0 * s0j, invRes,
+																  crossing, planeTest0 && j == 0, posJ, dirLS * s0j,
+																  tIn, tCell, paneMask );
+				if( paneMask != 0u && !front )
+				{
+					paneLight += jahVoxelPaneCross( j, uvw, iv, iso, paneMask, !own, surface, surfJ, nLS, epsC0 * s0j, invRes,
+													posJ, dirLS * s0j, dirLS, tIn, tCell, paneT, paneIn );
+					if( !( paneT > 0.0 ) )
+					{
+						// nothing passes: the panes' light is the whole answer, a hit where it stopped
+						r.radiance = finite3( paneLight ) ? paneLight : vec3( 0.0, 0.0, 0.0 );
+						r.exitReason = kJahRayHit;
+						r.cascade = j;
+						r.tC0 = tIn;
+						r.throughput = 0.0;
+						return r;
+					}
+				}
 				if( front && own )
 				{
-					// a face in front inside the side's own cell: blocked there, dark (the header)
+					// a face in front inside the side's own cell: blocked there, dark (the header) - but the panes before it
+					r.radiance = finite3( paneLight ) ? paneLight : vec3( 0.0, 0.0, 0.0 );
+					r.throughput = paneT;
 					r.exitReason = kJahRayHit;
 					r.cascade = j;
 					r.tC0 = tIn;
@@ -339,7 +456,9 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 						}
 					}
 					const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
-					r.radiance = side * ( 1.0 / iso.w );
+					// ...through the panes crossed before it, and their own light beside it (PHOTON-7 10-4 R7)
+					r.radiance = paneLight + paneT * ( side * ( 1.0 / iso.w ) );
+					r.throughput = paneT;
 					r.exitReason = finite3( r.radiance ) ? kJahRayHit : kJahRayExhausted;
 					if( r.exitReason != kJahRayHit )
 						r.radiance = vec3( 0.0, 0.0, 0.0 );
@@ -371,6 +490,9 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 			// window before the chain is rebuilt around it): the caller's to answer, never a hit or an escape it earned
 			r.exitReason = entered ? kJahRayEscaped : kJahRayOutside;
 			r.cascade = j;
+			// the panes crossed: their own light, and what they pass of the sky (the caller's, x r.throughput)
+			r.radiance = finite3( paneLight ) ? paneLight : vec3( 0.0, 0.0, 0.0 );
+			r.throughput = paneT;
 			return r;
 		}
 		posJ = posN;

@@ -102,7 +102,7 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 			// (OUTSIDE: no cascade held the ray - the chain knows nothing of that world, and the diffuse takes what GI
 			// off takes there, the sky over the bin: gi.cascades 4 and 5 - a pixel beyond a one-cascade chain, a
 			// teleport's window before the chain is rebuilt around the eye - read black, 0.06 x the ambient)
-			sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
+			sum += r.radiance + r.throughput * jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );   // (the panes: PHOTON-7 10-4 R7)
 			taken += 1.0;
 		}
 	}
@@ -189,8 +189,10 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 		}
 		else if( r.exitReason == kJahRayEscaped || r.exitReason == kJahRayOutside )
 		{
+			// (the panes crossed: their own light, and what they pass of the open share - PHOTON-7 10-4 R7)
+			o.radiance += r.radiance * w;
 			wSum += w;
-			wOpen += w;
+			wOpen += w * r.throughput;
 		}
 	}
 	if( wSum > 0.0 )

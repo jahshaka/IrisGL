@@ -1,7 +1,7 @@
 # WrapHlmsPiece.cmake — turn plain GLSL files into ONE Hlms library piece
 # (PHOTON-READER-1: the one voxel radiance reader).
 #
-#   cmake -DPIECE=<name> -DOUT=<file.any> -DIN0=<a.glsl> [-DIN1=<b.glsl> ... -DIN7=] -P WrapHlmsPiece.cmake
+#   cmake -DPIECE=<name> -DOUT=<file.any> -DIN0=<a.glsl> [-DIN1=<b.glsl> ... -DIN9=] -P WrapHlmsPiece.cmake
 #   cmake -DRAW=1 -DOUT=<file.glsl> -DIN0=... -P WrapHlmsPiece.cmake
 #   cmake -DUNWRAP=1 -DOUT=<file.glsl> -DIN0=<a_piece_all.any> [-DIN1=...] -P WrapHlmsPiece.cmake
 #
@@ -28,7 +28,7 @@ endif()
 # Numbered, not a list: a custom command's arguments reach a shell, where a list
 # separator is a pipe or a statement end.
 set(_inputs "")
-foreach(_i RANGE 0 7)
+foreach(_i RANGE 0 9)
     if(IN${_i})
         list(APPEND _inputs "${IN${_i}}")
     endif()

@@ -70,7 +70,7 @@ namespace Ogre
         /// THE MERGE ACCUMULATOR'S TEXELS PER VOXEL (VoxelMerge_piece_cs.any, voxelMergeUvw's
         /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
-        constexpr uint32 kMergeAccumTexels = 26u;
+        constexpr uint32 kMergeAccumTexels = 27u;   // +26: the kinds of faces (PHOTON-7 10-4 R7)
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -1203,7 +1203,7 @@ namespace Ogre
         // two, so the residency round trip never actually saves anything -- it
         // only returns memory the next build immediately asks for again.
         // THE COST is one accumulator per volume SIZE, held while any voxeliser of that
-        // size lives: width * height * depth * 26 * 4 bytes (27.3 MB at 64^3, 218 MB at
+        // size lives: width * height * depth * 27 * 4 bytes (28.3 MB at 64^3, 226 MB at
         // 128^3), shared by every cascade of that size (SPEED-VR-MEM, acquireMergeAccum).
 
         generateMips();

@@ -358,7 +358,8 @@
 												   int4( 0, 0, 0, 0 ), 0.0, p.worldToVolumeDir.w, true );
 		// (a ray no cascade held - OUTSIDE - is no sample here: a probe beyond the chain is not the chain's to answer)
 		const bool sampled = ray.exitReason == kJahRayHit || ray.exitReason == kJahRayEscaped;
-		const float3 sky = ray.exitReason == kJahRayEscaped ? jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
+		// (through the panes it crossed - their own light is in ray.radiance: PHOTON-7 10-4 R7)
+		const float3 sky = ray.exitReason == kJahRayEscaped ? ray.throughput * jahEnvCone( dir, p.coneAngleTan ) : float3( 0, 0, 0 );
 		// THE DEPTH STAYS CASCADE-0-LOCAL AND IS MEASURED FROM THE PROBE: the march's
 		// age converted back into cascade 0's normalised units, plus the start bias's
 		// own length - and BOUNDED at cascade 0's diagonal, 1.414, the old march's own
