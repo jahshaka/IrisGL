@@ -3772,7 +3772,7 @@ bool describeMesh(const Ogre::Mesh *mesh, uint32_t level, MeshGeometry &out,
         VkAccelerationStructureGeometryKHR g{};
         g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;      // shared by every wearer; a cut-out is its INSTANCE (FORCE_NO_OPAQUE)
+        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR | VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;   // (W1: a pane candidate never repeats: T, not T^2) shared by every wearer; a cut-out is its INSTANCE (FORCE_NO_OPAQUE)
         g.geometry.triangles.sType =
             VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -4076,7 +4076,7 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     VkAccelerationStructureGeometryKHR geom{};
     geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR | VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;   // (W1)
     geom.geometry.instances.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     geom.geometry.instances.arrayOfPointers = VK_FALSE;
@@ -4569,7 +4569,7 @@ bool RayQueryTier::skinPass(OgreScene *scene, SceneAs &sa, VkCommandBuffer &cmd,
             VkAccelerationStructureGeometryKHR g{};
             g.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
             g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-            g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR | VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR;   // (W1)
             g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
             g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
             g.geometry.triangles.vertexData.deviceAddress = VkDeviceAddress(sk.buf.address);
