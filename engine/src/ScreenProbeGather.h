@@ -500,6 +500,9 @@ public:
     /// frame already produced — re-registered, nothing recorded, no history stepped.
     /// False when the view recorded nothing this frame.
     bool rebindThisFrame(const void *key);
+    /// THE SKY VISIBILITY the blended pass reads (PHOTON-7 10-4 R11): the view's, once the integrate has written it
+    /// (null before, or with no view under `key`).
+    Ogre::TextureGpu *skyVisOf(const void *key) const;
     /// A FRAME THE VIEW'S GATHER DECLINED (PHOTON-7 stage 7's read, F3: no TLAS, a missing prepass texture, the
     /// pipelines failed): the LAST irradiance and rough specular it produced are registered for the pass - the
     /// target's size and layers, nothing recorded, no history stepped. False when it has none of that shape or
@@ -675,6 +678,8 @@ private:
         Ogre::TextureGpu *irradiance = nullptr;
         /// THE ROUGH SPECULAR (7-3), `jahRoughSpec`: an Ogre texture for the same reason as the irradiance.
         Ogre::TextureGpu *roughSpec = nullptr;
+        /// THE SKY VISIBILITY (PHOTON-7 10-4 R11), `jahSkyVis`: R8, the integrate's (rq_probe_integrate.comp binding 18).
+        Ogre::TextureGpu *skyVis = nullptr;
         /// The prefiltered image's layers as made: the levels, and one more under the quadrature door (the filtered
         /// map itself).
         unsigned prefilteredLayers = 0u;

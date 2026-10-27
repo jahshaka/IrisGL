@@ -1243,12 +1243,17 @@ constexpr Ogre::uint32 kScreenDecodePassIdentifier = 25003u;
 /// (OgreScreenIntegrate.cpp), which also registers the pass's three targets for the opaque passes. Stamped on exactly
 /// that pass.
 constexpr Ogre::uint32 kScreenIntegratePassIdentifier = 25005u;
+/// THE BLENDED PASS ("Jahshaka blended", OgreChain.cpp: the blended queues after the opaque pass on a screen-GI chain) -
+/// the pass the measured sky visibility is registered for beside the opaque one (PHOTON-7 10-4 R11: its fog's sky share).
+constexpr Ogre::uint32 kBlendedPassIdentifier = 25004u;
 /// ...its job and its three targets (the node's names; the pixel binds them as jahProbeIrradiance, jahRoughSpec and
 /// jahConeHit through the Hlms listener's registration).
 constexpr const char *kScreenIntegrateJob = "Jahshaka/ScreenIntegrate";
 constexpr const char *kScreenGiIrradiance = "jahScreenIrradiance";
 constexpr const char *kScreenGiSpecular = "jahScreenSpecular";
 constexpr const char *kScreenGiConeHit = "jahScreenConeHit";
+/// THE NO-RAY ROUTE'S SKY VISIBILITY (PHOTON-7 10-4 R11): the diffuse rays' open share, R8 - the fog's `jahSkyVis`
+constexpr const char *kScreenGiSkyVis = "jahScreenSkyVis";
 /// THE NO-RAY ROUTE'S AREA LIGHT VISIBILITY (PHOTON-7 stage 7, 7-6; OgreAreaVis.cpp): its two compute passes right
 /// after the screen integrate - the trace (one stratum of each forward LTC light a half-resolution texel a frame, seen
 /// through the voxel chain's shadow march) and the resolve (the joint-bilateral upsample into `jahAreaVis`) - whose jobs
@@ -3661,6 +3666,9 @@ public:
         /// THE NO-RAY ROUTE (PHOTON-7 7-6): the screen integrate's cone-hit distance - non-null says roughSpec holds
         /// the CONE's specular (JahScreenCone_piece_ps.any), not the probes' lobe
         Ogre::TextureGpu *coneHit = nullptr;
+        /// THE SKY VISIBILITY (PHOTON-7 10-4 R11, `jahSkyVis`, R8): the pixel's measured sky share - the pass property
+        /// `jah_sky_vis`: the fog's in-scatter of the sky (JahFog_piece_vs_piece_ps.any's jahFogLitAt)
+        Ogre::TextureGpu *skyVis = nullptr;
     };
     static void setProbeGather(const Ogre::SceneManager *sm, const ProbeGatherBind &bind);
     static ProbeGatherBind probeGather(const Ogre::SceneManager *sm);
@@ -3686,6 +3694,8 @@ public:
     /// ...whether the scene drawn through `sm` traces its lamps (setLampRays' `on`); false for a manager no scene holds.
     /// A scene that does not trace sees its Forward+ lamps through the voxel chain (PhotonPassBinding::lampVoxelsOf).
     static bool lampRaysOn(const Ogre::SceneManager *sm);
+    /// THE BLENDED PASS'S SKY VISIBILITY (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): pass-scoped, null to take it away.
+    static void setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3752,6 +3762,7 @@ private:
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
         Ogre::TextureGpu             *shadowTransmit = nullptr;         // PHOTON-7 10-4 R8 (the shadow node's atlasT)
         const Ogre::HlmsSamplerblock *shadowTransmitSampler = nullptr;
+        Ogre::TextureGpu             *skyVis = nullptr;                 // PHOTON-7 10-4 R11 (the gather's sampler)
         /// PHOTON-3: the constant-buffer slot of the specular lobe's albedo table
         /// (PhotonSpecularAlbedoBuffer.h) in this pass, -1 for a pass that declares none.
         int                           specAlbedoSlot = -1;
@@ -3787,6 +3798,10 @@ public:
         /// never the address, so a TLAS that comes and goes (an empty scene's first object) changes no permutation -
         /// a zero address answers 1 in the shader (the R8 stand-in's lesson: a compile-time property is stable).
         bool lampRaysOn = false;
+        /// THE BLENDED PASS'S SKY VISIBILITY (PHOTON-7 10-4 R11): the view's measured sky share, registered by the
+        /// screen products' producer in front of the blended pass and taken away when it ends (the opaque pixel's
+        /// behind each blended fragment - its fog's sky share; a named limit). Null otherwise.
+        Ogre::TextureGpu *fogSkyVis = nullptr;
     };
     /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
@@ -3796,6 +3811,7 @@ public:
         b.probeGather = ProbeGatherBind();
         b.sunContact = SunContactBind();
         b.areaVis = nullptr;
+        b.fogSkyVis = nullptr;
     }
 private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only

@@ -76,6 +76,9 @@ vulkan_layout( ogre_t2 ) uniform texture2D gBufShadowRoughness;
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece( uav0_pf_type ) ) uniform restrict writeonly image2D outIrradiance;
 layout( vulkan( ogre_u1 ) vk_comma @insertpiece( uav1_pf_type ) ) uniform restrict writeonly image2D outSpecular;
 layout( vulkan( ogre_u2 ) vk_comma @insertpiece( uav2_pf_type ) ) uniform restrict writeonly image2D outConeHit;
+// THE SKY VISIBILITY (PHOTON-7 10-4 R11, `jahSkyVis`): the diffuse rays' open share (jahRayDiffuse's
+// gJahRayDiffuseOpen) - the colour passes' fog in-scatter of the sky reads it
+layout( vulkan( ogre_u3 ) vk_comma @insertpiece( uav3_pf_type ) ) uniform restrict writeonly image2D outSkyVis;
 
 // THE JOB'S PARAMETERS (OgreScreenIntegrate.cpp fills them per view and frame; every member a vec4).
 struct ScreenGiParams
@@ -112,7 +115,7 @@ struct ScreenGiParams
 	// THE FOG LAW (OgreScene::fogAlong's eight: jah_fog_along.glsl's JAH_FOG_P)
 	vec4 fog[8];
 };
-layout( std430, ogre_U3 ) readonly restrict buffer screenGiLayout { ScreenGiParams p; };
+layout( std430, ogre_U4 ) readonly restrict buffer screenGiLayout { ScreenGiParams p; };   // (after the four images: Ogre numbers a job's UAV images first, its buffers after)
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),
@@ -211,6 +214,7 @@ void main()
 		imageStore( outIrradiance, pix, vec4( 0.0, 0.0, 0.0, 1.0 ) );
 		imageStore( outSpecular, pix, vec4( 0.0, 0.0, 0.0, 1.0 ) );
 		imageStore( outConeHit, pix, vec4( 0.0 ) );
+		imageStore( outSkyVis, pix, vec4( 1.0 ) );
 		return;
 	}
 	nVS = normalize( nVS );
@@ -233,6 +237,7 @@ void main()
 	const float eyeDist = length( P - p.camPos.xyz );
 
 	vec3 diffuse = vec3( 0.0 );
+	float skyShare = 1.0;   // (R11: the sky share the diffuse rays measured; 1 where none was traced - the field alone, no chain yet)
 	vec4 specular = vec4( 0.0, 0.0, 0.0, 1.0 );
 	float hitT = 0.0;
 @property( hlms_num_vct_cascades )
@@ -257,12 +262,16 @@ void main()
 											   p.fieldProbes.xy, p.fieldDepthAtlas, p.fieldIrradAtlas );
 		diffuse = a.irradiance;
 		const float fallback = 1.0 - a.confidence;
+		// (where the field answers alone no ray measured the sky: its share unmeasured, 1 - a named limit)
 	@property( hlms_num_vct_cascades > 1 )
 		// UNDER A CASCADE CHAIN THE FALLBACK IS THE CHAIN'S OWN BOUNCE (PHOTON_SPEC 13 G3): the rays, traced only
 		// where the field's confidence leaves them a weight (SPEED-GPU, audit PH-2)
 		if( fallback > 0.0 )
+		{
 			diffuse += jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
 									  p.counts.w, true ) * fallback;
+			skyShare = gJahRayDiffuseOpen;
+		}
 	@else
 		// ...UNDER A SINGLE VOLUME, the environment's diffuse (what an unoccluded surface had before the field)
 		if( fallback > 0.0 )
@@ -273,6 +282,7 @@ void main()
 	@property( hlms_num_vct_cascades )
 		diffuse = jahRayDiffuse( surfLS, biasDirLS, basis, kJahPixelDiffuseRays, JAH_VOX_INVRES( 0 ).x, ivec4( 0 ), 0.0,
 								 p.counts.w, true );
+		skyShare = gJahRayDiffuseOpen;
 	@else
 		// NO VOLUME BUILT YET (the chain's first frames): the environment's diffuse
 		diffuse = jahEnvIrradiance( N );
@@ -342,4 +352,5 @@ void main()
 	imageStore( outIrradiance, pix, vec4( diffuse, 1.0 ) );
 	imageStore( outSpecular, pix, specular );
 	imageStore( outConeHit, pix, vec4( hitT, 0.0, 0.0, 0.0 ) );
+	imageStore( outSkyVis, pix, vec4( skyShare ) );
 }

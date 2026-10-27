@@ -1372,6 +1372,8 @@ public:
     /// Takes this listener's shader registration away the moment its pass
     /// ends — the gather's binding is PASS-scoped (GATHER-0's D2).
     void releaseGatherBinding(const ReflectPassListener *key);
+    /// The view's measured sky visibility (PHOTON-7 10-4 R11: the blended pass's fog), or null.
+    Ogre::TextureGpu *gatherSkyVis(const ReflectPassListener *key) const { return mGather ? mGather->skyVisOf(key) : nullptr; }
     /// The last measured numbers for a scene, for `GiStatus::gather`.
     void gatherStatsInto(const OgreScene *scene, GatherStatus &out) const;
     bool cardReadersRestComplete(const OgreScene *scene, unsigned restFrames[2], bool active[2]) const;
@@ -10622,6 +10624,12 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     // — the pass every ray job's answer is read by. The write-back, the
     // reflection's filter, the gather's filter/SH/integrate and every job's
     // pass-scoped registration ran in front of it, in photon_resolve.
+    // THE BLENDED PASS (PHOTON-7 10-4 R11): the view's measured sky visibility for its fog, for its length
+    if (def->mIdentifier == kBlendedPassIdentifier) {
+        if (mView->ogreScene() && mView->mEngine->mRayTier->gatherSkyVis(this))
+            FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), mView->mEngine->mRayTier->gatherSkyVis(this));
+        return;
+    }
     if (def->mPrePassMode != Ogre::PrePassUse) return;
     // THE OPAQUE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) is the first such pass of
     // the frame and the opaque pass the last: the jobs finish once, in front of the
@@ -10653,6 +10661,10 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
     }
     if (def->mIdentifier == kHitDecodePassIdentifier) {
         mView->mEngine->mRayTier->endHitDecode(this);
+        return;
+    }
+    if (def->mIdentifier == kBlendedPassIdentifier) {
+        if (mView->ogreScene()) FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), nullptr);
         return;
     }
     if (def->mPrePassMode != Ogre::PrePassUse) return;

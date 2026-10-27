@@ -2042,7 +2042,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     if (desc.screenIntegrate) {
         for (const auto &t : { std::make_pair(kScreenGiIrradiance, Ogre::PFG_RGBA16_FLOAT),
                                std::make_pair(kScreenGiSpecular, Ogre::PFG_RGBA16_FLOAT),
-                               std::make_pair(kScreenGiConeHit, Ogre::PFG_R16_FLOAT) }) {
+                               std::make_pair(kScreenGiConeHit, Ogre::PFG_R16_FLOAT),
+                               std::make_pair(kScreenGiSkyVis, Ogre::PFG_R8_UNORM) }) {
             auto *td = addTex(n, t.first, t.second);
             td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
         }
@@ -2573,7 +2574,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // while the integrate's permutation builds in the background writes nothing, and the opaque passes read its
             // targets as they are - no indirect light for those frames, never undefined VRAM (a NaN there poisons the
             // exposure meter, trap 5)
-            for (const char *seed : { kScreenGiIrradiance, kScreenGiSpecular, kScreenGiConeHit }) {
+            for (const char *seed : { kScreenGiIrradiance, kScreenGiSpecular, kScreenGiConeHit, kScreenGiSkyVis }) {
                 Ogre::CompositorTargetDef *st = n->addTargetPass(seed);
                 st->setNumPasses(1);
                 auto *c = static_cast<Ogre::CompositorPassClearDef *>(st->addPass(Ogre::PASS_CLEAR));
@@ -2593,6 +2594,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->addUavSource(0, kScreenGiIrradiance, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(1, kScreenGiSpecular, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(2, kScreenGiConeHit, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+            c->addUavSource(3, kScreenGiSkyVis, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);   // (4: the parameters)
             // ...AND THE ROUTE'S AREA LIGHT VISIBILITY (7-6; OgreAreaVis.cpp): the trace and the resolve, their jobs
             // bound whole by the listener (the images its own, made only while an LTC light is in the forward set)
             Ogre::CompositorTargetDef *at = n->addTargetPass("");
@@ -2722,6 +2724,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             b->mLastRQ = sceneLastRq;
             b->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             b->mProfilingId = "Jahshaka blended";
+            b->mIdentifier = kBlendedPassIdentifier;   // (its fog's sky visibility is registered for it: PHOTON-7 10-4 R11)
         }
     }
 

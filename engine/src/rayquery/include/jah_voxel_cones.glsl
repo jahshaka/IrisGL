@@ -78,6 +78,10 @@ vec3 jahConeStart( vec3 posLS, vec3 biasDirLS )
 /// cache texel.
 const int kJahPixelDiffuseRays = 8;
 
+/// THE LAST CALL'S OPEN SHARE (PHOTON-7 10-4 R11): the cosine-weighted share of its rays that left the chain, each by
+/// what the panes it crossed passed (1 with no ray taken) - the no-ray integrate's measured sky visibility (jahSkyVis).
+float gJahRayDiffuseOpen = 1.0;
+
 vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, ivec4 ownCell,
 					float firstShellC0, float lastShellC0, bool planeTest0 )
 {
@@ -86,7 +90,7 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 	const float binCos = 1.0 - 1.0 / float( n );
 	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
 	vec3 sum = vec3( 0.0, 0.0, 0.0 );
-	float taken = 0.0;
+	float taken = 0.0, open = 0.0;
 	for( int i = 0; i < n; ++i )
 	{
 		const vec3 d = basis * jahRayCosineDir( i, n );
@@ -104,8 +108,10 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 			// teleport's window before the chain is rebuilt around the eye - read black, 0.06 x the ambient)
 			sum += r.radiance + r.throughput * jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );   // (the panes: PHOTON-7 10-4 R7)
 			taken += 1.0;
+			open += r.throughput;
 		}
 	}
+	gJahRayDiffuseOpen = taken > 0.0 ? open / taken : 1.0;
 	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0, 0.0, 0.0 );
 }
 

@@ -177,6 +177,10 @@ layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpe
 layout( r32ui, set = 0, binding = 15 ) uniform readonly uimage2DArray roughHistoryPrev;
 layout( r32ui, set = 0, binding = 16 ) uniform writeonly uimage2DArray roughHistoryCur;
 layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
+/// THE SKY VISIBILITY (PHOTON-7 10-4 R11, `jahSkyVis`): the pixel's measured sky share - its taps' probes' own (the
+/// filter's cosine-weighted miss share, the record's sh[6].w) under the diffuse's own weights; a pixel no probe answers
+/// keeps its last share, the sky's own pixels read 1. The colour passes' fog in-scatter reads it.
+layout( r8, set = 0, binding = 18 ) uniform writeonly image2DArray skyVis;
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
@@ -595,6 +599,7 @@ void main()
 		// (a zero word fails every distance test).
 		imageStore( probeIrradiance, at, vec4( 0.0 ) );
 		imageStore( roughSpec, at, vec4( 0.0 ) );
+		imageStore( skyVis, at, vec4( 1.0 ) );
 		if( temporal )
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
@@ -669,6 +674,7 @@ void main()
 
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
+	float skySum = 0.0;   // (R11: the taps' sky shares under the same weights)
 	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
 	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
 	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
@@ -740,6 +746,7 @@ void main()
 					if( w <= 0.0 )
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
+					skySum += records.r[pi].sh[6].w * w;
 					wsum += w;
 				}
 			}
@@ -753,6 +760,7 @@ void main()
 		for( int t = 0; t < nTap; ++t )
 		{
 			sum += shEvalAt( tapIdx[t], pixelNormal, bands ) * tapW[t];
+			skySum += records.r[tapIdx[t]].sh[6].w * tapW[t];
 			wsum += tapW[t];
 		}
 	}
@@ -798,6 +806,7 @@ void main()
 					if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
+					skySum += records.r[pi].sh[6].w * w;
 					wsum += w;
 				}
 			}
@@ -830,6 +839,7 @@ void main()
 						if( w <= 0.0 || !seenAlongSurface( pixelWorld, local, posW.xyz, thisEye, eye, eyeSize ) )
 							continue;
 						sum += shEvalAt( pi, pixelNormal, bands ) * w;
+						skySum += records.r[pi].sh[6].w * w;
 						wsum += w;
 					}
 				}
@@ -838,6 +848,12 @@ void main()
 	vec4 answer = vec4( 0.0 );
 	if( wsum >= weightFloor )
 		answer = vec4( clamp( sum / wsum, vec3( 0.0 ), vec3( kMaxRadiance ) ), 1.0 );
+	// (a pixel no probe answers this frame - a starved one, a silhouette - keeps the share it last measured: no flicker;
+	// the view's first frame has no last one - its image is new - and such a pixel reads the sky's share unmeasured, 1)
+	if( wsum >= weightFloor )
+		imageStore( skyVis, at, vec4( clamp( skySum / wsum, 0.0, 1.0 ) ) );
+	else if( p.knobs5.x < 1.0 )
+		imageStore( skyVis, at, vec4( 1.0 ) );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );

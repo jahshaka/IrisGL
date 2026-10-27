@@ -21,6 +21,7 @@
 // block's own density is 0 there (an identity) and our piece does all of it.
 // The authored colour is only for the other skies.
 #include "EnginePrivate.h"
+#include <array>
 #include "HlmsAtom.h"
 #include "Atmosphere.h"
 #include "photon/voxel/PhotonPassBinding.h"
@@ -79,6 +80,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_area_vis",     "jahAreaVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
     { "jah_shadow_transmit", "jahShadowTransmit" },   // PHOTON-7 10-4 R8: the shadow node's transmittance layer
+    { "jah_sky_vis",      "jahSkyVis" },          // PHOTON-7 10-4 R11: the measured sky visibility (the fog's in-scatter)
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
 // THE PASS-TEXTURE TABLE (BUGS-1; preflight-atom-3 §A). Set 0 — the pass's
@@ -129,17 +131,13 @@ static_assert(kAtomPassFullest <= kPassTextureTable,
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
-    static const Ogre::IdString ids[kNumExtraPassSlots] = {
-        Ogre::IdString(kExtraPassSlots[0].property),
-        Ogre::IdString(kExtraPassSlots[1].property),
-        Ogre::IdString(kExtraPassSlots[2].property),
-        Ogre::IdString(kExtraPassSlots[3].property),
-        Ogre::IdString(kExtraPassSlots[4].property),
-        Ogre::IdString(kExtraPassSlots[5].property),
-        Ogre::IdString(kExtraPassSlots[6].property),
-        Ogre::IdString(kExtraPassSlots[7].property),
-        Ogre::IdString(kExtraPassSlots[8].property),
-    };
+    // (built from the table itself: a hand-kept list of the slots' ids fell one short when R11's slot was added - the
+    // slot never claimed, its register 0, the pass's shader refused)
+    static const std::array<Ogre::IdString, kNumExtraPassSlots> ids = [] {
+        std::array<Ogre::IdString, kNumExtraPassSlots> out;
+        for (size_t k = 0; k < kNumExtraPassSlots; ++k) out[k] = Ogre::IdString(kExtraPassSlots[k].property);
+        return out;
+    }();
     return ids[i];
 }
 }   // namespace
@@ -375,6 +373,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.areaVis, pb.areaVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
         { pb.shadowTransmit, pb.shadowTransmitSampler },
+        { pb.skyVis, pb.probeGatherSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
                   "one binding per extra pass slot, in kExtraPassSlots' order");
@@ -427,6 +426,9 @@ void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigne
         b->lampTlas = on ? tlas : 0ull;
         b->lampAlpha = b->lampTlas ? alpha : 0ull;
     }
+}
+void FogHlmsListener::setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis) {
+    if (SceneBinds *b = bindsOf(sm)) b->fogSkyVis = skyVis;
 }
 bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
@@ -542,6 +544,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.probeGatherSampler = nullptr;
     pb.roughSpec = nullptr;
     pb.coneHit = nullptr;
+    pb.skyVis = nullptr;
     // THE CHAIN'S SCREEN-GI FLAG (PHOTON-7 stage 7's read, F3): a colour pass that shades with the prepass and reads
     // no world cache (OgreChain.cpp: mJahReadsGi false on a screen-GI chain's opaque pass and its decode, L4) compiles
     // upstream's ambient out whether or not a producer registered this frame (JahProbeGather_piece_ps.any). From the
@@ -581,6 +584,11 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                     pb.roughSpec = rec->probeGather.roughSpec;
                     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_rough_spec", 1);
                 }
+                // ...AND THE MEASURED SKY VISIBILITY (PHOTON-7 10-4 R11), the same point sampler: the fog's in-scatter
+                if (rec->probeGather.skyVis) {
+                    pb.skyVis = rec->probeGather.skyVis;
+                    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_vis", 1);
+                }
                 // ...OR THE NO-RAY ROUTE'S PRODUCTS (PHOTON-7 7-6, the screen integrate): the same diffuse texture,
                 // the cone's specular in the rough specular's slot and its hit distance - JahScreenCone_piece_ps.any
                 // composes them where the voxel route's cone stood (jah_screen_cone)
@@ -590,6 +598,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_screen_cone", 1);
                 }
             }
+        }
+    }
+    // ...AND IN THE BLENDED PASS, THE SKY VISIBILITY ALONE (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): the opaque
+    // pixel's behind each blended fragment - its fog's sky share (a named limit); the same point sampler
+    if (!pb.skyVis && rec && rec->fogSkyVis && hlms && !casterPass) {
+        if (const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false)) {
+            pb.probeGatherSampler = point;
+            pb.skyVis = rec->fogSkyVis;
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_vis", 1);
         }
     }
     // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1) — the same three decisions

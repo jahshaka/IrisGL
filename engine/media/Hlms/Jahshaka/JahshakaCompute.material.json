@@ -308,7 +308,7 @@
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahFieldWindow_piece_all.any", "JahFieldRead_piece_all.any", "JahAtmosphere_piece_all.any", "JahHeightFog_piece_all.any", "JahFogAlong_piece_all.any"],
 			"inform_shader_of_texture_size" : false,
 			"inform_shader_of_texture_data_change" : true,
-			"uav_units" : 4,
+			"uav_units" : 5,
 			"properties" :
 			{
 				"hlms_num_vct_cascades" : 0,
