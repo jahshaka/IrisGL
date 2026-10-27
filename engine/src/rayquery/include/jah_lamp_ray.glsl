@@ -38,4 +38,21 @@ float jahLampRay( uvec2 tlasAddress, vec3 surface, vec3 geomN, float carried, ve
 	return T;
 }
 
+/// THE SUN AT A POINT OF THE MEDIUM (the fog's march past its last shadow split, the one read's F9): one ray from the
+/// world point `p` toward the sun (`toSun`, world) - a point of the medium has no surface, so no lift - against the
+/// shadow casters (kRayMaskCaster), through the panes: 0 behind an opaque caster, the panes' transmittance, 1 open.
+float jahSunMediumRay( uvec2 tlasAddress, vec3 p, vec3 toSun )
+{
+	if( ( tlasAddress.x | tlasAddress.y ) == 0u || !finite3( p ) || !finite3( toSun ) )
+		return 1.0;
+	rayQueryEXT rq;
+	rayQueryInitializeEXT( rq, accelerationStructureEXT( tlasAddress ), jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+						   0x01u, p, 0.0, normalize( toSun ), 1e6 );
+	float T = 1.0;
+	JAH_RQ_PROCEED_TRANSMIT( rq, T )
+	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		return 0.0;
+	return T;
+}
+
 #endif   // JAH_LAMP_RAY_GLSL

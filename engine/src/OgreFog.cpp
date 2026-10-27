@@ -1124,6 +1124,18 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
             const double lSky = sh ? double(std::max(0.0f, lum(sh[0], sh[1], sh[2]))) : 0.0;
             const double open = eSun + 4.0 * 3.14159265358979 * lSky;
             inscatter[0] = open > 0.0 ? float(eSun / open) : 0.0f;
+            // ...and toward the SHADOWED SUN (world): the first visible shadow-casting directional, the PSSM's - the
+            // march's visibility past its last split (the one read's F9: jahFogSunPast)
+            for (size_t i = 0; i < all.lights.size(); ++i) {
+                const Ogre::Light *l = all.lights[i];
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getVisible() || !l->getCastShadows())
+                    continue;
+                const Ogre::Vector3 toSun = -l->getDerivedDirection().normalisedCopy();
+                inscatter[1] = float(toSun.x);
+                inscatter[2] = float(toSun.y);
+                inscatter[3] = float(toSun.z);
+                break;
+            }
         }
         std::memcpy(passBufferPtr, inscatter, sizeof(inscatter));
         passBufferPtr += 4;

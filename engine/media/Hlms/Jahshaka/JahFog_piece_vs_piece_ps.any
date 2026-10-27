@@ -177,7 +177,8 @@
 		@end
 		@property( hlms_fog )
 			// THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): x = s, the sun's share of the light an open point of the medium
-			// receives (E_sun / (E_sun + 4 pi L_sky): OgreFog.cpp); yzw 0
+			// receives (E_sun / (E_sun + 4 pi L_sky): OgreFog.cpp); yzw toward the shadowed sun, world (0: none) - the
+			// march's ray past its last split (F9)
 			float4 jahFogInscatter;
 		@end
 		@property( jah_glass_escape )
@@ -427,8 +428,11 @@
 // along the ray WEIGHTED BY WHERE THE IN-SCATTER COMES FROM: kJahFogSamples segments of the ray, segment i's share the
 // exact transmittance difference T(a_i) - T(b_i) of every medium the pass applies (jahFogEyeT), its shadow read at one
 // point of it (the PSSM split holding that depth, ONE compare tap - the point's own visibility, no receiver PCF - and
-// the R8 transmittance of a pane at the same uv, so a shaft through glass passes 1 - alpha); past the last split the
-// sun is unshadowed. The point's place in its segment is a
+// the R8 transmittance of a pane at the same uv, so a shaft through glass passes 1 - alpha); PAST THE LAST SPLIT (the
+// one read's F9: it read 1 there - fog beyond the shadow distance, in a sealed hall or behind terrain, was sunlit) by R9's
+// means: one TLAS ray toward the sun at the ray tier (jah_lamp_ray.glsl jahSunMediumRay, through the panes), the voxel
+// chain's own march at the no-ray tier (jah_inject_visibility.glsl; past the chain the sun is open - its limit); a
+// segment with no medium in it reads nothing. The point's place in its segment is a
 // FIXED per-pixel pattern (interleaved gradient noise of the pixel - never animated: no colour pass flickers at rest,
 // and the fog has no temporal filter). V_sky, the measured sky visibility, stands at 1 until its screen product lands
 // (jahSkyVis, R11's second half). Named limits (the review list): the lamps' in-scatter (only the sun and the sky
@@ -448,6 +452,27 @@
 		return float( OGRE_SAMPLE_SHADOW( shadowMap, shadowSampler, uv, depth ) );
 	}
 	@end
+	/// The sun's visibility at the world point `wp` of the medium PAST THE LAST SPLIT (the header; the one read's F9)
+	float jahFogSunPast( float3 wp )
+	{
+		const float3 toSun = passBuf.jahFogInscatter.yzw;
+		if( !( dot( toSun, toSun ) > 0.0 ) )
+			return 1.0;
+		@property( jah_lamp_rays )
+			return jahSunMediumRay( passBuf.jahLampAddr.xy, wp, toSun );
+		@else
+			@property( jah_lamp_voxels )
+				const float cell0 = passBuf.jahLampChainOrigin[0].w;
+				// (no chain described - a cell not positive, by its bits: nothing the voxels hold can stop the sun)
+				if( floatBitsToInt( cell0 ) <= 0 || jahInjNonFinite( cell0 ) )
+					return 1.0;
+				const float3 sW = wp - passBuf.jahLampChainCorner.xyz;
+				return jahInjectVisibility( sW, normalize( toSun ), 1e30, int3( floor( sW / cell0 ) ), -1, 0.0, 0.0 );
+			@else
+				return 1.0;
+			@end
+		@end
+	}
 	/// The sun's shadow at the view-space point `posVS` of the eye ray: the PSSM split holding its depth
 	float jahFogSunAt( float3 posVS )
 	{
@@ -489,7 +514,7 @@
 			@end
 		}
 		@end
-		return 1.0;
+		return jahFogSunPast( wp.xyz );
 	}
 	@end
 	/// The share of the medium's light reaching it along this pixel's eye ray (the header), `pix` the pixel
@@ -513,7 +538,8 @@
 				// (no medium at all along the ray - the air alone: every segment the same share)
 				const float w = tAll > 1e-6 ? max( Ta - Tb, 0.0 ) : 1.0;
 				const float t = L * ( float( i ) + xi ) / float( kJahFogSamples );
-				acc += w * jahFogSunAt( posVS * ( t / max( L, 1e-6 ) ) );
+				if( w > 0.0 )   // (a segment with no medium reads nothing: no shadow tap, no ray)
+					acc += w * jahFogSunAt( posVS * ( t / max( L, 1e-6 ) ) );
 				wAcc += w;
 				Ta = Tb;
 			}
