@@ -99,7 +99,7 @@ void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // contiguous shadow maps) and knows nothing of the layer the listener binds - its pane passes leave it a render
     // target.
     if (!bCasterPass && sm)
-        if (Ogre::TextureGpu *t = shadowTransmitLayer(sm->getCurrentShadowNode()))
+        if (Ogre::TextureGpu *t = FogHlmsListener::shadowTransmitBound(sm->getCurrentShadowNode()))
             barrierSolver.resolveTransition(resourceTransitions, t, Ogre::ResourceLayout::Texture,
                                             Ogre::ResourceAccess::Read, 1u << Ogre::PixelShader);
 }

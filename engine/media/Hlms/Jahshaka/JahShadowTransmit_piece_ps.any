@@ -11,8 +11,9 @@
 //     compile-time value, `jah_pane_caster` = round( ( 1 - alpha ) x 255 ) + 1 (ScenePbs::calculateHashForPreCaster:
 //     the caster pass binds no material buffer, so the value rides the permutation; an alpha edit re-hashes its
 //     wearers, OgreScene::setPbrMaterial). After DoShadowCastPS, over the depth it wrote into the colour output.
-// (2) THE READER: every shadow lookup of a pass whose shadow node holds the layer (`jah_shadow_transmit`, the
-//     listener's: OgreFog.cpp) is multiplied by the layer at the lookup's own uv - one bilinear read where the depth is
+// (2) THE READER: every shadow lookup of a shadowed colour pass (`jah_shadow_transmit`, the listener's: OgreFog.cpp;
+//     a node without the layer binds a white texel, so the permutation never depends on whether a pane was drawn) is
+//     multiplied by the layer at the lookup's own uv - one bilinear read where the depth is
 //     PCF-filtered - inside the fork's getShadow / getShadowPoint (custom_shadow_transmit_uv / custom_shadow_transmit),
 //     before the map rectangle's clamp, so a lookup outside its map stays lit.
 // THE AT-SIGN RULE: no directive mark in any comment of this file.

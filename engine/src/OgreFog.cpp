@@ -35,6 +35,9 @@
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <OgreRootLayout.h>
 #include <OgreVulkanGlobalBindingTable.h>
+#include <OgreStagingTexture.h>
+#include <OgreTextureBox.h>
+#include <OgreTextureGpuManager.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -635,12 +638,13 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // OgreShadow.cpp: built only while a drawn scene holds a pane) - the product of the panes' 1 - alpha between each
     // map's light and its nearest opaque caster, in the depth atlas's own layout - and JahShadowTransmit_piece_ps.any
     // multiplies every shadow lookup by it at the lookup's uv (the fork's custom_shadow_transmit hooks in getShadow).
-    // A LINEAR sampler: one bilinear read where the depth is PCF-filtered. Absent in every node without the layer:
-    // one lookup per colour pass and every generated shader is the one it was.
+    // A LINEAR sampler: one bilinear read where the depth is PCF-filtered. A node without the layer binds the white
+    // stand-in (createShadowTransmitNone): the property is a constant of every shadowed colour pass, so the layer's
+    // process-wide arrival changes no permutation.
     pb.shadowTransmit = nullptr;
     pb.shadowTransmitSampler = nullptr;
     if (shadowNode && !casterPass) {
-        if (Ogre::TextureGpu *t = shadowTransmitLayer(shadowNode)) {
+        if (Ogre::TextureGpu *t = shadowTransmitBound(shadowNode)) {
             const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
             if (linear) {
                 pb.shadowTransmit = t;
@@ -837,6 +841,42 @@ const Ogre::HlmsSamplerblock *FogHlmsListener::acquireSampler(Ogre::HlmsManager 
         slot = mgr->getSamplerblock(ref);
     }
     return slot;
+}
+
+namespace {
+Ogre::TextureGpu *gShadowTransmitNone = nullptr;
+unsigned gShadowTransmitNoneSerial = 0u;
+}   // namespace
+
+void FogHlmsListener::createShadowTransmitNone(Ogre::TextureGpuManager *tm) {
+    if (!tm || gShadowTransmitNone) return;
+    gShadowTransmitNone = tm->createTexture("JahShadowTransmitNone" + std::to_string(++gShadowTransmitNoneSerial),
+                                            Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                            Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
+    gShadowTransmitNone->setResolution(1u, 1u);
+    gShadowTransmitNone->setPixelFormat(Ogre::PFG_R8_UNORM);
+    gShadowTransmitNone->setNumMipmaps(1u);
+    // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md: a ManualTexture's _transitionTo calls it itself).
+    gShadowTransmitNone->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+    gShadowTransmitNone->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+    Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_R8_UNORM);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_R8_UNORM);
+    *static_cast<Ogre::uint8 *>(box.at(0, 0, 0)) = 255u;   // exactly 1: a lookup times it is the lookup
+    staging->stopMapRegion();
+    staging->upload(box, gShadowTransmitNone, 0, 0, 0);
+    tm->removeStagingTexture(staging);
+}
+
+void FogHlmsListener::releaseShadowTransmitNone(Ogre::TextureGpuManager *tm) {
+    if (tm && gShadowTransmitNone) tm->destroyTexture(gShadowTransmitNone);
+    gShadowTransmitNone = nullptr;
+}
+
+Ogre::TextureGpu *FogHlmsListener::shadowTransmitBound(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    Ogre::TextureGpu *t = shadowTransmitLayer(node);
+    return t ? t : gShadowTransmitNone;
 }
 
 void FogHlmsListener::releaseSamplers() {

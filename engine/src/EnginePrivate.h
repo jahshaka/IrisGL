@@ -3555,6 +3555,16 @@ public:
     /// Engine's manager can land at the same address (test_engine_recreate),
     /// which a pointer compared against a dead one would never notice.
     static void releaseSamplers();
+    /// THE SHADOWS' TRANSMITTANCE LAYER'S STAND-IN (PHOTON-7 10-4 R8): one white R8 texel every colour pass reads
+    /// where its shadow node has no layer (no pane drawn yet). The pass property `jah_shadow_transmit` is then a
+    /// constant of every shadowed colour pass, so the layer's arrival - a process-wide flip, set by ANY drawn scene's
+    /// pane, a material preview's included - changes no permutation: without it the editor's passes recompiled
+    /// whenever a preview drew a glass, and a launch that drew none built a different set (shader.async_after_open,
+    /// shadercache.app). Made once beside the listener's registration, released before Root.
+    static void createShadowTransmitNone(Ogre::TextureGpuManager *tm);
+    static void releaseShadowTransmitNone(Ogre::TextureGpuManager *tm);
+    /// What a colour pass reads as the layer: the node's own (shadowTransmitLayer), else the stand-in; null without either.
+    static Ogre::TextureGpu *shadowTransmitBound(const Ogre::CompositorShadowNode *node);
     static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
     /// The cloud field's block: trilinear and WRAPPED (the field tiles), taken
     /// once per manager like the two above and released with them.
