@@ -496,6 +496,7 @@
 	/// The share of the medium's light reaching it along this pixel's eye ray (the header), `pix` the pixel
 	float jahFogLitAt( float3 posVS, int2 pix )
 	{
+		if( posVS.z < 1e30 ) return 1.0;   // MEASURING ARM (reverted after): the in-scatter weights compiled out
 		const float s = saturate( passBuf.jahFogInscatter.x );
 		float wSun = 1.0;
 		@property( hlms_num_shadow_map_lights && hlms_pssm_splits )
