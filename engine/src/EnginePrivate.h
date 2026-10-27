@@ -2245,7 +2245,6 @@ private:
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
-    X(LampVoxels, "lamp.voxels") /* MEASURING ARM (PHOTON-7 10-4 R9's no-ray price, reverted after): 0 = the Forward+ lamps' voxel march skipped (a zero chain block, the same permutation) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GiScreenBindMissing, "gi.screenBindMissing") /* the no-ray screen passes read their inputs as missing: they stand down (a test door, gi.screen_bind) */ \
     X(GiScreenZeroUnmarked, "gi.screenZeroUnmarked") /* the screen integrate dispatches no group WITHOUT the stood-down mark: the fork's BUGS-6 guard throws (a test door, gi.screen_bind) */ \
@@ -3687,9 +3686,6 @@ public:
     /// ...whether the scene drawn through `sm` traces its lamps (setLampRays' `on`); false for a manager no scene holds.
     /// A scene that does not trace sees its Forward+ lamps through the voxel chain (PhotonPassBinding::lampVoxelsOf).
     static bool lampRaysOn(const Ogre::SceneManager *sm);
-    /// MEASURING ARM lamp.voxels (reverted after R9's no-ray price): false = the chain block uploads zeros (the march
-    /// answers 1 before it starts; the same permutation)
-    static bool sLampVoxelsArm;
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in

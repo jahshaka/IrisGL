@@ -11616,7 +11616,6 @@ bool OgreEngine::deviceRayQuery() const {
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // (every scene's lamp rays off first: the traced ones are switched on below, after their TLAS is current)
     for (auto &s : mScenes) FogHlmsListener::setLampRays(s->sceneManager(), false, 0ull, 0ull);
-    FogHlmsListener::sLampVoxelsArm = mArms.on(ArmId::LampVoxels);   // MEASURING ARM (reverted after)
     if (!mRayTracingWanted || mHeadless || !mRoot) return;
     if (!mRayTier) {
         if (!rayQueryAvailable()) return;             // the fallback picture, silently

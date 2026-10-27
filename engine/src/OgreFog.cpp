@@ -428,7 +428,6 @@ void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigne
         b->lampAlpha = b->lampTlas ? alpha : 0ull;
     }
 }
-bool FogHlmsListener::sLampVoxelsArm = true;   // MEASURING ARM lamp.voxels (render thread only)
 bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
     return b && b->lampRaysOn;
@@ -1061,7 +1060,7 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
         // THE CHAIN (jahLampChainOrigin[4], jahLampChainRes[4], jahLampChainCorner): zeros without one - a cell not
         // positive is no chain, and the march answers 1
         float chain[kLampChainFloats] = {};
-        if (vct && cam && sLampVoxelsArm) {
+        if (vct && cam) {
             float origin[4u * 8u] = {}, res[4u * 8u] = {};
             vct->chainMarchParams(origin, res);
             std::memcpy(chain, origin, 16u * sizeof(float));
