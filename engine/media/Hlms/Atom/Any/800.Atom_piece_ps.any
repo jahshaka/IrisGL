@@ -1037,7 +1037,8 @@
 					// THE LAMP'S RAY FROM THE HIT (PHOTON-7 10-4 R9): exact, per lamp - 0 behind an opaque caster, the
 					// panes' transmittance between (JahLampRay_piece_ps.any, the colour passes' own)
 					@property( jah_lamp_rays && ( hlms_normal || hlms_qtangent ) )
-						if( atomWlAtten > 0.0 )
+						if( atomWlAtten > 0.0 && max( dot( float3( pixelData.normal ), atomWlDir ),
+													  dot( float3( pixelData.geomNormal ), atomWlDir ) ) > 0.0 )
 							atomWlAtten *= jahLampRayView( inPs.pos, inPs.pos + atomWlDir * atomWlDist,
 														   float3( pixelData.geomNormal ) );
 					@end
