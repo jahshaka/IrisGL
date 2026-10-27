@@ -102,6 +102,8 @@
 // No at-sign in any comment of this file (the Hlms parser reads them).
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( DeclUavCrossPlatform )
+// THE SUNVIS TEXEL'S CODEC (jah_card_sunvis.glsl: the sun, the fractional lamps, the 48-bit lamp mask)
+@insertpiece( JahCardSunVis )
 
 // (The Albedo and Normal layers are UAVs, u6 and u7 below: the job writes the
 // mean light direction into their alpha — JahCardView.)
@@ -163,15 +165,15 @@ struct CardRelight
 	vec4 axisU;
 	vec4 axisV;
 	vec4 axisD;
-	// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the world ids of the lamps whose visibility the texels' lamp bits
-	// carry, bit j = lamp j (0 = no lamp)
-	uvec4 lampIds[4];
+	// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3; 48 since 10-4 R9): the world ids of the lamps whose visibility the
+	// texels' lamp bits carry, bit j = lamp j (0 = no lamp)
+	uvec4 lampIds[12];
 };
 layout( std430, ogre_U0 ) readonly restrict buffer relightLayout { CardRelight relights[]; };
 /// The table slot of a lamp's world id, or -1: the lamp is past the table (its visibility the overflow's byte).
-int jahCardLampSlot( uvec4 ids[4], uint id )
+int jahCardLampSlot( uvec4 ids[12], uint id )
 {
-	for( int k = 0; k < 16; ++k )
+	for( int k = 0; k < int( kJahCardLampTable ); ++k )
 		if( ids[k >> 2][k & 3] == id )
 			return k;
 	return -1;
@@ -416,7 +418,8 @@ void main()
 	// a and b: a 16-bit MASK (g the low byte, a the high), bit j the visibility of the card's lamp table's lamp j
 	// (exact per lamp), and the lamps past the table one visibility weighted by their shares of the texel's direct
 	// luminance (b) - kept as traced. Untraced (no structure yet): every lamp visible.
-	vec4 lampTex = vec4( 0.0, 1.0, 1.0, 1.0 );
+	uvec2 lampMask = kJahSunVisAllLamps;   // (the texel: jah_card_sunvis.glsl)
+	float lampRest = 1.0;
 	float depth = texelFetch( cardDepth, at, 0 ).x;
 	if( depth > 0.0 )
 	{
@@ -459,9 +462,9 @@ void main()
 		if( r.axisD.w > 0.5 )
 		{
 			const vec4 was = imageLoad( cardSunVis, at );
-			lampTex = vec4( 0.0, was.yzw );
+			lampMask = jahSunVisMask( was );
+			lampRest = jahSunVisRest( was );
 		}
-		const uint lampMask = uint( lampTex.y * 255.0 + 0.5 ) | ( uint( lampTex.w * 255.0 + 0.5 ) << 8u );
 		vec3 direct = vec3( 0.0, 0.0, 0.0 );
 		// THE MEAN LIGHT DIRECTION (JahCardView): each light's direction weighted
 		// by its share of the direct half's luminance.
@@ -489,7 +492,7 @@ void main()
 				if( d > l.attenuation.x || d <= 0.0 )
 					continue;
 				L *= 1.0 / d;
-				const float lampVis = lampTex.z;
+				const float lampVis = lampRest;
 				const vec3 frameV = abs( Ncone.y ) < 0.9 ? vec3( 0.0, 1.0, 0.0 ) : vec3( 1.0, 0.0, 0.0 );
 				const float ff = LTC_Evaluate( Ncone, frameV, P,
 											   buildFloat3x3( vec3( 1, 0, 0 ), vec3( 0, 1, 0 ), vec3( 0, 0, 1 ) ),
@@ -520,7 +523,7 @@ void main()
 			if( type > 0.5 )
 			{
 				const int slot = jahCardLampSlot( r.lampIds, floatBitsToUint( l.spotParams.w ) );
-				lampVis = slot >= 0 ? float( ( lampMask >> uint( slot ) ) & 1u ) : lampTex.z;
+				lampVis = slot >= 0 ? ( jahSunVisBit( lampMask, uint( slot ) ) ? 1.0 : 0.0 ) : lampRest;
 			}
 			float visibility = l.diffuse.w > 0.5 ? sr.x * moverVis : ( type < 0.5 ? 1.0 : lampVis );
 @property( jah_cloud_shadow )
@@ -597,7 +600,7 @@ void main()
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
-	imageStore( cardSunVis, at, vec4( sunVis, lampTex.yzw ) );
+	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampMask ) );
 	// (RGBA16F, 10-2d: the store rounds to nearest itself - jahCardRound is the R11G11B10F layers')
 	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
 @property( jah_card_gather )

@@ -71,6 +71,7 @@ layout( set = 0, binding = 1 ) uniform Params
 /// A CUT-OUT CASTS ITS HOLES ON A CARD TOO (REFLECT-MOVERS-2, jah_rq_alpha.glsl).
 #define JAH_ALPHA_TABLE floatBitsToUint( p.knobs.zw )
 #include "jah_rq_alpha.glsl"
+#include "jah_card_sunvis.glsl"
 // the lamps' falloff, cone and the relight's diffuse shape: the fork's own text (unwrapped at build)
 #include "jah_fork_brdf.glsl"
 
@@ -84,7 +85,7 @@ struct CardRec
 	vec4 axisU;
 	vec4 axisV;
 	vec4 axisD;
-	uvec4 lampIds[4];   // THE CARD'S LAMP TABLE (the lamps mode): bit j of the mask = lamp j's visibility
+	uvec4 lampIds[12];   // THE CARD'S LAMP TABLE (the lamps mode): bit j of the mask = lamp j's visibility (48)
 };
 layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
 
@@ -118,7 +119,7 @@ layout( std430, set = 0, binding = 7 ) readonly buffer Lamps
 	uvec4 lampCount;
 	CardLightRec lamps[];
 };
-layout( rgba8, set = 0, binding = 8 ) uniform image2D sunVis;
+layout( rgba16, set = 0, binding = 8 ) uniform image2D sunVis;   // jah_card_sunvis.glsl's texel
 /// A lamp's ray stops this far short of its source (beyond its source radius): its own bulb is not its shadow.
 const float kLampEnd = 0.05;
 // THE AREA LIGHT'S STRATA (PHOTON-7 stage 7, 7-A): one text with the pixel's trace - the key, the one origin function,
@@ -170,7 +171,7 @@ void main()
 	{
 		// THE LAMPS' MODE (the head of this file)
 		float wRest = 0.0, vRest = 0.0;
-		uint mask = 0xFFFFu;
+		uvec2 mask = kJahSunVisAllLamps;
 		if( depth > 0.0 )
 		{
 			const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
@@ -211,7 +212,7 @@ void main()
 				// its slot in the card's table, by its world id (-1: past the table, the overflow's)
 				int slot = -1;
 				const uint id = floatBitsToUint( l.spotParams.w );
-				for( int q = 0; q < 16 && slot < 0 && !area; ++q )
+				for( int q = 0; q < int( kJahCardLampTable ) && slot < 0 && !area; ++q )
 					if( r.lampIds[q >> 2][q & 3] == id )
 						slot = q;
 				if( area )
@@ -270,7 +271,12 @@ void main()
 				if( slot >= 0 )
 				{
 					if( !( v > 0.5 ) )
-						mask &= ~( 1u << uint( slot ) );
+					{
+						if( slot < 32 )
+							mask.x &= ~( 1u << uint( slot ) );
+						else
+							mask.y &= ~( 1u << uint( slot - 32 ) );
+					}
 				}
 				else
 				{
@@ -280,8 +286,7 @@ void main()
 			}
 		}
 		const vec4 was = imageLoad( sunVis, at );
-		imageStore( sunVis, at, vec4( was.x, float( mask & 0xFFu ) / 255.0, wRest > 0.0 ? vRest / wRest : 1.0,
-									  float( mask >> 8u ) / 255.0 ) );
+		imageStore( sunVis, at, jahSunVisPack( jahSunVisSun( was ), wRest > 0.0 ? vRest / wRest : 1.0, mask ) );
 		return;
 	}
 	if( depth > 0.0 )

@@ -70,7 +70,7 @@ struct CardRec
 	vec4 axisU;
 	vec4 axisV;
 	vec4 axisD;
-	uvec4 lampIds[4];
+	uvec4 lampIds[12];   // the relight record's lamp table (48 ids, jah_card_sunvis.glsl)
 };
 layout( std430, set = 0, binding = 2 ) readonly buffer Cards { CardRec cards[]; };
 /// THE GATHER LAYER: rgb = the texel's envColourD (the mean radiance over its cosine hemisphere); a = the relight's

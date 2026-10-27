@@ -869,6 +869,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_card_sunvis.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
@@ -1044,6 +1045,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardView
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardView_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE CARDS' SUNVIS TEXEL (PHOTON-7 10-4 R9 (3)): the sun, the fractional lamps and the 48-bit lamp mask - the relight
+    # reads and writes it as the ray jobs do (jah_card_sunvis.glsl)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardSunVis
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardSunVis_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_sunvis.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE PIXEL'S AREA LIGHT VISIBILITY'S LAW (PHOTON-7 stage 7, 7-6): one text for the ray tier's two jobs (through
     # glslang) and the no-ray route's Jahshaka/ScreenAreaVis and its resolve - the parameters, the strata's geometry,

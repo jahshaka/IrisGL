@@ -4130,11 +4130,12 @@ struct CardSample {
     /// plus the specular lobe's re-emission - what the texel sends the same way to
     /// every direction; inside `radiance` too.
     float flat[3] = { 0, 0, 0 };
-    /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3): bit j of `lampMask` = lamp j of the card's
-    /// table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the lamps past it.
-    unsigned lampMask = 0u;
+    /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3; 48 lamps since 10-4 R9): bit j of `lampMask`
+    /// = lamp j of the card's table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the
+    /// lamps past it (and the area lights).
+    unsigned long long lampMask = 0ull;
     float lampOverflowVis = 1.0f;
-    unsigned lampIds[16] = {};
+    unsigned lampIds[48] = {};
     unsigned lampCount = 0u;
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
     /// readCardTexel), and whether its radiance carries a marched indirect

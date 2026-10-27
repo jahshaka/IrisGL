@@ -45,6 +45,8 @@
 #error "define JAH_CARD_VIEW_BINDING_BASE before including jah_rq_card_bindings.glsl"
 #endif
 
+#include "jah_card_sunvis.glsl"
+
 struct JahCardRecordGpu
 {
 	vec4 rowU;
@@ -52,8 +54,9 @@ struct JahCardRecordGpu
 	vec4 rowD;
 	vec4 axis;
 	uvec4 atlas;
-	// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): 16 world lamp ids, bit j of a texel's lamp mask lamp j's visibility
-	uvec4 lamps[4];
+	// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3; 48 since 10-4 R9): world lamp ids, bit j of a texel's lamp mask
+	// lamp j's visibility (jah_card_sunvis.glsl)
+	uvec4 lamps[12];
 };
 layout( std430, set = 0, binding = JAH_CARD_BINDING_BASE ) readonly buffer JahCardTable
 {
@@ -86,10 +89,10 @@ layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 5 ) uniform sampler2D ja
 // THE SUN'S VISIBILITY AT THE TEXEL (PHOTON-3 stage 2), the seventh: the still world's traced term times the
 // movers' and the cloud sheet's, as the relight shaded the texel (R8) - the weight of the read's sun lobe.
 layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 6 ) uniform sampler2D jahCardSunVisLayer;
-#define JAH_CARD_SUN_VIS( t ) texelFetch( jahCardSunVisLayer, t, 0 ).x
-// ...and in g, a and b THE LAMPS' (PHOTON-7 stage 5, 5-3; rq_card_movers.comp): a 16-bit mask (g the low byte, a the
-// high), bit j the traced visibility of lamp j of the card's lamp table (JahCardRecordGpu::lamps), and b the lamps
-// past the table, weighted by their shares of the texel's direct luminance - what the read's lamp lobes take, by id.
+#define JAH_CARD_SUN_VIS( t ) jahSunVisSun( texelFetch( jahCardSunVisLayer, t, 0 ) )
+// ...and THE LAMPS' (PHOTON-7 stage 5, 5-3; rq_card_movers.comp): the 48-bit mask, bit j the traced visibility of lamp j
+// of the card's lamp table (JahCardRecordGpu::lamps), and the fractional lamps (the area lights and the lamps past the
+// table, weighted by their shares of the texel's direct luminance) - the texel whole, jah_card_sunvis.glsl decodes it.
 #define JAH_CARD_LAMP_BITS( t ) texelFetch( jahCardSunVisLayer, t, 0 )
 
 #endif   // JAH_RQ_CARD_BINDINGS_GLSL

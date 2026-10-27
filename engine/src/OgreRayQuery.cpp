@@ -9571,7 +9571,8 @@ constexpr unsigned kCardMoverBindings = 9u;
 constexpr unsigned kCardMoverModes = 3u;
 /// The records ring's capacity: the relight list's (kMaxRelights, 80 B a card).
 constexpr unsigned kCardMoverMaxRecords = 1024u;
-constexpr unsigned kCardMoverRecordFloats = 36u;   // the relight's record: five vec4, then the card's 16 lamp ids
+constexpr unsigned kCardMoverRecordFloats = 20u + kCardLampTable;   // the relight's record: five vec4, then the card's
+                                                                     // lamp table (48 ids, PHOTON-7 10-4 R9 (3))
 }   // namespace
 
 bool RayQueryTier::makeCardMoverPipelineNow(std::string &err) {
@@ -9905,7 +9906,7 @@ static_assert(kCardGatherBindings == kHitSetBindings + 5u, "the cards' gather se
 static_assert(kCardGatherReadsBlock == kCardReadsBlock, "one read-list block");
 /// The records ring's capacity: the relight list's (kMaxRelights).
 constexpr unsigned kCardGatherMaxRecords = 1024u;
-constexpr unsigned kCardGatherRecordFloats = 36u;
+constexpr unsigned kCardGatherRecordFloats = 20u + kCardLampTable;   // (the relight's record, as the movers')
 constexpr unsigned kCardGatherCounts = 10u;   // rq_card_gather.comp's kCountWords
 /// ...then each record's own sky rays (the e = 0 counter per card), one word a record
 constexpr unsigned kCardGatherCountWords = kCardGatherCounts + kCardGatherMaxRecords;

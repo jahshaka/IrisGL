@@ -209,11 +209,12 @@ struct CardGpuRec {
     /// flags: kGpuCardCaptured (captured at least once), kGpuCardLit (its
     /// radiance carries a marched indirect half — `indirectValid`).
     unsigned atlas[4] = {};
-    /// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): up to 16 world lamp ids (SceneLightList::documentId, 0 = none),
-    /// bit j of each texel's lamp mask the visibility of lamp j (jah_rq_card_lights.glsl maps its own lamps by id).
-    unsigned lamps[16] = {};
+    /// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3; 48 since 10-4 R9 (3)): up to kCardLampTable world lamp ids
+    /// (SceneLightList::documentId, 0 = none), bit j of each texel's lamp mask the visibility of lamp j
+    /// (jah_rq_card_lights.glsl maps its own lamps by id; jah_card_sunvis.glsl the texel).
+    unsigned lamps[kCardLampTable] = {};
 };
-static_assert(sizeof(CardGpuRec) == 144u, "the card record's layout is a contract with the ray job");
+static_assert(sizeof(CardGpuRec) == 272u, "the card record's layout is a contract with the ray job");
 constexpr unsigned kGpuCardCaptured = 1u;
 constexpr unsigned kGpuCardLit = 2u;
 
@@ -381,7 +382,9 @@ bool SurfaceCache::makeAtlas(std::string &err) {
                                 Ogre::TextureFlags::ManualTexture | Ogre::TextureFlags::Uav,
                                 Ogre::TextureTypes::Type2D);
     mSunVis->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
-    mSunVis->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    // RGBA16_UNORM (PHOTON-7 10-4 R9 (3), the lead's ruling: 48 lamps exact a texel): r = the sun's byte and the
+    // fractional lamps' byte, g/b/a = the 48-bit lamp mask (jah_card_sunvis.glsl) - +8 MB over the RGBA8 texel.
+    mSunVis->setPixelFormat(Ogre::PFG_RGBA16_UNORM);
     mSunVis->setNumMipmaps(1u);
     mSunVis->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE MOVERS' VISIBILITY (PHOTON-CARDS-4): R8 over the atlas, a UAV
@@ -1923,9 +1926,9 @@ namespace {
 constexpr unsigned kMaxRelights = 1024u;
 /// The most lights the job sums (144 B a light after a 16 B count).
 constexpr unsigned kMaxCardLights = 64u;
-/// A relight record: rect, the capture camera, the three axes, and THE CARD'S LAMP TABLE (16 world ids: PHOTON-7
-/// stage 5, 5-3) - 144 B.
-constexpr unsigned kRelightFloats = 36u;
+/// A relight record: rect, the capture camera, the three axes, and THE CARD'S LAMP TABLE (kCardLampTable = 48 world
+/// ids: PHOTON-7 stage 5, 5-3; 10-4 R9 (3)) - 272 B.
+constexpr unsigned kRelightFloats = 20u + kCardLampTable;
 /// A lamp's world id, as every lamp table and light record carries it (32 bits of the document's node id; a light no
 /// document made takes its Ogre id in the upper half's own range).
 unsigned lampIdOf(const Ogre::Light *l) {
@@ -2272,18 +2275,18 @@ void SurfaceCache::relightCards() {
             mCardLampsMax = std::max(mCardLampsMax, unsigned(reach.size()));
             mCardAreaLampsMax = std::max(mCardAreaLampsMax, areaHere);
             c.areaLampCount = areaHere;
-            c.fractionalCount = areaHere + (reach.size() > 16u ? unsigned(reach.size()) - 16u : 0u);
+            c.fractionalCount = areaHere + (reach.size() > kCardLampTable ? unsigned(reach.size()) - kCardLampTable : 0u);
             pointsHere[i] = reach.size();   // (in the table or past it: one ray each)
             areasHere[i] = areaHere;
-            if (reach.size() > 16u) {
+            if (reach.size() > kCardLampTable) {
                 std::vector<std::pair<float, unsigned>> byShare = reach;
                 std::stable_sort(byShare.begin(), byShare.end(),
                                  [](const std::pair<float, unsigned> &a, const std::pair<float, unsigned> &b) {
                                      return a.first > b.first;
                                  });
                 double over = 0.0;
-                for (size_t k = 16; k < byShare.size(); ++k) over += double(byShare[k].first);
-                byShare.resize(16u);
+                for (size_t k = kCardLampTable; k < byShare.size(); ++k) over += double(byShare[k].first);
+                byShare.resize(kCardLampTable);
                 std::sort(byShare.begin(), byShare.end(),
                           [](const std::pair<float, unsigned> &a, const std::pair<float, unsigned> &b) {
                               return a.second < b.second;   // back into the world order
@@ -2291,7 +2294,7 @@ void SurfaceCache::relightCards() {
                 reach.swap(byShare);
                 if (total > 0.0) mLampOverflowShareMax = std::max(mLampOverflowShareMax, float(over / total));
             }
-            unsigned ids[16] = {};
+            unsigned ids[kCardLampTable] = {};
             for (size_t k = 0; k < reach.size(); ++k) {
                 std::memcpy(&ids[k], &mLightCpu[4u + size_t(reach[k].second) * kLightFloats + 19u], sizeof(unsigned));
             }
@@ -3966,7 +3969,7 @@ bool SurfaceCache::syncBuffers() {
         rec.atlas[1] = c.atlasY;
         rec.atlas[2] = c.size;
         rec.atlas[3] = (c.lastUpdated ? kGpuCardCaptured : 0u) | (c.indirectValid ? kGpuCardLit : 0u);
-        for (unsigned k = 0; k < 16u; ++k) rec.lamps[k] = k < c.lampCount ? c.lampIds[k] : 0u;
+        for (unsigned k = 0; k < kCardLampTable; ++k) rec.lamps[k] = k < c.lampCount ? c.lampIds[k] : 0u;
         std::memcpy(&mCardBufferCpu[size_t(i) * kCardGpuFloats], &rec, sizeof(rec));
     }
     mCardRecords = records;
@@ -4520,8 +4523,8 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
     }
-    // THE LAMPS' TRACED BITS (PHOTON-7 stage 5, 5-3): the SunVis texel's mask (g low, a high) and overflow byte (b),
-    // and the card's lamp table they index.
+    // THE LAMPS' TRACED BITS (PHOTON-7 stage 5, 5-3; 10-4 R9 (3)): the SunVis texel's 48-bit mask (g, b, a: 16 bits
+    // each) and the fractional byte (r's low byte: jah_card_sunvis.glsl), and the card's lamp table they index.
     if (mSunVis) {
         Ogre::AsyncTextureTicket *tk = tm->createAsyncTextureTicket(
             1u, 1u, 1u, Ogre::TextureTypes::Type2D, mSunVis->getPixelFormat());
@@ -4533,11 +4536,13 @@ bool SurfaceCache::sampleCard(const CardRec &rec, float u, float v, CardSample &
         decodeTexel(mSunVis->getPixelFormat(), box.at(0, 0, 0), sv);
         tk->unmap();
         tm->destroyAsyncTextureTicket(tk);
-        out.lampMask = unsigned(std::lround(sv[1] * 255.0f)) | (unsigned(std::lround(sv[3] * 255.0f)) << 8u);
-        out.lampOverflowVis = sv[2];
+        const auto word = [](float c) { return (unsigned long long)std::lround(double(c) * 65535.0); };
+        out.lampMask = word(sv[1]) | (word(sv[2]) << 16u) | (word(sv[3]) << 32u);
+        out.lampOverflowVis = float(word(sv[0]) & 0xFFull) / 255.0f;
     }
     out.lampCount = rec.lampCount;
-    for (unsigned k = 0; k < 16u; ++k) out.lampIds[k] = rec.lampIds[k];
+    static_assert(sizeof(out.lampIds) / sizeof(out.lampIds[0]) == kCardLampTable, "the sample carries the whole table");
+    for (unsigned k = 0; k < kCardLampTable; ++k) out.lampIds[k] = rec.lampIds[k];
     out.gatherSky = rec.gatherSky;
     // ...and THE GATHER LAYER (PHOTON-7 stage 10, 10-2a): the TLAS gather's irradiance and the texel's escaped share.
     if (mGather) {

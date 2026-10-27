@@ -46,9 +46,9 @@ void jahSpecularAlbedo( float v, float r, out float a, out float b );
 #endif
 
 vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
-						uvec4 lampIds[4] )
+						uvec4 lampIds[12] )
 {
-	const uint lampMask = uint( lampBits.y * 255.0 + 0.5 ) | ( uint( lampBits.w * 255.0 + 0.5 ) << 8u );
+	const uvec2 lampMask = jahSunVisMask( lampBits );
 	const uvec2 a = JAH_HIT_TABLE;
 	if( ( a.x | a.y ) == 0u )
 		return vec3( 0.0 );
@@ -82,11 +82,11 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 			L = d / dist;
 			// ITS OWN BIT: its world id (word 31) in the card's lamp table, or the overflow's byte past it
 			const uint id = T.u[o + 31u];
-			float lampVis = lampBits.z;
-			for( int q = 0; q < 16; ++q )
+			float lampVis = jahSunVisRest( lampBits );
+			for( int q = 0; q < int( kJahCardLampTable ); ++q )
 				if( lampIds[q >> 2][q & 3] == id )
 				{
-					lampVis = float( ( lampMask >> uint( q ) ) & 1u );
+					lampVis = jahSunVisBit( lampMask, uint( q ) ) ? 1.0 : 0.0;
 					break;
 				}
 			vis = lampVis * jahLightAttenuation( dist, v1.w, v2.w );
