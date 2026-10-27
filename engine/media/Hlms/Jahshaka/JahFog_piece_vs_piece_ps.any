@@ -232,7 +232,7 @@
 		// so, and a pane hidden behind an opaque surface would append a record and light a pixel it does not reach. A
 		// blended pass writes no depth (OgreMaterials.cpp: no blended surface writes depth), so the early test changes
 		// nothing else - a discard after it still discards the colour.
-		layout( early_fragment_tests ) in;
+		// MEASURING ARM (reverted after): no early test
 		layout( buffer_reference, std430, buffer_reference_align = 16 ) buffer JahEscapeList
 		{
 			uint count;
