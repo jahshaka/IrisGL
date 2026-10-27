@@ -2250,7 +2250,6 @@ private:
     X(GatherFilterOff, "gather.filterOff") /* the probe-space filter off (the measuring arm, decision 20) */ \
     X(GatherIrradianceReadback, "gather.irradianceReadback") /* the gather's E/pi copied to the host (world.gatherIrradiance) */ \
     X(GiScreenIntegrateOff, "gi.screenIntegrateOff") /* a no-ray chain shades with the pixel's own cones (7-6's A/B: the voxel route) */ \
-    X(FogMarch, "fog.march") /* MEASURING ARM (PHOTON-7 10-4 R11's price, reverted after): 0 = the fog's sun march skipped (s written 0, the same permutation) */ \
     X(AreaVisReadback, "area.visReadback") /* the pixel's area light visibility copied to the host (ScenePublished::areaVis, a test door; 7-A) */ \
     X(GiScreenBindMissing, "gi.screenBindMissing") /* the no-ray screen passes read their inputs as missing: they stand down (a test door, gi.screen_bind) */ \
     X(GiScreenZeroUnmarked, "gi.screenZeroUnmarked") /* the screen integrate dispatches no group WITHOUT the stood-down mark: the fork's BUGS-6 guard throws (a test door, gi.screen_bind) */ \
@@ -3695,8 +3694,6 @@ public:
     /// ...whether the scene drawn through `sm` traces its lamps (setLampRays' `on`); false for a manager no scene holds.
     /// A scene that does not trace sees its Forward+ lamps through the voxel chain (PhotonPassBinding::lampVoxelsOf).
     static bool lampRaysOn(const Ogre::SceneManager *sm);
-    /// MEASURING ARM fog.march (reverted after R11's price): false = s written 0, the sun march skipped
-    static bool sFogMarchArm;
     /// THE BLENDED PASS'S SKY VISIBILITY (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): pass-scoped, null to take it away.
     static void setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis);
 
