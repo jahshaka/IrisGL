@@ -21,6 +21,10 @@
 #include <optional>
 
 #include <OgreHlmsManager.h>
+#include <CommandBuffer/OgreCommandBuffer.h>
+#include <CommandBuffer/OgreCbShaderBuffer.h>
+#include <OgreConstBufferPool.h>
+#include <Vao/OgreConstBufferPacked.h>
 #include <OgreAsyncTextureTicket.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
@@ -178,8 +182,29 @@ void ScenePbs::calculateHashForPreCaster(Ogre::Renderable *renderable, Ogre::Pie
     const float T = paneTransmittance(renderable->getDatablock());
     if (T >= 0.0f) {
         static const Ogre::IdString kPaneCaster("jah_pane_caster");
-        setProperty(kNoTid, kPaneCaster, Ogre::int32(std::lround(T * 255.0f)) + 1);
+        setProperty(kNoTid, kPaneCaster, T < 1.0f ? 1 : 2);
     }
+}
+
+Ogre::uint32 ScenePbs::fillBuffersForV2(const Ogre::HlmsCache *cache, const Ogre::QueuedRenderable &queuedRenderable,
+                                        bool casterPass, Ogre::uint32 lastCacheHash, Ogre::CommandBuffer *commandBuffer) {
+    const Ogre::uint32 instance =
+        Ogre::HlmsPbs::fillBuffersForV2(cache, queuedRenderable, casterPass, lastCacheHash, commandBuffer);
+    if (casterPass) {
+        // (HlmsPbs::fillBuffersFor's own binding, for a pane's caster: both stages, the pool remembered)
+        const auto *db = static_cast<const Ogre::HlmsPbsDatablock *>(queuedRenderable.renderable->getDatablock());
+        const float T = paneTransmittance(db);
+        const Ogre::ConstBufferPool::BufferPool *pool = db->getAssignedPool();
+        if (T >= 0.0f && T < 1.0f && pool && mLastBoundPool != pool) {
+            const Ogre::uint32 bytes = Ogre::uint32(pool->materialBuffer->getTotalSizeBytes());
+            *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
+                Ogre::CbShaderBuffer(Ogre::VertexShader, 1, pool->materialBuffer, 0, bytes);
+            *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
+                Ogre::CbShaderBuffer(Ogre::PixelShader, 1, pool->materialBuffer, 0, bytes);
+            mLastBoundPool = pool;
+        }
+    }
+    return instance;
 }
 
 // THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in

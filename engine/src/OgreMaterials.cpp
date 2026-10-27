@@ -607,7 +607,7 @@ bool OgreScene::hasPanes() const {
     if (mPaneMaterials < 0) {
         int n = 0;
         for (const auto &kv : mMaterials)
-            if (!kv.second.unlit && paneCasterLevel(kv.second.params.alphaMode, kv.second.params.alpha) > 0) ++n;
+            if (!kv.second.unlit && isPaneMaterial(kv.second.params.alphaMode, kv.second.params.alpha)) ++n;
         mPaneMaterials = n;
     }
     return mPaneMaterials > 0;
@@ -688,7 +688,7 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     JAH_HOST_CALL("Scene::setPbrMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
-    if (paneCasterLevel(it->second.params.alphaMode, it->second.params.alpha) != paneCasterLevel(p.alphaMode, p.alpha))
+    if (isPaneMaterial(it->second.params.alphaMode, it->second.params.alpha) != isPaneMaterial(p.alphaMode, p.alpha))
         mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
     if (it->second.params.alphaMode != p.alphaMode) mBlendedMaterials = -1;   // (hasBlended, R4)
     // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
@@ -832,11 +832,12 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         if (wasMetal != gpuIsMetal(db) || paneMoved)
             for (auto &kv : mNodes)
                 if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
-        // ...AND THE PANE's CASTER PERMUTATION (PHOTON-7 10-4 R8): its pixel writes the transmittance as a compile-time
-        // value (ScenePbs::calculateHashForPreCaster), and an alpha edit inside one mode re-hashes nothing - so its
-        // wearers' renderables are re-hashed here (Hlms::calculateHashFor + Renderable::_setHlmsHashes: what a datablock's
-        // flush does, through the public door). Only when the baked level moved.
-        if (paneMoved && paneCasterLevel(o0Mode, o0Alpha) != paneCasterLevel(p.alphaMode, p.alpha))
+        // ...AND THE PANE's CASTER PERMUTATION (PHOTON-7 10-4 R8; the one read's F12): ONE caster shader reads the
+        // pane's transmittance from its material, so an alpha edit inside pane-ness re-hashes nothing (an alpha drag
+        // compiles no PSO); an edit that makes or unmakes a pane inside one mode (alpha to or from 1) re-hashes its
+        // wearers' renderables here (Hlms::calculateHashFor + Renderable::_setHlmsHashes: what a datablock's flush
+        // does, through the public door).
+        if (paneMoved && isPaneMaterial(o0Mode, o0Alpha) != isPaneMaterial(p.alphaMode, p.alpha))
             for (auto &kv : mNodes) {
                 if (kv.second.materialRef != id || !kv.second.item) continue;
                 for (size_t i = 0, e = kv.second.item->getNumSubItems(); i < e; ++i) {

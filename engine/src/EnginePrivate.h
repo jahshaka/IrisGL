@@ -4188,10 +4188,19 @@ protected:
     /// renderable's OWN scene's PlanarReflections is bound for the call and the
     /// pass's pointer put back after it.
     void calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) override;
-    /// A PANE's CASTER (PHOTON-7 10-4 R8): `jah_pane_caster` = its transmittance on 255 steps + 1 (paneTransmittance), the
-    /// value its pixel writes into the shadow node's transmittance layer (JahShadowTransmit_piece_ps.any).
+    /// A PANE's CASTER (PHOTON-7 10-4 R8; the one read's F12): `jah_pane_caster` = 1 a pane whose transmittance is its
+    /// material's 1 - alpha - read per renderable from the material buffer (its vertex stage), ONE caster shader for
+    /// every alpha - or 2 an Additive (T = 1); what its pixel writes into the shadow node's transmittance layer
+    /// (JahShadowTransmit_piece_ps.any).
     void calculateHashForPreCaster(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces,
                                    const Ogre::PiecesMap *normalPassPieces) override;
+public:
+    /// ...AND ITS MATERIAL BOUND: HlmsPbs binds the material buffer on a caster pass only for an alpha test or hash (MDI's
+    /// sake); a pane's caster reads its own alpha there, so its pool is bound for it too (the pane pass alone draws
+    /// panes: the depth passes keep their merged draws).
+    Ogre::uint32 fillBuffersForV2(const Ogre::HlmsCache *cache, const Ogre::QueuedRenderable &queuedRenderable,
+                                  bool casterPass, Ogre::uint32 lastCacheHash,
+                                  Ogre::CommandBuffer *commandBuffer) override;
 private:
     std::vector<HashNote> mHashNotes;
     bool mHashNotesOverflow = false;
@@ -6040,14 +6049,12 @@ private:
     /// A mode that BLENDS over what is behind it (every mode but Opaque and Cutout): its surface is drawn after the
     /// opaque ones, in the blended queue, and occludes nothing.
     static bool isBlendedMode(PbrAlphaMode m) { return m != PbrAlphaMode::Opaque && m != PbrAlphaMode::Cutout; }
-    /// The pane caster's baked level for a material's mode and alpha (ScenePbs::calculateHashForPreCaster's value):
-    /// round((1 - alpha) x 255) + 1 for a pane's modes (Blend, Glass, Refractive) under alpha 1, 256 for Additive (T = 1
-    /// at any alpha: paneTransmittance), 0 otherwise.
-    static int paneCasterLevel(PbrAlphaMode m, float alpha) {
-        if (m == PbrAlphaMode::Additive) return 256;
+    /// Is a material of this mode and alpha a PANE (paneTransmittance's rule from the document's side): a pane's modes
+    /// (Blend, Glass, Refractive) under alpha 1, and Additive (T = 1 at any alpha).
+    static bool isPaneMaterial(PbrAlphaMode m, float alpha) {
+        if (m == PbrAlphaMode::Additive) return true;
         const bool paneMode = m == PbrAlphaMode::Blend || m == PbrAlphaMode::Glass || m == PbrAlphaMode::Refractive;
-        const float a = std::min(std::max(alpha, 0.0f), 1.0f);
-        return paneMode && a < 1.0f ? int(std::lround((1.0f - a) * 255.0f)) + 1 : 0;
+        return paneMode && std::min(std::max(alpha, 0.0f), 1.0f) < 1.0f;
     }
     /// Re-files every item that uses this material after its alpha mode changed.
     void refileItems(MaterialId id, const MaterialRec &m);
