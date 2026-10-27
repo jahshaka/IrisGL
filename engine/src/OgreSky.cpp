@@ -1044,10 +1044,11 @@ void OgreScene::applyPendingSkyCapture() {
     if (!mSkyCapturePending) return;
     mSkyCapturePending = false;
     // NOTHING TO PHOTOGRAPH - no sky and no dome, or an UNLIT BACKDROP (R5b: EnvironmentSource::Black) - is no sky light:
-    // the ambient and the reflection both go (the drawn sky stays).
+    // the ambient and the reflection both go (the drawn sky stays). UNDER NO SKY TOO (the 10-3 read's F1): a dome's
+    // convolved cube was left bound there, and a scene whose dome was hidden kept mirroring it (a no-op without a cube).
     if (!environmentCaptured()) {
         forgetSkySh();
-        if (mSkyDesc.mode != SkyMode::NoSky) destroyReflection();
+        destroyReflection();
         return;
     }
     Ogre::CompositorManager2 *cm = mRoot->getCompositorManager2();
