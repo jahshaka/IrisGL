@@ -11483,20 +11483,23 @@ bool OgreEngine::deviceRayQuery() const {
     return sStores;
 }
 
+void OgreEngine::ensureRayTier() {
+    if (!mRayTracingWanted || mHeadless || !mRoot || mRayTier) return;
+    if (!rayQueryAvailable()) return;             // the fallback picture, silently
+    mRayTier = new detail::RayQueryTier();
+    mRayTier->setArms(&mArms);
+    std::string err;
+    if (!mRayTier->open(mRoot->getRenderSystem(), err)) {
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-query tier off — " + err);
+        delete mRayTier;
+        mRayTier = nullptr;
+    }
+}
+
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     if (!mRayTracingWanted || mHeadless || !mRoot) return;
-    if (!mRayTier) {
-        if (!rayQueryAvailable()) return;             // the fallback picture, silently
-        mRayTier = new detail::RayQueryTier();
-        mRayTier->setArms(&mArms);
-        std::string err;
-        if (!mRayTier->open(mRoot->getRenderSystem(), err)) {
-            Ogre::LogManager::getSingleton().logMessage("Jahshaka: ray-query tier off — " + err);
-            delete mRayTier;
-            mRayTier = nullptr;
-            return;
-        }
-    }
+    ensureRayTier();
+    if (!mRayTier) return;
     // A scene whose project row says OFF must cost nothing, not just look the
     // same (world.rayTracing's contract): no gather, no BLAS/TLAS for it. The
     // structures it may already hold were released when the row flipped
@@ -11930,6 +11933,7 @@ namespace detail {
 void OgreEngine::setRayTracing(bool on) { mRayTracingWanted = on; mHostRayTracing = on; }
 bool OgreEngine::deviceRayQuery() const { return false; }
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &) {}
+void OgreEngine::ensureRayTier() {}
 // (no ray tier: no swept box and no posed slot, and none of the list's mover consumers - the cards, the gather, the
 // reflection, the hits - runs without it; movers are not voxel geometry)
 void OgreEngine::listRayMovers(const std::vector<OgreScene *> &) {}

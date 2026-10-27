@@ -1243,6 +1243,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // THE GI STEP RUNS AFTER THE SCENE GRAPH (U4 stage 3, decision 8: `engine.plan`, below, where the world boxes
         // are the frame's own); here only its camera and the driver's profile, which the pending flush may owe.
         std::vector<OgreView *> giDrivers;
+        ensureRayTier();   // before the views sync: a ray chain's listener arms only on an open tier
         for (auto &v : mViews) {
             const bool authoritative = v->isEnabled() && v->ogreScene() &&
                                        *driverSlot(v->ogreScene()) == v.get();

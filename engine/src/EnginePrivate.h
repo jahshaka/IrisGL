@@ -8810,6 +8810,11 @@ public:
     /// point (applyShadowCacheDirties, after updateSceneGraph and before any
     /// workspace renders). No private submit, no fence wait, no stall.
     void updateRayQuery(const std::vector<OgreScene *> &drawn);
+    /// THE RAY TIER OPENED BEFORE THE VIEWS SYNC (PHOTON-7 10-3 R3): a view's ray chain arms its listener only on an
+    /// open tier (syncReflectListener), and the tier opened inside updateRayQuery - after the views had synced - so the
+    /// first frame a project traced drew its ray chain with no producer: no gather, no area visibility (an area light
+    /// over a sealed hall lit its inside unshadowed, 1.74 over 25,484 px; gi.sealed_hall (2)). Idempotent.
+    void ensureRayTier();
     /// THE CHANGED-REGION LIST'S MOVERS (PHOTON-7 stage 3; OgreRayQuery.cpp): the moved and skin-posed slots' swept
     /// boxes into each drawn scene's list, after the GPU scene's commit and the skin pass.
     void listRayMovers(const std::vector<OgreScene *> &drawn);
