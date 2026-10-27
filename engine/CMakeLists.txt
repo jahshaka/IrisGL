@@ -277,10 +277,10 @@ if(JAH_RAY_QUERY_OK)
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
         COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h.d" --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
                 --vn krq_reflectResolveSpv -o "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_reflect_resolve.comp" "${JAH_RQ_SPEC_ALBEDO}"
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h.d"
         COMMENT "Compiling the reflection resolve compute shader at SPIR-V 1.4"
         VERBATIM)

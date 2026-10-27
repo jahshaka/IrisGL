@@ -186,9 +186,12 @@ void main()
 				const vec3 fogged = jahFogAlong( clamp( radj.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ),
 												 uintBitsToFloat( jahHitBuf[auxj + 2u] ), dirj, lengthsj.x, lengthsj.y );
 				// (+ the NEE delta, PHOTON-7 11-1b: the NEE part less the BRDF's share of the emission it found)
+				// (and the ray share at the estimator's gain, PHOTON-7 11-2 (1): the screen share and the delta carry theirs)
 				const vec2 dj01 = unpackHalf2x16( jahHitBuf[auxj + 6u] );
-				const vec3 deltaJ = vec3( dj01, unpackHalf2x16( jahHitBuf[auxj + 7u] ).x );
-				sampleJ = screenShare.xyz + rayShare * fogged + ( finite3( deltaJ ) ? deltaJ : vec3( 0.0 ) );
+				const vec2 dj2g = unpackHalf2x16( jahHitBuf[auxj + 7u] );
+				const vec3 deltaJ = vec3( dj01, dj2g.x );
+				const float gainJ = finite1( dj2g.y ) ? dj2g.y : 0.0;
+				sampleJ = screenShare.xyz + rayShare * gainJ * fogged + ( finite3( deltaJ ) ? deltaJ : vec3( 0.0 ) );
 				tj = max( screenShare.w + rayShare * max( lengthsj.x, 1e-3 ), 1e-3 );
 			}
 			else if( rayShare < 1.0 )
@@ -237,12 +240,16 @@ void main()
 		// THE NEE DELTA (PHOTON-7 11-1b, the preflight's gap G3): the NEE part less the BRDF's share ( 1 - v ) ( 1 - w_b )
 		// E T of the emission this hit holds - added to the shaded sample (an unshaded one is the screen's whole or none)
 		const vec2 d01 = unpackHalf2x16( jahHitBuf[aux + 6u] );
-		vec3 delta = vec3( d01, unpackHalf2x16( jahHitBuf[aux + 7u] ).x );
+		const vec2 d2g = unpackHalf2x16( jahHitBuf[aux + 7u] );
+		vec3 delta = vec3( d01, d2g.x );
 		delta = finite3( delta ) ? delta : vec3( 0.0 );
+		// THE ESTIMATOR's GAIN (PHOTON-7 11-2 (1), the record's word): the decoded ray share at the draw's gain - the
+		// screen's share the trace wrote and the delta carry theirs already
+		const float gain = finite1( d2g.y ) ? d2g.y : 0.0;
 		imageStore( reflectSample, at3,
-					share ? vec4( max( was.xyz + weight * fogged + delta, vec3( 0.0 ) ),
+					share ? vec4( max( was.xyz + weight * gain * fogged + delta, vec3( 0.0 ) ),
 								  was.w + weight * max( lengths.x, 1e-3 ) )
-						  : vec4( max( fogged + delta, vec3( 0.0 ) ), max( lengths.x, 1e-3 ) ) );
+						  : vec4( max( gain * fogged + delta, vec3( 0.0 ) ), max( lengths.x, 1e-3 ) ) );
 	}
 	else if( share )
 	{
