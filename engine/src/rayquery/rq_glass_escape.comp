@@ -24,7 +24,10 @@
 //   * the panes the ray crosses pass their transmittance and add their own light (jah_rq_panes.glsl);
 //   * the leg's media are the reflection's law (jah_fog_along.glsl: jahFogAlong to a hit, jahFogAlongSky past one).
 // The answer, times the record's weight, is ADDED in fixed point to the record's pixel (three uint words a pixel, one
-// atomic a channel); rq_glass_escape_add.comp adds the pixel's sum to the pass's colour target. SAME FRAME: the job runs
+// atomic a channel; a word that would pass its 32 bits SATURATES, counted - the one read's F11: it wrapped silently at 64
+// brightest terms); rq_glass_escape_add.comp adds the pixel's sum to the pass's colour target. A hit's answer is bounded as
+// every reflection's (kMaxRadiance); a MISS is the environment the fragment itself would have taken, unbounded as the
+// fragment's own environment term is (F11: a sun glint in glass read the same on every tier). SAME FRAME: the job runs
 // right after the pass that appended the records (the blended pass, the refractives), before anything reads its target.
 //
 // THE RECORD (32 bytes, two uvec4 - OgreRayQuery.cpp kEscapeRecordWords; PhotonVct_piece_ps.any writes it):
@@ -36,7 +39,8 @@
 //
 // THE COUNTS (one atomic a subgroup a count): the records traced, answered by a card, by the cascades, by the direct
 // term alone (past every cache), by a far copy (the coarsest level: its normal faces the ray - no near row names its
-// triangle; a named limit), by the environment, back faces, and no sample (a hit no reader could shade: 0 expected).
+// triangle; a named limit), by the environment, back faces, no sample (a hit no reader could shade: 0 expected), and the
+// records whose add saturated a pixel's word.
 
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 
@@ -70,8 +74,26 @@ layout( std430, set = 0, binding = 2 ) readonly buffer Records
 layout( std430, set = 0, binding = 3 ) buffer Accum { uint accum[]; };
 layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
 const uint kCountTraced = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountDirect = 3u, kCountFar = 4u, kCountSky = 5u,
-		   kCountBack = 6u, kCountNoSample = 7u;
-const uint kCountWords = 8u;   // (OgreRayQuery.cpp kEscapeCounts)
+		   kCountBack = 6u, kCountNoSample = 7u, kCountSaturated = 8u;
+const uint kCountWords = 9u;   // (OgreRayQuery.cpp kEscapeCounts)
+
+/// ADDS v (fixed point, >= 0) to a pixel's word, SATURATING at its 32 bits (the one read's F11): an add that passed them
+/// leaves the word at its top, whatever other adds raced it (each one that passes the top again restores it). True when
+/// it saturated.
+bool jahEscapeAdd( uint at, float v )
+{
+	if( !( v >= 1.0 ) )
+		return false;
+	const bool big = v >= 4294967040.0;   // (the largest float under 2^32)
+	const uint u = big ? 0xFFFFFFFFu : uint( v + 0.5 );
+	const uint was = atomicAdd( accum[at], u );
+	if( big || was > 0xFFFFFFFFu - u )
+	{
+		atomicMax( accum[at], 0xFFFFFFFFu );
+		return true;
+	}
+	return false;
+}
 
 // THE HIT SET (RayQueryTier's kCardGatherHitSlots numbering: the records jobs' one text). A REFLECTION'S READER: its card
 // reads stamp the reflection's demand (reader 0), and a hit's specular lobe is read along the ray (no lobe integral).
@@ -91,8 +113,9 @@ void main()
 {
 	const uint i = gl_GlobalInvocationID.x;
 	const uint cap = uint( p.knobs.x );
-	uint c[kCountWords] = uint[kCountWords]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	uint c[kCountWords] = uint[kCountWords]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	vec3 answer = vec3( 0.0 );
+	bool missed = false;   // the answer the environment's (unbounded: the fragment's own term)
 	vec3 weight = vec3( 0.0 );
 	uint at = 0xFFFFFFFFu;
 	if( i < min( count, cap ) )
@@ -183,6 +206,7 @@ void main()
 			{
 				// THE ENVIRONMENT along the lobe: what the fragment would have lit the share by
 				answer = paneLight + through * jahFogAlongSky( jahEnvLobe( dir, rough ), origin.y, dir, eyeDist );
+				missed = true;
 				++c[kCountSky];
 			}
 			else
@@ -234,13 +258,17 @@ void main()
 			}
 		}
 	}
-	// THE PIXEL'S SUM, in fixed point (one atomic a channel; a channel's term is clamped to the radiance bound first)
-	if( at != 0xFFFFFFFFu )
+	// THE PIXEL'S SUM, in fixed point (one atomic a channel, saturating; a hit's term bounded as every reflection's, a miss
+	// the environment's own)
+	if( at != 0xFFFFFFFFu && finite3( answer ) )
 	{
-		const vec3 v = clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) * weight * p.knobs2.w;
-		if( v.x >= 1.0 ) atomicAdd( accum[at], uint( v.x + 0.5 ) );
-		if( v.y >= 1.0 ) atomicAdd( accum[at + 1u], uint( v.y + 0.5 ) );
-		if( v.z >= 1.0 ) atomicAdd( accum[at + 2u], uint( v.z + 0.5 ) );
+		const vec3 v = ( missed ? max( answer, vec3( 0.0 ) ) : clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * weight *
+					   p.knobs2.w;
+		bool saturated = jahEscapeAdd( at, v.x );
+		saturated = jahEscapeAdd( at + 1u, v.y ) || saturated;
+		saturated = jahEscapeAdd( at + 2u, v.z ) || saturated;
+		if( saturated )
+			++c[kCountSaturated];
 	}
 	for( uint k = 0u; k < kCountWords; ++k )
 	{

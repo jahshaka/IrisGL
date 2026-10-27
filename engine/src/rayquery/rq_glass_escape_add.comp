@@ -2,7 +2,8 @@
 #extension GL_GOOGLE_include_directive : require
 
 // THE BLENDED PASSES' ESCAPES INTO THE PICTURE (PHOTON-7 10-4 R4, the lead's design (D)): every pixel's fixed-point sum
-// rq_glass_escape.comp left (three words a pixel, r g b) added to the pass's colour target - the light the fragments'
+// rq_glass_escape.comp left (three words a pixel, r g b; a saturated word - counted there - adds its top) added to the
+// pass's colour target - the light the fragments'
 // open shares took along their rays - and the sum zeroed for the next pass. Dispatched INDIRECTLY from the list's header:
 // no group when the pass appended no record (the fragment that appends the first record arms it). ITS ONE LIMIT, named:
 // the add lands on top of every blended layer drawn after the fragment that appended the record, not under it - exact for

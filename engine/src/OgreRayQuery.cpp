@@ -1870,7 +1870,7 @@ private:
         /// THE NEWEST READ (summed over the two lists): the records appended, those a full list dropped, the lists'
         /// capacity, the job's counts; the largest demand a retired frame showed (the growth's target)
         unsigned long long records = 0ull, dropped = 0ull, capacity = 0ull;
-        unsigned long long counts[8] = {};
+        unsigned long long counts[9] = {};   // (kEscapeCounts)
         unsigned long long demand[2] = {};
         uint32_t readDraw = 0u;
         bool everRead = false;
@@ -11700,11 +11700,13 @@ constexpr unsigned kEscapeBindings = 38u;
 static_assert(kEscapeBindings == kHitSetBindings + 5u, "the escapes' set is the hit set, its own four and the air");
 constexpr unsigned kEscapeAddBindings = 3u;
 /// rq_glass_escape.comp's kCountWords, and the list's header (eight words: the count, the trace's groups, the add's)
-constexpr unsigned kEscapeCounts = 8u;
+constexpr unsigned kEscapeCounts = 9u;
+static_assert(kEscapeCounts * 4u + 4u <= 64u, "the readback slot holds the record count and the counts");
 constexpr VkDeviceSize kEscapeHeaderBytes = 32u;
 constexpr VkDeviceSize kEscapeRecordBytes = 32u;   ///< two uvec4 (rq_glass_escape.comp's head)
-/// The pixels' sums' fixed point: 2^16 a unit of radiance - a record's term is at most kMaxRadiance (1024) x a weight
-/// at most 1, so a pixel holds 64 such terms in 32 bits; its quantum 1.5e-5 is far under one code at any exposure.
+/// The pixels' sums' fixed point: 2^16 a unit of radiance - a hit's term is at most kMaxRadiance (1024) x a weight at most
+/// 1, so a pixel holds 64 such terms in 32 bits, and past them (or a miss's unbounded environment) the word SATURATES at
+/// 65536, counted (escapeSaturated; the one read's F11); its quantum 1.5e-5 is far under one code at any exposure.
 constexpr float kEscapeFixedScale = 65536.0f;
 /// The lists' first sizes: the blended pass's a quarter of the target's pixels, the refractives' 64k records.
 constexpr unsigned kEscapeMinRecords = 65536u;
@@ -12244,6 +12246,7 @@ void RayQueryTier::glassEscapeStatsInto(const OgreScene *scene, RayQueryStatus &
         st.escapeSky += ev.counts[5];
         st.escapeBack += ev.counts[6];
         st.escapeNoSample += ev.counts[7];
+        st.escapeSaturated += ev.counts[8];
     }
 }
 

@@ -5577,6 +5577,9 @@ struct RayQueryStatus {
     unsigned long long escapeSky = 0;
     unsigned long long escapeBack = 0;
     unsigned long long escapeNoSample = 0;
+    /// ...and the records whose add SATURATED a pixel's fixed-point word (its top, 65536 a channel: the one read's F11 -
+    /// a sum that once wrapped silently; 0 expected outside a sun's glint).
+    unsigned long long escapeSaturated = 0;
     /// THE PANE LIST'S OVERFLOW (the one read's F4): the reading rays (a gather's, a reflection's, a card's, the voxel
     /// sides', the escape's) that met more panes than they list (jah_rq_alpha.glsl kJahPanesMax, the nearest kept): the
     /// rest are applied - their transmittance multiplied, their own light left out. Cumulative over the tier's life (every
