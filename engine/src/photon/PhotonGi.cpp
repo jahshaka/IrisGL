@@ -8761,6 +8761,16 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames, view.readerActive);
     }
     mSurfaceCache->takeDemand(mCardSlots, view);
+    // THE TEST DOOR cards.force (+): a card held resident ARRIVES WHATEVER ITS DEMAND (SurfaceCache::refreshResidency) -
+    // so its node is offered as a candidate though no reader marked it (it was offered only once something read it:
+    // a face nothing reads could not be held in, PHOTON-7 10-3 R12's gi.card_truth patch)
+    if (view.forcedCardMode > 0) {
+        const size_t fs = mScene.itemSlotOfNode(view.forcedCardNode);
+        if (fs != size_t(-1)) {
+            const auto at = std::lower_bound(mCardSlots.begin(), mCardSlots.end(), uint32_t(fs));
+            if (at == mCardSlots.end() || *at != uint32_t(fs)) mCardSlots.insert(at, uint32_t(fs));
+        }
+    }
     mScene.cardCandidates(mCardSlots, view);
     // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {

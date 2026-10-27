@@ -4784,6 +4784,11 @@ public:
     void cardSceneFacts(CardSceneView &view) const;
     /// Fills view.candidates with the slots asked for that can hold cards, and view.itemSlots (PHOTON-7 stage 5, 5-2).
     void cardCandidates(const std::vector<uint32_t> &slots, CardSceneView &view);
+    /// A node's place in mItemNodes (npos: no node, or no Item) - the test door cards.force's offer (PhotonGi).
+    size_t itemSlotOfNode(NodeId id) const {
+        const auto it = mNodes.find(id);
+        return it == mNodes.end() ? size_t(-1) : it->second.itemSlot;
+    }
     bool readCardTexel(NodeId node, unsigned card, float u, float v, CardSample &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = readCardTexel(node, card, u, v, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::readCardTexel"); return mPhoton.readCardTexel(node, card, u, v, out); }
