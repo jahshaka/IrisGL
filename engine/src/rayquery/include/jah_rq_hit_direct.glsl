@@ -25,7 +25,9 @@
 // THE TABLE (RayQueryTier::updateHitTable), read through its device address JAH_HIT_TABLE (a uvec2;
 // zero = no table: the hit reads the store whole): u[0] = the lights, u[1] = the material rows,
 // u[2] = the first light's word, u[3] = the first row's word, u[4] = the first word of the metal's lobe
-// integrals (METAL-BOUNCE-1: photon/voxel/PhotonSpecularAlbedo.h's table, its floats' bits). A light is
+// integrals (METAL-BOUNCE-1: photon/voxel/PhotonSpecularAlbedo.h's table, its floats' bits), u[5] = the first
+// word of THE EMITTER TABLE and u[6] = its targets (PHOTON-7 stage 11, 11-1a: 8 words each - the world bounding
+// sphere's centre and radius, the row's emissive radiance and the slot; RayQueryTier::updateEmitterTable). A light is
 // 32 words (eight vec4):
 //   0 position (directional: the direction TOWARDS the light), w = the type (0 directional,
 //     1 point, 2 spot, 5 area); 1 the diffuse colour x power, w = the range (0: none);
@@ -362,7 +364,19 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 			jahSpecularAlbedo( clamp( dot( N, L ), 0.0, 1.0 ), roughness, sa, sb );
 			spec += ( cosL * atten * vis * 0.318309886 ) * v1.xyz * ( metal.xyz * sa + metal.w * sb );
 #else
-			spec += ( cosL * atten * vis ) * v1.xyz * jahSpecularLobe( N, L, V, roughness, metal.xyz, metal.w );
+			// A LAMP HAS A SIZE (PHOTON-7 stage 11): a point or spot light's glint is the lobe widened by its sphere's
+			// angular size, its energy the point lobe's (JahBrdf's jahSphereLightWiden - the pixel's BRDF_Default takes the
+			// same function); a directional or area light's as before
+			float rS = roughness;
+			float sNorm = 1.0;
+			if( type == 1 || type == 2 )
+			{
+				float aW;
+				sNorm = jahSphereLightWiden( max( roughness * roughness, 0.001 ), v2.w, dist, clamp( dot( N, L ), 0.0, 1.0 ),
+											 aW );
+				rS = sqrt( aW );
+			}
+			spec += ( cosL * atten * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, L, V, rS, metal.xyz, metal.w );
 #endif
 		}
 	}

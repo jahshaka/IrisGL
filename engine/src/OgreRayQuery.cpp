@@ -262,13 +262,16 @@ constexpr unsigned kReflectRestSequence = 0x10000u;
 /// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two.
 constexpr unsigned kReflectRestRaysCap = 64u;
 constexpr unsigned kReflectRestTailDivisor = 8u;
+/// THE STOP'S FRAMES (jah_reflect_rest.glsl kReflectStopFrames): a texel stops after its standard error stayed within its
+/// share this many frames - the rest bound's last term (PHOTON-7 11-1c).
+constexpr unsigned kReflectStopFrames = 8u;
 /// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
 /// the view's rest whole.
 constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 55u;
+constexpr unsigned kReflectBindings = 56u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -349,12 +352,19 @@ constexpr unsigned kReflectMovingSeBinding = kReflectCompactBinding + 1u;
 /// ...and THE DIRECT TERM's BACK side per cascade (54, PHOTON-7 stage 7: the direct store holds the two sides, and the
 /// hit's share and its mover gate read their mean - jah_rq_hit.glsl; moved past stage 6's bindings at the merge).
 constexpr unsigned kReflectDirectBackBinding = kReflectMovingSeBinding + 1u;
-static_assert(kReflectBindings == kReflectDirectBackBinding + 1u,
-              "the direct term's back side is the reflection set's last binding");
+/// ...and THE SAMPLE's NEE PART (55, PHOTON-7 stage 11, 11-1b): the next-event estimate inside this frame's sample, which
+/// the resolve keeps apart from the BRDF part its density ratio reweights (rq_reflect_resolve.comp).
+constexpr unsigned kReflectNeeBinding = kReflectDirectBackBinding + 1u;
+static_assert(kReflectBindings == kReflectNeeBinding + 1u, "the sample's NEE part is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
 constexpr unsigned kReflectCompactTexels = 16384u;
+/// THE HIT LIST'S BUFFER LAYOUT (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords, 800.Atom_piece_ps.any's read):
+/// twelve counter words (PHOTON-7 11-1b/c added four: the rest bound's two, the NEE's two), then eight words a record.
+constexpr uint32_t kHitCounterWords = 12u;
+constexpr uint32_t kHitCounterBytes = kHitCounterWords * 4u;
+constexpr uint32_t kHitAuxWords = 8u;
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
@@ -596,6 +606,15 @@ private:
         uint32_t hitSlotUntil[kFramesInFlight] = {};
         int hitSlot = -1;
         std::vector<uint32_t> hitWords, hitScratch;
+        /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a; updateEmitterTable): the reflection's NEE targets, a section of
+        /// the hit table (its u[5] / u[6]). `emitterWords` the section as last derived (kEmitterWords a target, ordered
+        /// by slot); the inputs it was derived from (the GPU scene's writes, slot count and mesh set, the rows' serial,
+        /// the material edits, the tier's cap) - re-derived only when one of them moved; `emitterSetKey` the SET's
+        /// words (slot + radiance, never the bounds: a move is no new set) and its serial.
+        std::vector<uint32_t> emitterWords, emitterSetKey;
+        unsigned long long emitterWrites = ~0ull, emitterRows = ~0ull, emitterEdits = ~0ull, emitterMeshes = ~0ull;
+        uint32_t emitterSlotCount = ~0u, emitterCap = ~0u;
+        bool emitterDirty = true;   ///< the section changed since the hit table last took it
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
@@ -880,6 +899,11 @@ private:
         fold(gs.slotCount());
         fold(gs.meshSetSerial());
         fold(sa.skinUse.size());
+        // (NOT the emitter table's set serial, PHOTON-7 11-1a: every change of the SET is already here - an emissive
+        // edit the material edits, a row the rows' serial, a slot born or dead the slot count. The serial alone moves
+        // a frame later where a slot's material word arrives after its row, and a rest restarted there for a change
+        // of the NEE's sampling distribution alone, which biases nothing: each sample of the rest is unbiased under
+        // either table. Measured: the fold restarted the selftest's fixture B rest once, 65 -> 75 frames.)
         return key;
     }
     /// THE REFIT, off by default. A full TLAS rebuild is NVIDIA's own recommendation
@@ -1079,6 +1103,8 @@ private:
         /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): one image (not a pair — written and read within the frame), the
         /// temporal pass' neighbourhood and blend input. 8 bytes a trace texel.
         ReflectImage sample;
+        /// ...and ITS NEE PART (PHOTON-7 11-1b, binding 55): the same size and format; the resolve's.
+        ReflectImage nee;
         /// THE REST'S REFERENCE (R1 (f)'s arm "reflect.restReference"): rgba32f, the texel's raw rest samples' mean and
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
@@ -1237,6 +1263,7 @@ private:
     /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots (the masks: the GPU scene's table).
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
+    void updateEmitterTable(OgreScene *scene, SceneAs &sa);
     void updateHitTable(OgreScene *scene, SceneAs &sa);
 public:
     /// The table's address a job hands its shader (0: none - the hit reads the store whole).
@@ -1659,6 +1686,12 @@ private:
         uint32_t restCapped = 0u;
         /// ...and its BATCHING texels (counter word 4: the rest's tail budget, kReflectRestRaysCap's note).
         uint32_t restBatching = 0u;
+        /// THE NEE's CONE HIT RATE (PHOTON-7 11-1b, counter words 10-11; the lead's condition): the NEE rays and those
+        /// whose first hit was the target drawn, summed over every retired frame read.
+        unsigned long long neeRays = 0ull, neeHits = 0ull;
+        /// THE REST'S BOUND's words (PHOTON-7 11-1c, counter words 8-9: filled at rest frame 2N, held after it) as the
+        /// newest retired frame that carried them read them, with that frame's rest tag.
+        uint32_t boundOwed = 0u, boundNeedMax = 0u, boundTag = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -4533,6 +4566,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // gate: a mask that became ready, or a slot's near level the ray rule moved,
     // changes it with nothing else moving.
     updateAlphaTable(scene, sa);
+    updateEmitterTable(scene, sa);
     updateHitTable(scene, sa);
     // A COMPACTION OWED, from its own list (decision 14.4: this was a walk of every structure every
     // frame, an idle one included).
@@ -5730,6 +5764,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 52 the rest's compact list
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 53 the moving SE instrument
         kHitSetSlot,                                     // 54 (the hit set) voxelDirectBack[] (PHOTON-7 stage 7)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 55 the sample's NEE part (PHOTON-7 stage 11, 11-1b)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -5910,6 +5945,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         retireImage(rv.state[i]);
     }
     retireImage(rv.sample);
+    retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
     rv.imagesReady = false;
@@ -5928,6 +5964,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
         if (!makeStorageImage(w, h, formats[1], rv.state[i], err, layers)) return false;
     }
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
+    if (!makeStorageImage(w, h, formats[0], rv.nee, err, layers)) return false;
     if (!makeStorageImage(w, h, VK_FORMAT_R32_UINT, rv.share, err, layers)) return false;   // the stop share: a float's bits, atomic min
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
     if (!makeStorageImage(reference ? w : 1u, reference ? h : 1u, VK_FORMAT_R32G32B32A32_SFLOAT, rv.reference, err,
@@ -5951,10 +5988,10 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // clear waits for those stages and makes their writes available before it writes;
     // a freshly made image has no earlier access and the same barrier costs it nothing.
     // The old contents are discarded (UNDEFINED): they are cleared.
-    constexpr int kImages = 7;
+    constexpr int kImages = 8;
     VkImageMemoryBarrier toGeneral[kImages] = {};
     ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference,
-                                    &rv.share };
+                                    &rv.share, &rv.nee };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -5999,6 +6036,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     }
     for (int i = 0; i < 2; ++i) { retireImage(rv.hist[i]); retireImage(rv.state[i]); }
     retireImage(rv.sample);
+    retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
     retire(rv.compactList);
@@ -6062,6 +6100,21 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
             if (tag && (tag >> 20u) == (rv.restSession & 0xFFFu) && (tag & 0xFFFFFu) > rv.restMoverFrame) {
                 st.reflectRestActive = int(h->second.restActive);
                 st.reflectRestCapped = int(h->second.restCapped);
+            }
+        }
+        if (const auto h = mHits.find(kv.first); h != mHits.end()) {
+            st.reflectNeeRays += h->second.neeRays;
+            st.reflectNeeHits += h->second.neeHits;
+            // THE REST'S BOUND (PHOTON-7 stage 11, 11-1c): the samples the texels converging at rest frame 2N still owe,
+            // over the tail's rays a frame (the rest's count / kReflectRestTailDivisor), past 2N, plus the stop's frames
+            const uint32_t tag = h->second.boundTag;
+            if (rv.restFrames > 0u && tag && (tag >> 20u) == (rv.restSession & 0xFFFu)) {
+                const unsigned long long tail =
+                    std::max<unsigned long long>(rv.restRayCount / kReflectRestTailDivisor, 1ull);
+                st.reflectRestBoundOwed = h->second.boundOwed;
+                st.reflectRestNeedMax = h->second.boundNeedMax;
+                st.reflectRestBound = int(2u * rv.restN + unsigned((h->second.boundOwed + tail - 1ull) / tail) +
+                                          kReflectStopFrames);
             }
         }
     }
@@ -6375,6 +6428,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                  : 0.0f,
         cam->getFarClipDistance());
     pp.knobs[2] = float(rv.frame & 0xFFFFu);
+    // THE NEE (PHOTON-7 11-1b): 1 = next-event estimation toward the emitter table with the BRDF draw by the balance
+    // heuristic; the arm "reflect.nee" 0 = the BRDF-only estimator (the acceptance's reference)
+    pp.knobs[3] = arm(ArmId::ReflectNee, true) ? 1.0f : 0.0f;
     // THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): the screen trace (its march: the chain's length, thickness, steps
     // and phase rule - the raster march's own numbers, PostFxDesc::ssr*), the screen alone, and the FAR COPIES' query
     // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
@@ -6603,7 +6659,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const auto foldF = [&](float v) { foldBytes(&v, sizeof(v)); };
         fold4(pp.projParams);
         fold4(pp.resolution);
-        foldF(pp.knobs[0]); foldF(pp.knobs[1]);
+        foldF(pp.knobs[0]); foldF(pp.knobs[1]); foldF(pp.knobs[3]);
         foldF(pp.knobs2[1]); foldF(pp.knobs2[3]);
         fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
         foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
@@ -6834,6 +6890,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!sampleImg.imageView) { bail("the sample view is null"); return; }
     w[kReflectSampleBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectSampleBinding].pImageInfo = &sampleImg;
+    // ...AND ITS NEE PART (55, PHOTON-7 11-1b).
+    VkDescriptorImageInfo neeImg{};
+    neeImg.imageView = rv.nee.view;
+    neeImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!neeImg.imageView) { bail("the NEE part's view is null"); return; }
+    w[kReflectNeeBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectNeeBinding].pImageInfo = &neeImg;
     // THE REST'S REFERENCE (46, R1 (f)).
     VkDescriptorImageInfo referenceImg{};
     referenceImg.imageView = rv.reference.view;
@@ -7228,7 +7291,8 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 
 /// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
 /// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's, u[4] = the first
-/// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable); a light is
+/// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable), u[5] / u[6] the emitter
+/// table's first word and targets (PHOTON-7 11-1a, updateEmitterTable); a light is
 /// kHitLightWords words (eight vec4, PhotonVoxelLighting::addLight's packing in WORLD space), a
 /// row PhotonVoxelMaterial::kRowWords. THE LIGHTS are the scene's one light list
 /// (SceneLightList), EVERY visible light with the injection's mask and NO budget (the lead's
@@ -7242,7 +7306,117 @@ bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
 /// tlasIn pattern): a sun the day cycle moves re-writes a slot, never re-makes the buffer.
 namespace {
 constexpr unsigned kHitLightWords = 32u;
+/// The header's words: u[0..4] above, u[5] = the first word of the EMITTER TABLE, u[6] = its targets (PHOTON-7 11-1a).
+constexpr uint32_t kHitHeaderWords = 7u;
+/// AN EMITTER TARGET (PHOTON-7 stage 11, 11-1a; jah_rq_emitters.glsl reads it): the world bounding sphere's centre
+/// and radius (vec4), the row's emissive radiance (xyz) and the instance's SLOT (w, its bits).
+constexpr uint32_t kEmitterWords = 8u;
 }   // namespace
+
+/// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the instances the reflection's next-event estimation aims at. An
+/// emitter is a TRACED instance (kGpuRayTraced: what a ray can hit) whose material row (GpuInstance::ids.y, the
+/// voxeliser's row - the same E a ray hit adds, unclamped fp32) emits: any channel of its emissive above zero. A light
+/// is a light at any radiance: the floor is zero, and the tier's CAP (GiQualityFacts::reflectEmitters, a count)
+/// keeps the brightest by POWER - the radiance's largest channel x the bounding sphere's cross-section pi r^2, the
+/// measure the cone strategy samples by - the rest counted (reflectEmittersOver), never silent. A target is the world
+/// bounding sphere of the instance's world box (the cone the NEE ray is drawn in: any emitter shape, the sample's pdf
+/// exact from the table alone) and the row's radiance (the pick's weight; the E a ray takes is the hit's own row and map).
+/// ORDERED BY SLOT (never by a container's or a pointer's order: a run repeats). The SET's serial (slots and radiance -
+/// never the bounds: a moving emitter is a mover, which the rest follows per texel) is published; it is NOT in the rest
+/// key, whose material edits, rows and slot count already carry every change of the set (reflectRestKey says why).
+/// Re-derived only when its inputs moved (the GPU scene's writes, its slot count and mesh set, the rows, the edits,
+/// the cap); the hit table re-writes only when the section's words changed.
+void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
+    const detail::GpuScene &gs = scene->gpuScene();
+    const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
+    const unsigned long long writes = gs.writes();
+    const unsigned long long rowsSerial = store ? store->getRowsSerial() : 0ull;
+    const unsigned long long edits = scene->photon().materialEditSerial();
+    const unsigned long long meshes = gs.meshSetSerial();
+    const uint32_t slotCount = gs.live() ? gs.slotCount() : 0u;
+    const uint32_t cap = giQualityFacts(scene->giParams().quality).reflectEmitters;
+    if (writes == sa.emitterWrites && rowsSerial == sa.emitterRows && edits == sa.emitterEdits &&
+        meshes == sa.emitterMeshes && slotCount == sa.emitterSlotCount && cap == sa.emitterCap)
+        return;
+    sa.emitterWrites = writes;
+    sa.emitterRows = rowsSerial;
+    sa.emitterEdits = edits;
+    sa.emitterMeshes = meshes;
+    sa.emitterSlotCount = slotCount;
+    sa.emitterCap = cap;
+
+    struct Target { uint32_t slot = 0u; float c[3] = {}; float r = 0.0f; float L[3] = {}; double power = 0.0; };
+    std::vector<Target> all;
+    const detail::GpuInstance *m = gs.mirrorData();
+    if (m && store) {
+        const auto &rows = store->getRowWords();
+        const uint32_t nRows = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
+        for (uint32_t i = 0; i < slotCount; ++i) {
+            uint32_t f;
+            std::memcpy(&f, &m[i].boundsMax[3], sizeof(f));
+            if (!(f & detail::kGpuRayTraced)) continue;
+            const uint32_t word = m[i].ids[1];
+            if (word == detail::GpuScene::kNoMaterialWord) continue;
+            const uint32_t row = (word >> 16u) * Ogre::PhotonVoxelMaterial::kRowsPerBucket + (word & 0xFFFFu);
+            if (row >= nRows) continue;
+            Target t;
+            const uint32_t *rw = &rows[size_t(row) * Ogre::PhotonVoxelMaterial::kRowWords];
+            bool emits = false, finite = true;
+            for (int k = 0; k < 3; ++k) {
+                std::memcpy(&t.L[k], &rw[8 + k], sizeof(float));
+                finite = finite && std::isfinite(t.L[k]);
+                emits = emits || t.L[k] > 0.0f;
+            }
+            if (!emits || !finite) continue;
+            double d2 = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                const double lo = m[i].boundsMin[k], hi = m[i].boundsMax[k];
+                t.c[k] = float(0.5 * (lo + hi));
+                d2 += (hi - lo) * (hi - lo);
+            }
+            t.r = float(0.5 * std::sqrt(d2));
+            if (!std::isfinite(t.r) || !(t.r > 0.0f) || !std::isfinite(t.c[0] + t.c[1] + t.c[2])) continue;
+            t.slot = i;
+            t.power = double(std::max({ t.L[0], t.L[1], t.L[2] })) * 3.14159265358979 * double(t.r) * double(t.r);
+            all.push_back(t);
+        }
+    }
+    // THE CAP: the brightest by power (ties by slot: deterministic), then back into slot order.
+    if (all.size() > cap) {
+        std::stable_sort(all.begin(), all.end(), [](const Target &a, const Target &b) { return a.power > b.power; });
+        sa.st.reflectEmittersOver = unsigned(all.size() - cap);
+        all.resize(cap);
+        std::sort(all.begin(), all.end(), [](const Target &a, const Target &b) { return a.slot < b.slot; });
+    } else {
+        sa.st.reflectEmittersOver = 0u;
+    }
+    auto bits = [](float v) { uint32_t u; std::memcpy(&u, &v, sizeof u); return u; };
+    std::vector<uint32_t> words, setKey;
+    words.reserve(all.size() * kEmitterWords);
+    setKey.reserve(all.size() * 4u);
+    sa.st.reflectEmitterTable.clear();
+    for (const Target &t : all) {
+        const uint32_t e[kEmitterWords] = { bits(t.c[0]), bits(t.c[1]), bits(t.c[2]), bits(t.r),
+                                            bits(t.L[0]), bits(t.L[1]), bits(t.L[2]), t.slot };
+        words.insert(words.end(), e, e + kEmitterWords);
+        const uint32_t k[4] = { t.slot, bits(t.L[0]), bits(t.L[1]), bits(t.L[2]) };
+        setKey.insert(setKey.end(), k, k + 4);
+        RayQueryStatus::ReflectEmitter pub;
+        pub.slot = t.slot;
+        for (int c = 0; c < 3; ++c) { pub.centre[c] = t.c[c]; pub.radiance[c] = t.L[c]; }
+        pub.radius = t.r;
+        sa.st.reflectEmitterTable.push_back(pub);
+    }
+    sa.st.reflectEmitters = int(all.size());
+    if (setKey != sa.emitterSetKey) {
+        sa.emitterSetKey.swap(setKey);
+        ++sa.st.reflectEmitterSetSerial;
+    }
+    if (words != sa.emitterWords) {
+        sa.emitterWords.swap(words);
+        sa.emitterDirty = true;
+    }
+}
 
 void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     // RE-WRITTEN ONLY WHEN ITS INPUTS MOVED (ENGINE-UPGRADE-U5 stage 3; it was re-derived every frame):
@@ -7261,7 +7435,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         const unsigned long long rows = storeGate ? storeGate->getRowsSerial() : 0ull;
         const unsigned long long edits = scene->photon().materialEditSerial();
         if (sa.hitTableAddress && lights == sa.hitLightSerial && removed == sa.hitLightsRemoved &&
-            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial) {
+            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial && !sa.emitterDirty) {
             if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = frameNow();
             return;
         }
@@ -7269,9 +7443,10 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         sa.hitLightsRemoved = removed;
         sa.hitRowsSerial = rows;
         sa.hitMaterialSerial = edits;
+        sa.emitterDirty = false;
     }
     std::vector<uint32_t> &w = sa.hitScratch;
-    w.assign(5u, 0u);
+    w.assign(kHitHeaderWords, 0u);
     const SurfaceCache *cardCache = scene->photon().surfaceCache();
     const Ogre::Light *cardSun = cardCache ? cardCache->readersSun() : nullptr;
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
@@ -7344,11 +7519,16 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     // shaded by the directional albedo the injection takes (jah_rq_hit_direct.glsl), from the same floats.
     const uint32_t specWords = uint32_t(w.size());
     for (float f : Ogre::PhotonSpecularAlbedo::kTable) w.push_back(bits(f));
+    // THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the reflection's NEE targets, as updateEmitterTable derived them.
+    const uint32_t emitterWords = uint32_t(w.size());
+    w.insert(w.end(), sa.emitterWords.begin(), sa.emitterWords.end());
     w[0] = nLights;
     w[1] = nRows;
-    w[2] = 5u;
+    w[2] = kHitHeaderWords;
     w[3] = lightWords;
     w[4] = specWords;
+    w[5] = emitterWords;
+    w[6] = uint32_t(sa.emitterWords.size() / kEmitterWords);
     const uint32_t nowFrame = frameNow();
     if (w == sa.hitWords && sa.hitTableAddress) {
         if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;
@@ -10777,7 +10957,10 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         HitView::Pending &pd = hv.pending[i];
         if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
         const uint32_t *w = reinterpret_cast<const uint32_t *>(
-            static_cast<const unsigned char *>(hv.readback.mapped) + i * 32u);
+            static_cast<const unsigned char *>(hv.readback.mapped) + i * kHitCounterBytes);
+        // (every retired frame's NEE counts, the newest or not: a sum)
+        hv.neeRays += w[10];
+        hv.neeHits += w[11];
         // EVERY retired frame's overflow, the newest or not (kHitListWidth's law: the list grows to hold it)
         if (w[0] > pd.listRecords) hv.overflowDemand = std::max<unsigned long long>(hv.overflowDemand, w[0]);
         if (!any || int32_t(pd.frame - newest) > 0) {
@@ -10788,6 +10971,11 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.restCapped = w[3];
             hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
+            if (w[9] > 0u && pd.restTag != 0u) {
+                hv.boundOwed = w[8];
+                hv.boundNeedMax = w[9];
+                hv.boundTag = pd.restTag;
+            }
             newest = pd.frame;
             any = true;
         }
@@ -10834,11 +11022,12 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
     if (!instances) return false;
     Ogre::VaoManager *vao = mRs->getVaoManager();
-    // THE LIST'S BUFFER, sized to the list: the eight counter words, then six per
-    // record (jah_rq_hit_record.glsl kJahHitAuxWords: a blended run record's screen share is words 4-5). Re-made when the list grows (Ogre's destroy is delayed past every
+    // THE LIST'S BUFFER, sized to the list: the twelve counter words, then eight per
+    // record (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords: a blended run record's screen share is words 4-5,
+    // the NEE delta 6-7). Re-made when the list grows (Ogre's destroy is delayed past every
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
-        const size_t words = 8u + 6u * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
+        const size_t words = kHitCounterWords + kHitAuxWords * size_t(hv.ids->getWidth()) * hv.ids->getHeight();
         // (the list only grows: OgreView::sizeHitList re-makes it in place, larger)
         if (hv.buf && hv.buf->getNumElements() != words) {
             vao->destroyUavBuffer(hv.buf);
@@ -10848,7 +11037,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     }
     std::string err;
     if (!hv.readback.buffer &&
-        !makeBuffer(VkDeviceSize(kFramesInFlight) * 32u, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
+        !makeBuffer(VkDeviceSize(kFramesInFlight) * kHitCounterBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false,
                     hv.readback, err))
         return false;
     hv.capacity = hv.ids->getWidth() * hv.ids->getHeight();
@@ -10886,7 +11075,10 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
                              &b, 0, nullptr, 0, nullptr);
+        // (every counter word but the rest bound's two, 8-9: the trace zeroes them up to the rest's 2N and they hold
+        // the temporal pass' figures after it - PHOTON-7 11-1c)
         vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset, 32u, 0u);
+        vkCmdFillBuffer(cmd, bufInfo.buffer, bufInfo.offset + 40u, kHitCounterBytes - 40u, 0u);
         b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
@@ -11398,11 +11590,11 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
         VkBufferCopy region{};
         region.srcOffset = bufInfo.offset;
-        region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * 32u;
+        region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * kHitCounterBytes;
         // appended, dropped, the reflection's active resting texels, its CAPPED texels (word 3: the copy stopped at 12
-        // bytes, so RayQueryStatus::reflectRestCapped read a word no frame wrote - 0 - until PHOTON-7 stage 6) and its
-        // batching texels
-        region.size = 20u;
+        // bytes, so RayQueryStatus::reflectRestCapped read a word no frame wrote - 0 - until PHOTON-7 stage 6), its
+        // batching texels, ... and (PHOTON-7 11-1b/c) the rest bound's two and the NEE's two: every counter word
+        region.size = kHitCounterBytes;
         vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 1, &region);
         VkMemoryBarrier h{};
         h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;

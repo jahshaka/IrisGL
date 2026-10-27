@@ -466,7 +466,7 @@
 			bool atomOk = atomIds.x != 0xFFFFFFFFu && atomListIdx < inAtom.hitCount;
 			// The record's aux words, CLAMPED into the buffer (a lane past the count
 			// - a helper lane - still loads).
-			uint atomAuxAt = min( 8u + 6u * atomListIdx, max( uint( atomHitBuf.length() ), 8u ) - 6u );
+			uint atomAuxAt = min( 12u + 8u * atomListIdx, max( uint( atomHitBuf.length() ), 12u ) - 8u );
 			float2 atomAux = unpackHalf2x16( atomHitBuf[atomAuxAt] );
 		@else
 			uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;

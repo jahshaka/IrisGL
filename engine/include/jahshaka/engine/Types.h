@@ -3120,6 +3120,12 @@ struct GiQualityFacts {
     /// rest converges in about (2N + its measured samples) / k + 8 frames, then holds. 4 where the rays are the
     /// reflection (the preflight's simulated stop: ~100 frames on photon-glass against the deleted K_max's 513), 1 else.
     unsigned reflectRestRays = 1u;
+    /// THE EMITTER TABLE'S CAP (PHOTON-7 stage 11, 11-1a/d): at most this many emissive traced instances are the
+    /// reflection's NEE targets (the brightest by power, the bounding sphere's cross-section x its radiance; the rest
+    /// stay the BRDF sample's alone and are counted as RayQueryStatus::reflectEmittersOver, never silently). A
+    /// count, not milliseconds (L7): each NEE sample's pick walks the table once. 0 where the rays are not the
+    /// reflection.
+    unsigned reflectEmitters = 0u;
     /// THE IRRADIANCE FIELD, what `GiParams::ddgi`'s Auto resolves to: ON at every
     /// quality (owner option (b), 2026-09-09 — the field is the one diffuse arm
     /// that is right in open and sealed scenes alike). The Studio tier table's
@@ -3247,6 +3253,13 @@ inline GiQualityFacts giQualityFacts(GiQuality quality,
         f.rayReflections = true;        // no probe grid where the machine traces (F12-PCC)
         f.reflectTrace = quality == GiQuality::Epic ? 2 : 1;   // the SSR row's High/Epic columns
         f.reflectRestRays = 4u;
+        // THE EMITTER CAP (PHOTON-7 11-1d), MEASURED on two scenes (spikes/photon-7/stage11/11-1d): Bistro Exterior's table
+        // holds 59 emissive traced instances, Bistro Interior's 18 - 64 keeps every one of both (none over). Its price:
+        // each NEE sample walks the table three times (W, the pick, p_l of the drawn direction); at 59 targets the
+        // trace moved 0.230 -> 0.251 ms (1080p Epic, ABBA, Bistro Exterior's walk). Past 64 the dimmest by power are
+        // counted over (reflectEmittersOver) and stay the BRDF's alone - many emitters is the many-lights problem whose
+        // general answer (reservoirs) is out of this stage.
+        f.reflectEmitters = 64u;
         f.probeGridBudgetBytes = quality == GiQuality::Epic ? (1024ull << 20) : (512ull << 20);
         break;
     default:   // Medium: the same reach as High, at its own resolution
@@ -5542,6 +5555,33 @@ struct RayQueryStatus {
     /// The hit table's ring buffers made, ever (decision 16.2: a written-every-frame table re-makes none
     /// once its three slots exist).
     unsigned long long hitTableBuffers = 0ull;
+    /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a: the reflection's NEE targets, published in the hit table): the
+    /// emissive traced instances it holds (-1: no table made yet), those left out by the tier's cap
+    /// (GiQualityFacts::reflectEmitters), the serial of its SET (moves when an emitter enters, leaves or changes its
+    /// radiance - never on a move), and the table itself as uploaded, ordered by slot: the slot, the world bounding
+    /// sphere (the instance's world box's) and the row's emissive radiance.
+    int reflectEmitters = -1;
+    unsigned reflectEmittersOver = 0u;
+    unsigned long long reflectEmitterSetSerial = 0ull;
+    struct ReflectEmitter {
+        unsigned slot = 0u;
+        float centre[3] = {};
+        float radius = 0.0f;
+        float radiance[3] = {};
+    };
+    std::vector<ReflectEmitter> reflectEmitterTable;
+    /// THE NEE's CONE HIT RATE (PHOTON-7 stage 11, 11-1b; the lead's condition on the cone strategy): the reflection's NEE
+    /// rays and those whose first hit was the target drawn, summed over the views' retired frames (read several frames
+    /// late). Their ratio is the cone's efficiency (a thin or edge-on emitter's falls; under ~25 % its cone is owed the
+    /// instance's oriented box).
+    unsigned long long reflectNeeRays = 0ull, reflectNeeHits = 0ull;
+    /// THE REFLECTION'S REST BOUND (PHOTON-7 stage 11, 11-1c): at rest frame 2N (the hand-over done) every texel still
+    /// converging owes v_need - v samples, v_need = v ( e / share )^2 (its standard error e over v samples, the stop's bar
+    /// its share); `reflectRestBoundOwed` their sum, `reflectRestNeedMax` the largest v_need (over 65,535 PREDICTS a capped
+    /// texel), and `reflectRestBound` the rest frame the hold is bound by: 2N + ceil( owed / the tail's rays a frame ) +
+    /// the stop's 8 frames. -1 / 0 until this rest's 2N has been read back.
+    int reflectRestBound = -1;
+    unsigned reflectRestBoundOwed = 0u, reflectRestNeedMax = 0u;
     /// True when the last top-level update was a REFIT rather than a full
     /// rebuild. The default is a rebuild (NVIDIA's own guidance for a TLAS;
     /// 0.5 ms at 8k instances buys the better tree); the refit is the

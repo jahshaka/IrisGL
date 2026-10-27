@@ -1539,6 +1539,11 @@ constexpr ArmDef kArms[] = {
       "bounce cone); a glossier reflector takes the metal hit like any other hit - its card, else the "
       "store with the hit's direct light (it blurs the reflection anyway). 0 = never decoded, 1 = always "
       "(the full-decode reference)." },
+    { ArmId::ReflectNee, 1.0, 0.0, 1.0,
+      "THE REFLECTION'S NEXT-EVENT ESTIMATION (PHOTON-7 stage 11, 11-1b): 1 = every VNDF draw of a texel an emitter of "
+      "the table reaches is paired with ONE ray drawn in an emitter's bounding-sphere cone, the two combined by the "
+      "balance heuristic (unbiased: each strategy takes the first hit's emission); 0 = the BRDF-only estimator, the "
+      "acceptance's reference. Shipped 1." },
     { ArmId::GiHitDirect, 1.0, 0.0, 1.0,
       "THE HIT'S DIRECT LIGHT AT THE HIT (FAR-SUN-2, jah_rq_hit_direct.glsl): a voxel-answered gather or "
       "reflection hit sums every light's direct term at the hit (its material, its normal, its own shadow "
