@@ -437,17 +437,6 @@
 @piece( JahFogInscatterFuncs )
 	#define kJahFogSamples 16
 	@property( hlms_num_shadow_map_lights && hlms_pssm_splits )
-	@property( hlms_shadow_uses_depth_texture && !exponential_shadow_maps )
-	/// ONE COMPARE TAP of a split, THROUGH A PARAMETER as getShadow takes its map: the global shadow texture used directly
-	/// in a comparison sampler's constructor is given a depth image type by glslang while getShadow's parameter keeps the
-	/// plain one, and the shader's SPIR-V then passes a mismatched argument (VUID-VkShaderModuleCreateInfo-pCode-08737:
-	/// app.engine_selftest_validation's layer; the drivers accepted it)
-	INLINE float jahFogShadowTap( @insertpiece( TEXTURE2DSHADOW ) shadowMap, @insertpiece( SamplerShadow ) float2 uv,
-								  float depth )
-	{
-		return float( OGRE_SAMPLE_SHADOW( shadowMap, shadowSampler, uv, depth ) );
-	}
-	@end
 	/// The sun's shadow at the view-space point `posVS` of the eye ray: the PSSM split holding its depth
 	float jahFogSunAt( float3 posVS )
 	{
@@ -472,7 +461,7 @@
 					const float jahDepth = posL.z;
 				@end
 				const float2 jahUv = posL.xy / posL.w;
-				float jahV = jahFogShadowTap( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) jahUv, jahDepth );
+				float jahV = float( OGRE_SAMPLE_SHADOW( hlms_shadowmap@n, shadowSampler, jahUv, jahDepth ) );
 				@property( jah_shadow_transmit )
 					jahV *= float( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahUv, 0.0 ).x );
 				@end
