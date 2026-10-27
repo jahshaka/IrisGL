@@ -1584,11 +1584,9 @@ void SceneMirror::refreshLightAggregates()
         if (!light) continue;
         // Exactly the walk's own test, in the walk's own order: a Sky Light
         // returns before the fold (it is the ambient, not a light), an Area
-        // light can never cast, and None is not a request.
+        // light can never cast (its visibility is the area job's).
         if (light->lightType == iris::LightType::Sky) continue;
         if (light->lightType == iris::LightType::Area) continue;
-        if (light->shadowMap.shadowType == iris::ShadowMapType::None)
-            continue;
         ShadowFilter f = ShadowFilter::Hard;
         if (light->shadowMap.shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
         else if (light->shadowMap.shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
@@ -5527,8 +5525,8 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     d.iesProfilePath = light->iesProfilePath.toStdString();
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
-    d.castShadows = light->lightType != iris::LightType::Area &&
-                    light->shadowMap.shadowType != iris::ShadowMapType::None;
+    // (every other light casts: no document setting lets a light through a wall - PHOTON-7 10-4 R9)
+    d.castShadows = light->lightType != iris::LightType::Area;
     // ---- THE SUN, and the secondary directionals -----------------------
     // EVERY directional casts what its own flag says (PHOTON-7 10-4 R8: a light
     // is blocked by geometry on every path). The shadow node gives the PSSM

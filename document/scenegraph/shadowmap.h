@@ -4,9 +4,11 @@
 namespace iris
 {
 
+// THE FILTER OF A LIGHT'S SHADOW - every light has one (PHOTON-7 10-4 R9; L9: a light is blocked by geometry on every
+// path). `None` ("this light casts no shadow") is DELETED: the engine traces the lamps the shadow maps do not hold, so
+// no setting lets a light through a wall. The values keep their numbers; 0 names nothing (the reader takes Soft).
 enum class ShadowMapType : int
 {
-    None = 0,
     Hard = 1,
     Soft = 2,
     VerySoft = 3
