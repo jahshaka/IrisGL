@@ -3126,13 +3126,14 @@ constexpr float kFootprintMargin = 0.05f;
 /// keeps, Types.h rayOriginLevelLift): the origin moves off the receiver along the captured surface's GEOMETRIC normal by
 /// THE CAPTURED LEVEL'S BOUND against level 0 (CardRec::levelBound, the stored bound, times the bake's drift ratio
 /// kLevelDriftOverBound: the surface the card captured lies within it of level 0, which every sun ray traces -
-/// PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus ONE TEXEL (the texel's own reconstruction: its depth and normal
-/// are a texel's average) and the Depth layer's R16F quantum at the card's far end; the shader adds the point's
-/// float bound. Derived, never a texel count: the bake picks the level for its NOMINAL 128-texel page while a split card's
-/// texel is that page's / the split (up to kCardMaxSplit 4), so a fixed "2 texels" let a convex card wider than 4 m
-/// start its sun rays inside level 0 (self-shadowed texels). The ray tier's footprint at the card that the old lift
-/// also cleared (a coarser near level re-fitted per view) is gone with the level.
-constexpr float kSunLiftTexels = 1.0f;
+/// PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus the Depth layer's R16F quantum at the card's far end; the shader adds
+/// the point's float bound. NO TEXEL TERM (PHOTON-7 10-3 R10, B1): the capture writes ONE rasterised depth at each
+/// texel's centre (JahCardCapture_piece_ps.any, outCardDepth), so a texel's point lies ON its surface - at any slant -
+/// up to that quantum; the "one texel" that stood here started every ray a coarse card's texel off its surface (13 cm
+/// on a far wall) and shortened every contact shadow by lift / tan(sun elevation). Derived, never a texel count: the
+/// bake picks the level for its NOMINAL 128-texel page while a split card's texel is that page's / the split (up to
+/// kCardMaxSplit 4), so a fixed "2 texels" let a convex card wider than 4 m start its sun rays inside level 0
+/// (self-shadowed texels) - the level's bound is what clears that.
 /// A ray's length: the sun is at infinity; a mover beyond the residency radius
 /// casts onto no resident card anyway.
 constexpr float kMoverRayRange = 10000.0f;
@@ -3359,10 +3360,9 @@ const Ogre::Light *SurfaceCache::cardSun() const {
 }
 
 float SurfaceCache::sunLiftOf(const CardRec &c) const {
-    const float texel = 2.0f * std::max(c.halfU, c.halfV) / float(std::max(1u, c.size));
     // R16F keeps 11 bits: the depth quantum at the card's far end.
     const float depthQuantum = (2.0f * c.halfDepth + 2.0f * captureMargin(c.halfDepth)) / 1024.0f;
-    return rayOriginLevelLift(c.levelBound) + kSunLiftTexels * texel + depthQuantum;
+    return rayOriginLevelLift(c.levelBound) + depthQuantum;
 }
 
 void SurfaceCache::traceSun() {

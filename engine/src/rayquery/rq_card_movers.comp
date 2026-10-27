@@ -48,8 +48,8 @@
 // (the card's Depth layer, jah_geometric_normal.glsl: the Normal layer is the shaded
 // one, and a lift along a tilted shading normal clears the surface by cos(tilt) of
 // itself) by the point's float bound plus the record's lift (rect.w,
-// OgreSurfaceCache.cpp sunLiftOf: the texel's own reconstruction - one card texel
-// and the depth layer's quantum - plus the captured level's bound against level 0,
+// OgreSurfaceCache.cpp sunLiftOf: the depth layer's quantum - a texel's point lies on
+// its surface, PHOTON-7 10-3 R10 - plus the captured level's bound against level 0,
 // the near copy traced, times the bake's drift ratio), tMin zero. The movers' mode
 // lifts nothing: a receiver is never a mover (movers carry no cards). THE LAMPS' MODE TAKES THE SAME LAW (the merge's
 // one form, PHOTON-7 stage 6 into 7): the same lift along the same geometric normal, and each ray - a lamp's point or

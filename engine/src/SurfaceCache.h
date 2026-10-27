@@ -749,7 +749,7 @@ private:
     /// their sun-projected footprints reach) — records both traces and hands the
     /// traced and the retired cards to the relight.
     void traceSun();
-    /// The still trace's lift for `card` (kSunLiftTexels; CardSample::sunLift).
+    /// The still trace's lift for `card`: its level's bound + its depth quantum (CardSample::sunLift).
     float sunLiftOf(const CardRec &card) const;
     /// The first visible shadow-casting directional light of the scene's one light
     /// list (SceneLightList.h; the relight's sun, the traces' direction), or null.
