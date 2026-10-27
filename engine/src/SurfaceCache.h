@@ -730,6 +730,8 @@ private:
     /// size can hold is emptied into them (each moved card re-captured where it lands), so a set whose page demand fits
     /// fits. False when no page can be freed that way.
     bool compactOnePage(std::vector<std::vector<CardRec>> &cards, unsigned long long roots);
+    /// Can an arrival be given room this frame without an eviction (a free slot, or a page compaction could empty)?
+    bool atlasHasRoom() const;
     /// The demand read-back: issued every kDemandReadEvery frames, taken a fixed lag later; and the head (the frame's
     /// stamp, the count arm) uploaded every frame.
     void issueDemandRead();

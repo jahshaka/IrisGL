@@ -904,6 +904,27 @@ void SurfaceCache::layoutCards(const CardSceneView::Candidate &cand, std::vector
     }
 }
 
+bool SurfaceCache::atlasHasRoom() const {
+    // A free page, a sub-cut page with a free slot, or a sub-cut page the others cutting its size could take whole
+    // (compactOnePage's own test): the room an arrival could be given this frame without an eviction.
+    unsigned freeBySize[kCardPageSize + 1u] = {};
+    for (size_t q = 0; q < mPageOwner.size(); ++q) {
+        if (mPageOwner[q] == 0u) return true;
+        if (mPageOwner[q] != 2u) continue;
+        const unsigned size = mPageSubSize[q];
+        const unsigned slots = (kCardPageSize / size) * (kCardPageSize / size);
+        if (mPageSubUsed[q] < slots) return true;
+        freeBySize[size] += slots - mPageSubUsed[q];
+    }
+    for (size_t p = 0; p < mPageOwner.size(); ++p) {
+        if (mPageOwner[p] != 2u) continue;
+        const unsigned size = mPageSubSize[p];
+        const unsigned slots = (kCardPageSize / size) * (kCardPageSize / size);
+        if (freeBySize[size] - (slots - mPageSubUsed[p]) >= mPageSubUsed[p]) return true;
+    }
+    return false;
+}
+
 bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsigned long long roots) {
     const unsigned perSide = kCardAtlasSize / kCardPageSize;
     // THE PAGE TO EMPTY: the sub-cut page with the fewest cards whose cards the OTHER pages cutting its size have free
@@ -1275,10 +1296,48 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         float size = 0.0f;
         bool persistent = false;   // marked in two read-backs within its reader's window (or a moved card's own)
     };
+    // 4. THE EVICTABLE: resident cards no reader read for a window, least recently read first, then the smallest on
+    //    screen, the node, the index.
+    struct Evictable {
+        size_t inst = 0, pos = 0;
+        unsigned long long read = 0ull;
+        float size = 0.0f;
+        NodeId node = 0;
+        unsigned index = 0u;
+    };
+    std::vector<Evictable> evictable;
+    for (size_t i = 0; i < per.size(); ++i)
+        for (size_t k = 0; k < per[i].size(); ++k) {
+            const CardRec &c = per[i][k];
+            // FRESH FOR A WINDOW of a reader's clock after that reader's last read, or of the newest clock after its last
+            // capture; one still waiting for its first capture is wanted (an arrival the budget has not reached) and
+            // never evicted.
+            bool fresh = !c.lastUpdated || c.lastUpdated + mDemandWindow >= std::max(mDemandNewest[0], mDemandNewest[1]);
+            for (unsigned r = 0; r < kDemandReaders && !fresh; ++r)
+                fresh = c.readBy[r] && c.readBy[r] + mDemandWindow >= mDemandNewest[r];
+            if (fresh) continue;
+            evictable.push_back(Evictable{ i, k, c.lastRead, projectedSize(c, view.viewerPos), mInstances[i].node,
+                                           c.index });
+        }
+    std::sort(evictable.begin(), evictable.end(), [](const Evictable &a, const Evictable &b) {
+        if (a.read != b.read) return a.read < b.read;
+        if (a.size != b.size) return a.size < b.size;
+        if (a.node != b.node) return a.node < b.node;
+        return a.index < b.index;
+    });
+
+    // A FULL ATLAS THAT CAN MAKE NO ROOM BUILDS NO ARRIVALS (scale.cpu_walks, PHOTON-7 10-3, the lead's ruling: the churn is
+    // a defect). With no free slot of any size, no page a compaction could empty, nothing evictable and no drain or door
+    // due, every arrival is refused - the non-persistent at once, the persistent after a compaction that fails and an
+    // eviction list that is empty - so building them is the only thing the frame does with them: a 10k world's open
+    // demand re-built 3,500-8,200 refused arrivals a frame (each face's layout, the sort). The decision holds until the
+    // room changes: a release, a drain, an eviction becoming due, a move.
+    const bool drainDue = !demandOpen && !view.demandChanged && !mWindowDrained;
+    const bool roomPossible = decide || drainDue || view.forcedCardMode != 0 || !evictable.empty() || atlasHasRoom();
     std::vector<Arrival> arriving;
     std::vector<CardRec> layout;
     for (const CardSceneView::Candidate &cand : view.candidates) {
-        if (decide) break;   // (the decision's set is its fit's: 4c)
+        if (decide || !roomPossible) break;   // (the decision's set is its fit's: 4c; no room: above)
         if (!cand.item || !cand.cards || cand.cards->empty()) continue;
         auto mv = moved.find(cand.node);
         unsigned long long marks[2][6] = {};
@@ -1372,35 +1431,6 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         return a.card.index < b.card.index;
     });
 
-    // 4. THE EVICTABLE: resident cards no reader read for a window, least recently read first, then the smallest on
-    //    screen, the node, the index.
-    struct Evictable {
-        size_t inst = 0, pos = 0;
-        unsigned long long read = 0ull;
-        float size = 0.0f;
-        NodeId node = 0;
-        unsigned index = 0u;
-    };
-    std::vector<Evictable> evictable;
-    for (size_t i = 0; i < per.size(); ++i)
-        for (size_t k = 0; k < per[i].size(); ++k) {
-            const CardRec &c = per[i][k];
-            // FRESH FOR A WINDOW of a reader's clock after that reader's last read, or of the newest clock after its last
-            // capture; one still waiting for its first capture is wanted (an arrival the budget has not reached) and
-            // never evicted.
-            bool fresh = !c.lastUpdated || c.lastUpdated + mDemandWindow >= std::max(mDemandNewest[0], mDemandNewest[1]);
-            for (unsigned r = 0; r < kDemandReaders && !fresh; ++r)
-                fresh = c.readBy[r] && c.readBy[r] + mDemandWindow >= mDemandNewest[r];
-            if (fresh) continue;
-            evictable.push_back(Evictable{ i, k, c.lastRead, projectedSize(c, view.viewerPos), mInstances[i].node,
-                                           c.index });
-        }
-    std::sort(evictable.begin(), evictable.end(), [](const Evictable &a, const Evictable &b) {
-        if (a.read != b.read) return a.read < b.read;
-        if (a.size != b.size) return a.size < b.size;
-        if (a.node != b.node) return a.node < b.node;
-        return a.index < b.index;
-    });
 
     // 4b. AT REST, THE POSE'S DEMAND ALONE (PHOTON-7 stage 10, 10-2d; the lead's ruling - residency is path-independent
     //     at rest): AT THE REST'S ONE DECISION (R3 (b)), a captured card NO VIEW READER read since the demand's last
