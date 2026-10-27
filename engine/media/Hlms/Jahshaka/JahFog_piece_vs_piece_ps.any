@@ -392,8 +392,9 @@
 // medium sees the sun's irradiance and the whole sky's radiance - the host's, OgreFog.cpp), W_sun the sun's shadow
 // along the ray WEIGHTED BY WHERE THE IN-SCATTER COMES FROM: kJahFogSamples segments of the ray, segment i's share the
 // exact transmittance difference T(a_i) - T(b_i) of every medium the pass applies (jahFogEyeT), its shadow read at one
-// point of it (the PSSM split holding that depth, getShadow: the R8 transmittance of a pane included, so a shaft
-// through glass passes 1 - alpha); past the last split the sun is unshadowed. The point's place in its segment is a
+// point of it (the PSSM split holding that depth, ONE compare tap - the point's own visibility, no receiver PCF - and
+// the R8 transmittance of a pane at the same uv, so a shaft through glass passes 1 - alpha); past the last split the
+// sun is unshadowed. The point's place in its segment is a
 // FIXED per-pixel pattern (interleaved gradient noise of the pixel - never animated: no colour pass flickers at rest,
 // and the fog has no temporal filter). V_sky, the measured sky visibility, stands at 1 until its screen product lands
 // (jahSkyVis, R11's second half). Named limits (the review list): the lamps' in-scatter (only the sun and the sky
@@ -416,8 +417,31 @@
 			@property( hlms_no_reverse_depth && ( syntax == glsl || syntax == glsles ) )
 				posL.z = posL.z * 0.5 + 0.5;
 			@end
-			return float( getShadow( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) posL,
-									 passBuf.shadowRcv[@n].invShadowMapSize hlms_shadowmap@n_uv_param ) );
+			@property( hlms_shadow_uses_depth_texture && !exponential_shadow_maps )
+				// ONE COMPARE TAP (the lead's ruling 2026-10-27): the receiver's PCF kernel is a spatial filter of a
+				// surface's shadow edge; the march integrates the visibility along the ray already, so the sample's
+				// own point visibility is the exact estimate - and the pane's transmittance at the same uv (R8)
+				@property( !hlms_no_reverse_depth )
+					const float jahDepth = posL.z / posL.w;
+				@else
+					const float jahDepth = posL.z;
+				@end
+				const float2 jahUv = posL.xy / posL.w;
+				float jahV = float( OGRE_SAMPLE_SHADOW( hlms_shadowmap@n, shadowSampler, jahUv, jahDepth ) );
+				@property( jah_shadow_transmit )
+					jahV *= float( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahUv, 0.0 ).x );
+				@end
+				@property( hlms_shadowmap@n_uvs_fulltex )
+					// (outside its map's rectangle of the atlas: unshadowed, getShadow's rule)
+					if( jahUv.x <= hlms_shadowmap@n_uv_min.x || jahUv.x >= hlms_shadowmap@n_uv_max.x ||
+						jahUv.y <= hlms_shadowmap@n_uv_min.y || jahUv.y >= hlms_shadowmap@n_uv_max.y )
+						jahV = 1.0;
+				@end
+				return jahV;
+			@else
+				return float( getShadow( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) posL,
+										 passBuf.shadowRcv[@n].invShadowMapSize hlms_shadowmap@n_uv_param ) );
+			@end
 		}
 		@end
 		return 1.0;
