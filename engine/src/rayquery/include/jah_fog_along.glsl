@@ -18,15 +18,13 @@
 // THE ORDER (what the colour pass does to a surface, outermost last):
 //   0. upstream's distance block — HlmsPbs 800.PixelShader_piece_ps.any, under
 //      hlms_fog: the World fog under any sky but the atmosphere, towards the
-//      authored colour, its breakthrough bending it on the surface's luminance
-//      (the block's own unclamped weight). THE ONE MIRRORED BLOCK: the colour pass
+//      authored colour. THE ONE MIRRORED BLOCK: the colour pass
 //      runs upstream's own text, the ray jobs this copy of it
 //      (jahFogUpstreamDistance), and gi.reflect_fog holds the two together;
 //   1. under the atmosphere (the passes' jah_atmo_ap): the air's aerial
 //      perspective at the ray's direction and length, then the World fog towards
-//      the sky's radiance above the horizon (breakthrough clamped to [0, 1]),
-//      then its height layer in that colour; under any other sky: the height
-//      layer in the authored colour;
+//      the sky's radiance above the horizon, then its height layer in that colour;
+//      under any other sky: the height layer in the authored colour;
 //   2. the exponential height fog (jah_height_fog.glsl, the one copy of its
 //      integral).
 // Steps 1 and 2 are jahFogMedia, the function both the colour pass and the ray
@@ -36,6 +34,13 @@
 // the sky with no distance fog and the height fog's quad over it at
 // kHeightFogSkyDistance, so an escape takes the height fog alone, at that
 // distance (jahFogAlongSky).
+//
+// A MEDIUM IS LIT BY WHAT REACHES IT (PHOTON-7 10-4 R11; L9): every in-scatter colour above - the authored fog colour,
+// the sky's above the horizon, the air's own in-scatter, the height fog's - is the medium's FULLY LIT answer, and it is
+// scaled by `lit`, the share of the medium's light that reaches it along the ray: the colour pass's eye leg computes it
+// (the sun's shadow along the ray and the measured sky visibility - JahFog_piece_vs_piece_ps.any's jahFogLitAt); a
+// reflection leg passes 1 (its in-scatter unshadowed: the lead's ruling (iii), on the review list). Its transmittance
+// is its optical depth alone: the luminance "breakthrough" that let a bright surface punch through a medium is deleted.
 //
 // HOW A CALLER BINDS IT (define these first):
 //     JAH_FOG_P( k )          vec4, k = 0..7 — OgreScene::fogAlong's eight:
@@ -66,8 +71,9 @@ const float kJahFogSkyDistance = 100000.0;
 
 /// Steps 1 and 2 on `c` (linear radiance): a ray from height `originY` reaching a
 /// surface at height `surfY` after `L` metres in world direction `dir`, which began
-/// `startUsed` metres from the eye (0 for the eye's own ray).
-vec3 jahFogMedia( vec3 c, float originY, float surfY, vec3 dir, float L, float startUsed )
+/// `startUsed` metres from the eye (0 for the eye's own ray); `lit` the share of the
+/// medium's light that reaches it (the header).
+vec3 jahFogMedia( vec3 c, float originY, float surfY, vec3 dir, float L, float startUsed, float lit )
 {
 	// THE HEIGHT LAYER's transmittance: density( y ) = D * 2^( -k * ( y - y0 ) ),
 	// integrated along the ray. With u = k * dy * ln2 the integral is
@@ -95,20 +101,15 @@ vec3 jahFogMedia( vec3 c, float originY, float surfY, vec3 dir, float L, float s
 		const vec4 planet = JAH_FOG_P( 5 );
 		const vec4 ap = JAH_FOG_AERIAL( vec3( jahAtmoDirUv( dir, JAH_FOG_P( 4 ).xyz, planet, vec2( 32.0, 64.0 ) ),
 											  jahAtmoApW( L * 0.001 * JAH_FOG_P( 2 ).w, planet, 32.0 ) ) );
-		vec3 o = c * ap.w + ap.xyz * JAH_FOG_P( 3 ).xyz;
+		vec3 o = c * ap.w + ap.xyz * JAH_FOG_P( 3 ).xyz * lit;
 		// THE WORLD FOG, ON TOP: its own medium, fogging towards the sky just above
 		// the horizon at this azimuth (a fog thick enough to hide the ground reads
-		// as the horizon sky behind it — no line). The breakthrough bends it on the
-		// unfogged colour's luminance, clamped to [0; 1] (upstream's max( exp2, 0 )
-		// is 1.017 at luminance 0 with the shipped pair, which lerped PAST the fog
-		// colour); then the height layer in the same sky colour.
+		// as the horizon sky behind it — no line); then the height layer in the same
+		// sky colour.
 		const vec3 fogLin =
 			JAH_FOG_AERIAL( vec3( jahAtmoDirUvAbove( dir, JAH_FOG_P( 4 ).xyz, planet, vec2( 32.0, 64.0 ) ),
-								  jahAtmoApSkyW( 32.0 ) ) ).xyz * JAH_FOG_P( 3 ).xyz;
-		const float lum = dot( c, vec3( 0.212655, 0.715158, 0.072187 ) );
-		const float brk = clamp( exp2( JAH_FOG_P( 2 ).z * lum + JAH_FOG_P( 2 ).y ), 0.0, 1.0 );
-		const float td = mix( 1.0, exp2( -L * JAH_FOG_P( 1 ).w ), brk );
-		o = mix( fogLin, o, td );
+								  jahAtmoApSkyW( 32.0 ) ) ).xyz * JAH_FOG_P( 3 ).xyz * lit;
+		o = mix( fogLin, o, exp2( -L * JAH_FOG_P( 1 ).w ) );
 		if( JAH_FOG_P( 0 ).w > 0.0 )
 			o = mix( fogLin, o, layerT );
 		c = o;
@@ -116,7 +117,7 @@ vec3 jahFogMedia( vec3 c, float originY, float surfY, vec3 dir, float L, float s
 	else
 #endif
 	if( JAH_FOG_P( 0 ).w > 0.0 )
-		c = mix( JAH_FOG_P( 0 ).xyz, c, layerT );
+		c = mix( JAH_FOG_P( 0 ).xyz * lit, c, layerT );
 #ifdef JAH_FOG_HAS_HEIGHT_FOG
 	// The exponential height fog, from the start distance off the EYE: the ray
 	// extended back by `startUsed` to the (virtual) eye, the start no nearer than
@@ -125,30 +126,52 @@ vec3 jahFogMedia( vec3 c, float originY, float surfY, vec3 dir, float L, float s
 	{
 		const vec4 hf = startUsed > 0.0 ? vec4( JAH_FOG_P( 6 ).xyz, max( JAH_FOG_P( 6 ).w, startUsed ) )
 										: JAH_FOG_P( 6 );
-		c = mix( JAH_FOG_P( 7 ).xyz, c,
+		c = mix( JAH_FOG_P( 7 ).xyz * lit, c,
 				 jahHeightFogT( surfY - dir.y * ( L + startUsed ), dir.y, L + startUsed, hf ) );
 	}
 #endif
 	return c;
 }
 
-/// Step 0, upstream's distance block (the one mirrored block, above).
-vec3 jahFogUpstreamDistance( vec3 c, float L )
+/// THE EYE RAY'S TRANSMITTANCE over its first `t` metres from the eye at height `eyeY` along the world direction
+/// `dir`: every medium the colour pass applies but the air (upstream's distance block, the World fog under the
+/// atmosphere, the height layer, the exponential height fog - the same integrals as jahFogMedia's and upstream's). The
+/// colour pass weights its in-scatter's samples by it (jahFogLitAt: a segment's share T(a) - T(b)).
+float jahFogEyeT( float eyeY, vec3 dir, float t )
 {
-	const float lum = dot( c, vec3( 0.212655, 0.715158, 0.072187 ) );
-	const float lumW = max( exp2( JAH_FOG_P( 2 ).z * lum + JAH_FOG_P( 2 ).y ), 0.0 );
-	float w = exp2( -L * JAH_FOG_P( 2 ).x );
-	w = mix( 1.0, w, lumW );
-	return mix( JAH_FOG_P( 1 ).z > 0.5 ? vec3( 0.0 ) : JAH_FOG_P( 0 ).xyz, c, w );
+	float T = exp2( -t * ( JAH_FOG_P( 3 ).w > 0.5 ? JAH_FOG_P( 2 ).x : 0.0 ) );
+	if( JAH_FOG_P( 1 ).z > 0.5 )
+		T *= exp2( -t * JAH_FOG_P( 1 ).w );
+	if( JAH_FOG_P( 0 ).w > 0.0 )
+	{
+		const float k = JAH_FOG_P( 1 ).x;
+		const float a = exp2( clamp( -k * ( eyeY - JAH_FOG_P( 1 ).y ), -60.0, 60.0 ) );
+		const float u = clamp( k * ( dir.y * t ) * 0.6931472, -60.0, 60.0 );
+		const float ramp = abs( u ) < 0.001 ? ( 1.0 - 0.5 * u ) : ( ( 1.0 - exp( -u ) ) / u );
+		T *= exp2( -JAH_FOG_P( 0 ).w * a * t * ramp );
+	}
+#ifdef JAH_FOG_HAS_HEIGHT_FOG
+	if( JAH_FOG_P( 7 ).w > 0.5 )
+		T *= jahHeightFogT( eyeY, dir.y, t, JAH_FOG_P( 6 ) );
+#endif
+	return T;
+}
+
+/// Step 0, upstream's distance block (the one mirrored block, above): `lit` as jahFogMedia's.
+vec3 jahFogUpstreamDistance( vec3 c, float L, float lit )
+{
+	return mix( JAH_FOG_P( 1 ).z > 0.5 ? vec3( 0.0 ) : JAH_FOG_P( 0 ).xyz * lit, c, exp2( -L * JAH_FOG_P( 2 ).x ) );
 }
 
 /// A reflection ray from `originY` (which the eye sees `eyeDistance` away) that met
 /// a surface after `L` metres: the whole law along it.
+/// ITS IN-SCATTER UNSHADOWED (`lit` 1: the lead's ruling (iii), PHOTON-7 10-4 R11 - on the review list; an exact
+/// leg would trace the sun along it).
 vec3 jahFogAlong( vec3 c, float originY, vec3 dir, float L, float eyeDistance )
 {
 	if( JAH_FOG_P( 3 ).w > 0.5 )
-		c = jahFogUpstreamDistance( c, L );
-	return jahFogMedia( c, originY, originY + dir.y * L, dir, L, eyeDistance );
+		c = jahFogUpstreamDistance( c, L, 1.0 );
+	return jahFogMedia( c, originY, originY + dir.y * L, dir, L, eyeDistance, 1.0 );
 }
 
 /// An ESCAPED reflection ray: the sky, which the colour pass fogs with the height

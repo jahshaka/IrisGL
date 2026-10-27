@@ -636,7 +636,7 @@ void OgreScene::fogAlong(float out[8][4], Ogre::TextureGpu *&aerial) const {
     out[0][0] = f.r; out[0][1] = f.g; out[0][2] = f.b; out[0][3] = f.heightDensity;
     out[1][0] = f.heightFalloff; out[1][1] = f.heightLevel; out[1][2] = ap ? 1.0f : 0.0f;
     out[1][3] = f.distanceDensity;
-    for (int k = 0; k < 4; ++k) out[2][k] = g[k];            // density, the breakthrough pair, aerial scale
+    for (int k = 0; k < 4; ++k) out[2][k] = g[k];            // density, 0, 0 (the deleted breakthrough), aerial scale
     for (int k = 0; k < 3; ++k) out[3][k] = g[4 + k];        // skyE
     out[3][3] = 1.0f;                                         // hlms_fog
     for (int k = 0; k < 4; ++k) {

@@ -5,7 +5,7 @@
 // THE COMPONENT (Atmosphere.h, JahAtmosphere) is an Ogre::AtmosphereComponent:
 // registered on a SceneManager (`_setAtmosphere`) it sets `hlms_fog` in every
 // colour pass and binds the const buffer upstream's block reads its density
-// and brightness breakthrough from. It serves two customers — the sky, when it
+// from. It serves two customers — the sky, when it
 // is the planet's atmosphere, and the World fog under any sky — and is
 // registered while either wants it (OgreScene::syncAtmosphere).
 //
@@ -955,7 +955,8 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): four float4 after the cloud block - the pass camera's
     // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them
     // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
-    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + (56u + kLampChainFloats) * sizeof(float);
+    // Plus THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): one float4 after the chain (s, the sun's share).
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + (56u + kLampChainFloats + 4u) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1045,11 +1046,13 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
         const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
         // (the no-ray tier's: the pass's voxel chain, as the hash's jah_lamp_voxels saw it bound)
         Ogre::PhotonVoxelLighting *vct = PhotonPassBinding::lampVoxelsOf(casterPass, sceneManager);
-        if (cam && !casterPass && ((b && b->lampRaysOn && b->lampTlas) || vct)) {
+        // (the rows always on a colour pass: the fog's in-scatter reads them too, R11)
+        if (cam && !casterPass) {
             const Ogre::Matrix4 inv = cam->getVrViewMatrix(0).inverseAffine();
             for (int r = 0; r < 3; ++r)
                 for (int c = 0; c < 4; ++c) *passBufferPtr++ = float(inv[r][c]);
-            const unsigned long long tlas = vct ? 0ull : b->lampTlas, alpha = vct ? 0ull : b->lampAlpha;
+            const bool rays = !vct && b && b->lampRaysOn;
+            const unsigned long long tlas = rays ? b->lampTlas : 0ull, alpha = rays ? b->lampAlpha : 0ull;
             const Ogre::uint32 words[4] = { Ogre::uint32(tlas & 0xFFFFFFFFull), Ogre::uint32(tlas >> 32u),
                                             Ogre::uint32(alpha & 0xFFFFFFFFull), Ogre::uint32(alpha >> 32u) };
             std::memcpy(passBufferPtr, words, sizeof(words));
@@ -1072,6 +1075,27 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
         }
         std::memcpy(passBufferPtr, chain, sizeof(chain));
         passBufferPtr += kLampChainFloats;
+        // THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): s, the sun's share of the light an open point of an isotropic medium
+        // receives - E_sun (every directional's irradiance, luminance) against 4 pi L_sky (the whole sky's radiance:
+        // the Sky Light's SH band 0 is the mean radiance HlmsPbs's irradianceSH reads, AmbientLighting_piece_ps.any)
+        float inscatter[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if (!casterPass) {
+            const auto lum = [](float r, float g, float bb) { return 0.212655f * r + 0.715158f * g + 0.072187f * bb; };
+            double eSun = 0.0;
+            const Ogre::LightListInfo &all = sceneManager->getGlobalLightList();
+            for (size_t i = 0; i < all.lights.size(); ++i) {
+                const Ogre::Light *l = all.lights[i];
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getVisible()) continue;
+                const Ogre::ColourValue d = l->getDiffuseColour() * l->getPowerScale();
+                eSun += double(std::max(0.0f, lum(d.r, d.g, d.b)));
+            }
+            const float *sh = sceneManager->getSphericalHarmonics();
+            const double lSky = sh ? double(std::max(0.0f, lum(sh[0], sh[1], sh[2]))) : 0.0;
+            const double open = eSun + 4.0 * 3.14159265358979 * lSky;
+            inscatter[0] = open > 0.0 ? float(eSun / open) : 0.0f;
+        }
+        std::memcpy(passBufferPtr, inscatter, sizeof(inscatter));
+        passBufferPtr += 4;
     }
     return passBufferPtr;
 }
@@ -1116,9 +1140,7 @@ void OgreScene::setFog(const FogDesc &desc) {
              (o.colour.r == desc.colour.r && o.colour.g == desc.colour.g &&
               o.colour.b == desc.colour.b && o.density == desc.density &&
               o.heightDensity == desc.heightDensity && o.heightFalloff == desc.heightFalloff &&
-              o.heightLevel == desc.heightLevel &&
-              o.breakMinBrightness == desc.breakMinBrightness &&
-              o.breakFalloff == desc.breakFalloff));
+              o.heightLevel == desc.heightLevel));
         mLastFogDesc = desc;
         mFogDescKnown = true;
         if (!same) staleProbeGrid(GiStaleReason::Fog);   // a no-op before a grid exists
@@ -1131,7 +1153,7 @@ void OgreScene::setFog(const FogDesc &desc) {
         // UNLESS THE ATMOSPHERE IS THE SKY: the same component draws it, and
         // under it the AIR is still a medium — syncAtmosphere -> pushFogState
         // leaves the air's aerial perspective on, without the World fog's
-        // density, height layer or breakthrough.
+        // density or height layer.
         mAtmoFogOn = false;
         if (mAtmoSkyOn || mHeightFogOn) {
             syncAtmosphere();
@@ -1171,7 +1193,7 @@ void OgreScene::pushFogState() {
         // its own block, and the World fog's state is the identity — no colour,
         // no height layer, no aerial table claimed, upstream's block at density 0.
         FogHlmsListener::registerScene(mSceneMgr, FogState());
-        mAtmosphere->setFogBlock(0.0f, 0.0f, 0.0f);
+        mAtmosphere->setFogBlock(0.0f);
         return;
     }
     const FogDesc &desc = mLastFogDesc;
@@ -1189,11 +1211,7 @@ void OgreScene::pushFogState() {
     // identity; under any other sky the block carries it.
     s.distanceDensity = mAtmoSkyOn ? worldDensity : 0.0f;
     FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassHash / preparePassBuffer
-    // The breakthrough is the World fog's authored bend of the curve (the
-    // piece reads the pair from the same buffer under the atmosphere).
-    mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity,
-                             fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f,
-                             fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f);
+    mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity);
 }
 
 // ---------------------------------------------------------------------------

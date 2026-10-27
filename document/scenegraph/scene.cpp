@@ -355,8 +355,6 @@ Scene::Scene()
     fogHeightDensity = 0.0f;      // height layer off until asked for
     fogHeightFalloff = 0.1f;
     fogHeightLevel = 0.0f;
-    fogBreakMinBrightness = 0.25f;
-    fogBreakFalloff = 0.1f;
 
     // SHADOWS ARE ON (SUN_AND_LIGHT_DEFAULTS_SPEC §2.5): this was the one
     // field the constructor never assigned — an uninitialised bool that every

@@ -496,8 +496,6 @@ public:
     float fogHeightDensity;    // 0 = no height layer
     float fogHeightFalloff;    // per world unit; larger = thins out faster with altitude
     float fogHeightLevel;      // world Y at which fogHeightDensity applies
-    float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
-    float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
     // (THE `fogAtmosphere` SWITCH IS GONE — FOG-ATMO-1. Under the realistic
     // sky both fog layers ALWAYS take the sky's own scattering colour and the
     // air's aerial perspective is always on; fogColor is used only under the

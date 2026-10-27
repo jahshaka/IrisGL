@@ -5228,20 +5228,13 @@ struct FogDesc {
     float  heightFalloff = 0.1f;  ///< per world unit; larger = thins out faster with altitude
     float  heightLevel   = 0.0f;  ///< world Y where heightDensity applies
 
-    /// Brightness breakthrough: bright pixels (a sun disc, an emissive sign)
-    /// resist the fog instead of dissolving into it. `breakMinBrightness` is the
-    /// luminance where breaking through starts, `breakFalloff` how fast it takes
-    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog. It
-    /// applies to the distance fog while this fog is enabled; the air alone
-    /// (fog disabled under the analytic sky) is pure extinction.
-    float  breakMinBrightness = 0.25f;
-    float  breakFalloff       = 0.1f;
+    // (the brightness "breakthrough" - bright pixels resisting the fog by their own luminance - is DELETED, PHOTON-7
+    // 10-4 R11: a medium's transmittance is its optical depth alone; its in-scatter is lit by what reaches it)
 
     bool operator==(const FogDesc &o) const {
         return enabled == o.enabled && colour == o.colour && density == o.density &&
                heightDensity == o.heightDensity && heightFalloff == o.heightFalloff &&
-               heightLevel == o.heightLevel && breakMinBrightness == o.breakMinBrightness &&
-               breakFalloff == o.breakFalloff;
+               heightLevel == o.heightLevel;
     }
     bool operator!=(const FogDesc &o) const { return !(*this == o); }
 };

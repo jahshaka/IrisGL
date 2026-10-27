@@ -7725,8 +7725,6 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         fog.heightDensity = mSource->fogHeightDensity;
         fog.heightFalloff = mSource->fogHeightFalloff;
         fog.heightLevel = mSource->fogHeightLevel;
-        fog.breakMinBrightness = mSource->fogBreakMinBrightness;
-        fog.breakFalloff = mSource->fogBreakFalloff;
         scene.fog = fog;
     }
     // THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1): the document's dials are

@@ -12,7 +12,7 @@
 //     before the sky capture, and only when their inputs changed;
 //   * the const buffer HlmsPbs binds while this component is registered on the
 //     SceneManager: the World fog's distance block (upstream's fog code reads
-//     `atmoSettings.fogDensity` and the breakthrough pair from it) and what the
+//     `atmoSettings.fogDensity` from it) and what the
 //     pixel shader needs to read the tables (the sun, the planet, the aerial
 //     scale, the sun's illuminance at the top of the air);
 //   * the sky quad (render queue 0, subgroup 1, kVisibleBit — the environment
@@ -97,7 +97,7 @@ public:
     /// constant, never a rebuild.
     void setSkyBrightness(float b);
     /// The World fog's distance block, in upstream's packing (0 = none).
-    void setFogBlock(float density, float breakMinBrightness, float breakFalloff);
+    void setFogBlock(float density);
     /// THE HEIGHT FOG (HeightFogDesc; SKY-DEFAULTS-1): its block in this
     /// component's const buffer (the PBS passes read it under the pass property
     /// `jah_height_fog`) and its OWN quad over the sky's pixels (queue 5, after
@@ -159,7 +159,7 @@ public:
     Ogre::TextureGpu *skyViewLut() const { return mSkyView; }   // the sky quad's alone
     Ogre::TextureGpu *aerialLut() const { return mAerial; }
     /// The const buffer the passes read (JahFog's `JahAtmoSettings`), as floats:
-    /// fog density, the breakthrough pair, aerial scale; skyE; sunDir; planet;
+    /// fog density, two floats of upstream's layout written 0 (the deleted breakthrough), aerial scale; skyE; sunDir; planet;
     /// heightFog; heightFogColour.
     static constexpr unsigned kSettingsFloats = 24u;
     void settingsFloats(float out[kSettingsFloats]) const;
@@ -204,7 +204,7 @@ private:
     float mObserverKm = kMinObserverKm;
     float mDrawnObserverKm = kMinObserverKm;   ///< held across a capture's environment observer
     unsigned mObserverRebuilds = 0;
-    float mFogDensity = 0.0f, mFogBreakMin = 0.0f, mFogBreakFalloff = 0.0f;
+    float mFogDensity = 0.0f;
     bool mAirOn = false;
     bool mHfOn = false;
     float mHf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   ///< density, falloff (per m), base Y, start (m)

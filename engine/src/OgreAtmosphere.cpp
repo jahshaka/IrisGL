@@ -50,8 +50,8 @@ constexpr float kOzoneAbsorb[3] = { 0.650e-3f, 1.881e-3f, 0.085e-3f };
 /// `atmoSettings` — upstream's fog block reads its first three floats by name).
 struct AtmoSettingsGpu {
     float fogDensity = 0.0f;
-    float fogBreakMinBrightness = 0.0f;   ///< upstream's packing: min x falloff
-    float fogBreakFalloff = 0.0f;         ///< ...and -falloff
+    float fogBreakMinBrightness = 0.0f;   ///< upstream's layout; written 0 (the breakthrough is deleted, 10-4 R11)
+    float fogBreakFalloff = 0.0f;         ///< ...the same
     float aerialScale = 1.0f;
     float skyE[4] = { 0.0f, 0.0f, 0.0f, 0.0f };     ///< rgb = the sun at the top of the air, w = 1 with the air on
     float sunDir[4] = { 0.0f, 1.0f, 0.0f, 0.0f };   ///< xyz = towards the sun
@@ -333,11 +333,9 @@ void JahAtmosphere::setSkyBrightness(float b) {
     mDirtyBuffer = mDirtyQuad = true;
 }
 
-void JahAtmosphere::setFogBlock(float density, float breakMin, float breakFalloff) {
-    if (density == mFogDensity && breakMin == mFogBreakMin && breakFalloff == mFogBreakFalloff) return;
+void JahAtmosphere::setFogBlock(float density) {
+    if (density == mFogDensity) return;
     mFogDensity = density;
-    mFogBreakMin = breakMin;
-    mFogBreakFalloff = breakFalloff;
     mDirtyBuffer = true;
 }
 
@@ -485,12 +483,9 @@ void JahAtmosphere::uploadSettings() {
 void JahAtmosphere::settingsFloats(float out[kSettingsFloats]) const {
     static_assert(sizeof(AtmoSettingsGpu) == kSettingsFloats * sizeof(float), "the settings block's size");
     AtmoSettingsGpu g{};
-    // THE FOG BLOCK IN UPSTREAM'S PACKING (AtmosphereNpr::_update): the
-    // breakthrough as min x falloff and -falloff, so the stock block's
-    // arithmetic is unchanged under every sky that is not this one.
+    // THE FOG BLOCK IN UPSTREAM'S LAYOUT (AtmosphereNpr::_update): the density; the breakthrough pair's two floats
+    // stay in the layout, written 0 (no reader: the fork's block and the law read the optical depth alone, 10-4 R11).
     g.fogDensity = mFogDensity;
-    g.fogBreakMinBrightness = mFogBreakMin * mFogBreakFalloff;
-    g.fogBreakFalloff = -mFogBreakFalloff;
     g.aerialScale = mAerialScale;
     const Ogre::Vector3 e = skyRadianceScale();   // scattered light only: the sky's brightness
     g.skyE[0] = e.x; g.skyE[1] = e.y; g.skyE[2] = e.z; g.skyE[3] = mAirOn ? 1.0f : 0.0f;
