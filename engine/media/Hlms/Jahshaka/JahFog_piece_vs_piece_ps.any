@@ -133,6 +133,36 @@
 		float4 jahCloudMap;			// x = 1 / tile (1/m), y = shadow strength, zw = scroll (m)
 		float4 jahCloudSun;			// xy = toSun.xz / toSun.y, z = altitude (m), w = 1 / mu_s
 	@end
+	@property( jah_lamp_rays )
+		// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9), after the cloud block - everything before it padded
+		// when its own feature is absent, the same rule
+		@property( !jah_cloud_shadow )
+			@property( !jah_shader_clock && !irradiance_field && !jah_env )
+				@property( !hlms_fog )
+					float4 jahLampPadFogColour;
+					float4 jahLampPadFogHeight;
+				@end
+				float4 jahLampPadClock;
+			@end
+			@property( !irradiance_field && !jah_env )
+				float4 jahLampPadIfd;
+			@end
+			@property( !jah_env )
+				float4 jahLampPadEnv;
+			@end
+			float4 jahLampPadCloud0;
+			float4 jahLampPadCloud1;
+			float4 jahLampPadCloud2;
+			float4 jahLampPadCloud3;
+			float4 jahLampPadCloud4;
+		@end
+		float4 jahLampInvView0;		// the pass camera's view-to-world transform, rows x, y and z
+		float4 jahLampInvView1;
+		float4 jahLampInvView2;
+		uint4 jahLampAddr;			// the TLAS's device address (xy) and the alpha table's (zw), as uints: never
+									// through floatBitsToUint - the SPIR-V optimiser folds that bitcast into the
+									// pointer's own, an invalid one (VUID-VkShaderModuleCreateInfo-pCode-08737)
+	@end
 @end
 
 // THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by fork 4d5fbef16+8f09c0cd4 (was 0048), lane
@@ -158,8 +188,15 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog || jah_shadow_transmit )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog || jah_shadow_transmit || jah_lamp_rays )
 @piece( custom_ps_uniformDeclaration )
+	// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9; JahLampRay_piece_ps.any): the library (jah_lamp_ray.glsl and
+	// its dependencies; the extensions it needs are the shader's head's, CustomGlslExtensions)
+	@property( jah_lamp_rays )
+		#define JAH_ALPHA_TABLE passBuf.jahLampAddr.zw
+		@insertpiece( JahLampRayLib )
+		@insertpiece( JahLampRayView )
+	@end
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
 		@property( syntax == glslvk )

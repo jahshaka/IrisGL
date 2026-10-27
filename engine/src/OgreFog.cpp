@@ -420,6 +420,14 @@ void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureG
 void FogHlmsListener::setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility) {
     if (SceneBinds *b = bindsOf(sm)) b->areaVis = visibility;
 }
+void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas,
+                                  unsigned long long alpha) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->lampRaysOn = on;
+        b->lampTlas = on ? tlas : 0ull;
+        b->lampAlpha = b->lampTlas ? alpha : 0ull;
+    }
+}
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
     if (SceneBinds *b = bindsOf(sm)) b->photonIsolation = mode <= 0 ? 0 : mode;
@@ -652,6 +660,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_shadow_transmit", 1);
             }
         }
+    }
+    // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): every colour pass of a scene that traces (the ray tier open, its
+    // row on) - JahLampRay_piece_ps.any; the TLAS's address rides the pass buffer (a zero address answers 1)
+    if (rec && rec->lampRaysOn) {
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays", 1);
+        // (the ray query needs GLSL 4.60: the fork's glslvk_460 raises the shader's version line)
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "glslvk_460", 1);
+        // (the PBS template's head takes the extensions from our piece; HlmsAtom's template defines that hook itself)
+        if (hlms->getType() == Ogre::HLMS_PBS) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays_pbs", 1);
     }
     // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is
     // the mode (1 the indirect diffuse alone, 2 the specular environment alone),
@@ -920,7 +937,9 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // immediately before this extension — while it held them. Writing them first
     // here keeps every byte where the shader's struct (DeclVctUniform,
     // DeclIrradianceFieldUniform, then custom_passBuffer) has always put it.
-    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + 40u * sizeof(float);
+    // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): four float4 after the cloud block - the pass camera's
+    // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them.
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + 56u * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1001,6 +1020,23 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
             *passBufferPtr++ = cloud.invMuSun;
         } else {
             for (int i = 0; i < 20; ++i) *passBufferPtr++ = 0.0f;
+        }
+    }
+    // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the view-to-world rows (the same view HlmsPbs wrote into
+    // passBuf.view, inverted: the cloud block's rule) and the two addresses' bits. Zeros without a TLAS.
+    {
+        const SceneBinds *b = bindsOf(sceneManager);
+        const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
+        if (b && b->lampRaysOn && b->lampTlas && cam && !casterPass) {
+            const Ogre::Matrix4 inv = cam->getVrViewMatrix(0).inverseAffine();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) *passBufferPtr++ = float(inv[r][c]);
+            const Ogre::uint32 words[4] = { Ogre::uint32(b->lampTlas & 0xFFFFFFFFull), Ogre::uint32(b->lampTlas >> 32u),
+                                            Ogre::uint32(b->lampAlpha & 0xFFFFFFFFull), Ogre::uint32(b->lampAlpha >> 32u) };
+            std::memcpy(passBufferPtr, words, sizeof(words));
+            passBufferPtr += 4;
+        } else {
+            for (int i = 0; i < 16; ++i) *passBufferPtr++ = 0.0f;
         }
     }
     return passBufferPtr;

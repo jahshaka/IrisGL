@@ -1291,9 +1291,13 @@ public:
         float cloudSun[4] = {};   // sunThrow x, z, altitude, 1 / mu_s
     };
     HitSurfaceInputs hitSurfaceInputsOf(const OgreScene *scene) const;
-private:
+    /// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the scene's TLAS by its device address (0: none built) - the
+    /// colour passes' fragments trace it (JahLampRay_piece_ps.any), so its build's barrier waits for and is waited on by
+    /// the FRAGMENT stage too (buildTlas).
+    uint64_t tlasAddressOf(const OgreScene *scene) const;
     /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
     uint64_t alphaTableOf(const OgreScene *scene) const;
+private:
     /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
     /// gate (jah_rq_hit_radiance.glsl) traces nothing when none does.
     bool rayMoversOf(const OgreScene *scene) const;
@@ -4068,9 +4072,12 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
                         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     pre.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
                         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    // ...AND THE FRAGMENT STAGE (PHOTON-7 10-4 R9): the colour passes' Forward+ lamps trace this TLAS by its device
+    // address (JahLampRay_piece_ps.any), last frame's among them - a write-after-read the validation layer CANNOT see
+    // (no descriptor names the structure), so this barrier is set by hand.
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &pre, 0,
                          nullptr, 0, nullptr);
     mFn.cmdBuild(cmd, 1, &build, &rangePtr);
@@ -4082,8 +4089,11 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     post.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     post.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     post.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    // (the FRAGMENT stage too: the Forward+ lamps' rays, PHOTON-7 10-4 R9 - by the structure's address, invisible to the
+    // validation layer, so set by hand; every raster pass that reads it follows this build in the frame)
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &post, 0, nullptr, 0, nullptr);
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &post, 0,
+                         nullptr, 0, nullptr);
 
     sa.st.tlasBytes = sizes.accelerationStructureSize;
     sa.st.lastWasRefit = (build.mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
@@ -7633,6 +7643,15 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     }
     out.alphaTable = alphaTableOf(scene);
     out.movers = rayMoversOf(scene);
+}
+
+uint64_t RayQueryTier::tlasAddressOf(const OgreScene *scene) const {
+    const SceneAs *sa = asOf(scene);
+    if (!sa || !sa->tlas || !sa->st.enabled || sa->instanceCount == 0u) return 0u;
+    VkAccelerationStructureDeviceAddressInfoKHR ai{};
+    ai.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    ai.accelerationStructure = sa->tlas;
+    return uint64_t(mFn.getAsDeviceAddress(mVk, &ai));
 }
 
 uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
@@ -11594,6 +11613,8 @@ bool OgreEngine::deviceRayQuery() const {
 }
 
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
+    // (every scene's lamp rays off first: the traced ones are switched on below, after their TLAS is current)
+    for (auto &s : mScenes) FogHlmsListener::setLampRays(s->sceneManager(), false, 0ull, 0ull);
     if (!mRayTracingWanted || mHeadless || !mRoot) return;
     if (!mRayTier) {
         if (!rayQueryAvailable()) return;             // the fallback picture, silently
@@ -11625,6 +11646,9 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     for (OgreScene *s : drawn) {
         if (!s->rayTracingResolved()) continue;
         mRayTier->updateScene(s);
+        // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): this frame's TLAS, after its build (the property follows
+        // the scene's tracing, the address may be 0)
+        FogHlmsListener::setLampRays(s->sceneManager(), true, mRayTier->tlasAddressOf(s), mRayTier->alphaTableOf(s));
     }
 }
 

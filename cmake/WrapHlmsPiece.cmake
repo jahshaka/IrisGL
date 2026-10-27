@@ -61,6 +61,11 @@ foreach(_in IN LISTS _inputs)
         message(FATAL_ERROR "WrapHlmsPiece: ${_in} contains the Hlms directive mark "
                             "at offset ${_at}; it becomes Hlms input — spell it out in words")
     endif()
+    # STRIP_INCLUDES: the inputs are concatenated in their dependency order, each with its own guard, so their
+    # #include lines (which an Hlms shader cannot resolve) are dropped
+    if(STRIP_INCLUDES)
+        string(REGEX REPLACE "(^|\n)[ \t]*#include[ \t]+\"[^\"\n]*\"[^\n]*" "\\1// (include stripped)" _text "${_text}")
+    endif()
     string(APPEND _body "${_text}\n")
 endforeach()
 if(RAW)

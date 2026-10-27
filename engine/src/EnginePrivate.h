@@ -3680,6 +3680,9 @@ public:
     /// opaque pass and takes it away as that pass ends; the listener's pass property `jah_area_vis`, its slot and its
     /// binding follow. Null = none.
     static void setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility);
+    /// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the scene's TLAS and alpha-table device addresses this frame
+    /// (0, 0: none - its colour passes trace no lamp ray). JahLampRay_piece_ps.any reads them from the pass buffer.
+    static void setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas, unsigned long long alpha);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3773,6 +3776,14 @@ public:
         FogState         fog;
         float            sceneTime = 0.0f;
         IfdState         ifd;
+        /// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the device addresses of the scene's TLAS and of its
+        /// alpha table, this frame's (the ray tier's, OgreEngine::updateRayQuery); 0 = no TLAS - the pass is the
+        /// one it was (no `jah_lamp_rays`).
+        unsigned long long lampTlas = 0ull, lampAlpha = 0ull;
+        /// ...and whether the scene TRACES at all (the ray tier open, its ray row on): the pass property follows THIS,
+        /// never the address, so a TLAS that comes and goes (an empty scene's first object) changes no permutation -
+        /// a zero address answers 1 in the shader (the R8 stand-in's lesson: a compile-time property is stable).
+        bool lampRaysOn = false;
     };
     /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);

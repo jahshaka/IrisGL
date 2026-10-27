@@ -1,0 +1,40 @@
+// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9; L9: a lamp is blocked by geometry on every path). A Forward+ lamp
+// (every point or spot light past the shadow-map budget, and every one that casts no shadow) is multiplied, in the
+// fork's hook on its term (custom_ps_fwdplus_lamp, 200.ForwardPlus_piece_ps.any), by ONE ray from the pixel to it on the
+// ray tier's TLAS (jah_lamp_ray.glsl: 0 behind an opaque caster, the panes' transmittance between, 1 in the open).
+// `jah_lamp_rays` is the listener's pass property (OgreFog.cpp): a colour pass of a scene whose TLAS is built this frame.
+// The pass works in VIEW space; the ray in world space, through the pass camera's view-to-world rows the listener writes
+// (jahLampInvView0..2) - the fragment's view position, its geometric normal, the lamp's position.
+// THE AT-SIGN RULE: no directive mark in any comment of this file.
+
+// THE EXTENSIONS, in the shader's head (upstream's CustomGlslExtensions hook in SetCrossPlatformSettings: an extension
+// enabled after the declarations does not reach the built-in constants). The PBS template only: HlmsAtom's template
+// defines the piece itself and enables the ray query there (Atom/GLSL/PixelShader_ps.glsl).
+@property( jah_lamp_rays_pbs )
+@piece( CustomGlslExtensions )
+	#extension GL_EXT_ray_query : require
+	#extension GL_EXT_buffer_reference : require
+	#extension GL_EXT_buffer_reference_uvec2 : require
+@end
+@end
+
+@property( jah_lamp_rays )
+@piece( JahLampRayView )
+float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
+{
+	const float3 wp = float3( dot( passBuf.jahLampInvView0.xyz, viewPos ) + passBuf.jahLampInvView0.w,
+							  dot( passBuf.jahLampInvView1.xyz, viewPos ) + passBuf.jahLampInvView1.w,
+							  dot( passBuf.jahLampInvView2.xyz, viewPos ) + passBuf.jahLampInvView2.w );
+	const float3 wl = float3( dot( passBuf.jahLampInvView0.xyz, viewLamp ) + passBuf.jahLampInvView0.w,
+							  dot( passBuf.jahLampInvView1.xyz, viewLamp ) + passBuf.jahLampInvView1.w,
+							  dot( passBuf.jahLampInvView2.xyz, viewLamp ) + passBuf.jahLampInvView2.w );
+	const float3 wn = normalize( float3( dot( passBuf.jahLampInvView0.xyz, viewGeomN ),
+										 dot( passBuf.jahLampInvView1.xyz, viewGeomN ),
+										 dot( passBuf.jahLampInvView2.xyz, viewGeomN ) ) );
+	return jahLampRay( passBuf.jahLampAddr.xy, wp, wn, length( viewPos ), wl );
+}
+@end
+@piece( custom_ps_fwdplus_lamp )
+			atten *= midf_c( jahLampRayView( inPs.pos.xyz, posAndType.xyz, float3( pixelData.geomNormal ) ) );
+@end
+@end
