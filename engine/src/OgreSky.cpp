@@ -1048,6 +1048,7 @@ void OgreScene::applyPendingSkyCapture() {
     // convolved cube was left bound there, and a scene whose dome was hidden kept mirroring it (a no-op without a cube).
     if (!environmentCaptured()) {
         forgetSkySh();
+        destroySkyShTicket();   // (the 10-3 read's F2: a drag's async SH read still in flight would land after this)
         destroyReflection();
         return;
     }
