@@ -215,10 +215,6 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 /// indirect half marched yet — the caller then reads the voxels. The atlas is read texel-exact (no mips until SC-2).
 #ifndef JAH_HIT_GATE_DECLARED
 #define JAH_HIT_GATE_DECLARED
-/// THE STORE'S NON-DIRECT SHARE AT A HIT, AS SEEN PAST THE MOVERS (MOVER-OCCLUSION-1):
-/// the fraction of the hit's hemisphere no mover blocks, set by jahHitRadianceSourced
-/// (jah_rq_hit_radiance.glsl) around the card or voxel read it makes; 1 everywhere else.
-float jahHitIndirectGate = 1.0;
 /// C2, THE HIT's OWN SPECULAR TRACED (PHOTON-7 11-2 (3)): set by a reader that traces the hit's lobe itself
 /// (jahHitSpecularLobeTraced, jah_rq_hit_radiance.glsl) around the store's read - the store then leaves out the INDIRECT
 /// specular it holds only as the lobe's integral (the card's lobe share, the voxels' bounce share); the lights' direct
@@ -268,9 +264,6 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	const float alpha = JAH_CARD_SHADOW_ROUGH( pick.texel ).y / 1.001001 + 0.001;
 	const float r = sqrt( max( alpha, 0.0 ) );
 	const vec3 L = jahCardOctDecode( vec2( albedo.w, normal.w ) );
-	// MOVER-OCCLUSION-1: the card's INDIRECT half (the sky and the bounce its relight
-	// gathered) gated by the mover visibility above the hit; the direct half keeps its
-	// own traced mover term (cardMoverVis) and the emissive is the surface's own.
 	// THE INDIRECT LAYER (ENGINE-POLISH-PHOTON-1 stage 3) holds the diffuse half where the channel has a
 	// diffuse albedo and the specular lobe's share where it has none (JahCardLight_cs.glsl's cache): the
 	// diffuse half is the layer where kD > 0, else 0. The EMISSIVE binding is the relight's FLAT layer
@@ -278,13 +271,12 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	const vec3 stored = JAH_CARD_INDIRECT( pick.texel );
 	const bvec3 hasDiffuse = greaterThan( albedo.xyz, vec3( 0.0 ) );
 	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );
-	const vec3 cut = ( 1.0 - jahHitIndirectGate ) * indirect;
-	// THE MOVERS' GATE CUTS THE LOBE'S INDIRECT SHARE TOO (the store gates its whole bounce,
-	// jah_rq_hit_radiance.glsl): where kD = 0 the cached texel IS that share; where kD > 0 it is the
-	// cached diffuse half times the lobes' ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's
-	// own recovery. Cut from the radiance and the flat term alike, so the direct half is untouched.
+	// THE LOBE'S INDIRECT SHARE, LEFT OUT WHERE THE READER TRACES THE LOBE ITSELF (C2: the traced lobe replaces the
+	// integral): where kD = 0 the cached texel IS that share; where kD > 0 it is the cached diffuse half times the lobes'
+	// ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's own recovery. Cut from the radiance and the flat term
+	// alike, so the direct half is untouched. (The movers' gate's half of this cut is deleted: PHOTON-7 8A A3.)
 	vec3 cutLobe = vec3( 0.0 );
-	if( jahHitIndirectGate < 1.0 || jahHitTracedLobe )
+	if( jahHitTracedLobe )
 	{
 		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
 		if( spec.w > 0.0 )
@@ -294,8 +286,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 			const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
 			const vec3 diffuseLobe = albedo.xyz * 3.141592654 * jahDiffuseAlbedoHemi( r );
 			const vec3 lobeShare = mix( stored, stored * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
-			// (all of it where the reader traces the lobe itself - C2: the traced lobe replaces the integral)
-			cutLobe = ( jahHitTracedLobe ? 1.0 : 1.0 - jahHitIndirectGate ) * lobeShare;
+			cutLobe = lobeShare;
 		}
 	}
 	// THE LIGHTS' SPECULAR LOBE TOWARD THIS RAY (PHOTON-3 stage 2): where the relight re-emitted the lobe's
@@ -311,7 +302,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 			lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
 									  JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
 	}
-	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cut - cutLobe, indirect - cut,
+	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cutLobe, indirect,
 								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
 }
 

@@ -1338,15 +1338,12 @@ public:
     /// colour passes' fragments trace it (JahLampRay_piece_ps.any), so its build's barrier waits for and is waited on by
     /// the FRAGMENT stage too (buildTlas).
     uint64_t tlasAddressOf(const OgreScene *scene) const;
-    /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
+    /// The table's address a job hands its shader (0: none).
     uint64_t alphaTableOf(const OgreScene *scene) const;
 private:
-    /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
-    /// gate (jah_rq_hit_radiance.glsl) traces nothing when none does.
-    bool rayMoversOf(const OgreScene *scene) const;
     /// THE HIT SET (ScreenProbeGather.h HitSetSources; PHOTON-7 stage 10, 10-2a): the ONE collection of everything a
     /// job's hit read binds - the TLAS, the cascades (innermost first, by name), the one environment, the surface
-    /// cache, the GPU scene's rows (flushed here), the hit table and surface, the alpha table, the movers' flag. The
+    /// cache, the GPU scene's rows (flushed here), the hit table and surface, the alpha table. The
     /// hit list is the job's own (`out.hit`, left as it is).
     void hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &out);
     VkDescriptorSetLayout mReflectSetLayout = VK_NULL_HANDLE;
@@ -5777,7 +5774,7 @@ struct ReflectParams {
     /// A MOVING OBJECT (REFLECT-MOVERS-1; rq_reflect.comp's `motion`): x = 1 when
     /// the view's id image is bound at binding 38, yz = its size.
     float motion[4] = {};
-    /// z = THE RAY ORIGIN'S POINT TERM (jah_ray_origin.glsl); xyw unused (the alpha table and the movers' flag are the hit
+    /// z = THE RAY ORIGIN'S POINT TERM (jah_ray_origin.glsl); xyw unused (the alpha table is the hit
     /// set's: `hit`).
     float alpha[4] = {};
     /// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong.
@@ -7511,21 +7508,6 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     sa.alphaWords.swap(w);
 }
 
-/// THE MEASURING DOOR (`JAH_R6_NO_ALPHA`, read per call so one process holds both
-/// arms of a paired A/B): no table — every ray query asks opaque, exactly the
-/// pre-lane traversal (a cut-out, still FORCE_NO_OPAQUE, then reads as its quad).
-bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
-    const detail::GpuScene &gs = scene->gpuScene();
-    const detail::GpuInstance *m = gs.mirrorData();
-    if (!m) return false;
-    for (uint32_t i = 0; i < gs.slotCount(); ++i) {
-        uint32_t f;
-        std::memcpy(&f, &m[i].boundsMax[3], sizeof(f));
-        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuMover)) return true;
-    }
-    return false;
-}
-
 /// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
 /// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's, u[4] = the first
 /// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable), u[5] / u[6] the emitter
@@ -7972,7 +7954,6 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         std::memcpy(out.cloudSun, hs.cloudSun, sizeof(hs.cloudSun));
     }
     out.alphaTable = alphaTableOf(scene);
-    out.movers = rayMoversOf(scene);
     out.tierCounters = tierCountersAddress();
 }
 
@@ -10415,7 +10396,6 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
-    pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
     pp.knobs[3] = float(kRayMaskStill | kRayMaskMover);   // the world, movers in it (rq_card_gather.comp's mask law)
@@ -10748,7 +10728,6 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
-    pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
     pp.knobs[2] = std::max(job.lift, 0.0f);

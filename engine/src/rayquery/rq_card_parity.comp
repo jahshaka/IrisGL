@@ -54,8 +54,8 @@ layout( set = 0, binding = 6 ) uniform Counts
 #define JAH_CARD_SLOTS cnt.counts.y
 #define JAH_CARD_RECORDS cnt.counts.z
 #include "jah_rq_card.glsl"
-// THE CARD READ'S LOBE INTEGRALS: this harness asks no movers' gate (jahHitIndirectGate stays 1, so the read never
-// cuts the lobe's share and never calls this); defined for the link, it answers no lobe.
+// THE CARD READ'S LOBE INTEGRALS: this harness traces no lobe (jahHitTracedLobe stays false, so the read never cuts
+// the lobe's share and never calls this); defined for the link, it answers no lobe.
 void jahCardLobeHemi( float r, out float a, out float b )
 {
 	a = 0.0;

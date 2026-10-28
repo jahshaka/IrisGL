@@ -497,7 +497,6 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		}
 		const vec3 hitN = known ? ( dot( wound, d ) > 0.0 ? -wound : wound ) : -d;
 		jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
-		jahHitSeed = 0u;
 		jahHitAreaSeq = uint( i ) * 83492791u;
 		bool ok = false;
 		uint source = 0u;

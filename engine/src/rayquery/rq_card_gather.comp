@@ -22,8 +22,7 @@
 // A RAY'S ANSWER, the world caches' law (the spec's stage 10 design; Lumen's radiosity):
 //   * a HIT on a FRONT face (the triangle's wound normal against the ray) reads the hit through jahHitRadianceStore
 //     (jah_rq_hit_radiance.glsl): the hit instance's card first, the cascades where no card answers (the hit's own
-//     direct light computed at the hit, the store's bounce beside it) - never jahHitRadianceSourced (its mover rays
-//     would write mover occlusion into a cache);
+//     direct light computed at the hit, the store's bounce beside it);
 //   * a hit on a BACK face - a one-sided surface seen from behind (the TLAS disables facing culls: the ray stops on
 //     it) - is 0: the inside of a closed shell holds no light of its outside;
 //   * a hit neither the card nor a cascade can shade is NO SAMPLE (the mean is over the rays that are);
@@ -223,7 +222,6 @@ void main()
 			}
 			const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
 			jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
-			jahHitSeed = 0u;
 			jahHitAreaSeq = ( uint( at.x ) * 73856093u ) ^ ( uint( at.y ) * 19349663u ) ^ ( uint( i ) * 83492791u );
 			bool ok = false;
 			uint source = 0u;
