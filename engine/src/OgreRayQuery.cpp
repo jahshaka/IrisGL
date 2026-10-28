@@ -6485,7 +6485,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // and the gather are held and the reflection runs live - its own estimator measured alone.
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
     const bool restReference = arm(ArmId::ReflectRestReference, false);
-    pp.rest[1] = restReference ? 1.0f : 0.0f;   // THE REST'S 4,096-SAMPLE REFERENCE (R1 (f)'s measuring arm)
+    pp.rest[1] = restReference ? 1.0f : arm(ArmId::ReflectRestNoStop, false) ? -1.0f : 0.0f;   // (-1: the no-stop arm)
     // THE REST'S RAYS A FRAME (commit 8: the trace's batch at rest, GiQualityFacts::reflectRestRays)
     pp.rest[2] = float(std::max(1u, giQualityFacts(scene->giParams().quality).reflectRestRays));
     // NO PREVIOUS FRAME — OR A DIFFERENT SHAPE OF ONE. A zero forward makes

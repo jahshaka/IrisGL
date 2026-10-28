@@ -422,7 +422,7 @@ void main()
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;
 			st.stop = capped ? kReflectStopFrames
-							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
+							 : ( e <= share && settled && !reference && !( p.rest.y < -0.5 ) ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			// THE REST'S BOUND (PHOTON-7 stage 11, 11-1c), at rest frame 2N - every texel's hand-over is done: a texel
 			// still converging needs v_need = v ( e / share )^2 samples (its standard error over v is e, the stop's bar its
