@@ -229,13 +229,17 @@ uniform restrict writeonly image2D cardFlat;
 // 5-3) in green, blue and alpha: traced before this job (rq_card_movers.comp's lamps mode), read here, kept.
 layout( vulkan( ogre_u10 ) vk_comma @insertpiece( uav10_pf_type ) )
 uniform restrict uimage2D cardSunVis;
+// THE TEXEL'S OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl - the card trace's still mode wrote it at the
+// capture): the texel is lit at its open centroid and sends f x that light - the area mean of a straddling texel.
+layout( vulkan( ogre_u11 ) vk_comma @insertpiece( uav11_pf_type ) )
+uniform restrict readonly image2D cardOpen;
 @property( jah_card_gather )
 // THE INDIRECT HALF BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): at the ray tier the cards this relight re-gathers were
 // traced through the scene's TLAS before this job, in the same frame (rq_card_gather.comp: the same N fixed rays, the
 // hits read through the cards and the cascades, a back face 0, a miss the sky's), into this layer - rgb the texel's
 // envColourD - which mode bit 4 reads in place of the voxel rays below; its a the texel's reported radiance (the move's
 // reference, the end of main).
-layout( vulkan( ogre_u11 ) vk_comma @insertpiece( uav11_pf_type ) )
+layout( vulkan( ogre_u12 ) vk_comma @insertpiece( uav12_pf_type ) )
 uniform restrict image2D cardGather;
 @end
 
@@ -421,6 +425,8 @@ void main()
 	uvec2 lampMask = kJahSunVisAllLamps, lampThroughMask = uvec2( 0u );   // (the texel: jah_card_sunvis.glsl)
 	float lampRest = 1.0, lampThrough = 1.0;
 	float depth = texelFetch( cardDepth, at, 0 ).x;
+	float openF = 1.0;
+	vec2 openOff = vec2( 0.0, 0.0 );
 	if( depth > 0.0 )
 	{
 		// Read raw and written back raw, the alpha replaced (no re-quantisation).
@@ -448,7 +454,16 @@ void main()
 		float alpha = sr.y / 1.001001 + 0.001;
 		float perceptualRoughness = sqrt( max( alpha, 0.0 ) );
 		// Image row 0 is the card's +v side (the capture camera's +Y).
-		vec2 f = ( vec2( t ) + 0.5 ) / float( size );
+		// (at its open centroid: the open fraction's offset, in texels)
+		{
+			const vec4 o = imageLoad( cardOpen, at );
+			if( o.a > 0.5 )
+			{
+				openF = 1.0 - o.r;
+				openOff = o.gb - 0.5;
+			}
+		}
+		vec2 f = ( vec2( t ) + 0.5 + openOff ) / float( size );
 		vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
 				 r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
 
@@ -598,8 +613,9 @@ void main()
 			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
 			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
 		}
-		flatTerm = texelFetch( cardEmissive, at, 0 ).xyz + specIndirect;
-		radiance = direct * kD + indirect + flatTerm;
+		// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
+		flatTerm = ( texelFetch( cardEmissive, at, 0 ).xyz + specIndirect ) * openF;
+		radiance = ( direct * kD + indirect ) * openF + flatTerm;
 	}
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );

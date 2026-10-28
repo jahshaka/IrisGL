@@ -66,6 +66,7 @@ layout( set = 0, binding = 1 ) uniform Params
 {
 	vec4 toSun;		// xyz = the unit direction TOWARDS the sun, w = the ray's length
 	vec4 knobs;		// x = the mask, y = the mode (0 movers, 1 still), zw = the alpha table's address (float bits)
+	uvec4 geom;		// x = the geometry rows' slot count (the open fraction's buried test, PHOTON-7 11-2 (5))
 } p;
 
 /// A CUT-OUT CASTS ITS HOLES ON A CARD TOO (REFLECT-MOVERS-2, jah_rq_alpha.glsl).
@@ -120,6 +121,18 @@ layout( std430, set = 0, binding = 7 ) readonly buffer Lamps
 	CardLightRec lamps[];
 };
 layout( rgba32ui, set = 0, binding = 8 ) uniform uimage2D sunVis;   // jah_card_sunvis.glsl's texel
+// THE TEXEL'S OPEN FRACTION (PHOTON-7 11-2 (5), the lead's ruling: a card texel is a radiance cache sampled by AREA):
+// the still mode writes it once per capture - four sub-points of the texel by the one origin law's buried test - as
+// ( 1 - f, the open sub-points' centroid offset u, v + 0.5, 1 = written ); every positional reader takes the texel at
+// that centroid (jah_card_open.glsl) and the relight scales its outgoing light by f: the area mean in the limit.
+layout( rgba8, set = 0, binding = 11 ) uniform image2D cardOpen;
+// THE GEOMETRY ROWS (the buried test's wound normal, jah_rq_geom.glsl): the hit set's two
+layout( std430, set = 0, binding = 9 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
+layout( std430, set = 0, binding = 10 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
+#define JAH_GEOM_SLOTS p.geom.x
+#define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
+#define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_rq_geom.glsl"
 /// A lamp's ray stops this far short of its source (beyond its source radius): its own bulb is not its shadow.
 const float kLampEnd = 0.05;
 // THE AREA LIGHT'S STRATA (PHOTON-7 stage 7, 7-A): one text with the pixel's trace - the key, the one origin function,
@@ -138,6 +151,13 @@ float jahCardLampShape( vec3 N, vec3 L, float perceptualRoughness )
 
 /// THE CARD TEXEL'S WORLD POINT at depth `depth` (the relight's reconstruction): image row 0 is the card's +v side (the
 /// capture camera's +Y), the ortho window on axisU/axisV, the depth back along axisD.
+/// ...at a point of the texel in texel units from its corner (`tc` = t + 0.5 its centre; the open centroid moves it)
+vec3 cardPointF( CardRec r, vec2 tc, float depth )
+{
+	const vec2 f = tc / max( r.rect.z, 1.0 );
+	return r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) + r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) -
+		   r.axisD.xyz * depth;
+}
 vec3 cardPoint( CardRec r, ivec2 t, float depth )
 {
 	const vec2 f = ( vec2( t ) + 0.5 ) / max( r.rect.z, 1.0 );
@@ -148,7 +168,9 @@ vec3 cardPoint( CardRec r, ivec2 t, float depth )
 /// THE CAPTURED SURFACE'S GEOMETRIC NORMAL: the one text (jah_geometric_normal.glsl) over the card's own block of the
 /// Depth layer - metres from the capture's near plane, R16F (10 stored mantissa bits), 0 = nothing captured; the
 /// depth is linear under the capture's orthographic camera, so a plane is affine in it as the include requires.
+#define JAH_RAY_ORIGIN_BURIED
 #include "jah_ray_origin.glsl"
+#include "jah_card_open.glsl"
 CardRec gnCard;
 #define JAH_GN_RAW( q ) texelFetch( cardDepth, ivec2( gnCard.rect.xy ) + ( q ), 0 ).x
 #define JAH_GN_WORLD( q, raw ) cardPoint( gnCard, ( q ), ( raw ) )
@@ -181,9 +203,9 @@ void main()
 			const vec3 Ncone = dot( N, planeN ) > 0.99985 ? planeN : N;
 			const float alpha = imageLoad( shadowRough, at ).y / 1.001001 + 0.001;
 			const float roughness = sqrt( max( alpha, 0.0 ) );
-			const vec2 f = ( vec2( t ) + 0.5 ) / float( size );
-			const vec3 P = r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) +
-						   r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) - r.axisD.xyz * depth;
+			// THE TEXEL AT ITS OPEN CENTROID (jah_card_open.glsl; the still mode wrote it at the capture)
+			const vec3 open = jahCardOpenRead( imageLoad( cardOpen, at ) );
+			const vec3 P = cardPointF( r, vec2( t ) + 0.5 + open.yz, depth );
 			// THE CLEARANCE AND ITS NORMAL (the ray origin's one law, the still mode's - the head of this file): the
 			// captured surface's GEOMETRIC normal, the lift the point's float bound plus the record's (rect.w); every
 			// ray starts there and is AIMED FROM THERE at its lamp's point (jahAreaRayOrigin)
@@ -303,9 +325,36 @@ void main()
 		const vec3 nV = texelFetch( cardNormal, at, 0 ).xyz * 2.0 - 1.0;
 		const vec3 N = normalize( r.axisU.xyz * nV.x + r.axisV.xyz * nV.y + r.axisD.xyz * nV.z );
 		const vec3 L = p.toSun.xyz;
-		if( dot( N, L ) > 0.0 )
+		// THE OPEN FRACTION (the still mode, once per capture: jah_card_open.glsl): the four sub-points' buried tests
+		vec3 open = vec3( 1.0, 0.0, 0.0 );
+		if( p.knobs.y > 0.5 )
 		{
-			const vec3 P = cardPoint( r, ivec2( t ), depth );
+			const vec3 Pc = cardPoint( r, ivec2( t ), depth );
+			gnCard = r;
+			const vec3 Ngc = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, Pc, N, r.axisD.xyz );
+			const float err = exp2( floor( log2( max( depth, 6.1035156e-5 ) ) ) - 11.0 );
+			float nOpen = 0.0;
+			vec2 sumOff = vec2( 0.0 );
+			for( int k = 0; k < 4; ++k )
+			{
+				const vec2 o = jahCardOpenSub( k );
+				const vec3 q = cardPointF( r, vec2( t ) + 0.5 + o, depth );
+				if( !jahRayOriginBuried( q, Ngc, jahRayOrigin( q, Ngc, depth, r.rect.w ), err, uint( p.knobs.x ) ) )
+				{
+					nOpen += 1.0;
+					sumOff += o;
+				}
+			}
+			open = vec3( nOpen * 0.25, nOpen > 0.0 ? sumOff / nOpen : vec2( 0.0 ) );
+			imageStore( cardOpen, at, jahCardOpenPack( open.x, open.yz ) );
+		}
+		else
+			open = jahCardOpenRead( imageLoad( cardOpen, at ) );
+		if( !( open.x > 0.0 ) )
+			vis = 0.0;   // wholly covered: no light reaches it
+		else if( dot( N, L ) > 0.0 )
+		{
+			const vec3 P = cardPointF( r, vec2( t ) + 0.5 + open.yz, depth );
 			// THE LIFT (the head of this file): the still mode's, from the record, along the captured surface's
 			// geometric normal - facing the capture camera, which looks down -axisD.
 			gnCard = r;

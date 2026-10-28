@@ -90,6 +90,9 @@ layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
 layout( std430, set = 0, binding = 37 ) buffer CardReads { uint cardReads[]; };
 const uint kCardReadsK = 32u;
 const uint kCardReadsBlock = 1u + 2u * kCardReadsK;
+/// THE TEXEL'S OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl): the gather starts at the open centroid
+layout( rgba8, set = 0, binding = 38 ) uniform readonly image2D cardOpen;
+#include "jah_card_open.glsl"
 
 // THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots): the records jobs' one
 // text. (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read.)
@@ -108,6 +111,12 @@ vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle );
 #include "jah_ray_set.glsl"
 
 /// THE CARD TEXEL'S WORLD POINT at depth `depth` (the relight's reconstruction).
+vec3 cardPointF( CardRec r, vec2 tc, float depth )
+{
+	const vec2 f = tc / max( r.rect.z, 1.0 );
+	return r.camPos.xyz + r.axisU.xyz * ( r.axisU.w * ( f.x - 0.5 ) ) + r.axisV.xyz * ( r.axisV.w * ( 0.5 - f.y ) ) -
+		   r.axisD.xyz * depth;
+}
 vec3 cardPoint( CardRec r, ivec2 t, float depth )
 {
 	const vec2 f = ( vec2( t ) + 0.5 ) / max( r.rect.z, 1.0 );
@@ -166,6 +175,9 @@ void main()
 		P = cardPoint( r, ivec2( t ), depth );
 		gnCard = r;
 		Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
+		// THE TEXEL AT ITS OPEN CENTROID (jah_card_open.glsl): a straddling texel gathers from its open part
+		const vec3 open = jahCardOpenRead( imageLoad( cardOpen, at ) );
+		P = cardPointF( r, vec2( t ) + 0.5 + open.yz, depth );
 		origin = jahRayOrigin( P, Ng, depth, r.rect.w );
 		buried = jahRayOriginBuried( P, Ng, origin, exp2( floor( log2( max( depth, 6.1035156e-5 ) ) ) - 11.0 ),
 									 uint( p.knobs.w ) );

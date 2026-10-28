@@ -1840,6 +1840,7 @@ private:
         VkDescriptorSet sets[kReflectRing] = {};
         RawBuffer       params[kReflectRing];
         RawBuffer       records[kReflectRing];
+        RawBuffer       rowOfSlot[kReflectRing];   ///< the geometry rows' per-slot copy (the open fraction's buried test)
         unsigned frame = 0;
     };
     bool makeCardMoverPipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
@@ -10156,8 +10157,11 @@ namespace {
 struct CardMoverParams {
     float toSun[4] = {};
     float knobs[4] = {};
+    uint32_t geom[4] = {};   ///< x = the geometry rows' slot count (the open fraction's buried test, PHOTON-7 11-2 (5))
 };
-constexpr unsigned kCardMoverBindings = 9u;
+/// ...0-8 the trace's own, 9 / 10 the geometry rows (the buried test's wound normal) and 11 THE OPEN FRACTION
+/// (PHOTON-7 11-2 (5), SurfaceCache's open layer: written by the still mode, read by the other two)
+constexpr unsigned kCardMoverBindings = 12u;
 /// The job's three modes' views (movers, still, lamps), each a ring of sets per scene: the pool holds them all.
 constexpr unsigned kCardMoverModes = 3u;
 /// The records ring's capacity: the relight list's (kMaxRelights, 80 B a card).
@@ -10196,6 +10200,9 @@ bool RayQueryTier::makeCardMoverPipelineNow(std::string &err) {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 6 shadowRough (still mode; the lamps' roughness)
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 7 the relight's light list (lamps mode)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 8 sunVis (lamps mode: its green)
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 9 the geometry rows' per-slot table
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 10 the geometry rows
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 11 the open fraction (11-2 (5))
     };
     for (unsigned i = 0; i < kCardMoverBindings; ++i) {
         b[i].binding = i;
@@ -10242,8 +10249,9 @@ bool RayQueryTier::makeCardMoverPipelineNow(std::string &err) {
 bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
     joinAhead(kAheadCardMovers);   // (its members are read below: the ahead build is joined first)
     if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis ||
-        !job.shadowRough || !job.lights || !job.sunVis)
+        !job.shadowRough || !job.lights || !job.sunVis || !job.open)
         return false;
+    Ogre::UavBufferPacked *geomRowsSrc = nullptr;   // (the buried test's rows, when bound: the solver's read below)
     SceneAs *saP = asOf(scene);
     if (!saP) return false;
     SceneAs &sa = *saP;
@@ -10357,7 +10365,46 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
         retireView(sunVisInfo.imageView);
         sunVisInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (!depth.imageView || !normal.imageView || !store.imageView || !rough.imageView || !sunVisInfo.imageView)
+    // THE OPEN FRACTION (PHOTON-7 11-2 (5)): the still mode writes it, the others read it
+    VkDescriptorImageInfo openInfo{};
+    if (job.open) {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = job.open;
+        slot.access = job.still ? Ogre::ResourceAccess::ReadWrite : Ogre::ResourceAccess::Read;
+        slot.pixelFormat = job.open->getPixelFormat();
+        openInfo.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.open)->createView(slot, false);
+        retireView(openInfo.imageView);
+        openInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    // ...AND THE GEOMETRY ROWS for its buried test (the hit set's two: the per-slot table copied into this ring's
+    // buffer, the GPU scene's rows); without them a small zeroed table and slot count 0 - nothing reads as buried
+    VkDescriptorBufferInfo rowOfSlotInfo{}, geomRowsInfo{};
+    {
+        HitSetSources hs;
+        hitSetOf(scene, sa, hs);
+        const uint32_t slots = hs.geomRows && hs.geomRowOfSlot ? uint32_t(hs.geomRowOfSlot->size()) : 0u;
+        RawBuffer &rs = cv.rowOfSlot[ring];
+        const VkDeviceSize want = std::max<VkDeviceSize>(VkDeviceSize(slots) * sizeof(uint32_t), 1024u);
+        if (rs.buffer && rs.size < want) retire(rs);
+        if (!rs.buffer && !makeBuffer(want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, rs, err)) return false;
+        if (slots) std::memcpy(rs.mapped, hs.geomRowOfSlot->data(), size_t(slots) * sizeof(uint32_t));
+        else std::memset(rs.mapped, 0xFF, 1024u);
+        rowOfSlotInfo.buffer = rs.buffer;
+        rowOfSlotInfo.range = VK_WHOLE_SIZE;
+        if (slots) {
+            auto *bi = static_cast<Ogre::VulkanBufferInterface *>(hs.geomRows->getBufferInterface());
+            geomRowsInfo.buffer = bi->getVboName();
+            geomRowsInfo.offset = VkDeviceSize(hs.geomRows->_getFinalBufferStart()) * hs.geomRows->getBytesPerElement();
+            geomRowsInfo.range = hs.geomRows->getTotalSizeBytes();
+        } else {
+            geomRowsInfo = rowOfSlotInfo;
+        }
+        pp.geom[0] = slots;
+        memcpy(cv.params[ring].mapped, &pp, sizeof(pp));
+        geomRowsSrc = slots ? hs.geomRows : nullptr;
+    }
+    if (!depth.imageView || !normal.imageView || !store.imageView || !rough.imageView || !sunVisInfo.imageView ||
+        !openInfo.imageView)
         return false;
     VkWriteDescriptorSet wds[kCardMoverBindings] = {};
     for (unsigned i = 0; i < kCardMoverBindings; ++i) {
@@ -10384,6 +10431,12 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     wds[7].pBufferInfo = &lightsInfo;
     wds[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     wds[8].pImageInfo = &sunVisInfo;
+    wds[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[9].pBufferInfo = &rowOfSlotInfo;
+    wds[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    wds[10].pBufferInfo = &geomRowsInfo;
+    wds[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds[11].pImageInfo = &openInfo;
     vkUpdateDescriptorSets(mVk, kCardMoverBindings, wds, 0, nullptr);
 
     // THE LAYOUTS through Ogre's own solver, before the command buffer is taken:
@@ -10415,6 +10468,9 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
                                  job.lamps ? Ogre::ResourceAccess::ReadWrite : Ogre::ResourceAccess::Read,
                                  computeStage);
         solver.resolveTransition(trans, job.lights, Ogre::ResourceAccess::Read, computeStage);
+        solver.resolveTransition(trans, job.open, Ogre::ResourceLayout::Uav,
+                                 job.still ? Ogre::ResourceAccess::ReadWrite : Ogre::ResourceAccess::Read, computeStage);
+        if (geomRowsSrc) solver.resolveTransition(trans, geomRowsSrc, Ogre::ResourceAccess::Read, computeStage);
         for (Ogre::TextureGpu *t : { job.depth, job.normal })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
@@ -10448,6 +10504,7 @@ void RayQueryTier::forgetCardMovers(OgreScene *scene) {
         if (it == views->end()) continue;
         for (unsigned i = 0; i < kReflectRing; ++i) {
             retireSet(it->second.sets[i], mCmPool);
+            retire(it->second.rowOfSlot[i]);
             retire(it->second.params[i]);
             retire(it->second.records[i]);
         }
@@ -10477,9 +10534,9 @@ struct CardGatherParams {
     float knobs[4] = {};   ///< the rays a texel, the reach, -, the ray mask
     float knobs2[4] = {};  ///< -, the records
 };
-/// The job's own five (the params, the records, the Gather layer, the counts; the read lists at 37) and the hit set at 0
-/// and 5..36.
-constexpr unsigned kCardGatherBindings = 38u;
+/// The job's own six (the params, the records, the Gather layer, the counts; the read lists at 37, the open fraction at
+/// 38 - PHOTON-7 11-2 (5)) and the hit set at 0 and 5..36.
+constexpr unsigned kCardGatherBindings = 39u;
 /// THE READ LISTS' BLOCK (10-2c; rq_card_gather.comp kCardReadsBlock, SurfaceCache::kCardReadsBlock): 1 + 2 x 32 words.
 constexpr unsigned kCardGatherReadsBlock = 65u;
 constexpr HitSetSlots kCardGatherHitSlots = {
@@ -10493,7 +10550,7 @@ constexpr HitSetSlots kCardGatherHitSlots = {
     35u,
     36u,
 };
-static_assert(kCardGatherBindings == kHitSetBindings + 5u, "the cards' gather set is the hit set and its own five");
+static_assert(kCardGatherBindings == kHitSetBindings + 6u, "the cards' gather set is the hit set and its own six");
 static_assert(kCardGatherReadsBlock == kCardReadsBlock, "one read-list block");
 /// The records ring's capacity: the relight list's (kMaxRelights).
 constexpr unsigned kCardGatherMaxRecords = 1024u;
@@ -10526,6 +10583,10 @@ bool RayQueryTier::makeCardGatherPipelineNow(std::string &err) {
     b[37].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     b[37].descriptorCount = 1u;
     b[37].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    b[38].binding = 38u;   // the open fraction (11-2 (5))
+    b[38].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    b[38].descriptorCount = 1u;
+    b[38].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     DescriptorPoolPlan plan;
     if (!plan.makeLayout(mVk, b, kCardGatherBindings, kMaxTimedScenes * kReflectRing, mCgSetLayout, err,
                          "rayquery/card-gather"))
@@ -10696,7 +10757,17 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
         retireView(store.imageView);
         store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (!store.imageView) return CardGatherResult::Wait;
+    VkDescriptorImageInfo openInfo{};
+    if (job.open) {
+        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
+        slot.texture = job.open;
+        slot.access = Ogre::ResourceAccess::Read;
+        slot.pixelFormat = job.open->getPixelFormat();
+        openInfo.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.open)->createView(slot, false);
+        retireView(openInfo.imageView);
+        openInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (!store.imageView || !openInfo.imageView) return CardGatherResult::Wait;
     const auto own = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet & {
         VkWriteDescriptorSet &e = w[binding];
         e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -10718,6 +10789,7 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
         readsInfo.range = job.reads->getTotalSizeBytes();
     }
     own(37u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &readsInfo;
+    own(38u, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).pImageInfo = &openInfo;
     vkUpdateDescriptorSets(mVk, kCardGatherBindings, w, 0, nullptr);
     // THE ZERO BLOCK the read lists' clear copies from (once)
     if (!mCgZeroBlock.buffer) {
@@ -10740,6 +10812,7 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
                                  computeStage);
         if (instances) solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
         solver.resolveTransition(trans, job.reads, Ogre::ResourceAccess::ReadWrite, computeStage);
+        solver.resolveTransition(trans, job.open, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Read, computeStage);
         mRs->executeResourceTransition(trans);
     }
     VkCommandBuffer cmd = frameCmd();
