@@ -646,6 +646,7 @@ struct JahReflectSample
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
 	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
+	vec3 c2;        // THE PICK's (the reds' instrument): the hit's traced lobe (C2) inside `traced` / a record's lobe
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -667,6 +668,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.recGain = 1.0;
 	o.recTraced = false;
 	o.recPane = vec4( 0.0, 0.0, 0.0, 1.0 );
+	o.c2 = vec3( 0.0 );
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -933,7 +935,11 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				vec4 hMetal;
 				if( c2 && ok && finite3( traced ) &&
 					jahHitMaterial( reflectFootprint( lobeAlpha, t ), hAlbedo, hEmissive, hRough, hMetal ) )
-					traced += jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, hRough, hMetal, c2u );
+				{
+					const vec3 c2part = jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, hRough, hMetal, c2u );
+					traced += c2part;
+					o.c2 = c2part;
+				}
 			}
 			record = decodeAlways || !ok || !finite3( traced );
 			// ...AND A RECORD's (the lead's ruling on D5): the decode keeps the lights' lobe, its ENVIRONMENT specular is
@@ -1141,7 +1147,59 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	// (READ_B finding 1, the gather's rule) and its sun leg lifts by the far copy's hand-over.
 	o.recGain = gainB;
 	o.recTraced = record && recTraced;
+	if( record && recTraced )
+		o.c2 = recLobe;
 	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
+}
+
+// THE PICK (binding 56, the reds' instrument: jahlab pick; OgreRayQuery.cpp kReflectPickBinding): while alpha.y's bits
+// name a full-resolution pixel (x | y << 12 | the ring's slot << 24 | 1 << 30), the trace texel holding it writes its
+// frame's sample into its slot's words 0-31 and the temporal pass its rest terms into 32-47.
+layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
+int jahPickSlot( ivec2 tc )
+{
+	const uint w = floatBitsToUint( p.alpha.y );
+	if( ( w & ( 1u << 30u ) ) == 0u || gEye != 0 )
+		return -1;
+	const ivec2 full = ivec2( p.resolution.zw );
+	const ivec2 traceRes = max( ivec2( p.resolution.xy ), ivec2( 1 ) );
+	const ivec2 scale = max( full / traceRes, ivec2( 1 ) );
+	const ivec2 px = ivec2( int( w & 4095u ), int( ( w >> 12u ) & 4095u ) );
+	return all( equal( px / scale, tc ) ) ? int( ( w >> 24u ) & 63u ) : -1;
+}
+void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool atRest )
+{
+	const int slot = jahPickSlot( tc );
+	if( slot < 0 )
+		return;
+	const uint b = uint( slot ) * 64u;
+	jahPick[b + 0u] = 1u;   // written
+	jahPick[b + 1u] = ( s.ok ? 1u : 0u ) | ( s.record ? 2u : 0u ) | ( s.recFar ? 4u : 0u ) | ( s.slotHit ? 8u : 0u ) |
+					  ( s.screenHit ? 16u : 0u ) | ( s.noSample ? 32u : 0u ) | ( s.centre ? 64u : 0u ) |
+					  ( s.vndf ? 128u : 0u ) | ( s.resume ? 256u : 0u ) | ( s.recTraced ? 512u : 0u ) |
+					  ( atRest ? 1024u : 0u ) | ( s.blend ? 2048u : 0u );
+	jahPick[b + 2u] = s.recSlot;
+	jahPick[b + 3u] = s.photonSource;
+	jahPick[b + 4u] = floatBitsToUint( s.hitT );
+	jahPick[b + 5u] = floatBitsToUint( s.L.x );
+	jahPick[b + 6u] = floatBitsToUint( s.L.y );
+	jahPick[b + 7u] = floatBitsToUint( s.L.z );
+	jahPick[b + 8u] = floatBitsToUint( s.traced.x );
+	jahPick[b + 9u] = floatBitsToUint( s.traced.y );
+	jahPick[b + 10u] = floatBitsToUint( s.traced.z );
+	jahPick[b + 11u] = floatBitsToUint( s.c2.x );
+	jahPick[b + 12u] = floatBitsToUint( s.c2.y );
+	jahPick[b + 13u] = floatBitsToUint( s.c2.z );
+	jahPick[b + 14u] = floatBitsToUint( s.nee.x );
+	jahPick[b + 15u] = floatBitsToUint( s.nee.y );
+	jahPick[b + 16u] = floatBitsToUint( s.nee.z );
+	jahPick[b + 17u] = floatBitsToUint( s.screenRadiance.x );
+	jahPick[b + 18u] = floatBitsToUint( s.blendVouch );
+	jahPick[b + 19u] = floatBitsToUint( s.recGain );
+	jahPick[b + 20u] = floatBitsToUint( s.recDelta.x );
+	jahPick[b + 21u] = vNow;
+	jahPick[b + 22u] = restStop;
+	jahPick[b + 23u] = s.recPrim;
 }
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,
@@ -1151,6 +1209,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
 					uint vNow, uint folds, uint consumed, float restT, JahReflectSample s )
 {
+	jahPickSample( tc, s, vNow, restStop, atRest );   // THE PICK (the reds' instrument; nothing unless the arm names tc)
 	bool resume;
 	resume = s.resume;
 	const bool centre = s.centre, vndf = s.vndf, folded = s.folded;

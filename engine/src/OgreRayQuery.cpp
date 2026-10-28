@@ -293,7 +293,7 @@ constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 56u;
+constexpr unsigned kReflectBindings = 57u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -377,7 +377,11 @@ constexpr unsigned kReflectDirectBackBinding = kReflectMovingSeBinding + 1u;
 /// ...and THE SAMPLE's NEE PART (55, PHOTON-7 stage 11, 11-1b): the next-event estimate inside this frame's sample, which
 /// the resolve keeps apart from the BRDF part its density ratio reweights (rq_reflect_resolve.comp).
 constexpr unsigned kReflectNeeBinding = kReflectDirectBackBinding + 1u;
-static_assert(kReflectBindings == kReflectNeeBinding + 1u, "the sample's NEE part is the reflection set's last binding");
+/// ...and THE PICK (56, PHOTON-7 11-2: the reds' instrument, jahlab's `pick`): one trace texel's sample and rest terms,
+/// a frame a slot of a 64-slot host-visible ring (kReflectPickWords words a slot), while the arm reflect.pick names it.
+constexpr unsigned kReflectPickBinding = kReflectNeeBinding + 1u;
+constexpr unsigned kReflectPickSlots = 64u, kReflectPickWords = 64u;
+static_assert(kReflectBindings == kReflectPickBinding + 1u, "the pick is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
@@ -1303,6 +1307,9 @@ private:
         RawBuffer movingSe;
         RawBuffer seReadback;
         std::vector<float> histHostSe;
+        /// THE PICK (binding 56, the arm reflect.pick): the ring the passes write the picked texel into
+        RawBuffer pick;
+        uint32_t pickFrames[64] = {};   ///< each slot's dispatch frame (the lab orders the ring by it)
     };
 
     bool makeReflectPipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
@@ -6037,6 +6044,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 53 the moving SE instrument
         kHitSetSlot,                                     // 54 (the hit set) voxelDirectBack[] (PHOTON-7 stage 7)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 55 the sample's NEE part (PHOTON-7 stage 11, 11-1b)
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 56 the pick (PHOTON-7 11-2, the reds' instrument)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6314,6 +6322,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     retire(rv.compactList);
     retire(rv.histReadback);
     retire(rv.movingSe);
+    retire(rv.pick);
     retire(rv.seReadback);
     for (ReflectView::HistPending &p : rv.histPending) p = ReflectView::HistPending();
     rv.histHost.clear();
@@ -6355,6 +6364,12 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
             st.reflectHistoryH = kv.second.histHostH;
             st.reflectHistoryFrame = kv.second.histHostFrame;
             st.reflectHistorySe = kv.second.histHostSe;
+        }
+        // THE PICK's RING (the arm reflect.pick): copied while the arm is on - the lab reads it back
+        if (mArms && mArms->value(ArmId::ReflectPick) >= 1.0 && kv.second.pick.mapped) {
+            const uint32_t *pw = static_cast<const uint32_t *>(kv.second.pick.mapped);
+            st.reflectPick.assign(pw, pw + size_t(kReflectPickSlots) * kReflectPickWords);
+            st.reflectPickFrames.assign(kv.second.pickFrames, kv.second.pickFrames + kReflectPickSlots);
         }
         st.reflectFrame = std::max(st.reflectFrame, kv.second.frame);
         // THE REST (R1, G6)
@@ -6867,6 +6882,18 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
     pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
+    // THE PICK (the arm reflect.pick = 1 + x + 4096 y, a full-resolution pixel; 0 off): x | y << 12 | the ring's slot
+    // << 24 | 1 << 30, in alpha.y's bits (rq_reflect.comp / rq_reflect_temporal.comp jahPickSlot)
+    {
+        const double pv = mArms ? mArms->value(ArmId::ReflectPick) : 0.0;
+        uint32_t packed = 0u;
+        if (pv >= 1.0) {
+            const uint32_t v = uint32_t(pv - 1.0);
+            packed = (v % 4096u) | ((v / 4096u) % 4096u) << 12u | (frameNow() % kReflectPickSlots) << 24u | (1u << 30u);
+            rv.pickFrames[frameNow() % kReflectPickSlots] = frameNow();
+        }
+        std::memcpy(&pp.alpha[1], &packed, sizeof(packed));
+    }
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
@@ -6945,7 +6972,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             foldBytes(&h, sizeof(h));
         }
         foldF(pp.motion[0]); foldF(pp.motion[1]); foldF(pp.motion[2]);
-        fold4(pp.alpha);
+        foldF(pp.alpha[0]); foldF(pp.alpha[2]); foldF(pp.alpha[3]);   // (NOT alpha.y: the pick, an instrument - its slot
+                                                                    // moves every frame and it changes no picture)
         foldBytes(pp.fog, sizeof(pp.fog));
         // (the rest block's freeze and reference arms; NOT its ray count, rest.z - the rest's own budget, which moves
         // inside a rest by design - nor rest.w, unused)
@@ -7240,6 +7268,21 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     movingSeInfo.range = VK_WHOLE_SIZE;
     w[kReflectMovingSeBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectMovingSeBinding].pBufferInfo = &movingSeInfo;
+    // THE PICK (56): the ring, host-visible and zeroed at its making (written only while the arm names a texel)
+    if (!rv.pick.buffer) {
+        std::string perr;
+        const VkDeviceSize bytes = VkDeviceSize(kReflectPickSlots) * kReflectPickWords * 4u;
+        if (!makeBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, rv.pick, perr)) {
+            bail("the pick could not be made");
+            return;
+        }
+        std::memset(rv.pick.mapped, 0, size_t(bytes));
+    }
+    VkDescriptorBufferInfo pickInfo{};
+    pickInfo.buffer = rv.pick.buffer;
+    pickInfo.range = VK_WHOLE_SIZE;
+    w[kReflectPickBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[kReflectPickBinding].pBufferInfo = &pickInfo;
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------

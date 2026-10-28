@@ -227,6 +227,19 @@ History historyOfPoint( vec3 point, EyeImage before, bool depthTest, float thres
 /// a float a texel - the moving mean's standard error in display codes. Unarmed it is a 16-byte stand-in and nothing is
 /// written past its length.
 layout( std430, set = 0, binding = 53 ) buffer JahMovingSe { float movingSe[]; };
+// THE PICK (binding 56, rq_reflect.comp jahPickSlot): the picked texel's rest terms into its slot's words 32-47
+layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
+int jahPickSlotT( ivec2 tc )
+{
+	const uint w = floatBitsToUint( p.alpha.y );
+	if( ( w & ( 1u << 30u ) ) == 0u || gEye != 0 )
+		return -1;
+	const ivec2 full = ivec2( p.resolution.zw );
+	const ivec2 traceRes = max( ivec2( p.resolution.xy ), ivec2( 1 ) );
+	const ivec2 scale = max( full / traceRes, ivec2( 1 ) );
+	const ivec2 px = ivec2( int( w & 4095u ), int( ( w >> 12u ) & 4095u ) );
+	return all( equal( px / scale, tc ) ) ? int( ( w >> 24u ) & 63u ) : -1;
+}
 /// THE STORE: the mean (linear) and its luma's variance into this half, the count and the throw in the state - and, for
 /// a texel RESUMING at rest, into the frozen half too (H = M: its rest restarts from here). The instrument takes the
 /// mean's standard error, sqrt( variance / count ), in display codes (0 with no count).
@@ -425,6 +438,28 @@ void main()
 			const bool capped = st.v >= kReflectRestVCap;
 			st.stop = capped ? kReflectStopFrames
 							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
+			{
+				const int ps = jahPickSlotT( tc );   // THE PICK (the reds' instrument)
+				if( ps >= 0 )
+				{
+					const uint b = uint( ps ) * 64u + 32u;
+					jahPick[b + 0u] = 1u;
+					jahPick[b + 1u] = floatBitsToUint( e );
+					jahPick[b + 2u] = floatBitsToUint( share );
+					jahPick[b + 3u] = floatBitsToUint( v );
+					jahPick[b + 4u] = st.stop;
+					jahPick[b + 5u] = ( settled ? 1u : 0u ) | ( capped ? 2u : 0u ) | ( reference ? 4u : 0u ) |
+									  ( handOver ? 8u : 0u );
+					jahPick[b + 6u] = floatBitsToUint( LD );
+					jahPick[b + 7u] = floatBitsToUint( answer.x );
+					jahPick[b + 8u] = floatBitsToUint( answer.y );
+					jahPick[b + 9u] = floatBitsToUint( answer.z );
+					jahPick[b + 10u] = floatBitsToUint( rs.m2 );
+					jahPick[b + 11u] = floatBitsToUint( sample1.x );
+					jahPick[b + 12u] = floatBitsToUint( sample1.y );
+					jahPick[b + 13u] = floatBitsToUint( sample1.z );
+				}
+			}
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 			// THE REST'S BOUND (PHOTON-7 stage 11, 11-1c), at rest frame 2N - every texel's hand-over is done: a texel
 			// still converging needs v_need = v ( e / share )^2 samples (its standard error over v is e, the stop's bar its
