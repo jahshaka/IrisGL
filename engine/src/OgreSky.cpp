@@ -2241,10 +2241,14 @@ bool OgreScene::cloudLayerDrawn() const {
 // the aerial in-scatter, the cloud sheet's air: JahAtmosphere::setSkyGain) and the cloud sheet's sun term (its sky
 // term is the clear sky's capture, which carries the gain already). The sun disc is a light and is not in it. Cheap,
 // idempotent: uniforms only.
-void OgreScene::applySkyGain() {
+Colour OgreScene::drawnSkyGain() const {
     // A DOME's gain is the dome's (R5b: the Sky Light lights the scene from its own cubemap; the World sky the camera
     // sees is drawn as authored, gain 1): the dome's capture sets it on its own draw (renderSkyCaptureCube).
-    const Colour g = mEnvDesc.source == EnvironmentSource::Cubemap ? Colour(1.0f, 1.0f, 1.0f, 1.0f) : mSkyGain;
+    return mEnvDesc.source == EnvironmentSource::Cubemap ? Colour(1.0f, 1.0f, 1.0f, 1.0f) : mSkyGain;
+}
+
+void OgreScene::applySkyGain() {
+    const Colour g = drawnSkyGain();
     JAH_TRY {
         setSkyMaterialGain(g);
         if (mAtmosphere) mAtmosphere->setSkyGain(Ogre::Vector3(g.r, g.g, g.b));

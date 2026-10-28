@@ -909,7 +909,10 @@ void OgreScene::ensureAtmosphere() {
     // Engine::createView(), so the window and the Hlms are up.
     JAH_TRY {
         mAtmosphere = new JahAtmosphere(mRoot, mSceneMgr, kVisibleBit);
-        mAtmosphere->setSkyGain(Ogre::Vector3(mSkyGain.r, mSkyGain.g, mSkyGain.b));   // the Sky Light's (R5)
+        // the drawn sky's gain, the one rule (R5; 1 under a dome - the 10-3 read's W2: fog first enabled under a dome
+        // ran the atmosphere at the dome's gain until the next capture)
+        const Colour g = drawnSkyGain();
+        mAtmosphere->setSkyGain(Ogre::Vector3(g.r, g.g, g.b));
         // The state the two customers left behind decides what happens next
         // (ONE component, two customers — syncAtmosphere's header).
         syncAtmosphere();

@@ -4449,6 +4449,10 @@ public:
     /// construction and no reader scales anything (applySkyGain).
     Colour mSkyGain { 1.0f, 1.0f, 1.0f, 1.0f };
     void applySkyGain();
+    /// THE DRAWN SKY's GAIN, the one rule (R5b): 1 under a dome (the World sky drawn as authored; the dome's capture
+    /// takes the Sky Light's gain on its own draw), the Sky Light's otherwise - what applySkyGain sets and what a
+    /// component created later (the atmosphere, ensureAtmosphere) starts at.
+    Colour drawnSkyGain() const;
     void setSkyMaterialGain(const Colour &gain);   ///< Ogre's sky material's `skyGain` (both its programs)
     /// THE ENVIRONMENT'S SOURCE (EnvironmentDesc, R5b) and, for a dome, its cube - the six faces copied, a picture only
     /// (one mip), photographed by the environment capture in place of the drawn sky (renderSkyCaptureCube's scope).
