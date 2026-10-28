@@ -356,12 +356,9 @@ Scene::Scene()
     fogHeightFalloff = 0.1f;
     fogHeightLevel = 0.0f;
 
-    // SHADOWS ARE ON (SUN_AND_LIGHT_DEFAULTS_SPEC §2.5): this was the one
-    // field the constructor never assigned — an uninitialised bool that every
-    // shipped creation path happened to set afterwards, so it was latent
-    // rather than live. It is the scene-wide master switch; a light's own
-    // Shadow Type is the per-light one, and both default to on.
-    shadowEnabled = true;
+    // (THE SCENE-WIDE SHADOW SWITCH IS DELETED - PHOTON-7 10-4 fix round, the one read's F7: turning every shadow map off
+    // let every light through every wall and took the fog's sun march with it. Shadows are always on; a light's
+    // Shadow Type says only how soft its shadow is.)
 
     // global illumination is opt-in: off by default, everywhere, always
     giMode = GiMode::OFF;

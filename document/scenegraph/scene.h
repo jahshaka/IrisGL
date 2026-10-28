@@ -955,7 +955,6 @@ public:
     QStringList folders;
 
     float gravity;
-    bool shadowEnabled;
 
 	SkyType skyType;
 	/// THE REALISTIC SKY'S DIALS — READ THIS, WRITE `setSkyRealistic`.

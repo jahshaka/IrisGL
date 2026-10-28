@@ -7465,8 +7465,9 @@ void SceneMirror::buildViewEnvironment(FrameInputView &part, View *view, const i
 
 void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record, bool offscreenChain)
 {
-    // World-panel Enable Shadows (used to be hardcoded on).
-    part.shadows = mSource->shadowEnabled;
+    // SHADOWS ARE ALWAYS ON (PHOTON-7 10-4 fix round, F7: the World panel's switch is deleted - turning every map off
+    // let every light through every wall). A view's shadows stay the engine's door for tests (View::setShadows).
+    part.shadows = true;
     // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
     // frame — the engine ignores a repeat of the value already REQUESTED (the
     // achieved count may be clamped lower by the driver, so comparing against
