@@ -64,6 +64,7 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 	vec4 fog[8];		// THE MEDIA ALONG THE RAY (OgreScene::fogAlong)
 	vec4 eye[2];		// each eye's position (world; xyz): the panes in front of a record's fragment (the one read's F5)
 } p;
+#include "jah_world_exit.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
@@ -150,6 +151,12 @@ void main()
 			// (1) THE NEAR COPIES from where the chain's read ended to the near length, (2) THE FAR COPIES past it (the
 			// reflection's continuation, rq_reflect.comp: from the near length less the hand-over gap to the far plane)
 			const float nearT = p.knobs.y;
+			// A MISS IS AN EXIT (10-3 R4; W5 at the 10-4 merge): the ray's last query ends where it leaves the world's box -
+			// the far copies' end where they are traced, else the near copies' (no far copies: the near query is the whole
+			// ray); the near query's end stays the hand-over length where the far query follows it
+			const bool farOn = p.knobs.w > 0.0 && ( mask & 0x10u ) != 0u;
+			const float nearEnd = farOn ? nearT : jahWorldExitT( origin, dir, nearT );
+			const float farEnd = farOn ? jahWorldExitT( origin, dir, p.knobs.w ) : 0.0;
 			bool hit = false, far = false;
 			float t = 0.0;
 			uint slot = 0u, prim = 0u, geomIdx = 0u;
@@ -157,11 +164,11 @@ void main()
 			mat4x3 toWorld = mat4x3( 1.0 );
 			JahPanes panes = jahPanesNone();
 			JahPanes panesFar = jahPanesNone();
-			if( tStart < nearT )
+			if( tStart < nearEnd )
 			{
 				rayQueryEXT rq;
 				rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask & 0x0Fu, origin, tStart, dir,
-									   nearT );
+									   nearEnd );
 				JAH_RQ_PROCEED_PANES( rq, panes )
 				if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 				{
@@ -173,14 +180,14 @@ void main()
 					bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
 					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
 				}
-				jahPanesInFront( panes, hit ? t : nearT );
+				jahPanesInFront( panes, hit ? t : nearEnd );
 			}
 			const float farFrom = max( p.knobs.z, tStart );
-			if( !hit && p.knobs.w > farFrom && ( mask & 0x10u ) != 0u )
+			if( !hit && farOn && farEnd > farFrom )
 			{
 				rayQueryEXT rqFar;
 				rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, farFrom, dir,
-									   p.knobs.w );
+									   farEnd );
 				JAH_RQ_PROCEED_PANES( rqFar, panesFar )
 				if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 				{
@@ -194,7 +201,7 @@ void main()
 					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rqFar, true );
 				}
 				// (a pane the near query crossed is not crossed twice: the far copies' past its end)
-				jahPanesBetween( panesFar, max( nearT, tStart ), hit ? t : p.knobs.w );
+				jahPanesBetween( panesFar, max( nearT, tStart ), hit ? t : farEnd );
 			}
 			// THE PANES IN FRONT: their own light and the throughput past them, the near list then the far one
 			float through = 1.0;
