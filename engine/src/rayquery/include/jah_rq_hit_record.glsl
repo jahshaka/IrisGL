@@ -61,7 +61,10 @@
 //                        whose ray rides a rest run (the write-back folds the
 //                        whole sample, screen and ray, as ONE: the moments are
 //                        not linear in the parts); 0 on every other record;
-//                        [6] packHalf2x16( THE NEE DELTA's r, g ) and [7] its b
+//                        [6] packHalf2x16( THE NEE DELTA's r, g ) and [7]
+//                        packHalf2x16( its b, THE ESTIMATOR's GAIN - the
+//                        reflection's factor on the decoded ray share,
+//                        PHOTON-7 11-2 (1); 1 on the gather's records )
 //                        (PHOTON-7 11-1b, the preflight's gap G3): what the
 //                        write-back adds to the shaded sample - the NEE part less
 //                        the BRDF's share ( 1 - v ) ( 1 - w_b ) E T of the
@@ -188,7 +191,7 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// other record).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare, vec3 delta )
+				  vec4 screenShare, vec3 delta, float gain )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -204,7 +207,7 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 4u] = packHalf2x16( clamp( screenShare.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 5u] = packHalf2x16( clamp( screenShare.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 6u] = packHalf2x16( clamp( delta.xy, vec2( -65504.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 7u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), 0.0 ) );
+	jahHitBuf[aux + 7u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), clamp( gain, 0.0, 65504.0 ) ) );
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -213,7 +216,7 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				   vec3 delta )
+				   vec3 delta, float gain )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -224,7 +227,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ), delta );
+				 vec4( 0.0 ), delta, gain );
 	return true;
 }
 

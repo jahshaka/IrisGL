@@ -15,7 +15,8 @@
 // the neighbour's taken under its mixture (the centre ray with probability p_j: a VNDF draw's density is (1 - p_j) q_j),
 // self-normalised over the samples kept (this texel's own at 1 / (1 - p)):
 //     out = sum_j w_j D( c_j ) / sum_j w_j,   w_j = plane_j q_p( L_j ) / ( ( 1 - p_j ) q_j( L_j ) )
-// in the denoiser space (jah_reflect_denoise.glsl), converted back. A neighbour's direction is RE-DERIVED from its
+// in the denoiser space (jah_reflect_denoise.glsl), converted back. A sample holds its radiance at ITS draw's estimator
+// gain (G2/G1 over the F-free A + B, PHOTON-7 11-2 (1)): a neighbour's BRDF part is re-gained to this texel's at L_j. A neighbour's direction is RE-DERIVED from its
 // per-pixel seed and its geometric normal (jah_reflect_draw.glsl, jah_geometric_normal.glsl: the trace's own texts) - no
 // direction is stored. Its CENTRE draws and its MIRROR FALLBACKS are deltas and are never reweighted as densities (the
 // state's centre and delta bits): left out. A texel whose own draw was the centre ray keeps its own sample (the centre
@@ -35,6 +36,8 @@
 // and the same Params (declared through `denoiser`).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -61,6 +64,19 @@ layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 #include "jah_rq_finite.glsl"
 #include "jah_reflect_state.glsl"
 #include "jah_reflect_draw.glsl"
+/// THE LOBE INTEGRALS (the split DFG's A, B: the trace's table, through the hit table's device address - the estimator's
+/// gain normalises by the F-free A + B, PHOTON-7 11-2 (1))
+layout( buffer_reference, std430, buffer_reference_align = 4 ) readonly buffer JahResolveTableRef
+{
+	uint u[];
+};
+float jahResolveAlbedoWord( int k )
+{
+	JahResolveTableRef T = JahResolveTableRef( JAH_HIT_TABLE );
+	return uintBitsToFloat( T.u[T.u[4] + uint( k )] );
+}
+#define JAH_SPEC_ALBEDO( k ) jahResolveAlbedoWord( k )
+#include "jah_spec_albedo.glsl"
 /// THE GEOMETRIC NORMAL (jah_geometric_normal.glsl): the trace's own reconstruction, through this eye.
 struct EyeImage { vec3 camPos; float perspective; vec3 rayTL; vec3 rayRight; vec3 rayDown; vec3 fwd; };
 EyeImage gNormalEye;
@@ -129,6 +145,16 @@ Surface surfaceAt( ivec2 t, ivec2 scale, ivec2 fullRes, EyeImage e )
 float foldedPdf( Surface s, vec3 L )
 {
 	return jahReflectFoldedPdf( s.N, s.g, s.V, L, s.alpha );
+}
+/// THE ESTIMATOR's GAIN of L at a surface (rq_reflect.comp's reflectGainAt, the same text): G2/G1 over the F-free A + B.
+float gainAt( Surface s, vec3 L )
+{
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) == 0u )
+		return 1.0;
+	float a, b;
+	jahSpecularAlbedo( clamp( dot( s.N, s.V ), 0.0, 1.0 ), sqrt( clamp( s.alpha, 0.0, 1.0 ) ), a, b );
+	return jahReflectGain( s.N, s.g, s.V, L, s.alpha, a + b );
 }
 
 /// The plane weight's scale (Lumen's r.Lumen.Reflections.BilateralFilter.DepthWeightScale) and the kernel's.
@@ -244,9 +270,14 @@ void main()
 			const float w = wPlane * pdfC / pdfQ * reuse;
 			if( !finite1( w ) )
 				continue;
+			// ITS BRDF PART AT THIS TEXEL's GAIN (PHOTON-7 11-2 (1)): the neighbour wrote its radiance times ITS gain at Lq
+			const float gainQ = gainAt( n, Lq );
+			if( !( gainQ > 0.0 ) )
+				continue;
+			const float regain = gainAt( c, Lq ) / gainQ;
 			const vec4 nee4 = imageLoad( reflectNee, ivec3( q, gEye ) );
 			const vec3 neeQ = finite3( nee4.xyz ) ? nee4.xyz : vec3( 0.0 );
-			sum += jahToDenoise( clamp( smp.xyz - neeQ, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
+			sum += jahToDenoise( clamp( ( smp.xyz - neeQ ) * regain, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * w;
 			sumW += w;
 			sumNee += neeQ * ( wPlane * reuse );
 			sumNeeW += wPlane * reuse;

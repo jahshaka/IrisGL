@@ -52,9 +52,9 @@ void jahReflectFrame( vec3 N, out vec3 T, out vec3 B )
 
 /// THE GGX VISIBLE-NORMAL SAMPLE (Heitz, "Sampling the GGX Distribution of Visible Normals", JCGT 2018): a half vector
 /// in the surface's tangent frame given the view direction in that frame. Sampling the VNDF cancels D and the masking
-/// term, leaving the estimator weight F G2 / G1 - NEITHER applied: this pass writes a radiance HlmsPbs multiplies by the
-/// surface's own BRDF (F here would apply it twice); G2 / G1 is 1 at normal incidence and falls at grazing, the
-/// approximation the probe path makes too. At alpha 0 it returns the normal exactly.
+/// term, leaving the estimator weight F G2 / G1: G2 / G1 is the trace's (jahReflectGain, with the F-free A + B that
+/// normalises it), F the split DFG's that HlmsPbs multiplies the reflection by (F here would apply it twice). At alpha 0
+/// it returns the normal exactly.
 vec3 jahGgxVndf( vec3 Ve, float alpha, vec2 u )
 {
 	const vec3 Vh = normalize( vec3( alpha * Ve.x, alpha * Ve.y, Ve.z ) );
@@ -96,6 +96,50 @@ float jahReflectFoldedPdf( vec3 N, vec3 g, vec3 V, vec3 L, float alpha )
 		return 0.0;
 	const float al = max( alpha, 1e-4 );
 	return jahGgxVndfPdf( N, V, L, al ) + jahGgxVndfPdf( N, V, L - 2.0 * a * g, al );
+}
+
+/// THE HEIGHT-CORRELATED SMITH G2 OVER THE VNDF's G1 (V): ( 1 + Lambda( V ) ) / ( 1 + Lambda( V ) + Lambda( L ) ) - what
+/// a VNDF draw's weight is missing against HlmsPbs's lobe (BRDF_Default: GGX D, the height-correlated Smith visibility;
+/// the split DFG it multiplies the reflection by integrates D G2 F / ( 4 N.V )). 1 at normal incidence and on a mirror,
+/// falling at grazing; 0 where L leaves the shading hemisphere (G2 is 0 there).
+float jahGgxG2OverG1( vec3 N, vec3 V, vec3 L, float alpha )
+{
+	const float NdotV = dot( N, V ), NdotL = dot( N, L );
+	if( !( NdotV > 0.0 ) || !( NdotL > 0.0 ) )
+		return 0.0;
+	const float a2 = alpha * alpha;
+	// Lambda( mu ) = ( sqrt( a2 + ( 1 - a2 ) mu^2 ) - mu ) / ( 2 mu ): the G1 form jahGgxVndfPdf takes, 1 / ( 1 + Lambda )
+	const float lamV = ( sqrt( a2 + ( 1.0 - a2 ) * NdotV * NdotV ) - NdotV ) / ( 2.0 * NdotV );
+	const float lamL = ( sqrt( a2 + ( 1.0 - a2 ) * NdotL * NdotL ) - NdotL ) / ( 2.0 * NdotL );
+	return ( 1.0 + lamV ) / ( 1.0 + lamV + lamL );
+}
+
+/// THE FOLDED DRAW's TARGET t( L ): pv( L ) G2/G1( L ) + pv( R_g L ) G2/G1( R_g L ) above g, 0 below - the folded density
+/// q( L ) with each branch's G2/G1, so integral( t ) = integral of D G2 / ( 4 N.V ) over the shading hemisphere = the
+/// F-free split DFG A + B (the fold moves the lobe's mass, never changes it).
+float jahReflectFoldedTarget( vec3 N, vec3 g, vec3 V, vec3 L, float alpha )
+{
+	const float a = dot( L, g );
+	if( !( a > 0.0 ) )
+		return 0.0;
+	const float al = max( alpha, 1e-4 );
+	const vec3 Lr = L - 2.0 * a * g;
+	return jahGgxVndfPdf( N, V, L, al ) * jahGgxG2OverG1( N, V, L, al ) +
+		   jahGgxVndfPdf( N, V, Lr, al ) * jahGgxG2OverG1( N, V, Lr, al );
+}
+
+/// THE ESTIMATOR's GAIN of a VNDF draw L (PHOTON-7 11-2 (1); the reference arm, ledger 3388): t( L ) / ( q( L ) ( A + B ) )
+/// - a sample's radiance times it averages to integral( L D G2 / ( 4 N.V ) ) / ( A + B ), the lobe's normalised mean,
+/// which HlmsPbs's F0 A + B then turns into the lobe's reflected radiance (F stays the DFG's: the gain is F-free).
+/// `ab` = A + B at ( N.V, the perceptual roughness ) from the table HlmsPbs reads (jahSpecularAlbedo). The centre ray
+/// takes the lobe whole (gain 1); a draw that left the surface has no G2 (gain 0, jahReflectDraw's `vndf` false).
+float jahReflectGain( vec3 N, vec3 g, vec3 V, vec3 L, float alpha, float ab )
+{
+	const float q = jahReflectFoldedPdf( N, g, V, L, alpha );
+	if( !( q > 0.0 ) || !( ab > 1e-4 ) )
+		return 0.0;
+	const float gain = jahReflectFoldedTarget( N, g, V, L, alpha ) / ( q * ab );
+	return gain >= 0.0 && gain < 1e4 ? gain : 0.0;
 }
 
 /// A UNIFORM POINT OF THE UNIT DISK (Shirley-Chiu's concentric map): the resolve's and the spatial filter's taps.
@@ -157,8 +201,10 @@ vec3 jahReflectDraw( vec3 N, vec3 V, float alpha, ivec2 seedPix, uint frame, flo
 	vec3 L = reflect( -V, H );
 	if( dot( L, N ) <= 0.0 )
 	{
+		// the lobe left the surface: a sample of NO light (G2 is 0 there - the estimator's gain 0, PHOTON-7 11-2 (1)),
+		// traced along the mirror so its distance stays the lobe's
 		vndf = false;
-		L = reflect( -V, N );		// the lobe left the surface: take the mirror
+		L = reflect( -V, N );
 	}
 	return L;
 }

@@ -569,6 +569,19 @@ void jahCardLobeHemi( float r, out float a, out float b )
 		jahSpecularAlbedoHemi( r, a, b );
 }
 
+/// THE ESTIMATOR's GAIN of a direction L for this texel (PHOTON-7 11-2 (1), jah_reflect_draw.glsl's jahReflectGain): the
+/// VNDF draw's missing G2/G1 over the F-free A + B the pixel's split DFG takes, at the texel's N.V and the perceptual
+/// roughness sqrt( alpha ) (the G-buffer's alpha). Without the hit table (no ray tier's tables yet) the old weight, 1.
+float reflectGainAt( vec3 N, vec3 g, vec3 V, vec3 L, float alpha )
+{
+	const uvec2 t = JAH_HIT_TABLE;
+	if( ( t.x | t.y ) == 0u )
+		return 1.0;
+	float a, b;
+	jahSpecularAlbedo( clamp( dot( N, V ), 0.0, 1.0 ), sqrt( clamp( alpha, 0.0, 1.0 ) ), a, b );
+	return jahReflectGain( N, g, V, L, alpha, a + b );
+}
+
 /// What is read as a MIRROR at the hit — the card texel-exact, the containing cascade whole at LOD 0 and no crossfade,
 /// the sky's finest mip — is the lobe's CENTRE RAY (the mirror ramp's draw, jah_reflect_draw.glsl), never an alpha.
 
@@ -625,6 +638,7 @@ struct JahReflectSample
 	vec2 recBary;
 	float hitT, sampleT, screenT, blendVouch;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
+	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -643,6 +657,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.screenT = 0.0;
 	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
+	o.recGain = 1.0;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -697,6 +712,12 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		L -= 2.0 * dot( L, geomN ) * geomN;
 		folded = true;
 	}
+	// THE ESTIMATOR's GAIN (PHOTON-7 11-2 (1); the reference arm, ledger 3388): the VNDF draw's sample is weighed by its
+	// missing G2/G1 over the F-free A + B (jahReflectGain: the folded target over the folded density), so the samples
+	// average to the lobe's normalised mean under HlmsPbs's own D G2 - the split DFG then applies F. Before it the pass
+	// averaged under D G1: a rough lobe at grazing read ~13 % (linear) dark against its reference. The centre ray is the
+	// lobe whole (1); a draw that left the surface is a sample of no light (0: G2 is 0 there).
+	const float gainB = vndf ? reflectGainAt( worldN, geomN, V, L, lobeAlpha ) : centre ? 1.0 : 0.0;
 	// ---- NEXT-EVENT ESTIMATION TOWARD THE EMITTERS (PHOTON-7 stage 11, 11-1b; jah_rq_emitters.glsl) ----------------------
 	// On a VNDF draw (never the centre ray nor a mirror fallback: a delta has no density to weigh) of a texel some target
 	// reaches, ONE more direction L_l is drawn in a target's cone, and the two are combined by the BALANCE HEURISTIC:
@@ -918,6 +939,11 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			sampleT = screenT;
 		}
 	}
+	// THE BRDF's SAMPLE AT ITS GAIN (11-2 (1)): every radiance of the draw - the ray's, the screen's, their blend; a record's
+	// ray share takes it at the write-back (the record's gain word)
+	if( !record && finite3( traced ) )
+		traced *= gainB;
+	screenRadiance *= gainB;
 	// ---- THE NEE's SAMPLE AND THE PAIR COMBINED (11-1b) -------------------------------------------------------------------
 	// ONE CLOSEST-HIT RAY along L_l (the near copies, then the far ones for an escape - the BRDF ray's own route, so E( L )
 	// is one function of the direction), where the screen does not vouch for it whole.
@@ -969,7 +995,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			const vec3 ElT = max( jahFogAlong( El, world.y, nee.L, lenL, eyeD ) -
 									  jahFogAlong( vec3( 0.0 ), world.y, nee.L, lenL, eyeD ),
 								  vec3( 0.0 ) );
-			neePart = ( 1.0 - neeVouch ) * ElT * ( neeQL / ( neeQL + nee.pdfL ) );
+			// (at the NEE direction's own gain: the target t( L_l ) = q( L_l ) gain( L_l ), 11-2 (1))
+			neePart = ( 1.0 - neeVouch ) * ElT * ( neeQL / ( neeQL + nee.pdfL ) ) *
+					  reflectGainAt( worldN, geomN, V, nee.L, lobeAlpha );
 		}
 		// THE CONE'S HIT RATE (the lead's condition): the NEE rays, and those whose first hit is the target drawn
 		if( JAH_HIT_ON )
@@ -999,7 +1027,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			const float vb = screenHit ? blendVouch : 0.0;
 			const float lenB = length( origin + L * hitT - world );
 			const float eyeD = length( world - thisEye.camPos );
-			corrB = -( 1.0 - vb ) * ( 1.0 - neeWb ) *
+			corrB = -gainB * ( 1.0 - vb ) * ( 1.0 - neeWb ) *
 					max( jahFogAlong( neeEb, world.y, L, lenB, eyeD ) - jahFogAlong( vec3( 0.0 ), world.y, L, lenB, eyeD ),
 						 vec3( 0.0 ) );
 		}
@@ -1034,6 +1062,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	o.noSample = noSample; o.blend = blend; o.centre = centre; o.vndf = vndf; o.folded = folded; o.resume = resume;
 	// A RECORD'S SUN (the list's word, the write-back's direct light at the hit): a FAR copy's hit is recorded as one
 	// (READ_B finding 1, the gather's rule) and its sun leg lifts by the far copy's hand-over.
+	o.recGain = gainB;
 	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
 }
 
@@ -1130,7 +1159,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const float sunVis = s.sunVis;   // (reflectSampleAt's: the sun leg at the hit)
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
-											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta );
+											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
 			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
@@ -1625,7 +1654,8 @@ void main()
 										 s.blend ? -( 1.0 - s.blendVouch ) : -1.0,
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
-										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta );
+										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
+										 s.recGain );
 							fit = 1u;
 						}
 						else
