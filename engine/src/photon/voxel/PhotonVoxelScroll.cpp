@@ -73,6 +73,44 @@ namespace Ogre
         /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the normal's 0.5 bias.
         const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         const float kNormalClear[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
+
+        /// The copy job's parameters, EVERY one each dispatch (a clone keeps its last values): `clear` null = a copy,
+        /// else the box is written with that value (PhotonScrollCopy_cs.glsl's clear).
+        void setCopyParams( HlmsComputeJob *job, const uint32 srcOrigin[3], const uint32 dstOrigin[3],
+                            const uint32 size[3], uint32 permAxis, const float *clear )
+        {
+            ShaderParams::Param pSrc, pDst, pSize, pPerm, pMode, pClearF, pClearU;
+            pSrc.name = "srcOrigin";
+            pDst.name = "dstOrigin";
+            pSize.name = "copySize";
+            pPerm.name = "permAxis";
+            pMode.name = "copyClear";
+            pClearF.name = "clearF";
+            pClearU.name = "clearU";
+            pSrc.setManualValue( srcOrigin, 3u );
+            pDst.setManualValue( dstOrigin, 3u );
+            pSize.setManualValue( size, 3u );
+            pPerm.setManualValue( permAxis );
+            const uint32 mode[4] = { clear ? 1u : 0u, 0u, 0u, 0u };
+            pMode.setManualValue( mode, 4u );
+            const float cf[4] = { clear ? clear[0] : 0.0f, clear ? clear[1] : 0.0f, clear ? clear[2] : 0.0f,
+                                  clear ? clear[3] : 0.0f };
+            uint32 cu[4];
+            for( int k = 0; k < 4; ++k )
+                cu[k] = uint32( cf[k] );
+            pClearF.setManualValue( cf, 4u );
+            pClearU.setManualValue( cu, 4u );
+            ShaderParams &params = job->getShaderParams( "default" );
+            params.mParams.clear();
+            params.mParams.push_back( pSrc );
+            params.mParams.push_back( pDst );
+            params.mParams.push_back( pSize );
+            params.mParams.push_back( pPerm );
+            params.mParams.push_back( pMode );
+            params.mParams.push_back( pClearF );
+            params.mParams.push_back( pClearU );
+            params.setDirty();
+        }
     }  // namespace
 
     PhotonVoxelScroll::PhotonVoxelScroll( RenderSystem *renderSystem, HlmsManager *hlmsManager,
@@ -227,23 +265,40 @@ namespace Ogre
         job->setNumThreadGroups( std::max( 1u, ( size[0] + tpg[0] - 1u ) / tpg[0] ),
                                  std::max( 1u, ( size[1] + tpg[1] - 1u ) / tpg[1] ),
                                  std::max( 1u, ( size[2] + tpg[2] - 1u ) / tpg[2] ) );
-        ShaderParams::Param pSrc, pDst, pSize, pPerm;
-        pSrc.name = "srcOrigin";
-        pDst.name = "dstOrigin";
-        pSize.name = "copySize";
-        pPerm.name = "permAxis";
-        pSrc.setManualValue( srcOrigin, 3u );
-        pDst.setManualValue( dstOrigin, 3u );
-        pSize.setManualValue( size, 3u );
-        pPerm.setManualValue( permAxis );
-        ShaderParams &params = job->getShaderParams( "default" );
-        params.mParams.clear();
-        params.mParams.push_back( pSrc );
-        params.mParams.push_back( pDst );
-        params.mParams.push_back( pSize );
-        params.mParams.push_back( pPerm );
-        params.setDirty();
+        setCopyParams( job, srcOrigin, dstOrigin, size, permAxis, nullptr );
         jahshaka::engine::detail::photonDispatch( hlmsManager->getComputeHlms(), job, renderSystem );
+    }
+    void PhotonVoxelScroll::clearBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *dst,
+                                      const uint32 origin[3], const uint32 size[3], const float clear[4] )
+    {
+        HlmsComputeJob *job = scrollJob( hlmsManager, 1, dst->getPixelFormat() );
+        // (the source slot is the destination itself, read nowhere: the job's layout binds two UAVs - the scratch's
+        // first dispatch binds a texture to both the same way)
+        DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+        uavSlot.texture = dst;
+        uavSlot.pixelFormat = dst->getPixelFormat();
+        uavSlot.access = ResourceAccess::Read;
+        job->_setUavTexture( 0u, uavSlot );
+        uavSlot.access = ResourceAccess::Write;
+        job->_setUavTexture( 1u, uavSlot );
+        const uint32 *tpg = job->getThreadsPerGroup();
+        job->setNumThreadGroups( std::max( 1u, ( size[0] + tpg[0] - 1u ) / tpg[0] ),
+                                 std::max( 1u, ( size[1] + tpg[1] - 1u ) / tpg[1] ),
+                                 std::max( 1u, ( size[2] + tpg[2] - 1u ) / tpg[2] ) );
+        const uint32 zero[3] = { 0u, 0u, 0u };
+        setCopyParams( job, zero, origin, size, 0u, clear );
+        jahshaka::engine::detail::photonDispatch( hlmsManager->getComputeHlms(), job, renderSystem );
+    }
+    void PhotonVoxelScroll::clearRegion( HlmsManager *hlmsManager, RenderSystem *renderSystem,
+                                         const PhotonVoxelizer::VolumeSet &live, const uint32 origin[3],
+                                         const uint32 size[3] )
+    {
+        renderSystem->endRenderPassDescriptor();
+        TextureGpu *to[kVolumes];
+        volumeList( live, to );
+        for( size_t i = 0u; i < kVolumes; ++i )
+            if( to[i] )
+                clearBox( hlmsManager, renderSystem, to[i], origin, size, i == 2u ? kNormalClear : kZero );
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelScroll::begin()

@@ -38,7 +38,7 @@ struct GpuInstance
 	vec4  boundsMin;    // xyz world AABB min; w = the mesh table index, bit-cast
 	vec4  boundsMax;    // xyz world AABB max; w = the flags word, bit-cast
 	uvec4 ids;          // y = the material word (pool, slot)
-	uvec4 raster;       // x = the PBS material word, y = the tangent byte offset (GpuScene.h)
+	uvec4 raster;       // x = the PBS material word, y = the tangent byte offset, z = THE SKIN ROW (GpuScene.h)
 };
 
 struct GpuMesh
@@ -176,6 +176,13 @@ void main()
 	GpuMeshLevel L = levels[meshIndex * JAH_LEVELS_PER_MESH + level];
 	if( L.geomRow == JAH_NONE || L.partCount == 0u )
 		return;                             // no readable geometry at this level
+	// A RIGGED ITEM AT ITS POSE (PHOTON-7 stage 8A): the row override (GpuInstance raster z, PHOTON-SKIN-1) names the
+	// item's skin cache - its POSED vertices over the mesh's own index ranges, level l submesh 0 at row + 8 l - the
+	// rows the ray tier traces and the decode shades; none (no rig, or no cache yet) reads the mesh's rows. The
+	// partitions' boxes are the BIND pose's, so a posed item's every partition takes the instance's own world box.
+	uint skinRow = instances[slot].raster.z;
+	bool posed = skinRow != JAH_NONE;
+	uint geomRow = posed ? skinRow + level * 8u : L.geomRow;
 
 @property( gather_write )
 	atomicAdd( readout[JAH_READ_CANDIDATES], 1u );
@@ -192,8 +199,13 @@ void main()
 		// absolute rows - conservative, which is all a broadphase needs to be.
 		vec3 wc = vec3( dot( r0, c ), dot( r1, c ), dot( r2, c ) );
 		vec3 wh = vec3( dot( abs( r0.xyz ), h ), dot( abs( r1.xyz ), h ), dot( abs( r2.xyz ), h ) );
-		vec3 wMin = wc - wh;
-		vec3 wMax = wc + wh;
+		vec3 wMin = posed ? bMin.xyz : wc - wh;
+		vec3 wMax = posed ? bMax.xyz : wc + wh;
+		if( posed )
+		{
+			wc = 0.5 * ( wMin + wMax );
+			wh = 0.5 * ( wMax - wMin );
+		}
 		uint first = L.firstIndex + j * perPart;
 		uint num = min( L.indexCount - j * perPart, perPart );
 
@@ -227,7 +239,7 @@ void main()
 			rec.worldRow[2] = r2;
 			rec.aabb0 = vec4( wc, 0.0 );
 			rec.aabb1 = vec4( wh, uintBitsToFloat( matSlot ) );
-			rec.meshData = uvec4( L.geomRow, first, num,
+			rec.meshData = uvec4( geomRow, first, num,
 								  ( ( flags & JAH_CASTER ) != 0u ? 1u : 0u ) |
 								  ( ( flags & JAH_TWO_SIDED ) != 0u ? 2u : 0u ) );
 			records[ranges[p].x + cursor] = rec;

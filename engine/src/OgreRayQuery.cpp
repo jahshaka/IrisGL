@@ -11776,7 +11776,7 @@ void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
             uint32_t flags;
             std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
             s->listGiMover(Ogre::Aabb::newFromExtents(Ogre::Vector3(lo[0], lo[1], lo[2]), Ogre::Vector3(hi[0], hi[1], hi[2])),
-                           (flags & detail::kGpuCaster) != 0u);
+                           flags);
         };
         std::vector<uint32_t> moved;
         if (gs.movedThisFrame(vaoFrame)) moved = gs.movedSlots();

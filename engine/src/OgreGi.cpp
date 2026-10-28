@@ -169,16 +169,15 @@ bool OgreScene::unbindGiPcc(const Ogre::ParallaxCorrectedCubemapBase *pcc) {
 }
 
 /// A dragged still the gesture put on the mover channel comes to rest: the node leaves the channel
-/// (its flags re-applied) and `rest` is the box the walk last saw it in. False when the node is
-/// gone or no longer a mover.
-bool OgreScene::demoteDragMover(NodeId id, Ogre::Aabb &rest) {
+/// (its flags re-applied). False when the node is gone or no longer a mover. (The store already holds it
+/// where it stopped: a mover is re-voxelised by region each frame it moves - PHOTON-7 stage 8A.)
+bool OgreScene::demoteDragMover(NodeId id) {
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return false;
     Node &n = it->second;
     if (!n.dragMover) return false;
     n.dragMover = false;
     applyNodeVisibilityFlags(n);
-    rest = n.scan.giBox;
     return true;
 }
 
@@ -209,25 +208,17 @@ void OgreScene::endStructureEdit() {
 }
 
 // THE END OF A DRAG GESTURE (MOVER-1) — where a dragged Still becomes still
-// world again and pays for the whole gesture at once.
+// world again.
 //
 // WHEN IT ENDS IS THE RECORD'S (U0 3c): the first frame whose scene record carries no active gesture — the user
 // let go. (It used to be INFERRED: kProbeMotionSettleFrames ticks with no promoted mover moving, which ended a drag
 // under a hand that paused and kept one alive for a script that moved something every frame.)
 //
-// WHAT IT COSTS, and it is the whole trade: ONE cascade dirty box per mover —
-// the place it came to rest — so the chain re-voxelises it once, at the tier's
-// own one-cascade-per-frame budget, instead of once per frame of the drag. The
-// probe grid is staled ONCE here as well, with reason Mobility, because the
-// object is re-joining the capture set it left at the promotion: every probe
-// holding a photograph without it owes one capture, which is exactly what a
-// mobility flip has always cost (setNodeMovable's step 2) and is what the
-// deferred sweep would have spent at the end of the drag anyway.
-//
-// AND THE PICTURE AT REST IS THE PICTURE AT REST. Nothing here changes what the
-// scene looks like once the settle has run — the object is GI geometry again,
-// at its new pose, voxelised from scratch — which is the property gi.drag_mover
-// asserts by rendering the same frame under both rules.
+// WHAT IT COSTS: no voxel (PHOTON-7 stage 8A - the drag's END BOX is deleted with the whole-cascade rebuild it fed:
+// the dragged object stayed GI geometry, re-voxelised by region each frame it moved, so the store holds it where it
+// stopped). The probe grid is staled ONCE, with reason Mobility, because the object is re-joining the capture set
+// it left at the promotion: every probe holding a photograph without it owes one capture - after the feedback has
+// converged the light around it (the order is the physics: geometry, then light, then the photographs of it).
 /// Is this item under the user's gesture (the node the record names, or anything below it)?
 bool OgreScene::underGesture(const Node &n) {
     if (!mGesture.active || mGesture.nodes.empty() || !n.node) return false;
@@ -621,7 +612,7 @@ void OgreScene::unindexItemNode(Node &n) {
         std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
         listGiMover(Ogre::Aabb::newFromExtents(Ogre::Vector3(g.boundsMin[0], g.boundsMin[1], g.boundsMin[2]),
                                                Ogre::Vector3(g.boundsMax[0], g.boundsMax[1], g.boundsMax[2])),
-                    (flags & detail::kGpuCaster) != 0u);
+                    flags);
     }
     if (mGpuScene.live()) {
         if (last != &n) {
@@ -773,18 +764,7 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
             return settled;
         };
         if (gi) {
-            // A PROMOTED DRAG MOVER FIRST (MOVER-1). It carries kMovableBit and
-            // no kGiGeometryBit, so without this branch it would fall into the
-            // probe-only case below and stale the probe grid on every frame of
-            // the gesture — the exact cost the promotion removes. Its motion is
-            // nobody's input but the GESTURE'S OWN CLOCK: it is out of the
-            // voxel bounce, out of the probe captures and out of the cascade
-            // dirty list, and its box is tracked only so the settle knows when
-            // the drag stopped and what to re-voxelise once at the end.
-            if (n.dragMover) {
-                if (PhotonComponent::giAabbMoved(n.scan.giBox, a)) n.scan.giBox = a;
-                n.scan.giXform = xf;   // the demotion re-voxelises its rest box whatever turned inside it
-            } else if (!(flags & kGiGeometryBit)) {
+            if (!(flags & kGiGeometryBit)) {
                 // PROBE-ONLY geometry (P7): unlit, captured by the probe faces,
                 // never voxelized. Same quantized test, its own record, and a
                 // flag rather than a moved box — the voxel side must not hear of it.
@@ -806,8 +786,8 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 n.scan.giBox = a;
                 n.scan.giXform = xf;
                 // An ARRIVAL, after the first scan (which sees every item for
-                // the first time and is not news): the probes must capture it (P1).
-                if (!firstGi) mGiWalk.itemsAppeared = true;
+                // the first time and is not news): the probes must capture it (P1) - a mover never (out of the captures).
+                if (!firstGi && !(flags & kMovableBit)) mGiWalk.itemsAppeared = true;
                 // ...AND THE CHAIN HAS TO GROW INTO IT (PHOTON_SPEC E2 (2)).
                 //
                 // Without this a NEW GI item that arrived after the chain was
@@ -826,6 +806,16 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     mGiWalk.cascadeDirty.push_back(a);
                     if (rootParity) mGiWalk.itemDirty.push_back(a);
                 }
+            } else if (flags & kMovableBit) {
+                // A MOVER - a Movable, or a still the user's gesture holds (MOVER-1's promotion) - IS GI GEOMETRY, BY REGION
+                // (PHOTON-7 stage 8A): every frame it moves, its slot's SWEPT box (the GPU scene's commit, the skin pass's
+                // pose: OgreEngine::listRayMovers) is the next frame's region rebuild, so the walk hands the cascades
+                // nothing for it and the probes (whose captures it is out of) nothing either. Its record follows it, so a
+                // demotion or a class flip sees no move it was not already answered for.
+                if (giMove(n.scan.giBox)) {
+                    n.scan.giBox = a;
+                    n.scan.giXform = xf;
+                }
             } else if (giMove(n.scan.giBox)) {
                 // (A TURN INSIDE THE BOX is a move: the old pose and the new are both inside the union below.)
                 Ogre::Aabb moved = n.scan.giBox;
@@ -836,18 +826,12 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                 // which is what the branch below does. The engine no longer infers a drag from a second move inside
                 // a window of frames: the host has the user's hand and says so.
                 if (mGiWalkIn.dragMoverChannel && underGesture(n) && mGiWalkIn.chainBuilt && !n.movable) {
-                    // THE PROMOTION. The object leaves the still world for the
-                    // length of the gesture: one re-voxelisation HERE clears
-                    // the copy of it the cascades hold at its old pose (the
-                    // union box, so the place it came from and the place it is
-                    // now are both re-voxelised), and from this frame on its
-                    // motion costs the voxels nothing at all. What it gives up
-                    // is stated rather than hidden: it stops bouncing light
-                    // into the room and the room stops storing its shadow,
-                    // exactly as a Movable object does — it is LIT by the field
-                    // and the cones at its live pose, which is what makes the
-                    // drag read correctly instead of through a half-rebuilt
-                    // volume.
+                    // THE PROMOTION. The object leaves the still world's captures for
+                    // the length of the gesture (the mover channel) and STAYS GI
+                    // geometry (PHOTON-7 stage 8A): from this frame on it is a mover,
+                    // its swept box re-voxelised by region each frame it moves - this
+                    // frame's too (the channel change re-stages its slot, which the
+                    // region list's movers take) - never a whole cascade.
                     //
                     // THE PROBE GRID IS DELIBERATELY NOT STALED HERE. During a
                     // gesture the probes hold the photograph they hold today
@@ -859,8 +843,6 @@ void OgreScene::walkItems(bool gi, bool shadow, bool fresh, const std::vector<No
                     n.dragMover = true;
                     mGiWalk.promoted.push_back(n.selfId);
                     applyNodeVisibilityFlags(n);
-                    mGiWalk.cascadeDirty.push_back(moved);
-                    if (rootParity) mGiWalk.itemDirty.push_back(moved);
                 } else {
                     mGiWalk.movedBoxes.push_back(moved);
                     // ...AND THE CASCADE CHAIN'S OWN RECORD (G1), which unlike
