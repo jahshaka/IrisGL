@@ -12,6 +12,12 @@
 //     receiver. A SKINNED item's box is its mesh's bind pose moved with the node, which a pose can leave (a limb
 //     swung out): its receiver is the SPHERE of twice the box's half-diagonal about its centre (decision 19.5).
 //     The id pass draws no skinned item (AtomDrawStatus 'skinned': the stock route), so every one is here.
+// ...AND THE MEDIUM IN FRONT OF IT (PHOTON-7 10-4 fix round, gi.fog_far_hall): the fog's in-scatter samples the sun
+// maps ALONG every eye ray to its surface (JahFog_piece_vs_piece_ps.any jahFogLitAt), so where the pass fogs
+// (`map.w` 1: the scene's atmosphere component is registered) mode 0 also keeps the pixel's eye-ray segment, from the
+// near plane to the surface, a point a tile along its projection. Without it a caster over a medium no visible surface
+// lies under (a roof 50 m over the eye: the near splits saw no floor) was culled, and the fog under it read sunlit.
+// Its price is per pixel per sun map: the segment's projected length in tiles (capped at 256), most of them reads.
 // Nothing else samples a sun map: the particles and billboards are unlit, a decal is shaded on the surface it
 // lies on, a ray hit takes the sun from its own shadow ray. The receivers' depth is moved toward the far side by
 // `misc.z` (the normal offset's reach along the light) before it is kept.
@@ -25,7 +31,7 @@ struct RecvParams
 	vec4  lightRow[4];        // the map's cull matrix (y row negated): rows
 	vec4  planes[6];          // the camera's frustum, inward
 	uvec4 dims;               // x depth width, y depth height, z tiles x, w tiles y
-	uvec4 map;                // x map width, y map height, z tile texels
+	uvec4 map;                // x map width, y map height, z tile texels, w the medium is a receiver (the pass fogs)
 	vec4  misc;               // x the depth's clear value, y the dilation in texels (x), z the depth margin, w the dilation (y)
 	uvec4 counts;             // x instances, y flags required, z flags forbidden
 	uvec4 rect;               // the id depth's viewport: x0, y0, width, height
@@ -122,9 +128,30 @@ void main()
 		return;
 	vec3 q = jahLight( w.xyz / w.w );
 	vec2 t = jahTexel( q );
-	if( t.x < 0.0 || t.y < 0.0 || t.x >= float( params.map.x ) || t.y >= float( params.map.y ) )
-		return;
-	jahKeep( ivec2( floor( t / float( params.map.z ) ) ), q.z );
+	if( !( t.x < 0.0 || t.y < 0.0 || t.x >= float( params.map.x ) || t.y >= float( params.map.y ) ) )
+		jahKeep( ivec2( floor( t / float( params.map.z ) ) ), q.z );
+	if( params.map.w != 0u )
+	{
+		// THE MEDIUM ALONG THE EYE RAY (the head): from the near plane (the clear's opposite depth) to the surface
+		vec4 ndcN = vec4( ndc.xy, 1.0 - params.misc.x, 1.0 );
+		vec4 wn = vec4( dot( params.invViewProjRow[0], ndcN ), dot( params.invViewProjRow[1], ndcN ),
+						dot( params.invViewProjRow[2], ndcN ), dot( params.invViewProjRow[3], ndcN ) );
+		if( abs( wn.w ) > 0.0 )
+		{
+			vec3 qa = jahLight( wn.xyz / wn.w );
+			vec2 ta = jahTexel( qa );
+			uint steps = min( uint( ceil( length( t - ta ) / float( params.map.z ) ) ) + 1u, 256u );
+			for( uint i = 0u; i < steps; ++i )
+			{
+				float s = steps > 1u ? float( i ) / float( steps - 1u ) : 1.0;
+				vec3 qs = mix( qa, q, s );
+				vec2 ts = jahTexel( qs );
+				if( ts.x < 0.0 || ts.y < 0.0 || ts.x >= float( params.map.x ) || ts.y >= float( params.map.y ) )
+					continue;
+				jahKeep( ivec2( floor( ts / float( params.map.z ) ) ), qs.z );
+			}
+		}
+	}
 @end
 @property( jah_receiver_mode == 1 )
 	// ONE WORKGROUP PER INSTANCE, its lanes striding the box's tiles (a ground plane covers the whole map); the

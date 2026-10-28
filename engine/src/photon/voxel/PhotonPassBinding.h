@@ -50,6 +50,7 @@ class CompositorPassDef;
 class BarrierSolver;
 class CommandBuffer;
 class Hlms;
+class PhotonVoxelLighting;
 class HlmsDatablock;
 class RootLayout;
 class SceneManager;
@@ -96,6 +97,15 @@ struct PhotonPassBinding {
     /// current pass), else YES (an unknown pass is a reader). Every binding call below asks it: the
     /// GI's properties, pass-buffer blocks, textures and barriers exist ONLY on reader passes.
     static bool scenePassReadsGi(const Ogre::SceneManager *sceneManager);
+    /// THE NO-RAY TIER'S LAMP CHAIN (PHOTON-7 10-4 R9; L4's one exception, the lead's ruling 2026-10-27): the voxel
+    /// chain an OPAQUE colour pass (the opaque pass, the Atom screen decode: they read no world cache - L4) binds the
+    /// GEOMETRY of - its coverage and surface position per half, never its light - so a Forward+ lamp is seen through
+    /// the chain's own shadow march (jah_inject_visibility.glsl), in a scene that does not trace. Null on every other
+    /// pass: a caster, a pass that reads the GI (it binds the whole chain), a traced scene's, a scene without a chain.
+    static Ogre::PhotonVoxelLighting *lampChainOf(bool casterPass, const Ogre::SceneManager *sceneManager);
+    /// ...and the chain any colour pass of a scene that does not trace sees its Forward+ lamps through: the lamp
+    /// chain, or the whole chain of a pass that reads the GI (the blended pass). Null: no voxel lamp visibility.
+    static Ogre::PhotonVoxelLighting *lampVoxelsOf(bool casterPass, const Ogre::SceneManager *sceneManager);
     /// The always-on listener (CompositorManager2::addPassListener: every workspace's passes, the
     /// probe captures' included), installed with the engine's compositor and removed before it dies.
     static void installPassListener(Ogre::CompositorManager2 *cm);

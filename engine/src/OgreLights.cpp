@@ -155,16 +155,32 @@ void shutdown() {
 // ---------------------------------------------------------------------------
 // Counted from the BACKEND lights rather than from a mirrored description, so
 // it says what the renderer will actually be asked for. Two exclusions, both
-// structural: a directional light rides the PSSM block (it never competes for a
-// focused map) and an area light can never cast at all.
+// structural: the FIRST casting directional rides the PSSM block (every further
+// one takes a focused map, so it counts — PHOTON-7 10-4 R8) and an area light
+// can never cast at all.
 //
 // One trap, recorded rather than worked around: while a shadow node sorts its
 // lights it temporarily flips `setCastShadows(false)` on every light fixed to a
 // static map and restores it afterwards (OgreCompositorShadowNode.cpp:512-519).
 // Reading getCastShadows() between those two lines would under-count. This runs
 // from renderOneFrame BEFORE Root::renderOneFrame, which is outside that window.
+unsigned OgreScene::countSecondaryShadowDirectionals() const {
+    unsigned n = 0;
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Ogre::Light *l = it->second.light;
+        if (l && l->getCastShadows() && l->isVisible() && l->getType() == Ogre::Light::LT_DIRECTIONAL) ++n;
+    }
+    return n ? n - 1u : 0u;
+}
+
 unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
     unsigned n = 0;
+    // The PSSM block's directional: the one Ogre's sort puts first (the
+    // highest shadow sort priority, then the lowest id) - it is not a
+    // focused-map caster, every other casting directional is.
+    const Ogre::Light *pssm = nullptr;
     // OVER THE LIGHT INDEX, NOT OVER mNodes: this runs once per drawn scene per
     // FRAME, and walking every node of a big scene to find its handful of
     // lights is exactly the kind of per-frame cost this engine keeps measuring
@@ -173,9 +189,22 @@ unsigned OgreScene::countLocalShadowCasters(std::vector<NodeId> *out) const {
         auto it = mNodes.find(id);
         if (it == mNodes.end()) continue;
         const Ogre::Light *l = it->second.light;
+        if (!l || !l->getCastShadows() || !l->isVisible() || l->getType() != Ogre::Light::LT_DIRECTIONAL) continue;
+        if (!pssm || l->getShadowSortPriority() > pssm->getShadowSortPriority() ||
+            (l->getShadowSortPriority() == pssm->getShadowSortPriority() && l->getId() < pssm->getId()))
+            pssm = l;
+    }
+    for (NodeId id : mLightNodes) {
+        auto it = mNodes.find(id);
+        if (it == mNodes.end()) continue;
+        const Ogre::Light *l = it->second.light;
         if (!l || !l->getCastShadows()) continue;
         const Ogre::Light::LightTypes t = l->getType();
-        if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) continue;
+        if (t == Ogre::Light::LT_DIRECTIONAL) {
+            if (l == pssm || !l->isVisible()) continue;
+        } else if (t != Ogre::Light::LT_POINT && t != Ogre::Light::LT_SPOTLIGHT) {
+            continue;
+        }
         ++n;
         if (out) out->push_back(id);
     }

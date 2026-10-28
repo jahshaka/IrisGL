@@ -496,8 +496,6 @@ public:
     float fogHeightDensity;    // 0 = no height layer
     float fogHeightFalloff;    // per world unit; larger = thins out faster with altitude
     float fogHeightLevel;      // world Y at which fogHeightDensity applies
-    float fogBreakMinBrightness;   // luminance where bright pixels start resisting the fog
-    float fogBreakFalloff;         // how fast they do; 0 = pure exponential fog
     // (THE `fogAtmosphere` SWITCH IS GONE — FOG-ATMO-1. Under the realistic
     // sky both fog layers ALWAYS take the sky's own scattering colour and the
     // air's aerial perspective is always on; fogColor is used only under the
@@ -923,10 +921,6 @@ public:
     // without needing rows of their own: budget >= 2 (Epic) means 1024, budget
     // 1 (High) means 512. SceneMirror owns that derivation.
     int planarReflectionResolution;
-    // Shadows INSIDE the reflections, which cost a private half-resolution
-    // shadow atlas per plane. 0 = off, 1 = on, -1 = derive from the budget the
-    // same way (Epic's 2 planes get shadows, High's 1 does not).
-    int planarReflectionShadows;
 
     // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
     // A scalability tier for the whole scene. -1 = Custom (no tier: the fields
@@ -957,7 +951,6 @@ public:
     QStringList folders;
 
     float gravity;
-    bool shadowEnabled;
 
 	SkyType skyType;
 	/// THE REALISTIC SKY'S DIALS — READ THIS, WRITE `setSkyRealistic`.

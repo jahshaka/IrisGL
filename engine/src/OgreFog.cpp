@@ -5,7 +5,7 @@
 // THE COMPONENT (Atmosphere.h, JahAtmosphere) is an Ogre::AtmosphereComponent:
 // registered on a SceneManager (`_setAtmosphere`) it sets `hlms_fog` in every
 // colour pass and binds the const buffer upstream's block reads its density
-// and brightness breakthrough from. It serves two customers — the sky, when it
+// from. It serves two customers — the sky, when it
 // is the planet's atmosphere, and the World fog under any sky — and is
 // registered while either wants it (OgreScene::syncAtmosphere).
 //
@@ -21,6 +21,7 @@
 // block's own density is 0 there (an identity) and our piece does all of it.
 // The authored colour is only for the other skies.
 #include "EnginePrivate.h"
+#include <array>
 #include "HlmsAtom.h"
 #include "Atmosphere.h"
 #include "photon/voxel/PhotonPassBinding.h"
@@ -35,6 +36,9 @@
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <OgreRootLayout.h>
 #include <OgreVulkanGlobalBindingTable.h>
+#include <OgreStagingTexture.h>
+#include <OgreTextureBox.h>
+#include <OgreTextureGpuManager.h>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -75,6 +79,9 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_sun_contact",  "jahSunVis" },
     { "jah_area_vis",     "jahAreaVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
+    { "jah_shadow_transmit", "jahShadowTransmit" },   // PHOTON-7 10-4 R8: the shadow node's transmittance layer
+    { "jah_shadow_transmit", "jahShadowTransmitDepth" },   // ...and its nearest pane's depth (the fix round's F1)
+    { "jah_sky_vis",      "jahSkyVis" },          // PHOTON-7 10-4 R11: the measured sky visibility (the fog's in-scatter)
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
 // THE PASS-TEXTURE TABLE (BUGS-1; preflight-atom-3 §A). Set 0 — the pass's
@@ -125,16 +132,13 @@ static_assert(kAtomPassFullest <= kPassTextureTable,
 /// The slot's property as a hashed IdString, hashed once (these run per
 /// renderable hash, not per frame).
 const Ogre::IdString &extraSlotProperty(size_t i) {
-    static const Ogre::IdString ids[kNumExtraPassSlots] = {
-        Ogre::IdString(kExtraPassSlots[0].property),
-        Ogre::IdString(kExtraPassSlots[1].property),
-        Ogre::IdString(kExtraPassSlots[2].property),
-        Ogre::IdString(kExtraPassSlots[3].property),
-        Ogre::IdString(kExtraPassSlots[4].property),
-        Ogre::IdString(kExtraPassSlots[5].property),
-        Ogre::IdString(kExtraPassSlots[6].property),
-        Ogre::IdString(kExtraPassSlots[7].property),
-    };
+    // (built from the table itself: a hand-kept list of the slots' ids fell one short when R11's slot was added - the
+    // slot never claimed, its register 0, the pass's shader refused)
+    static const std::array<Ogre::IdString, kNumExtraPassSlots> ids = [] {
+        std::array<Ogre::IdString, kNumExtraPassSlots> out;
+        for (size_t k = 0; k < kNumExtraPassSlots; ++k) out[k] = Ogre::IdString(kExtraPassSlots[k].property);
+        return out;
+    }();
     return ids[i];
 }
 }   // namespace
@@ -332,6 +336,9 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.sunVis, pb.sunVisSampler },
         { pb.areaVis, pb.areaVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
+        { pb.shadowTransmit, pb.shadowTransmitSampler },
+        { pb.shadowTransmitDepth, pb.shadowTransmitDepthSampler },
+        { pb.skyVis, pb.probeGatherSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
                   "one binding per extra pass slot, in kExtraPassSlots' order");
@@ -372,6 +379,29 @@ void FogHlmsListener::setSunContact(const Ogre::SceneManager *sm, Ogre::TextureG
 // PHOTON-7 7-A — the pixel's area light visibility, pass-scoped like the sun contact's registration.
 void FogHlmsListener::setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility) {
     if (SceneBinds *b = bindsOf(sm)) b->areaVis = visibility;
+}
+void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas,
+                                  unsigned long long alpha) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->lampRaysOn = on;
+        b->lampTlas = on ? tlas : 0ull;
+        b->lampAlpha = b->lampTlas ? alpha : 0ull;
+    }
+}
+void FogHlmsListener::setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis) {
+    if (SceneBinds *b = bindsOf(sm)) b->fogSkyVis = skyVis;
+}
+void FogHlmsListener::setGlassEscape(const Ogre::SceneManager *sm, bool on, unsigned long long list,
+                                     unsigned capacity) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->escapePass = on;
+        b->escapeList = on && capacity ? list : 0ull;
+        b->escapeCapacity = b->escapeList ? capacity : 0u;
+    }
+}
+bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
+    const SceneBinds *b = bindsOf(sm);
+    return b && b->lampRaysOn;
 }
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
 void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
@@ -482,6 +512,7 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     pb.probeGatherSampler = nullptr;
     pb.roughSpec = nullptr;
     pb.coneHit = nullptr;
+    pb.skyVis = nullptr;
     // THE CHAIN'S SCREEN-GI FLAG (PHOTON-7 stage 7's read, F3): a colour pass that shades with the prepass and reads
     // no world cache (OgreChain.cpp: mJahReadsGi false on a screen-GI chain's opaque pass and its decode, L4) compiles
     // upstream's ambient out whether or not a producer registered this frame (JahProbeGather_piece_ps.any). From the
@@ -521,6 +552,11 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                     pb.roughSpec = rec->probeGather.roughSpec;
                     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_rough_spec", 1);
                 }
+                // ...AND THE MEASURED SKY VISIBILITY (PHOTON-7 10-4 R11), the same point sampler: the fog's in-scatter
+                if (rec->probeGather.skyVis) {
+                    pb.skyVis = rec->probeGather.skyVis;
+                    hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_vis", 1);
+                }
                 // ...OR THE NO-RAY ROUTE'S PRODUCTS (PHOTON-7 7-6, the screen integrate): the same diffuse texture,
                 // the cone's specular in the rough specular's slot and its hit distance - JahScreenCone_piece_ps.any
                 // composes them where the voxel route's cone stood (jah_screen_cone)
@@ -530,6 +566,15 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
                     hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_screen_cone", 1);
                 }
             }
+        }
+    }
+    // ...AND IN THE BLENDED PASS, THE SKY VISIBILITY ALONE (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): the opaque
+    // pixel's behind each blended fragment - its fog's sky share (a named limit); the same point sampler
+    if (!pb.skyVis && rec && rec->fogSkyVis && hlms && !casterPass) {
+        if (const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false)) {
+            pb.probeGatherSampler = point;
+            pb.skyVis = rec->fogSkyVis;
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_sky_vis", 1);
         }
     }
     // THE CLOUD LAYER'S GROUND SHADOW (CLOUDS-2D-1) — the same three decisions
@@ -586,6 +631,51 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
             hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_area_vis", 1);
         }
     }
+    // THE SHADOWS' TRANSMITTANCE (PHOTON-7 10-4 R8): the pass's shadow node holds a transmittance layer (atlasT,
+    // OgreShadow.cpp: built only while a drawn scene holds a pane) - the product of the panes' 1 - alpha between each
+    // map's light and its nearest opaque caster, in the depth atlas's own layout - and JahShadowTransmit_piece_ps.any
+    // multiplies every shadow lookup by it at the lookup's uv (the fork's custom_shadow_transmit hooks in getShadow).
+    // A LINEAR sampler: one bilinear read where the depth is PCF-filtered. A node without the layer binds the white
+    // stand-in (createShadowTransmitNone): the property is a constant of every shadowed colour pass, so the layer's
+    // process-wide arrival changes no permutation.
+    // ...AND ITS NEAREST PANE's DEPTH (the fix round's F1, OgreShadow.cpp atlasTD), POINT-sampled: a receiver applies T
+    // only past it. The stand-in for a node without the layer is the white texel too (T is 1 there whatever the depth).
+    pb.shadowTransmit = nullptr;
+    pb.shadowTransmitSampler = nullptr;
+    pb.shadowTransmitDepth = nullptr;
+    pb.shadowTransmitDepthSampler = nullptr;
+    if (shadowNode && !casterPass) {
+        Ogre::TextureGpu *t = shadowTransmitBound(shadowNode), *d = shadowTransmitDepthBound(shadowNode);
+        if (t && d) {
+            const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
+            const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false);
+            if (linear && point) {
+                pb.shadowTransmit = t;
+                pb.shadowTransmitSampler = linear;
+                pb.shadowTransmitDepth = d;
+                pb.shadowTransmitDepthSampler = point;
+                hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_shadow_transmit", 1);
+            }
+        }
+    }
+    // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): every colour pass of a scene that traces (the ray tier open, its
+    // row on) - JahLampRay_piece_ps.any; the TLAS's address rides the pass buffer (a zero address answers 1)
+    if (rec && rec->lampRaysOn) {
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays", 1);
+        // (the ray query needs GLSL 4.60: the fork's glslvk_460 raises the shader's version line)
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "glslvk_460", 1);
+        // (the PBS template's head takes the extensions from our piece; HlmsAtom's template defines that hook itself)
+        if (hlms->getType() == Ogre::HLMS_PBS) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_rays_pbs", 1);
+        // THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): the ray tier's blended pass and its refractives append their
+        // open shares' records (PhotonVct_piece_ps.any) - the PBS template's passes (its PhotonVct reads the volumes)
+        if (rec->escapePass && !casterPass && hlms->getType() == Ogre::HLMS_PBS)
+            hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_glass_escape", 1);
+    }
+    // ...AND AT THE NO-RAY TIER, THE VOXEL CHAIN'S MARCH (the lead's ruling, 2026-10-27): every colour pass of a scene
+    // that does not trace and binds its voxel chain - the lamp seen through the voxels' own shadow march
+    // (jah_inject_visibility.glsl, JahLampRay_piece_ps.any's jahLampVoxelView); the chain rides the pass buffer
+    else if (hlms && !casterPass && PhotonPassBinding::lampVoxelsOf(casterPass, sceneManager))
+        hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_lamp_voxels", 1);
     // THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): a pass property whose VALUE is
     // the mode (1 the indirect diffuse alone, 2 the specular environment alone),
     // read by JahPhotonView_piece_ps.any. Empty in every scene whose view is not
@@ -776,6 +866,47 @@ const Ogre::HlmsSamplerblock *FogHlmsListener::acquireSampler(Ogre::HlmsManager 
     return slot;
 }
 
+namespace {
+Ogre::TextureGpu *gShadowTransmitNone = nullptr;
+unsigned gShadowTransmitNoneSerial = 0u;
+}   // namespace
+
+void FogHlmsListener::createShadowTransmitNone(Ogre::TextureGpuManager *tm) {
+    if (!tm || gShadowTransmitNone) return;
+    gShadowTransmitNone = tm->createTexture("JahShadowTransmitNone" + std::to_string(++gShadowTransmitNoneSerial),
+                                            Ogre::GpuPageOutStrategy::SaveToSystemRam,
+                                            Ogre::TextureFlags::ManualTexture, Ogre::TextureTypes::Type2D);
+    gShadowTransmitNone->setResolution(1u, 1u);
+    gShadowTransmitNone->setPixelFormat(Ogre::PFG_R8_UNORM);
+    gShadowTransmitNone->setNumMipmaps(1u);
+    // Immediate, and NO notifyDataIsReady (DOCS/traps/ENGINE.md: a ManualTexture's _transitionTo calls it itself).
+    gShadowTransmitNone->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+    gShadowTransmitNone->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+    Ogre::StagingTexture *staging = tm->getStagingTexture(1u, 1u, 1u, 1u, Ogre::PFG_R8_UNORM);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(1u, 1u, 1u, 1u, Ogre::PFG_R8_UNORM);
+    *static_cast<Ogre::uint8 *>(box.at(0, 0, 0)) = 255u;   // exactly 1: a lookup times it is the lookup
+    staging->stopMapRegion();
+    staging->upload(box, gShadowTransmitNone, 0, 0, 0);
+    tm->removeStagingTexture(staging);
+}
+
+void FogHlmsListener::releaseShadowTransmitNone(Ogre::TextureGpuManager *tm) {
+    if (tm && gShadowTransmitNone) tm->destroyTexture(gShadowTransmitNone);
+    gShadowTransmitNone = nullptr;
+}
+
+Ogre::TextureGpu *FogHlmsListener::shadowTransmitBound(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    Ogre::TextureGpu *t = shadowTransmitLayer(node);
+    return t ? t : gShadowTransmitNone;
+}
+Ogre::TextureGpu *FogHlmsListener::shadowTransmitDepthBound(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    Ogre::TextureGpu *t = shadowTransmitDepthLayer(node);
+    return t ? t : gShadowTransmitNone;
+}
+
 void FogHlmsListener::releaseSamplers() {
     if (sSamplerMgr) {
         if (sEnvSampler)    sSamplerMgr->destroySamplerblock(sEnvSampler);
@@ -787,6 +918,12 @@ void FogHlmsListener::releaseSamplers() {
     for (PassBinds &pb : sPass) pb = PassBinds();
     PhotonPassBinding::releaseSamplers();
 }
+
+/// THE NO-RAY TIER'S LAMP CHAIN in the pass buffer (PHOTON-7 10-4 R9): four entries' corners and cells, four
+/// resolutions and shell ends, cascade 0's world corner - JahFog_piece_vs_piece_ps.any's jahLampChain* members.
+/// Four entries: every tier's chain (kGiTierMaxCascades).
+static_assert(kGiTierMaxCascades == 4, "the pass block's lamp chain holds four entries");
+constexpr Ogre::uint32 kLampChainFloats = 4u * (4u + 4u + 1u);
 
 Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode *, bool casterPass,
                                                 bool, Ogre::SceneManager *sceneManager) const {
@@ -817,7 +954,13 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // immediately before this extension — while it held them. Writing them first
     // here keeps every byte where the shader's struct (DeclVctUniform,
     // DeclIrradianceFieldUniform, then custom_passBuffer) has always put it.
-    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) + 40u * sizeof(float);
+    // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): four float4 after the cloud block - the pass camera's
+    // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them
+    // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
+    // Plus THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): one float4 after the chain (s, the sun's share).
+    // Plus THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): one uint4 after it (the address, the capacity).
+    return PhotonPassBinding::passBufferSize(casterPass, sceneManager) +
+           (56u + kLampChainFloats + 4u + 4u) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -896,6 +1039,86 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
             for (int i = 0; i < 20; ++i) *passBufferPtr++ = 0.0f;
         }
     }
+    // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the view-to-world rows (the same view HlmsPbs wrote into
+    // passBuf.view, inverted: the cloud block's rule) and the two addresses' bits. Zeros without a TLAS.
+    {
+        const SceneBinds *b = bindsOf(sceneManager);
+        const Ogre::Camera *cam = sceneManager->getCamerasInProgress().renderingCamera;
+        // (the no-ray tier's: the pass's voxel chain, as the hash's jah_lamp_voxels saw it bound)
+        Ogre::PhotonVoxelLighting *vct = PhotonPassBinding::lampVoxelsOf(casterPass, sceneManager);
+        // (the rows always on a colour pass: the fog's in-scatter reads them too, R11)
+        if (cam && !casterPass) {
+            const Ogre::Matrix4 inv = cam->getVrViewMatrix(0).inverseAffine();
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 4; ++c) *passBufferPtr++ = float(inv[r][c]);
+            const bool rays = !vct && b && b->lampRaysOn;
+            const unsigned long long tlas = rays ? b->lampTlas : 0ull, alpha = rays ? b->lampAlpha : 0ull;
+            const Ogre::uint32 words[4] = { Ogre::uint32(tlas & 0xFFFFFFFFull), Ogre::uint32(tlas >> 32u),
+                                            Ogre::uint32(alpha & 0xFFFFFFFFull), Ogre::uint32(alpha >> 32u) };
+            std::memcpy(passBufferPtr, words, sizeof(words));
+            passBufferPtr += 4;
+        } else {
+            for (int i = 0; i < 16; ++i) *passBufferPtr++ = 0.0f;
+        }
+        // THE CHAIN (jahLampChainOrigin[4], jahLampChainRes[4], jahLampChainCorner): zeros without one - a cell not
+        // positive is no chain, and the march answers 1
+        float chain[kLampChainFloats] = {};
+        if (vct && cam) {
+            float origin[4u * 8u] = {}, res[4u * 8u] = {};
+            vct->chainMarchParams(origin, res);
+            std::memcpy(chain, origin, 16u * sizeof(float));
+            std::memcpy(chain + 16u, res, 16u * sizeof(float));
+            const Ogre::Vector3 corner = vct->getVoxelizer()->getVoxelOrigin();
+            chain[32] = float(corner.x);
+            chain[33] = float(corner.y);
+            chain[34] = float(corner.z);
+        }
+        std::memcpy(passBufferPtr, chain, sizeof(chain));
+        passBufferPtr += kLampChainFloats;
+        // THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): s, the sun's share of the light an open point of an isotropic medium
+        // receives - E_sun (every directional's irradiance, luminance) against 4 pi L_sky (the whole sky's radiance:
+        // the Sky Light's SH band 0 is the mean radiance HlmsPbs's irradianceSH reads, AmbientLighting_piece_ps.any)
+        float inscatter[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        if (!casterPass) {
+            const auto lum = [](float r, float g, float bb) { return 0.212655f * r + 0.715158f * g + 0.072187f * bb; };
+            double eSun = 0.0;
+            const Ogre::LightListInfo &all = sceneManager->getGlobalLightList();
+            for (size_t i = 0; i < all.lights.size(); ++i) {
+                const Ogre::Light *l = all.lights[i];
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getVisible()) continue;
+                const Ogre::ColourValue d = l->getDiffuseColour() * l->getPowerScale();
+                eSun += double(std::max(0.0f, lum(d.r, d.g, d.b)));
+            }
+            const float *sh = sceneManager->getSphericalHarmonics();
+            const double lSky = sh ? double(std::max(0.0f, lum(sh[0], sh[1], sh[2]))) : 0.0;
+            const double open = eSun + 4.0 * 3.14159265358979 * lSky;
+            inscatter[0] = open > 0.0 ? float(eSun / open) : 0.0f;
+            // ...and toward the SHADOWED SUN (world): the first visible shadow-casting directional, the PSSM's - the
+            // march's visibility past its last split (the one read's F9: jahFogSunPast)
+            for (size_t i = 0; i < all.lights.size(); ++i) {
+                const Ogre::Light *l = all.lights[i];
+                if (!l || l->getType() != Ogre::Light::LT_DIRECTIONAL || !l->getVisible() || !l->getCastShadows())
+                    continue;
+                const Ogre::Vector3 toSun = -l->getDerivedDirection().normalisedCopy();
+                inscatter[1] = float(toSun.x);
+                inscatter[2] = float(toSun.y);
+                inscatter[3] = float(toSun.z);
+                break;
+            }
+        }
+        std::memcpy(passBufferPtr, inscatter, sizeof(inscatter));
+        passBufferPtr += 4;
+        // THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): its address' bits and its capacity (zeros: no list - the
+        // fragment appends nothing and lights its open share by the environment)
+        Ogre::uint32 escape[4] = { 0u, 0u, 0u, 0u };
+        if (!casterPass && b && b->escapePass && b->escapeList) {
+            escape[0] = Ogre::uint32(b->escapeList & 0xFFFFFFFFull);
+            escape[1] = Ogre::uint32(b->escapeList >> 32u);
+            escape[2] = b->escapeCapacity;
+        }
+        std::memcpy(passBufferPtr, escape, sizeof(escape));
+        passBufferPtr += 4;
+    }
     return passBufferPtr;
 }
 
@@ -943,9 +1166,7 @@ void OgreScene::setFog(const FogDesc &desc) {
              (o.colour.r == desc.colour.r && o.colour.g == desc.colour.g &&
               o.colour.b == desc.colour.b && o.density == desc.density &&
               o.heightDensity == desc.heightDensity && o.heightFalloff == desc.heightFalloff &&
-              o.heightLevel == desc.heightLevel &&
-              o.breakMinBrightness == desc.breakMinBrightness &&
-              o.breakFalloff == desc.breakFalloff));
+              o.heightLevel == desc.heightLevel));
         mLastFogDesc = desc;
         mFogDescKnown = true;
         if (!same) staleProbeGrid(GiStaleReason::Fog);   // a no-op before a grid exists
@@ -958,7 +1179,7 @@ void OgreScene::setFog(const FogDesc &desc) {
         // UNLESS THE ATMOSPHERE IS THE SKY: the same component draws it, and
         // under it the AIR is still a medium — syncAtmosphere -> pushFogState
         // leaves the air's aerial perspective on, without the World fog's
-        // density, height layer or breakthrough.
+        // density or height layer.
         mAtmoFogOn = false;
         if (mAtmoSkyOn || mHeightFogOn) {
             syncAtmosphere();
@@ -998,7 +1219,7 @@ void OgreScene::pushFogState() {
         // its own block, and the World fog's state is the identity — no colour,
         // no height layer, no aerial table claimed, upstream's block at density 0.
         FogHlmsListener::registerScene(mSceneMgr, FogState());
-        mAtmosphere->setFogBlock(0.0f, 0.0f, 0.0f);
+        mAtmosphere->setFogBlock(0.0f);
         return;
     }
     const FogDesc &desc = mLastFogDesc;
@@ -1016,11 +1237,7 @@ void OgreScene::pushFogState() {
     // identity; under any other sky the block carries it.
     s.distanceDensity = mAtmoSkyOn ? worldDensity : 0.0f;
     FogHlmsListener::registerScene(mSceneMgr, s);   // read by preparePassHash / preparePassBuffer
-    // The breakthrough is the World fog's authored bend of the curve (the
-    // piece reads the pair from the same buffer under the atmosphere).
-    mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity,
-                             fogOn ? std::max(desc.breakMinBrightness, 0.0f) : 0.0f,
-                             fogOn ? std::max(desc.breakFalloff, 0.0f) : 0.0f);
+    mAtmosphere->setFogBlock(mAtmoSkyOn ? 0.0f : worldDensity);
 }
 
 // ---------------------------------------------------------------------------

@@ -198,9 +198,9 @@ public:
         Ogre::UavBufferPacked *meshes = nullptr;      ///< GpuScene::meshBuffer()
         Ogre::UavBufferPacked *clusters = nullptr;    ///< GpuScene::clusterBuffer()
         /// HIT MODE (PHOTON-HIT-SHADE-1): `ids` is the hit list's RGBA32UI record
-        /// image and `hitBuf` the ray jobs' buffer (word 0 = records appended; two
-        /// words a record from word 4: the sun's visibility and the footprint as
-        /// halves, the write-back weight — jah_rq_hit_record.glsl). The pass
+        /// image and `hitBuf` the ray jobs' buffer (word 0 = records appended; eight
+        /// words a record from word 8, the first the sun's visibility and the footprint
+        /// as halves — jah_rq_hit_record.glsl). The pass
         /// property atom_hit_mode selects the decode's hit branches.
         bool hitMode = false;
         Ogre::UavBufferPacked *hitBuf = nullptr;

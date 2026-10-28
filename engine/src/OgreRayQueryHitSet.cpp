@@ -156,7 +156,9 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     }
     for (unsigned i = 0; i < SurfaceCache::kViewLayers; ++i) {
         mCardView[i].sampler = point;
-        mCardView[i].imageView = cards ? sampledView(src.cardView[i]) : dummyFlat;
+        // (the SunVis layer, the seventh, is RGBA32_UINT: an unsigned stand-in for its usampler)
+        mCardView[i].imageView = cards ? sampledView(src.cardView[i])
+                                       : i == SurfaceCache::kViewSunVis ? host.gatherDummyUint() : dummyFlat;
         mCardView[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (!mCardView[i].imageView) { err = "a card view-term binding is null"; return false; }
         entry(s.cardView + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCardView[i];
@@ -263,6 +265,8 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
     std::memcpy(out.tables, a, sizeof(a));
     out.surface[0] = src.hitPool ? 1.0f : 0.0f;
     out.surface[1] = src.cloudField ? 1.0f : 0.0f;
+    const uint32_t c[2] = { uint32_t(src.tierCounters & 0xFFFFFFFFu), uint32_t(src.tierCounters >> 32u) };
+    std::memcpy(&out.surface[2], c, sizeof(c));
     std::memcpy(out.cloudMap, src.cloudMap, sizeof(out.cloudMap));
     std::memcpy(out.cloudSun, src.cloudSun, sizeof(out.cloudSun));
 }

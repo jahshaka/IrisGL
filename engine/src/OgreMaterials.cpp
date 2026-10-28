@@ -14,12 +14,17 @@ Ogre::uint8 OgreScene::renderQueueFor(const MaterialRec &m) {
     // pass, at a queue above every other scene range.
     if (m.distortion) return kDistortionRenderQueue;
     if (m.refractive) return kRefractiveRenderQueue;   // the chain's refraction pass
-    // A BLENDED surface draws after the depth-tested editor helpers (REFLECT-FIX-1): a
-    // grid line or an outline behind a pane of glass is seen THROUGH it — dimmed by its
-    // alpha — on every chain. In the opaque queue it drew before the grid's queue, and
-    // whether its depth then hid the grid depended on the tier (a prepass makes the
-    // opaque pass read-only: through on a march chain, hidden without one).
-    if (m.params.alphaMode == PbrAlphaMode::Blend && !(m.unlit && !m.shadingUnlit)) return kBlendedRenderQueue;
+    // EVERY BLENDED SURFACE draws in the blended queue: Blend, Glass, Additive and Modulate alike.
+    // It draws after the depth-tested editor helpers (REFLECT-FIX-1: a grid line or an outline
+    // behind a pane of glass is seen THROUGH it, dimmed by its alpha, on every chain), and on a
+    // screen-GI chain in its own pass after the opaque one ("Jahshaka blended", OgreChain.cpp),
+    // which binds no screen product. In the opaque queue a Glass, Additive or Modulate fragment
+    // was shaded in the opaque pass, whose pass properties hand every fragment the gathered
+    // diffuse and the rough specular at its pixel - the OPAQUE surface's behind it, which the
+    // prepass holds alone: a window glowed with the lit wall's irradiance (PHOTON-7 10-4 R6;
+    // SPECS/audits/PHYSICS_AUDIT_2026-10-26.md A0; gi.glass_pass). The mode is the blend, not
+    // a category: what decides the pass is that the surface blends over what is behind it.
+    if (isBlendedMode(m.params.alphaMode) && !(m.unlit && !m.shadingUnlit)) return kBlendedRenderQueue;
     return 10u;                                        // Ogre's default for normal items
 }
 
@@ -344,9 +349,15 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
         break;
     }
     // Additive/Modulate ride an explicit blendblock preset (setTransparency
-    // only knows alpha blending) and never write depth — like other transparents
-    // they must not occlude what they blend over. Managed idempotently both
-    // ways, the same discipline as the culling macroblock above.
+    // only knows alpha blending). NO BLENDED SURFACE WRITES DEPTH, in any mode: it
+    // does not occlude what it blends over (PHOTON-7 10-4; gi.glass_pass). Ogre's
+    // Fade and Transparent keep the macroblock's depth write, and in a DEPTH-ONLY
+    // pass (the Atom stock depth between the id passes, OgreChain.cpp) a pane's
+    // depth then joined the scene's: every screen product behind the window (the
+    // gather's diffuse, the integrate's, the HZB that culls the clusters behind it)
+    // took the pane for the surface, and the wall seen through it lost its whole
+    // indirect light. Managed idempotently both ways, the same discipline as the
+    // culling macroblock above.
     {
         const bool srcDest = p.alphaMode == PbrAlphaMode::Additive ||
                              p.alphaMode == PbrAlphaMode::Modulate;
@@ -372,7 +383,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
             want.mSeparateBlend != cur.mSeparateBlend)
             db->setBlendblock(want);
         Ogre::HlmsMacroblock macro = *db->getMacroblock();
-        const bool wantDepthWrite = !srcDest;
+        const bool wantDepthWrite = !isBlendedMode(p.alphaMode);
         if (macro.mDepthWrite != wantDepthWrite) {
             macro.mDepthWrite = wantDepthWrite;
             db->setMacroblock(macro);
@@ -433,11 +444,38 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // colour pass keeps its cull; the caster draws both faces. An opaque material keeps the
     // copy - a one-sided opaque surface is the face of a closed shape, whose other side casts.
     // LAST in applyPbr: every macroblock set above resets the caster to the copy.
+    // A PANE's CASTER (PHOTON-7 10-4 R8: paneTransmittance) draws only into the shadow node's TRANSMITTANCE layer
+    // (atlasT, OgreShadow.cpp): it MULTIPLIES the layer by its transmittance (the caster's blendblock: dest x src - its
+    // pixel writes 1 - alpha, JahShadowTransmit_piece_ps.any) and writes no depth (it occludes nothing: the layer's
+    // passes test the map's opaque depth read-only). Every other caster keeps the depth-writing copy, and a blendblock
+    // this rule set is taken back when the material stops being a pane.
+    const bool pane = paneTransmittance(db) >= 0.0f;
     {
         Ogre::HlmsMacroblock caster = *db->getMacroblock();
         if (p.alphaMode == PbrAlphaMode::Cutout) caster.mCullMode = Ogre::CULL_NONE;
+        // EVERY OTHER CASTER WRITES DEPTH (the one read's F2): the colour pass's copy has none for EVERY blended mode
+        // (above: a blended surface occludes nothing in the picture), so a blended material that is not a pane - alpha
+        // 1, whose pixel passes nothing of what lies behind it - cast no shadow on the stock caster's path (a skinned
+        // item, a front-culled caster); its caster is an opaque silhouette, the Atom cut's own answer
+        // ...AND A PANE's TOO (the fix round's F1): a pane draws only in the shadow node's pane passes (paneMask), where
+        // the transmittance pass loads the opaque atlas READ-ONLY (Ogre forces its depth write off) and the pane-depth
+        // pass writes the nearest pane's depth into atlasTD (OgreShadow.cpp)
+        caster.mDepthWrite = true;
         const Ogre::HlmsMacroblock *cur = db->getMacroblock(true);
         if (!cur || *cur != caster) db->setMacroblock(caster, true);
+    }
+    {
+        const Ogre::HlmsBlendblock *cur = db->getBlendblock(true);
+        const bool ours = cur && cur->mSourceBlendFactor == Ogre::SBF_DEST_COLOUR &&
+                          cur->mDestBlendFactor == Ogre::SBF_ZERO && !cur->mSeparateBlend;
+        if (pane && !ours) {
+            Ogre::HlmsBlendblock multiply;
+            multiply.mSourceBlendFactor = Ogre::SBF_DEST_COLOUR;
+            multiply.mDestBlendFactor = Ogre::SBF_ZERO;
+            db->setBlendblock(multiply, true);
+        } else if (!pane && ours) {
+            db->setBlendblock(Ogre::HlmsBlendblock(), true);
+        }
     }
 }
 
@@ -566,6 +604,32 @@ void OgreScene::applyDistortion(Ogre::HlmsUnlitDatablock *db, const PbrParams &p
 }
 
 // ---- Materials ----
+/// DOES THIS SCENE HOLD A PANE (PHOTON-7 10-4 R8: the shadow nodes' transmittance layer is built once one does):
+/// a lit material in a pane's mode under alpha 1. Counted over the materials when one changed, never per frame.
+bool OgreScene::hasPanes() const {
+    if (mPaneMaterials < 0) {
+        int n = 0;
+        for (const auto &kv : mMaterials)
+            if (!kv.second.unlit && isPaneMaterial(kv.second.params.alphaMode, kv.second.params.alpha)) ++n;
+        mPaneMaterials = n;
+    }
+    return mPaneMaterials > 0;
+}
+
+bool OgreScene::hasBlended() const {
+    if (mBlendedMaterials < 0) {
+        int n = 0;
+        for (const auto &kv : mMaterials) {
+            const PbrAlphaMode m = kv.second.params.alphaMode;
+            if (!kv.second.unlit && (m == PbrAlphaMode::Blend || m == PbrAlphaMode::Glass ||
+                                     m == PbrAlphaMode::Additive || m == PbrAlphaMode::Refractive))
+                ++n;
+        }
+        mBlendedMaterials = n;
+    }
+    return mBlendedMaterials > 0;
+}
+
 MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
     if (hostPosts()) {   // THE HOST'S CREATE (U3 4a): an id it reserves, the create a message
         const MaterialId mid = id ? id : reserveMaterialId();
@@ -573,6 +637,8 @@ MaterialId OgreScene::createPbrMaterial(const PbrParams &p, MaterialId id) {
         return mid;
     }
     if (id && mMaterials.count(id)) { mError = "createPbrMaterial: the id is already a material of this scene"; return 0; }
+    mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    mBlendedMaterials = -1;   // (hasBlended, R4)
     JAH_TRY {
         MaterialRec rec;
         rec.params = p;
@@ -625,6 +691,9 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
     JAH_HOST_CALL("Scene::setPbrMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
+    if (isPaneMaterial(it->second.params.alphaMode, it->second.params.alpha) != isPaneMaterial(p.alphaMode, p.alpha))
+        mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    if (it->second.params.alphaMode != p.alphaMode) mBlendedMaterials = -1;   // (hasBlended, R4)
     // An OVERLAY unlit material (grid, gizmo, outline) has no PBR parameters at
     // all. A material whose SHADING MODEL is Unlit does — it just renders them
     // through the other family.
@@ -704,11 +773,18 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
                  o.uvOffset[0] != p.uvOffset[0] || o.uvOffset[1] != p.uvOffset[1] ||
                  o.uvRotation != p.uvRotation || o.alpha != p.alpha || samplersMoved ||
                  o.uvVelocity[0] != p.uvVelocity[0] || o.uvVelocity[1] != p.uvVelocity[1]);
+            // ...AND A PANE's ALPHA IS ITS SHADOW (PHOTON-7 10-4 R8; the fix round's F12 row): the caster writes its 1 - alpha
+            // into the transmittance layer, so an alpha edit on either side of a pane redraws the maps holding it (a
+            // cached lamp map kept the old transmittance: the alpha drag's shadow stood still)
+            const bool paneAlpha = o.alpha != p.alpha &&
+                                   (isPaneMaterial(o.alphaMode, o.alpha) || isPaneMaterial(p.alphaMode, p.alpha));
             if (it->second.paramsPushed &&
-                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs))
+                (o.alphaMode != p.alphaMode || o.alphaCutoff != p.alphaCutoff || cutoutInputs || paneAlpha))
                 noteShadowShapeChanged(id);
         }
         const Ogre::uint8 rqBefore = renderQueueFor(it->second);
+        const PbrAlphaMode o0Mode = it->second.params.alphaMode;
+        const float o0Alpha = it->second.params.alpha;
         it->second.params = p;
         it->second.paramsPushed = true;
         if (it->second.shadingUnlit) {
@@ -752,6 +828,30 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
         if (wasGated != db->hasZeroSpecularResponse()) mPhoton.countProbeGateCrossing();
+        // THE PANE WORD (PHOTON-7 10-4 R7, gpuPaneWordFor): an alpha edit inside one mode moves no queue and
+        // flushes no renderable, so the wearers are marked here or their TLAS instances keep the old transmittance.
+        const bool paneMoved = isBlendedMode(o0Mode) != isBlendedMode(p.alphaMode) ||
+                               (isBlendedMode(p.alphaMode) && o0Alpha != p.alpha);
+        if (paneMoved)
+            for (auto &kv : mNodes)
+                if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
+        // ...AND THE PANE's CASTER PERMUTATION (PHOTON-7 10-4 R8; the one read's F12): ONE caster shader reads the
+        // pane's transmittance from its material, so an alpha edit inside pane-ness re-hashes nothing (an alpha drag
+        // compiles no PSO); an edit that makes or unmakes a pane inside one mode (alpha to or from 1) re-hashes its
+        // wearers' renderables here (Hlms::calculateHashFor + Renderable::_setHlmsHashes: what a datablock's flush
+        // does, through the public door).
+        if (paneMoved && isPaneMaterial(o0Mode, o0Alpha) != isPaneMaterial(p.alphaMode, p.alpha))
+            for (auto &kv : mNodes) {
+                if (kv.second.materialRef != id || !kv.second.item) continue;
+                for (size_t i = 0, e = kv.second.item->getNumSubItems(); i < e; ++i) {
+                    Ogre::SubItem *sub = kv.second.item->getSubItem(i);
+                    Ogre::HlmsDatablock *worn = sub->getDatablock();
+                    if (!worn) continue;
+                    Ogre::uint32 hash = 0, casterHash = 0;
+                    worn->getCreator()->calculateHashFor(sub, hash, casterHash);
+                    sub->_setHlmsHashes(hash, casterHash);
+                }
+            }
         if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive
@@ -1121,6 +1221,8 @@ bool OgreScene::destroyMaterial(MaterialId id) {
     JAH_HOST_CALL("Scene::destroyMaterial");
     auto it = mMaterials.find(id);
     if (it == mMaterials.end()) return false;
+    mPaneMaterials = -1;   // recounted on its next read (hasPanes, PHOTON-7 10-4 R8)
+    mBlendedMaterials = -1;   // (hasBlended, R4)
     JAH_TRY {
         // WHAT A DYING MATERIAL COSTS THE VOLUME IS THE GEOMETRY THAT WORE IT
         // (MATERIAL-SWAP-GI-1). This used to invalidate the GI caches with no

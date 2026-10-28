@@ -961,7 +961,11 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     const bool moving = n.movable || n.dragMover;
     // ...AND THE STOCK CASTER'S CHANNEL beside it (kStockCasterBit): every world item starts on the stock shadow
     // passes; the GPU scene's compose takes the pair away when the caster cut draws its caster (placeAtomCaster).
-    const Ogre::uint32 channel = (moving ? kMovableBit : kVisibleBit) | stockCasterBits(moving ? kMovableBit : kVisibleBit);
+    // (a PANE - PHOTON-7 10-4 R8 - starts on the pane pair instead: it occludes no light, placeAtomCaster's rule)
+    const bool pane = n.item && n.item->getNumSubItems() &&
+                      paneTransmittance(n.item->getSubItem(0)->getDatablock()) >= 0.0f;
+    const Ogre::uint32 world = moving ? kMovableBit : kVisibleBit;
+    const Ogre::uint32 channel = world | (pane ? paneCasterBits(world) : stockCasterBits(world));
     if (unlit) return channel;
     // A HIDDEN NODE MUST NOT BOUNCE LIGHT (SMOKE_FIX S12). Ogre's own hide —
     // SceneNode::setVisible — toggles the LAYER_VISIBILITY bit, which
@@ -1742,18 +1746,15 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // Ogre-Next cannot render shadows for area lights (and our shadow node
         // only lists directional/point/spot); never mark them casters.
         //
-        // AND ONLY THE SUN CASTS AMONG DIRECTIONALS. The node declares a single
-        // directional slot (three PSSM splits at slot 0; every focused slot
-        // accepts spot/point only — OgreShadow.cpp), and Ogre fills it with the
-        // first CASTING directional in its own castShadows-then-light-id sort
-        // (OgreSceneManager.cpp) — engine creation order, which can flip across
-        // a reload or a mirror re-attach. Clearing the flag on every directional
-        // the host did not name primary leaves that sort exactly one candidate,
-        // so the sun takes the slot on every frame, in every process.
-        const bool secondaryDirectional =
-            d.type == LightType::Directional && !d.primaryDirectional;
-        L->setCastShadows(d.type == LightType::Area || secondaryDirectional ? false
-                                                                            : d.castShadows);
+        // EVERY OTHER LIGHT CASTS WHAT ITS FLAG SAYS, a second directional too
+        // (PHOTON-7 10-4 R8). The node's PSSM splits (slot 0) go to the first
+        // casting directional in Ogre's sort and every further one takes a
+        // focused map (OgreShadow.cpp). The sort is castShadows, then the
+        // fork's shadow sort priority, then the light id (creation order, which
+        // flips across a reload): the host's sun takes priority 1, so it holds
+        // the splits on every frame, in every process.
+        L->setCastShadows(d.type == LightType::Area ? false : d.castShadows);
+        L->setShadowSortPriority(d.type == LightType::Directional && d.primaryDirectional ? 1u : 0u);
         if (d.type == LightType::Area) {
             L->setRectSize(Ogre::Vector2(std::max(d.rectWidth, 0.01f), std::max(d.rectHeight, 0.01f)));
             L->setDoubleSided(d.doubleSided);
@@ -1839,15 +1840,13 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // This function runs for every light on every mirror sync (60 Hz), and
         // LightProfiles::build() recreates and re-uploads a GPU texture.
         //
-        // Honesty about what the renderer does with it — the host UI says the
-        // same thing, because there is no engine signal: a profile shapes SPOT
-        // lights always, POINT lights only while they cast no shadows (a
-        // shadow-casting point light is shaded from the pass buffer, whose
-        // point loop has no profile term), and never directional or area lights.
+        // What the renderer does with it: a profile shapes SPOT and POINT
+        // lights, shadowed or not (the pass buffer's shadowed point loop reads
+        // the profile row too: the fork's 800.PixelShader, PHOTON-7 10-4 R8),
+        // and never directional or area lights.
         {
             const bool profileApplies =
-                d.type == LightType::Spot ||
-                (d.type == LightType::Point && !d.castShadows);
+                d.type == LightType::Spot || d.type == LightType::Point;
             const std::string wantProfile = profileApplies ? d.iesProfilePath : std::string();
             if (wantProfile != n.lightProfilePath) {
                 std::string err;

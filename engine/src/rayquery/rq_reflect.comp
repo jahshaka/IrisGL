@@ -32,6 +32,7 @@
 // SPV_KHR_ray_query documents), like rq_rays.comp beside it: Ogre's own GLSL
 // path never sets a target environment, so this never goes through it.
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_control_flow_attributes : require
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -550,6 +551,7 @@ vec3 skyRadiance( vec3 dir, float lobeAlpha, bool centreRay );
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) skyRadiance( d, alpha, centre )
 #include "jah_rq_hit_radiance.glsl"
 #include "jah_rq_emitters.glsl"
+#include "jah_rq_panes.glsl"
 /// THE EMISSION OF THE HIT `jahHitSurf` describes (PHOTON-7 11-1b): the row's emissive and its map at the hit - the ONE
 /// function both of the NEE's strategies take E from (the split between them is exact whatever answered the BRDF's hit).
 /// 0 where the hit has no material (a far copy, an item the store has not converted).
@@ -643,6 +645,7 @@ struct JahReflectSample
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
+	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -663,6 +666,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.sunVis = 1.0;
 	o.recGain = 1.0;
 	o.recTraced = false;
+	o.recPane = vec4( 0.0, 0.0, 0.0, 1.0 );
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -838,7 +842,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
-		JAH_RQ_PROCEED( rq )
+		JahPanes panes = jahPanesNone();
+		JahPanes panesFar = jahPanesNone();
+		JAH_RQ_PROCEED_PANES( rq, panes )
 		float t = 0.0;
 		vec3 hitN = -L;
 		bool hitNormalKnown = false;
@@ -854,7 +860,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
 			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
 		}
-		else if( p.screen2.w > maxT )
+		jahPanesInFront( panes, slotHit ? t : maxT );
+		if( !slotHit && p.screen2.w > maxT )
 		{
 			// (3) THE FAR COPIES for an escape (kRayMaskFar, each mesh's coarsest level), from the near length less
 			// the widest coarse-vs-fine hand-over gap to the far plane - the gather's continuation (rq_probe_gather.comp):
@@ -864,7 +871,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			rayQueryEXT rqFar;
 			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, L,
 								   p.screen2.w );
-			JAH_RQ_PROCEED( rqFar )
+			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
 				slotHit = true;
@@ -873,6 +880,23 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				recSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
 				recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
 				recBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
+			}
+			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
+			jahPanesBetween( panesFar, maxT, slotHit ? t : p.screen2.w );
+		}
+		// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl)
+		float through = 1.0;
+		vec3 paneLight = vec3( 0.0 );
+		const bool crossedPanes = panes.n + panesFar.n > 0;
+		if( crossedPanes )
+		{
+			// the near list, then the far one, through ONE call of the fold (its shading inlined once)
+			[[dont_unroll]] for( int list = 0; list < 2; ++list )
+			{
+				float th = 1.0;
+				const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, L, th );
+				paneLight += through * own;
+				through *= th;
 			}
 		}
 		if( slotHit )
@@ -946,6 +970,16 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !record )
 				traced = jahFogAlong( traced, world.y, L, length( origin + L * t - world ),
 									  length( world - thisEye.camPos ) );
+			// ...THROUGH THE PANES IN FRONT (PHOTON-7 10-4 R7; the one read's F6): a hit the decode must shade behind
+			// panes keeps its record, the panes' light and throughput in it (words 6-7: the write-back's ray share is
+			// the panes' light plus the throughput x the decoded light - the gather's rule, its weight x through)
+			if( crossedPanes )
+			{
+				if( record )
+					o.recPane = vec4( paneLight, through );
+				else
+					traced = paneLight + through * traced;
+			}
 			// THE MEASURING ARM reflect.flatHits (denoiser.w): the hit answered by a constant of its instance - no cache,
 			// no footprint, no fog, no record (the estimator and the denoiser measured alone).
 			if( p.denoiser.w > 0.5 )
@@ -960,7 +994,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		else
 		{
 			// (4) THE SKY: nothing near, nothing far.
-			traced = jahFogAlongSky( skyRadiance( L, lobeAlpha, centre ), world.y, L, length( world - thisEye.camPos ) );
+			traced = paneLight + through * jahFogAlongSky( skyRadiance( L, lobeAlpha, centre ), world.y, L,
+														   length( world - thisEye.camPos ) );
 			ok = true;
 			photonSource = 3u;
 		}
@@ -1207,7 +1242,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
 											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain,
-											s.recTraced );
+											s.recPane, s.recTraced );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
 			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
@@ -1703,7 +1738,7 @@ void main()
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
 										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
-										 s.recGain, s.recTraced );
+										 s.recGain, s.recPane, s.recTraced );
 							fit = 1u;
 						}
 						else

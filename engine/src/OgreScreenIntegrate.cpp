@@ -96,7 +96,7 @@ ScreenGiListener::~ScreenGiListener() {
                 for (Ogre::uint8 u : slots)
                     if (job && u < job->getNumUavUnits()) job->_setUavBuffer(u, none);
             };
-            forget(kScreenIntegrateJob, { 3u });
+            forget(kScreenIntegrateJob, { 4u });
             forget(kScreenAreaVisJob, { 5u, 6u });
             forget(kScreenAreaVisResolveJob, { 1u });
         }
@@ -124,6 +124,14 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (!pass || !mView) return;
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
+    // THE BLENDED PASS (PHOTON-7 10-4 R11): the integrate's sky visibility for its fog, for its length
+    if (def && def->mIdentifier == kBlendedPassIdentifier) {
+        OgreScene *scene = mView->ogreScene();
+        const Ogre::CompositorNode *node = pass->getParentNode();
+        if (scene && node)
+            FogHlmsListener::setFogSkyVis(scene->sceneManager(), node->getDefinedTexture(Ogre::IdString(kScreenGiSkyVis)));
+        return;
+    }
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     OgreScene *scene = mView->ogreScene();
     const Ogre::CompositorNode *node = pass->getParentNode();
@@ -132,6 +140,7 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
     bind.irradiance = node->getDefinedTexture(Ogre::IdString(kScreenGiIrradiance));
     bind.roughSpec = node->getDefinedTexture(Ogre::IdString(kScreenGiSpecular));
     bind.coneHit = node->getDefinedTexture(Ogre::IdString(kScreenGiConeHit));
+    bind.skyVis = node->getDefinedTexture(Ogre::IdString(kScreenGiSkyVis));
     // (the view's own passes, and the frame capture's - the same frame, camera and size: it takes the view's product,
     // never a history of its own; a product of another size is no answer for these pixels; and a product no resolve
     // has written - its shaders still building - is never registered, F2)
@@ -145,7 +154,7 @@ void ScreenGiListener::passPreExecute(Ogre::CompositorPass *pass) {
         Ogre::RenderSystem *rs = Ogre::Root::getSingleton().getRenderSystem();
         Ogre::BarrierSolver &solver = rs->getBarrierSolver();
         Ogre::ResourceTransitionArray trans;
-        for (Ogre::TextureGpu *t : { bind.irradiance, bind.roughSpec, bind.coneHit, area ? mAreaVis : nullptr })
+        for (Ogre::TextureGpu *t : { bind.irradiance, bind.roughSpec, bind.coneHit, bind.skyVis, area ? mAreaVis : nullptr })
             if (t)
                 solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                          1u << Ogre::GPT_FRAGMENT_PROGRAM);
@@ -165,6 +174,10 @@ void ScreenGiListener::passPosExecute(Ogre::CompositorPass *pass) {
     }
     if (pass->getType() != Ogre::PASS_SCENE) return;
     const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
+    if (def && def->mIdentifier == kBlendedPassIdentifier) {
+        if (OgreScene *scene = mView->ogreScene()) FogHlmsListener::setFogSkyVis(scene->sceneManager(), nullptr);
+        return;
+    }
     if (!def || def->mPrePassMode != Ogre::PrePassUse) return;
     if (OgreScene *scene = mView->ogreScene()) {
         FogHlmsListener::setProbeGather(scene->sceneManager(), FogHlmsListener::ProbeGatherBind());
@@ -393,7 +406,7 @@ void ScreenGiListener::bindJob(Ogre::CompositorPassCompute *pass) {
     buf.offset = 0;
     buf.sizeBytes = 0;
     buf.access = Ogre::ResourceAccess::Read;
-    job->_setUavBuffer(3u, buf);
+    job->_setUavBuffer(4u, buf);   // (after the job's four UAV images: the sky visibility is the fourth, PHOTON-7 10-4 R11)
 }
 
 }}}   // namespace jahshaka::engine::detail

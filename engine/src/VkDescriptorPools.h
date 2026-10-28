@@ -19,7 +19,9 @@
 // RTX 4080 / 595.84): NVIDIA does NOT refuse an over-allocation — a pool one
 // binding short allocated all its sets — so that runtime proof is only the
 // validation layer's net; the construction (one call makes both) is the fix.
-// Every plan is recorded (descriptorPoolProofs) for the suite engine.descriptor_pools.
+// (The plans' process-wide record, descriptorPoolProofs, is deleted - PHOTON-7 10-4: its suite
+// engine.descriptor_pools is archived and nothing read it, and its unsynchronised push_back raced between the ray
+// tier's ahead-build workers: a heap corruption, "malloc(): unaligned tcache chunk detected", gi.walk's jahlab.)
 //
 // Header-only and Vulkan-typed: included by the Vulkan TUs and by the suite only.
 #pragma once
@@ -33,21 +35,6 @@
 namespace jahshaka {
 namespace engine {
 namespace detail {
-
-/// What one pool proved when it was created.
-struct DescriptorPoolProof {
-    std::string name;
-    uint32_t sets = 0;         ///< maxSets: every set the pool was planned for
-    uint32_t descriptors = 0;  ///< the sum of its sizes
-    bool full = false;         ///< every planned set allocated at once, and was released
-};
-
-/// Every pool the process created through a plan, in creation order (a pool that
-/// failed its proof is here too, with full = false).
-inline std::vector<DescriptorPoolProof> &descriptorPoolProofs() {
-    static std::vector<DescriptorPoolProof> proofs;
-    return proofs;
-}
 
 class DescriptorPoolPlan {
 public:
@@ -99,10 +86,6 @@ public:
     bool create(VkDevice dev, const char *name, VkDescriptorPoolCreateFlags flags,
                 VkDescriptorPool &out, std::string &err) const {
         out = VK_NULL_HANDLE;
-        DescriptorPoolProof proof;
-        proof.name = name;
-        proof.sets = maxSets();
-        for (const VkDescriptorPoolSize &s : mSizes) proof.descriptors += s.descriptorCount;
         VkDescriptorPoolCreateInfo dpi{};
         dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         dpi.flags = flags;
@@ -113,7 +96,6 @@ public:
         if (r != VK_SUCCESS) {
             out = VK_NULL_HANDLE;
             err = std::string(name) + ": vkCreateDescriptorPool failed (" + std::to_string(int(r)) + ")";
-            descriptorPoolProofs().push_back(proof);
             return false;
         }
         std::vector<VkDescriptorSet> sets(mLayouts.size(), VK_NULL_HANDLE);
@@ -130,11 +112,8 @@ public:
             err = std::string(name) + ": the pool cannot hold the " + std::to_string(maxSets()) +
                   " sets its layouts were planned for (" + std::to_string(int(r)) +
                   ") - a layout and its pool disagree";
-            descriptorPoolProofs().push_back(proof);
             return false;
         }
-        proof.full = true;
-        descriptorPoolProofs().push_back(proof);
         return true;
     }
 

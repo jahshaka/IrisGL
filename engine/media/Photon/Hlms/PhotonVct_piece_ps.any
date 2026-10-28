@@ -199,6 +199,59 @@
 										 probeParams.rayLastShell, true ) * probeParams.blendFade;
 	}
 
+	@property( jah_glass_escape )
+	// THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, the lead's design (D); L9). Past the voxel chain an
+	// open share is the environment's only past the WORLD: inside the world box the escape meets what the chain no longer
+	// holds. So at the ray tier a blended or refractive fragment appends its lobe's open share as a RECORD
+	// (rq_glass_escape.comp's layout) - the origin lifted on the lobe's side (jahRayOrigin, the one origin law), the lobe's
+	// dominant direction, where the chain's read of the escapes ended (`openMetres`: the TLAS ray starts there), the eye's
+	// distance and the roughness - and lights NONE of the share itself: the job traces it on the TLAS after the pass and
+	// adds the answer into the pixel (rq_glass_escape_add.comp). The weight is completed after the body
+	// (JahGlassEscapeWeight: the lobe's albedo, the eye leg's media, the blend's coverage). A FULL LIST keeps the share
+	// on the environment, as before - the record counted past the capacity (the list grows to the frame's demand).
+	// `w0` the share's weight in the environment term (the open share x the probe's fade).
+	bool jahGlassEscapeAppend( float3 viewPos, float3 viewGeomN, float3 viewDir, float openMetres, float rough, float w0 )
+	{
+		const uint2 addr = passBuf.jahEscapeAddr.xy;
+		if( ( addr.x | addr.y ) == 0u || !( w0 > 0.0f ) )
+			return false;
+		JahEscapeList jahL = JahEscapeList( addr );
+		const uint idx = atomicAdd( jahL.count, 1u );
+		if( idx >= passBuf.jahEscapeAddr.z )
+			return false;
+		// (the job's groups: the record that opens one counts it; the first record arms the add)
+		if( ( idx & 63u ) == 0u )
+			atomicMax( jahL.traceX, idx / 64u + 1u );
+		if( idx == 0u )
+			jahL.addX = jahL.addFull;
+		const float3 wp = float3( dot( passBuf.jahLampInvView0.xyz, viewPos ) + passBuf.jahLampInvView0.w,
+								  dot( passBuf.jahLampInvView1.xyz, viewPos ) + passBuf.jahLampInvView1.w,
+								  dot( passBuf.jahLampInvView2.xyz, viewPos ) + passBuf.jahLampInvView2.w );
+		const float3 wn = normalize( float3( dot( passBuf.jahLampInvView0.xyz, viewGeomN ),
+											 dot( passBuf.jahLampInvView1.xyz, viewGeomN ),
+											 dot( passBuf.jahLampInvView2.xyz, viewGeomN ) ) );
+		const float3 wd = normalize( float3( dot( passBuf.jahLampInvView0.xyz, viewDir ),
+											 dot( passBuf.jahLampInvView1.xyz, viewDir ),
+											 dot( passBuf.jahLampInvView2.xyz, viewDir ) ) );
+		const float eye = length( viewPos );
+		const float3 origin = jahRayOrigin( wp, dot( wn, wd ) < 0.0f ? -wn : wn, eye, 0.0f );
+		@property( hlms_multiview )
+			const uint layer = uint( gl_ViewIndex ) & 1u;
+		@else
+			const uint layer = 0u;
+		@end
+		const uint pix = ( uint( gl_FragCoord.x ) & 0x7FFFu ) | ( ( uint( gl_FragCoord.y ) & 0x7FFFu ) << 15u ) |
+						 ( layer << 30u );
+		jahL.rec[2u * idx] = uint4( floatBitsToUint( origin ), packHalf2x16( float2( max( openMetres, 0.0f ), eye ) ) );
+		// (a zero weight until the body's end writes it: a fragment discarded after this traces nothing)
+		jahL.rec[2u * idx + 1u] = uint4( packSnorm2x16( jahOctEncode( wd ) ), pix, 0u, packHalf2x16( float2( 0.0f, rough ) ) );
+		jahEscapeIdx = idx;
+		jahEscapeW0 = w0;
+		jahEscapeRough = rough;
+		return true;
+	}
+	@end
+
 	INLINE void computeVctProbe
 	(
 		OGRE_INOUT_REF( float3, outDiffuse ), OGRE_INOUT_REF( float4, outSpecular ),
@@ -262,6 +315,7 @@
 			const float jahFieldShare = jahFieldSpec.w >= 0.0f ? jahSpecularFieldShare( jahRough ) : 0.0f;
 			float4 jahRays = float4( 0.0f, 0.0f, 0.0f, 0.0f );
 			float jahHitC0 = 2.0f;   // no hit: past cascade 0's box (the parallax-corrected probes' far point)
+			float jahOpenC0 = 0.0f;  // where the chain's read of the escapes ended, cascade 0's units (PHOTON-7 10-4 R4)
 			if( jahFieldShare < 1.0f || jahFieldSpec.w < 1.0f )
 			{
 				const JahRaySpecular jahRs = jahRaySpecular( jahSurfLS, biasDirLS, jahRc, jahNc, jahRough,
@@ -282,6 +336,7 @@
 				}
 			@end
 				jahRays = float4( jahHitLight, jahRs.open );
+				jahOpenC0 = jahRs.openC0;
 				if( jahRs.hits > 0.0f )
 					jahHitC0 = jahRs.hitC0;
 			}
@@ -290,6 +345,23 @@
 			const float4 jahField = float4( jahFieldSpec.xyz, 0.0f ) + jahRays * ( 1.0f - saturate( jahFieldSpec.w ) );
 			const float4 jahLobe = lerp( jahRays, jahField, jahFieldShare );
 			const float specAlpha = jahLobe.w;
+			// THE OPEN SHARE TRACED (PHOTON-7 10-4 R4, jahGlassEscapeAppend above): at the ray tier a blended pass's escapes
+			// follow the TLAS from where the chain's read ended; the environment lights the share only where no record
+			// takes it (no TLAS, a full list, a blend a later add cannot follow: jah_blend_no_escape)
+			float jahOpenLit = 1.0f;
+		@property( jah_glass_escape && !use_parallax_correct_cubemaps && needs_env_brdf && !jah_blend_no_escape )
+			{
+				const float3 jahEscDir = jahEnvDominantDir( float3( pixelData.normal ), float3( pixelData.reflDir ),
+															 float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) );
+				const float3 jahRls = float3( dot( probeParams.xform_row0.xyz, pixelData.reflDir ),
+											  dot( probeParams.xform_row1.xyz, pixelData.reflDir ),
+											  dot( probeParams.xform_row2.xyz, pixelData.reflDir ) );
+				if( jahGlassEscapeAppend( pos, float3( pixelData.geomNormal ), jahEscDir,
+										  jahOpenC0 / max( length( jahRls ), 1e-6f ), jahRough,
+										  specAlpha * probeParams.blendFade * blend ) )
+					jahOpenLit = 0.0f;
+			}
+		@end
 
 			// THE OPEN SHARE SEES THE ENVIRONMENT IN THE REFLECTED DIRECTION (PHOTON-ENV-1) AT THE SURFACE'S OWN
 			// ROUGHNESS (the prefiltered chain holds this GGX lobe, jahEnvLobe; audit F3), along the lobe's dominant
@@ -303,14 +375,14 @@
 			float3 jahEnvS = jahEnvLobe( jahViewToWorldDir( jahEnvDominantDir(
 											 float3( pixelData.normal ), float3( pixelData.reflDir ),
 											 float( pixelData.perceptualRoughness * pixelData.perceptualRoughness ) ) ),
-										 float( pixelData.perceptualRoughness ) ) * specAlpha;
+										 float( pixelData.perceptualRoughness ) ) * ( specAlpha * jahOpenLit );
 		@end
 
 			// Radiance as the store holds it (the voxel holds radiance since fork 8f09c0cd4+155a56bf8, was 0077: no
 			// 1/PI fudge); the pre-integrated BRDF downstream applies the specular albedo.
 			outSpecular += float4( jahLobe.xyz * blendWeight + jahEnvS * ( probeParams.blendFade * blend ), blend );
 			// what the lobe's rays (or the field) stopped is not open to the material's cube
-			outRoughOcclusion = 1.0f - specAlpha;
+			outRoughOcclusion = 1.0f - specAlpha * jahOpenLit;
 
 			@property( use_parallax_correct_cubemaps )
 				vctSpecPosVS = fromVctToViewSpace( jahSurfLS + normalize( jahCubeToVctProbeSpaceDir( jahRc, probeParams ) ) *
@@ -448,4 +520,52 @@
 	@end
 @end
 
+@end
+
+// THE ESCAPE RECORD'S WEIGHT (PHOTON-7 10-4 R4, jahGlassEscapeAppend above), inserted at the end of the colour pass's
+// fog law (JahFog_piece_vs_piece_ps.any's custom_ps_posExecution) - or, in a pass that fogs nothing, the hook's own
+// definition below - with `jahEscEyeT` the eye leg's transmittance as this pass applied its media (upstream's distance
+// block, then jahFogMedia: linear in the light, so the law at 1 less the law at 0; 1 without fog): the record's weight
+// per channel - the share's weight in the environment term x the lobe's albedo as BRDF_EnvMap applies it
+// (Rs = envColourS kS ( F0 A( NdotV, r ) + B ), the clear coat's 1 - Fc) x that transmittance x, under a blend whose
+// source factor is the fragment's alpha (Fade, Additive: jah_escape_src_alpha, ScenePbs's), that alpha. Written beside
+// the record's roughness; a record whose fragment never got here keeps its zero weight.
+@property( jah_glass_escape )
+@piece( JahGlassEscapeWeight )
+	if( jahEscapeIdx != 0xFFFFFFFFu )
+	{
+		float jahEscA, jahEscB;
+		jahSpecularAlbedo( float( pixelData.NdotV ), float( pixelData.perceptualRoughness ), jahEscA, jahEscB );
+		float3 jahEscW = jahEscapeW0 * float3( pixelData.specular.xyz ) *
+						 ( float3( pixelData.F0 ) * jahEscA + float3( jahEscB, jahEscB, jahEscB ) );
+		@property( clear_coat )
+			@property( normal_map )
+				const float jahEscCoatNoV = saturate( dot( float3( pixelData.geomNormal ), float3( pixelData.viewDir ) ) );
+			@else
+				const float jahEscCoatNoV = float( pixelData.NdotV );
+			@end
+			jahEscW *= 1.0 - F_Schlick( 0.04, 1.0, jahEscCoatNoV ) * float( pixelData.clearCoat );
+		@end
+		jahEscW *= jahEscEyeT;
+		@property( jah_escape_src_alpha )
+			jahEscW *= float( outPs_colour0.w );
+		@end
+		jahEscW = max( jahEscW, float3( 0.0, 0.0, 0.0 ) );
+		JahEscapeList jahEscL = JahEscapeList( passBuf.jahEscapeAddr.xy );
+		jahEscL.rec[2u * jahEscapeIdx + 1u].zw = uint2( packHalf2x16( jahEscW.xy ),
+													  packHalf2x16( float2( jahEscW.z, jahEscapeRough ) ) );
+	}
+@end
+@end
+
+// ...THE HOOK IN A PASS THAT FOGS NOTHING (no hlms_fog: JahFog defines no custom_ps_posExecution there - the hook is one
+// definition a permutation, and the gather's, the card capture's and the G-buffer class's are the prepass's, the photon
+// view's its own property's)
+@property( jah_glass_escape && !hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+@piece( custom_ps_posExecution )
+	{
+		const float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 );
+		@insertpiece( JahGlassEscapeWeight )
+	}
+@end
 @end

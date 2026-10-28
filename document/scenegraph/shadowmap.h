@@ -4,9 +4,13 @@
 namespace iris
 {
 
+// THE FILTER OF A LIGHT'S SHADOW - every light has one (PHOTON-7 10-4 R9; L9: a light is blocked by geometry on every
+// path). `None` ("this light casts no shadow") is DELETED: a lamp the shadow maps do not hold is traced (a ray at the
+// ray tier, the voxels' march where the GI is on) - so with GI off and no ray tracing, the lamps beyond the shadow maps
+// are unshadowed (the scene issue `lamps.unshadowed` names them). The values keep their numbers; 0 names nothing (the
+// reader takes Soft).
 enum class ShadowMapType : int
 {
-    None = 0,
     Hard = 1,
     Soft = 2,
     VerySoft = 3

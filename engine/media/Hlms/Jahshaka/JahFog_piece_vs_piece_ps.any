@@ -131,6 +131,65 @@
 		float4 jahCloudMap;			// x = 1 / tile (1/m), y = shadow strength, zw = scroll (m)
 		float4 jahCloudSun;			// xy = toSun.xz / toSun.y, z = altitude (m), w = 1 / mu_s
 	@end
+	@property( jah_lamp_rays || jah_lamp_voxels || hlms_fog )
+		// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9), after the cloud block - everything before it padded
+		// when its own feature is absent, the same rule (the ray tier's TLAS, or the no-ray tier's voxel chain); the
+		// view-to-world rows the fog's in-scatter reads too (R11)
+		@property( !jah_cloud_shadow )
+			@property( !jah_shader_clock && !irradiance_field && !jah_env )
+				@property( !hlms_fog )
+					float4 jahLampPadFogColour;
+					float4 jahLampPadFogHeight;
+				@end
+				float4 jahLampPadClock;
+			@end
+			@property( !irradiance_field && !jah_env )
+				float4 jahLampPadIfd;
+			@end
+			@property( !jah_env )
+				float4 jahLampPadEnv;
+			@end
+			float4 jahLampPadCloud0;
+			float4 jahLampPadCloud1;
+			float4 jahLampPadCloud2;
+			float4 jahLampPadCloud3;
+			float4 jahLampPadCloud4;
+		@end
+		float4 jahLampInvView0;		// the pass camera's view-to-world transform, rows x, y and z
+		float4 jahLampInvView1;
+		float4 jahLampInvView2;
+		uint4 jahLampAddr;			// the TLAS's device address (xy) and the alpha table's (zw), as uints: never
+									// through floatBitsToUint - the SPIR-V optimiser folds that bitcast into the
+									// pointer's own, an invalid one (VUID-VkShaderModuleCreateInfo-pCode-08737)
+		@property( jah_lamp_voxels )
+			// THE VOXEL CHAIN the no-ray tier's lamp march runs through (PhotonVoxelLighting::chainMarchParams, at most
+			// kGiTierMaxCascades = 4 entries): per entry its box corner relative to cascade 0's (metres; w its cell)
+			// and its resolution (xyz) with the world distance its shell ends at (w); cascade 0's corner in the world
+			float4 jahLampChainOrigin[4];
+			float4 jahLampChainRes[4];
+			float4 jahLampChainCorner;
+		@else
+			@property( hlms_fog )
+				float4 jahLampPadChain[9];
+			@end
+		@end
+		@property( hlms_fog )
+			// THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): x = s, the sun's share of the light an open point of the medium
+			// receives (E_sun / (E_sun + 4 pi L_sky): OgreFog.cpp); yzw toward the shadowed sun, world (0: none) - the
+			// march's ray past its last split (F9)
+			float4 jahFogInscatter;
+		@end
+		@property( jah_glass_escape )
+			// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4; PhotonVct_piece_ps.any's jahGlassEscapeAppend): its
+			// device address (xy, as uints: the lamp addresses' rule), its capacity in records (z); w 0. A pass that is
+			// not the ray tier's blended or refractive one never declares it. (Only under jah_lamp_rays: no chain.)
+			@property( !hlms_fog )
+				float4 jahEscapePadChain[9];
+				float4 jahEscapePadInscatter;
+			@end
+			uint4 jahEscapeAddr;
+		@end
+	@end
 @end
 
 // THE ENVIRONMENT CUBE (PHOTON-ENV-1; first claimed by fork 4d5fbef16+8f09c0cd4 (was 0048), lane
@@ -156,8 +215,39 @@
 // the piece is this one. The gather's register is claimed beside the sky's in
 // FogHlmsListener::propertiesMergedPreGenerationStep, in the fixed order
 // getNumExtraPassTextures states.
-@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog )
+@property( jah_env || jah_probe_gather || jah_cloud_shadow || jah_sun_contact || jah_area_vis || jah_atmo_ap || jah_height_fog || hlms_fog || jah_shadow_transmit || jah_lamp_rays || jah_sky_vis )
 @piece( custom_ps_uniformDeclaration )
+	// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9; JahLampRay_piece_ps.any): the library (jah_lamp_ray.glsl and
+	// its dependencies; the extensions it needs are the shader's head's, CustomGlslExtensions)
+	@property( jah_lamp_rays )
+		#define JAH_ALPHA_TABLE passBuf.jahLampAddr.zw
+		@insertpiece( JahLampRayLib )
+		@insertpiece( JahLampRayView )
+	@end
+	// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): the records rq_glass_escape.comp traces - the header (the records
+	// appended, the job's groups, the add's), then two uvec4 a record - and the fragment's own record, if it appended one
+	@property( jah_glass_escape )
+		// THE DEPTH TEST BEFORE THE FRAGMENT RUNS: a shader that writes memory is run before its depth test unless it says
+		// so, and a pane hidden behind an opaque surface would append a record and light a pixel it does not reach. A
+		// blended pass writes no depth (OgreMaterials.cpp: no blended surface writes depth), so the early test changes
+		// nothing else - a discard after it still discards the colour.
+		layout( early_fragment_tests ) in;
+		layout( buffer_reference, std430, buffer_reference_align = 16 ) buffer JahEscapeList
+		{
+			uint count;
+			uint traceX;
+			uint traceY;
+			uint traceZ;
+			uint addX;
+			uint addY;
+			uint addZ;
+			uint addFull;
+			uvec4 rec[];
+		};
+		uint jahEscapeIdx = 0xFFFFFFFFu;
+		float jahEscapeW0 = 0.0;
+		float jahEscapeRough = 0.0;
+	@end
 	@property( jah_env )
 		vulkan_layout( ogre_t@value(jahEnvCube) ) midf_tex uniform textureCube jahEnvCube;
 		@property( syntax == glslvk )
@@ -169,6 +259,11 @@
 	// uniform, but a piece that reads one that was not declared is a compile
 	// error that loses the frame. JahProbeGather_piece_ps.any carries the
 	// same six terms and the reason for each.
+	@property( jah_sky_vis )
+		// THE MEASURED SKY VISIBILITY (PHOTON-7 10-4 R11): the gather's (or the no-ray integrate's) sky share at this
+		// pixel - the fog's in-scatter of the sky (jahFogLitAt)
+		vulkan_layout( ogre_t@value(jahSkyVis) ) uniform OGRE_ScreenTexture2D jahSkyVis;
+	@end
 	@property( jah_probe_gather && hlms_screen_pos_int && needs_env_brdf && !hlms_prepass && !hlms_shadowcaster && !irradiance_volumes )
 		vulkan_layout( ogre_t@value(jahProbeIrradiance) ) uniform OGRE_ScreenTexture2D jahProbeIrradiance;
 		@property( jah_rough_spec )
@@ -189,6 +284,30 @@
 		@property( syntax == glslvk )
 			layout( ogre_s@value(jahCloudField) ) uniform sampler jahCloudSampler;
 		@end
+	@end
+	// THE SHADOWS' TRANSMITTANCE (PHOTON-7 10-4 R8): R8, the product of the panes' 1 - alpha between a shadow map's
+	// light and its nearest opaque caster, in the depth atlas's layout (JahShadowTransmit_piece_ps.any reads it)
+	@property( jah_shadow_transmit )
+		vulkan_layout( ogre_t@value(jahShadowTransmit) ) uniform texture2D jahShadowTransmit;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahShadowTransmit) ) uniform sampler jahShadowTransmitSampler;
+		@end
+		// ...and its NEAREST PANE's DEPTH (the fix round's F1: atlasTD, point-sampled): T applies only past it
+		vulkan_layout( ogre_t@value(jahShadowTransmitDepth) ) uniform texture2D jahShadowTransmitDepth;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahShadowTransmitDepth) ) uniform sampler jahShadowTransmitDepthSampler;
+		@end
+		/// IS A RECEIVER at the map depth `at` PAST the nearest pane at `uv` (farther from the light: the smaller value
+		/// under reverse depth)? A pane's own lit face (its receiver offset toward the light) is not.
+		bool jahShadowTransmitPast( float2 uv, float at )
+		{
+			const float pane = OGRE_SampleLevel( jahShadowTransmitDepth, jahShadowTransmitDepthSampler, uv, 0.0 ).x;
+			@property( hlms_no_reverse_depth )
+				return at > pane;
+			@else
+				return at < pane;
+			@end
+		}
 	@end
 	// THE SUN CONTACT VISIBILITY (PHOTON-RAYS-1): R8, 1 = the sun reaches the
 	// surface this texel's ray started from. Declared wherever the pass claimed
@@ -235,7 +354,7 @@
 	@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 		#define JAH_FOG_P( k ) JAH_FOG_P_##k
 		#define JAH_FOG_P_0 passBuf.jahFogColour
-		#define JAH_FOG_P_2 float4( atmoSettings.fogDensity, atmoSettings.fogBreakMinBrightness, atmoSettings.fogBreakFalloff, atmoSettings.aerialScale )
+		#define JAH_FOG_P_2 float4( atmoSettings.fogDensity, 0.0, 0.0, atmoSettings.aerialScale )   // (yz: unused)
 		#define JAH_FOG_P_3 float4( atmoSettings.skyE.xyz, 1.0 )
 		#define JAH_FOG_P_4 atmoSettings.sunDir
 		#define JAH_FOG_P_5 atmoSettings.planet
@@ -267,8 +386,8 @@
 	struct JahAtmoSettings
 	{
 		float fogDensity;
-		float fogBreakMinBrightness;
-		float fogBreakFalloff;
+		float jahAtmoPad0;		// (std140: aerialScale and the pad fill fogDensity's float4; nothing reads them)
+		float jahAtmoPad1;
 		float aerialScale;
 		float4 skyE;
 		float4 sunDir;
@@ -315,8 +434,159 @@
 // kernel as wide as the altitude -- uniform across any scene -- and that
 // uniform part is already in the ambient, because the environment capture
 // photographs the sheet.
-@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+// THE FOG'S LIT SHARE ALONG THE EYE RAY (PHOTON-7 10-4 R11; L9: a medium is lit by what reaches it). Every in-scatter
+// colour of the fog law is the medium's fully lit answer (jah_fog_along.glsl's header); this pixel's is scaled by
+//     lit = s W_sun + (1 - s) V_sky,
+// s the sun's share of the light an open point of the medium receives (E_sun / (E_sun + 4 pi L_sky): an isotropic
+// medium sees the sun's irradiance and the whole sky's radiance - the host's, OgreFog.cpp), W_sun the sun's shadow
+// along the ray WEIGHTED BY WHERE THE IN-SCATTER COMES FROM: kJahFogSamples segments of the ray, segment i's share the
+// exact transmittance difference T(a_i) - T(b_i) of every medium the pass applies (jahFogEyeT), its shadow read at one
+// point of it (the PSSM split holding that depth, ONE compare tap - the point's own visibility, no receiver PCF - and
+// the R8 transmittance of a pane at the same uv, so a shaft through glass passes 1 - alpha); PAST THE LAST SPLIT (the
+// one read's F9: it read 1 there - fog beyond the shadow distance, in a sealed hall or behind terrain, was sunlit) by R9's
+// means: one TLAS ray toward the sun at the ray tier (jah_lamp_ray.glsl jahSunMediumRay, through the panes), the voxel
+// chain's own march at the no-ray tier (jah_inject_visibility.glsl; past the chain the sun is open - its limit); a
+// segment with no medium in it reads nothing. The point's place in its segment is a
+// FIXED per-pixel pattern (interleaved gradient noise of the pixel - never animated: no colour pass flickers at rest,
+// and the fog has no temporal filter). V_sky, the measured sky visibility, stands at 1 until its screen product lands
+// (jahSkyVis, R11's second half). Named limits (the review list): the lamps' in-scatter (only the sun and the sky
+// light the medium), a secondary directional's in-scatter taking the sun's shadow, the air's own transmittance
+// outside the weights (its in-scatter takes the others').
+@piece( JahFogInscatterFuncs )
+	#define kJahFogSamples 16
+	@property( hlms_num_shadow_map_lights && hlms_pssm_splits )
+	@property( hlms_shadow_uses_depth_texture && !exponential_shadow_maps )
+	/// ONE COMPARE TAP of a split, THROUGH A PARAMETER as getShadow takes its map: the global shadow texture used directly
+	/// in a comparison sampler's constructor is given a depth image type by glslang while getShadow's parameter keeps the
+	/// plain one, and the shader's SPIR-V then passes a mismatched argument (VUID-VkShaderModuleCreateInfo-pCode-08737:
+	/// app.engine_selftest_validation's layer; the drivers accepted it)
+	INLINE float jahFogShadowTap( @insertpiece( TEXTURE2DSHADOW ) shadowMap, @insertpiece( SamplerShadow ) float2 uv,
+								  float depth )
+	{
+		return float( OGRE_SAMPLE_SHADOW( shadowMap, shadowSampler, uv, depth ) );
+	}
+	@end
+	/// The sun's visibility at the world point `wp` of the medium PAST THE LAST SPLIT (the header; the one read's F9)
+	float jahFogSunPast( float3 wp )
+	{
+		const float3 toSun = passBuf.jahFogInscatter.yzw;
+		if( !( dot( toSun, toSun ) > 0.0 ) )
+			return 1.0;
+		@property( jah_lamp_rays )
+			return jahSunMediumRay( passBuf.jahLampAddr.xy, wp, toSun );
+		@else
+			@property( jah_lamp_voxels )
+				const float cell0 = passBuf.jahLampChainOrigin[0].w;
+				// (no chain described - a cell not positive, by its bits: nothing the voxels hold can stop the sun)
+				if( floatBitsToInt( cell0 ) <= 0 || jahInjNonFinite( cell0 ) )
+					return 1.0;
+				const float3 sW = wp - passBuf.jahLampChainCorner.xyz;
+				return jahInjectVisibility( sW, normalize( toSun ), 1e30, int3( floor( sW / cell0 ) ), -1, 0.0, 0.0 );
+			@else
+				return 1.0;
+			@end
+		@end
+	}
+	/// The sun's shadow at the view-space point `posVS` of the eye ray: the PSSM split holding its depth
+	float jahFogSunAt( float3 posVS )
+	{
+		const float depth = -posVS.z;
+		const float4 wp = float4( dot( passBuf.jahLampInvView0.xyz, posVS ) + passBuf.jahLampInvView0.w,
+								  dot( passBuf.jahLampInvView1.xyz, posVS ) + passBuf.jahLampInvView1.w,
+								  dot( passBuf.jahLampInvView2.xyz, posVS ) + passBuf.jahLampInvView2.w, 1.0 );
+		@foreach( hlms_pssm_splits, n )
+		if( depth <= passBuf.pssmSplitPoints@n )
+		{
+			float4 posL = mul( wp, passBuf.shadowRcv[@n].texViewProj );
+			@property( hlms_no_reverse_depth && ( syntax == glsl || syntax == glsles ) )
+				posL.z = posL.z * 0.5 + 0.5;
+			@end
+			@property( hlms_shadow_uses_depth_texture && !exponential_shadow_maps )
+				// ONE COMPARE TAP (the lead's ruling 2026-10-27): the receiver's PCF kernel is a spatial filter of a
+				// surface's shadow edge; the march integrates the visibility along the ray already, so the sample's
+				// own point visibility is the exact estimate - and the pane's transmittance at the same uv (R8)
+				@property( !hlms_no_reverse_depth )
+					const float jahDepth = posL.z / posL.w;
+				@else
+					const float jahDepth = posL.z;
+				@end
+				const float2 jahUv = posL.xy / posL.w;
+				float jahV = jahFogShadowTap( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) jahUv, jahDepth );
+				@property( jah_shadow_transmit )
+					if( jahShadowTransmitPast( jahUv, jahDepth ) )
+						jahV *= float( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahUv, 0.0 ).x );
+				@end
+				@property( hlms_shadowmap@n_uvs_fulltex )
+					// (outside its map's rectangle of the atlas: unshadowed, getShadow's rule)
+					if( jahUv.x <= hlms_shadowmap@n_uv_min.x || jahUv.x >= hlms_shadowmap@n_uv_max.x ||
+						jahUv.y <= hlms_shadowmap@n_uv_min.y || jahUv.y >= hlms_shadowmap@n_uv_max.y )
+						jahV = 1.0;
+				@end
+				return jahV;
+			@else
+				return float( getShadow( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) posL,
+										 passBuf.shadowRcv[@n].invShadowMapSize hlms_shadowmap@n_uv_param ) );
+			@end
+		}
+		@end
+		return jahFogSunPast( wp.xyz );
+	}
+	@end
+	/// The share of the medium's light reaching it along this pixel's eye ray (the header), `pix` the pixel
+	float jahFogLitAt( float3 posVS, int2 pix )
+	{
+		const float s = saturate( passBuf.jahFogInscatter.x );
+		float wSun = 1.0;
+		@property( hlms_num_shadow_map_lights && hlms_pssm_splits )
+		if( s > 0.0 )
+		{
+			const float L = length( posVS );
+			const float3 dirW = normalize( mul( toFloat3x3( passBuf.view ), posVS ) );
+			const float eyeY = passBuf.jahFogHeight.z;
+			const float tAll = 1.0 - jahFogEyeT( eyeY, dirW, L );
+			const float xi = fract( 52.9829189 * fract( 0.06711056 * float( pix.x ) + 0.00583715 * float( pix.y ) ) );
+			float acc = 0.0, wAcc = 0.0, Ta = 1.0;
+			for( int i = 0; i < kJahFogSamples; ++i )
+			{
+				const float b = L * float( i + 1 ) / float( kJahFogSamples );
+				const float Tb = jahFogEyeT( eyeY, dirW, b );
+				// (no medium at all along the ray - the air alone: every segment the same share)
+				const float w = tAll > 1e-6 ? max( Ta - Tb, 0.0 ) : 1.0;
+				const float t = L * ( float( i ) + xi ) / float( kJahFogSamples );
+				if( w > 0.0 )   // (a segment with no medium reads nothing: no shadow tap, no ray)
+					acc += w * jahFogSunAt( posVS * ( t / max( L, 1e-6 ) ) );
+				wAcc += w;
+				Ta = Tb;
+			}
+			wSun = wAcc > 0.0 ? acc / wAcc : 1.0;
+		}
+		@end
+		@property( jah_sky_vis )
+			const float vSky = float( OGRE_LoadScreen2D( jahSkyVis, pix, 0 ).x );
+		@else
+			const float vSky = 1.0;   // (no measured sky visibility in this pass: the sky's share unmeasured - review list)
+		@end
+		return s * wSun + ( 1.0 - s ) * vSky;
+	}
+@end
+
+// THE ONE custom_ps_functions (upstream inserts it once, after every texture's declaration, the voxel volumes' too): the
+// cloud sheet's transmittance below and the no-ray tier's lamp march (JahLampRay_piece_ps.any's JahLampVoxelFuncs)
+@property( ( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass ) || jah_lamp_voxels || ( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view ) )
 @piece( custom_ps_functions )
+@property( jah_lamp_voxels )
+@insertpiece( JahLampVoxelFuncs )
+@end
+@property( hlms_fog && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+@insertpiece( JahFogInscatterFuncs )
+@end
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@insertpiece( JahCloudSunFunctions )
+@end
+@end
+@end
+@property( jah_cloud_shadow && hlms_lights_directional_non_caster && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass )
+@piece( JahCloudSunFunctions )
 #define JAH_CLOUD_TAU( uv ) OGRE_SampleLevel( jahCloudField, jahCloudSampler, uv, 0.0 ).x
 @insertpiece( JahCloudShadow )
 midf jahCloudSunTransmittance( float3 viewPos )
@@ -337,6 +607,9 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@end
 @end
 @piece( custom_ps_darkenNonCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
+// (and every CASTING directional after the first, the fork's custom_ps_darkenCasterDirectional: a second
+// directional that casts a shadow crosses the same sheet - PHOTON-7 10-4 R8)
+@piece( custom_ps_darkenCasterDirectional )* jahCloudSunTransmittance( inPs.pos.xyz )@end
 @end
 
 @property( hlms_fog )
@@ -368,16 +641,17 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@end
 @end
 
-@property( hlms_normal || hlms_qtangent )
+// (a colour pass's: the shadow casters' vertex hooks are the pane caster's, below this block)
+@property( !hlms_shadowcaster && ( hlms_normal || hlms_qtangent ) )
 	@piece( custom_vs_posExecution )
 		outVs.jahFogWorldY = worldPos.y;
+	@end
+	@piece( custom_VStoPS )
+		INTERPOLANT( float jahFogWorldY, @counter(texcoord) );
 	@end
 @end
 
 @property( hlms_normal || hlms_qtangent )
-	@piece( custom_VStoPS )
-		INTERPOLANT( float jahFogWorldY, @counter(texcoord) );
-	@end
 
 	// The fog writes outPs_colour0, which is #defined to `outColour`
 	// (Hlms/Common/GLSL/CrossPlatformSettings_piece_all.glsl) — and outColour is
@@ -392,6 +666,18 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	// the second is the height layer exactly as it was before FOG-ATMO-1.
 	// ...AND NOT UNDER THE PHOTON VIEW'S ISOLATION (jah_photon_view, JahPhotonView_piece_ps.any),
 	// which owns this hook for its pass and draws one lighting term with no fog at all.
+	// THE FOG'S LIT SHARE ON THIS PIXEL (PHOTON-7 10-4 R11), computed ONCE before the body: upstream's distance block
+	// (the fork's custom_ps_fogLitFactor, 800.PixelShader under hlms_fog) and the law below both take it
+	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
+	@piece( custom_ps_preExecution )
+		@property( !atom_hit_mode )
+			const float jahFogLit = jahFogLitAt( inPs.pos.xyz, int2( gl_FragCoord.xy ) );
+		@else
+			const float jahFogLit = 1.0;   // a decoded hit is a reflection leg: unshadowed, ruling (iii)
+		@end
+	@end
+	@piece( custom_ps_fogLitFactor )* midf_c( jahFogLit )@end
+	@end
 	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 	@piece( custom_ps_posExecution )
 	{
@@ -413,11 +699,29 @@ midf jahCloudSunTransmittance( float3 viewPos )
 		@else
 			const float3 jahSurf = float3( outPs_colour0.xyz );
 		@end
-		const float3 jahOut = jahFogMedia( jahSurf, passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0 );
+		const float3 jahOut = jahFogMedia( jahSurf, passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0, jahFogLit );
 		@property( !hw_gamma_write )
 			outPs_colour0.xyz = midf3_c( sqrt( jahOut ) );
 		@else
 			outPs_colour0.xyz = midf3_c( jahOut );
+		@end
+		// THE ESCAPE RECORD'S WEIGHT (PHOTON-7 10-4 R4; jahGlassEscapeAppend): what one unit of the open share's light
+		// becomes in this fragment's output - the environment term's albedo (BRDF_EnvMap's Rs: kS ( F0 A + B ), the
+		// clear coat's attenuation), the eye leg's media as this pass applied them (upstream's distance block, then the
+		// law above: linear in the light, so its transmittance is the law at 1 less the law at 0) and, under a blend
+		// whose source factor is the fragment's alpha (Fade, Additive), that alpha
+		@property( jah_glass_escape )
+			// (upstream's distance block first, as the body ran it)
+			@property( hlms_fog )
+				float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 ) * exp2( -jahL * atmoSettings.fogDensity );
+			@else
+				float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 );
+			@end
+			jahEscEyeT *= jahFogMedia( float3( 1.0, 1.0, 1.0 ), passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0,
+									   jahFogLit ) -
+						  jahFogMedia( float3( 0.0, 0.0, 0.0 ), passBuf.jahFogHeight.z, inPs.jahFogWorldY, jahDir, jahL, 0.0,
+									   jahFogLit );
+			@insertpiece( JahGlassEscapeWeight )
 		@end
 	}
 	@end
@@ -486,4 +790,21 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@property( emissive_as_lightmap )
 	#define UV_EMISSIVE(x) (x)
 	@end
+@end
+
+// THE PANE CASTER's VERTEX STAGE (PHOTON-7 10-4 R8, the one read's F12; JahShadowTransmit_piece_ps.any's writer): its
+// material declared (bound for it by ScenePbs::fillBuffersForV2), its transmittance 1 - alpha read per renderable and
+// handed flat to the pixel - ONE caster shader for every alpha. In this file because both stages read it; outside every
+// fog block (a caster pass sets no fog), and the two vertex hooks are the colour pass's above otherwise (a piece is
+// defined once).
+@property( hlms_shadowcaster && jah_pane_caster == 1 && !hlms_render_depth_only )
+@piece( custom_vs_uniformStructDeclaration )
+	@insertpiece( MaterialStructDecl )
+@end
+@piece( custom_vs_posExecution )
+	outVs.jahPaneT = 1.0 - clamp( materialArray[worldMaterialIdx[inVs_drawId].x & 0x1FFu].F0.w, 0.0, 1.0 );
+@end
+@piece( custom_VStoPS )
+	FLAT_INTERPOLANT( float jahPaneT, @counter(texcoord) );
+@end
 @end

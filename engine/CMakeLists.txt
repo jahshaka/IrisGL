@@ -445,6 +445,31 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h.d"
         COMMENT "Compiling the cards' TLAS gather at SPIR-V 1.4"
         VERBATIM)
+    # THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, design (D)): a record a blended fragment's open
+    # specular share appended, traced from where the voxel chain's read ended, its hit read through the hit set; then
+    # every pixel's fixed-point sum added to the pass's colour target.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_glassEscapeSpv -o "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape.comp"
+                "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h.d"
+        COMMENT "Compiling the blended passes' escapes at SPIR-V 1.4"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${JAH_RQ_INCLUDE}"
+                --vn krq_glassEscapeAddSpv -o "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape_add.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_glass_escape_add.comp"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h.d"
+        COMMENT "Compiling the blended passes' escape add at SPIR-V 1.4"
+        VERBATIM)
     # THE TOP-LEVEL INSTANCES BY COMPUTE (ATOM-CPU-WALKS-1): one thread per GPU scene
     # slot writes its near and far instance from the table.
     add_custom_command(
@@ -535,6 +560,8 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
@@ -862,9 +889,18 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_inject_visibility.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_cones.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_alpha_mask.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_card_sunvis.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_atom_id.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_environment.glsl"
@@ -921,7 +957,33 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelRay
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelRay_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
-            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE FACES A RAY CROSSES IN ONE VOXEL (PHOTON-7 10-4 R7): the one model the occupancy ray's transmissive cells and
+    # the light injection's march share (jah_voxel_faces.glsl) - its own piece for the injection, which traces no ray.
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelFaces
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelFaces_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE VOXEL CHAIN'S SHADOW MARCH TO A LAMP (PHOTON-7 10-4 R9): one text for the light injection's direct term, the
+    # no-ray area strata and the colour passes' Forward+ lamps at the no-ray tier (jah_inject_visibility.glsl)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahInjectVisibility
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahInjectVisibility_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_inject_visibility.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE LAMP'S SHADOW RAY IN THE FRAGMENT (PHOTON-7 10-4 R9): the colour passes' Forward+ lamps, one TLAS ray each
+    # (jah_lamp_ray.glsl), with the alpha machinery and the origin rule the compute rays use - their includes stripped
+    # (the files are concatenated in their dependency order; each carries its own guard)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahLampRayLib -DSTRIP_INCLUDES=1
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahLampRayLib_piece_ps.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_alpha_mask.glsl
+            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl
+            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
     # sets, the start bias and the escape weight - read by the pixel shader's
@@ -1022,6 +1084,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardView_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_view.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE CARDS' SUNVIS TEXEL (PHOTON-7 10-4 R9 (3)): the sun, the fractional lamps and the 48-bit lamp mask - the relight
+    # reads and writes it as the ray jobs do (jah_card_sunvis.glsl)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahCardSunVis
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahCardSunVis_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_card_sunvis.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
     # THE PIXEL'S AREA LIGHT VISIBILITY'S LAW (PHOTON-7 stage 7, 7-6): one text for the ray tier's two jobs (through
     # glslang) and the no-ray route's Jahshaka/ScreenAreaVis and its resolve - the parameters, the strata's geometry,
     # the reprojection and the law itself, four pieces.
@@ -1060,9 +1128,10 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
             -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
             -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
-            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
-            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
-            -DIN7=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
+            -DIN8=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"
