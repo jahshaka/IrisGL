@@ -4249,22 +4249,11 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
     // is the engine's question since U0 3c: setNodeMovable counts a flip only for an item its GI has already seen.)
     const int want = movable ? 1 : 0;
     if (e.movable != want) {
-        // WHY the intent travels with the value: an AUTHORING change moves the
-        // object in or out of the voxel bounce, which costs one from-scratch GI
-        // rebuild; the play-time soft promotion must cost nothing at all (owner
-        // decision O3), so it asks the renderer for the channel change without
-        // the GI edge and accepts the stale bounce ghost until play stops.
-        //
-        // ...and the play STOP that clears such a promotion is soft for the
-        // same reason, from the other side: the object never left the voxels,
-        // so nothing has to be rebuilt to put it back.
-        const bool soft = why == iris::MobilityReason::Play || (!movable && e.movableSoft);
-        postCall(&jahshaka::engine::Scene::setNodeMovable, e.node, movable,
-                                soft ? jahshaka::engine::MobilityChange::Soft
-                                     : jahshaka::engine::MobilityChange::Authoring);
+        // (The value alone: a flip is the renderer's channel change and costs no GI work - a mover is GI geometry,
+        // PHOTON-7 stage 8A - so a play-time promotion and an authoring flip are the same push.)
+        postCall(&jahshaka::engine::Scene::setNodeMovable, e.node, movable);
         notePush(node, "mobility");
         e.movable = want;
-        e.movableSoft = movable && why == iris::MobilityReason::Play;
     }
     return movable;
 }

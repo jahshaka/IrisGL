@@ -1366,15 +1366,12 @@ public:
     /// colour passes' fragments trace it (JahLampRay_piece_ps.any), so its build's barrier waits for and is waited on by
     /// the FRAGMENT stage too (buildTlas).
     uint64_t tlasAddressOf(const OgreScene *scene) const;
-    /// The table's address a job hands its shader (0: none, or JAH_R6_NO_ALPHA).
+    /// The table's address a job hands its shader (0: none).
     uint64_t alphaTableOf(const OgreScene *scene) const;
 private:
-    /// MOVER-OCCLUSION-1: does any ray-traced slot carry the mover flag? A hit's mover
-    /// gate (jah_rq_hit_radiance.glsl) traces nothing when none does.
-    bool rayMoversOf(const OgreScene *scene) const;
     /// THE HIT SET (ScreenProbeGather.h HitSetSources; PHOTON-7 stage 10, 10-2a): the ONE collection of everything a
     /// job's hit read binds - the TLAS, the cascades (innermost first, by name), the one environment, the surface
-    /// cache, the GPU scene's rows (flushed here), the hit table and surface, the alpha table, the movers' flag. The
+    /// cache, the GPU scene's rows (flushed here), the hit table and surface, the alpha table. The
     /// hit list is the job's own (`out.hit`, left as it is).
     void hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &out);
     VkDescriptorSetLayout mReflectSetLayout = VK_NULL_HANDLE;
@@ -5816,7 +5813,7 @@ struct ReflectParams {
     /// A MOVING OBJECT (REFLECT-MOVERS-1; rq_reflect.comp's `motion`): x = 1 when
     /// the view's id image is bound at binding 38, yz = its size.
     float motion[4] = {};
-    /// z = THE RAY ORIGIN'S POINT TERM (jah_ray_origin.glsl); xyw unused (the alpha table and the movers' flag are the hit
+    /// z = THE RAY ORIGIN'S POINT TERM (jah_ray_origin.glsl); xyw unused (the alpha table is the hit
     /// set's: `hit`).
     float alpha[4] = {};
     /// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong.
@@ -7550,21 +7547,6 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
     sa.alphaWords.swap(w);
 }
 
-/// THE MEASURING DOOR (`JAH_R6_NO_ALPHA`, read per call so one process holds both
-/// arms of a paired A/B): no table — every ray query asks opaque, exactly the
-/// pre-lane traversal (a cut-out, still FORCE_NO_OPAQUE, then reads as its quad).
-bool RayQueryTier::rayMoversOf(const OgreScene *scene) const {
-    const detail::GpuScene &gs = scene->gpuScene();
-    const detail::GpuInstance *m = gs.mirrorData();
-    if (!m) return false;
-    for (uint32_t i = 0; i < gs.slotCount(); ++i) {
-        uint32_t f;
-        std::memcpy(&f, &m[i].boundsMax[3], sizeof(f));
-        if ((f & detail::kGpuRayTraced) && (f & detail::kGpuMover)) return true;
-    }
-    return false;
-}
-
 /// THE HIT TABLE (FAR-SUN-2; the layout is jah_rq_hit_direct.glsl's): u[0] = the lights,
 /// u[1] = the material rows, u[2] = the first light's word, u[3] = the first row's, u[4] = the first
 /// word of the metal's lobe integrals (METAL-BOUNCE-1: PhotonSpecularAlbedo::kTable), u[5] / u[6] the emitter
@@ -8242,7 +8224,6 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         std::memcpy(out.cloudSun, hs.cloudSun, sizeof(hs.cloudSun));
     }
     out.alphaTable = alphaTableOf(scene);
-    out.movers = rayMoversOf(scene);
     out.tierCounters = tierCountersAddress();
 }
 
@@ -10677,17 +10658,17 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
             std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
     }
 
-    // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against the
-    // still casters to the cards' sun range, no mover gate (rq_card_gather.comp's mask law)
+    // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against EVERY
+    // caster, still and moving, to the cards' sun range, no mover gate (rq_card_gather.comp's mask law; PHOTON-7 8A A4:
+    // a mover is GI geometry, in the store - the three masks change together)
     CardGatherParams pp{};
     hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
-    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
-    pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
-    pp.knobs[3] = float(kRayMaskStill);   // the still world (rq_card_gather.comp's mask law)
+    pp.knobs[3] = float(kRayMaskStill | kRayMaskMover);   // the world, movers in it (rq_card_gather.comp's mask law)
     pp.knobs2[1] = float(count);
     std::memcpy(v.params[ring].mapped, &pp, sizeof(pp));
     std::memcpy(v.records[ring].mapped, job.records, size_t(count) * kCardGatherRecordFloats * sizeof(float));
@@ -11015,18 +10996,17 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
         else
             std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
     }
-    // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against the still casters, no mover
-    // gate (rq_voxel_sides.comp's mask law, the cards' gather's)
+    // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against every caster, still and
+    // moving, no mover gate (rq_voxel_sides.comp's mask law, the cards' gather's; PHOTON-7 8A A4)
     VoxelSideParams pp{};
     hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
-    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
-    pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
     pp.knobs[2] = std::max(job.lift, 0.0f);
-    pp.knobs[3] = float(kRayMaskStill);
+    pp.knobs[3] = float(kRayMaskStill | kRayMaskMover);   // the world, movers in it (A4)
     pp.cascade[0] = cascade;
     pp.cascade[1] = job.brickDims[0];
     pp.cascade[2] = job.brickDims[1];
@@ -12962,7 +12942,7 @@ void OgreEngine::listRayMovers(const std::vector<OgreScene *> &drawn) {
             uint32_t flags;
             std::memcpy(&flags, &g.boundsMax[3], sizeof(flags));
             s->listGiMover(Ogre::Aabb::newFromExtents(Ogre::Vector3(lo[0], lo[1], lo[2]), Ogre::Vector3(hi[0], hi[1], hi[2])),
-                           (flags & detail::kGpuCaster) != 0u);
+                           flags);
         };
         std::vector<uint32_t> moved;
         if (gs.movedThisFrame(vaoFrame)) moved = gs.movedSlots();

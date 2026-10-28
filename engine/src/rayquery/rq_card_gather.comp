@@ -22,8 +22,7 @@
 // A RAY'S ANSWER, the world caches' law (the spec's stage 10 design; Lumen's radiosity):
 //   * a HIT on a FRONT face (the triangle's wound normal against the ray) reads the hit through jahHitRadianceStore
 //     (jah_rq_hit_radiance.glsl): the hit instance's card first, the cascades where no card answers (the hit's own
-//     direct light computed at the hit, the store's bounce beside it) - never jahHitRadianceSourced (its mover rays
-//     would write mover occlusion into a cache);
+//     direct light computed at the hit, the store's bounce beside it);
 //   * a hit on a BACK face - a one-sided surface seen from behind (the TLAS disables facing culls: the ray stops on
 //     it) - is 0: the inside of a closed shell holds no light of its outside;
 //   * a hit neither the card nor a cascade can shade is NO SAMPLE (the mean is over the rays that are);
@@ -32,9 +31,9 @@
 //     than that read the sky inside), and only there is it the sky over the ray's bin (a cone of the bin's solid angle
 //     2 pi / N: jahEnvCone) - the sky enters ONLY at an earned miss. A hit past every cascade reads its card, or is no
 //     sample (above).
-// THE MASK: the still world alone (kRayMaskStill, until stage 8's 8-M): no brick fires when a mover moves, and the
-// gate's card half counts a mover's occlusion where a reader asks for it. Its own sun rays at a voxel-answered hit
-// take the still casters (kRayMaskStillCaster) for the same reason.
+// THE MASK: THE WORLD, movers in it (kRayMaskStill | kRayMaskMover; PHOTON-7 8A A4 - a mover is GI geometry, in the
+// store since A1, so a ray that hits it reads its voxels like any surface's; its bounce is in the cards). Its own sun
+// rays at a voxel-answered hit take every caster (kRayMaskStillCaster | kRayMaskMoverCaster) for the same reason.
 //
 // THE COUNTS (the e = 0 counter, the lead's 10-2a): per dispatch, the rays traced and each one's answer - a card, a
 // cascade, a back face, no sample, the sky - the texels gathered, and the BURIED texels (jahRayOriginBuried: their
@@ -232,7 +231,6 @@ void main()
 			}
 			const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
 			jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
-			jahHitSeed = 0u;
 			jahHitAreaSeq = ( keyT.x * 73856093u ) ^ ( keyT.y * 19349663u ) ^ ( uint( i ) * 83492791u );
 			bool ok = false;
 			uint source = 0u;

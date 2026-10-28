@@ -957,16 +957,9 @@ private:
         int probeGridExcluded = -1;
         // MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lanes R1/R2): the last
         // RESOLVED answer pushed to the engine, same push-on-change discipline.
-        // -1 = never pushed. The discipline is load-bearing now that the engine
-        // spends it: a flip is a classification change, and crossing the GI
-        // edge costs a from-scratch invalidation or a probe-grid stale.
+        // -1 = never pushed. A flip is a channel change the engine spends on the
+        // probes (a stale); no GI edge (a mover is GI geometry, PHOTON-7 stage 8A).
         int movable = -1;
-        /// Whether the movable state above was a PLAY-TIME SOFT promotion. It
-        /// decides the intent of the push that CLEARS it too: a soft promotion
-        /// never took the object out of the voxel bounce (that is what makes it
-        /// free), so putting it back must not pay a from-scratch rebuild
-        /// either.
-        bool movableSoft = false;
         // SOFT PROMOTION (§3.3.3, owner decision O3): whether the author has already been told about it. (The pose
         // this node was last seen at while playing — the mirror's own movement detector — is GONE with U0 3b: a node
         // WRITTEN while playing is in the frame's change set, which is what syncMobility reads.)

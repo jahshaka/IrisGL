@@ -11,6 +11,11 @@
 // destination's cell (x, y, z) at (x, y, z) for a = 0, (y, x, z) for a = 1 and (z, x, y) for a = 2 - its own axis
 // first, the two others in increasing order (PhotonComponent::planScroll). 0 is the identity.
 //
+// THE CLEAR (PHOTON-7 stage 8A, the region rebuild): `copyClear.x` 1 writes the box with the CLEAR VALUE instead of a
+// copy - `clearU` for an integer volume, `clearF` otherwise - what a whole build's clear writes (every value zero but
+// the normal's 0.5 bias): the cells a region rebuild re-voxelises in place start where a whole build's start. Every
+// dispatch sets it (PhotonVoxelScroll::copyBox 0, clearBox 1): a clone keeps its last parameters.
+//
 // THE COPY IS EXACT. A load from a normalised or a half-float format and a store back into the
 // SAME format is the identity on every code (c / (2^b - 1) times 2^b - 1 rounds back to c); the
 // integer formats are copied as integers (copy_uint). The store qualifier is the bound volume's
@@ -37,6 +42,9 @@ vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform uint3 dstOrigin;
 	uniform uint3 copySize;
 	uniform uint permAxis;
+	uniform uint4 copyClear;
+	uniform float4 clearF;
+	uniform uint4 clearU;
 vulkan( }; )
 
 void main()
@@ -44,6 +52,15 @@ void main()
 	uint3 id = gl_GlobalInvocationID.xyz;
 	if( id.x >= copySize.x || id.y >= copySize.y || id.z >= copySize.z )
 		return;
+	if( copyClear.x != 0u )
+	{
+@property( copy_uint )
+		imageStore( dstVolume, int3( dstOrigin + id ), clearU );
+@else
+		imageStore( dstVolume, int3( dstOrigin + id ), clearF );
+@end
+		return;
+	}
 	const uint3 src = permAxis == 1u ? id.yxz : ( permAxis == 2u ? id.zxy : id );
 	imageStore( dstVolume, int3( dstOrigin + id ), imageLoad( srcVolume, int3( srcOrigin + src ) ) );
 }

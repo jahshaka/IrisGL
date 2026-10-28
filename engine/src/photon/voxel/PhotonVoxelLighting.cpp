@@ -1425,6 +1425,11 @@ namespace Ogre
                        ? 1u
                        : 0u;
         flags[3] = mode == 3u && !outer ? 1u : 0u;
+        if( mode == 6u && select )
+        {
+            flags[3] = select[0];   // REGION: list the bricks (else the fold alone)
+            flags[2] = select[1];   // ...the frame's first region call (the stop reset)
+        }
         if( mode == 5u && select )
         {
             flags[0] = select[0];   // the frame's first selection: the budget is set first
@@ -1464,10 +1469,10 @@ namespace Ogre
         for( const ShaderParams::Param *p : { &pDims, &pFlags, &pLo, &pHi, &pSelf, &pSrc, &pSrcDims, &pShift } )
             params.mParams.push_back( *p );
         params.setDirty();
-        // ONE THREAD A BRICK, 64 a group along x - but SELECT, ONE workgroup (its scan walks the bricks in order).
+        // ONE THREAD A BRICK, 64 a group along x - but SELECT and REGION, ONE workgroup (their scans walk the bricks in order).
         const uint32 bricks = mBrickDims[0] * mBrickDims[1] * mBrickDims[2];
         job->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
-        job->setNumThreadGroups( mode == 5u ? 1u : std::max( 1u, ( bricks + 63u ) / 64u ), 1u, 1u );
+        job->setNumThreadGroups( mode == 5u || mode == 6u ? 1u : std::max( 1u, ( bricks + 63u ) / 64u ), 1u, 1u );
         jahshaka::engine::detail::photonDispatch( hlmsCompute, job, renderSystem );
     }
     //-------------------------------------------------------------------------
@@ -1499,6 +1504,26 @@ namespace Ogre
     void PhotonVoxelLighting::feedbackRun()
     {
         runFeedbackPass();
+    }
+    //-------------------------------------------------------------------------
+    void PhotonVoxelLighting::feedbackRegionPasses( const PhotonFeedbackActivation &boxes, uint32 passes,
+                                                    PhotonVoxelLighting *chain )
+    {
+        if( !boxes.numBoxes || !passes )
+            return;
+        beginLightFrame();
+        PhotonVoxelLighting *owner = chain ? chain : this;
+        mFeedbackChain = owner;   // the back scratch (and the sides' gather) this frame's passes write
+        owner->ensureBrickMask();
+        const uint32 first[4] = { 1u, 1u, 0u, 0u }, list[4] = { 1u, 0u, 0u, 0u }, fold[4] = { 0u, 0u, 0u, 0u };
+        for( uint32 p = 0u; p < passes; ++p )
+        {
+            // REGION: the last pass folded, the bricks listed - none once the last pass moved the region by under a
+            // code (its own convergence, on the device: the remaining passes are indirect over no brick)
+            dispatchFeedback( 6u, nullptr, &boxes, nullptr, p == 0u ? first : list );
+            runFeedbackPass();
+        }
+        dispatchFeedback( 6u, nullptr, &boxes, nullptr, fold );   // REGION: the last pass folded
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::ensureSideGather( uint32 bricks )
@@ -1583,6 +1608,7 @@ namespace Ogre
         out.saturated = w[15];
         out.onPrior = w[10];
         out.carried = w[9] > w[8] ? w[9] - w[8] : 0u;
+        out.regionPasses = w[3];   // (PHOTON-7 8A: the region rebuilds' own passes this frame, their convergence's count)
         r.ticket->unmap();
         r.ticket.reset();
         mFeedbackNextTake = ( mFeedbackNextTake + 1u ) % kFeedbackReadingSlots;

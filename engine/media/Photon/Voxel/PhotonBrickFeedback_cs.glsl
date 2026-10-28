@@ -63,7 +63,8 @@
 // this frame, [1 + k] cascade k's selection cursor (the brick index its next selection starts from).
 // THE MODES (fbDims.w): 0 CLEAR (the frame's mask and arguments), 1 PRE (activation), 5 SELECT (the frame's list under
 // the budget: ONE workgroup), 2 POST (the stop and resume rules), 3 ACCUM (one source cascade's moves into the stopped
-// bricks' would-move), 4 SHIFT (a scroll commit's state moved with the store). The copy job (jah_brick_copy) copies the
+// bricks' would-move), 4 SHIFT (a scroll commit's state moved with the store), 6 REGION (a region rebuild's own passes:
+// ONE workgroup - the last pass folded into the frame's injection words, the region's bricks listed). The copy job (jah_brick_copy) copies the
 // pass's target back into the total over the listed bricks.
 
 @property( jah_brick_copy )
@@ -275,6 +276,117 @@ void main()
 			fbArgs[5] = taken;
 			fbArgs[8] = taken;
 			fbArgs[11] = fbSCarry;
+		}
+		return;
+	}
+	if( mode == 6u )
+	{
+		// REGION (one workgroup; PHOTON-7 stage 8A, A2): the passes a region rebuild runs over ITS OWN bricks in the frame
+		// it re-voxelised them (PhotonVoxelLighting::feedbackRegionPasses) - every brick inside the boxes (fbBoxLo /
+		// fbBoxHi, fbFlags.y of them), active or not, in index order. First each one's LAST region pass is FOLDED into the
+		// frame's injection words - its move [4] into [7], its moved flux [8] into [9], the larger of each - so the
+		// stopped bricks' and the cards' accumulations see the frame's whole change (they read [4] plus [7]: an injection
+		// is what a pass outside the frame's own selection is to them). Then, with fbFlags.w, they are LISTED and marked
+		// passed, their pass words cleared for the next pass's atomicMax, the arguments set as a selection sets them; the
+		// chain's budget words and cursors are not touched (the region's passes are its own, never the frame's count).
+		// THE LOOP STOPS AT ITS OWN CONVERGENCE (the lead's ruling (b)): before listing, the last pass's largest move over
+		// the region's bricks (the mask's word 1: a voxel's move relative to its own radiance, the pass's atomicMax) is
+		// taken; under one code (0.01) the region is converged - nothing is listed now or by any later call this frame
+		// (args [7], cleared by CLEAR; fbFlags.z the frame's first call resets it), so the remaining indirect passes run
+		// over no brick. Each call that lists counts a pass (args [3]: the passes the region took, read back).
+		const uint lid = gl_LocalInvocationIndex;
+		if( lid == 0u )
+		{
+			fbSTaken = 0u;
+			fbSBudget = 0u;   // (the last pass's largest move, float bits: the scan's max)
+			if( fbFlags.z != 0u )
+				fbArgs[7] = 0u;
+			fbSNext = fbArgs[7];   // (the stop, shared: a buffer word is not ordered by the shared barrier)
+		}
+		memoryBarrierShared();
+		barrier();
+		if( fbFlags.w != 0u && fbFlags.z == 0u )
+		{
+			for( uint base = 0u; base < numBricks; base += 64u )
+			{
+				const uint idx = base + lid;
+				bool inBox = false;
+				if( idx < numBricks )
+				{
+					const uint3 bb = uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) );
+					for( uint k = 0u; k < fbFlags.y && !inBox; ++k )
+						inBox = all( greaterThanEqual( bb, fbBoxLo[k].xyz ) ) && all( lessThan( bb, fbBoxHi[k].xyz ) );
+				}
+				if( inBox )
+					atomicMax( fbSBudget, fbMask[2u * idx + 1u] );   // (positive floats order as their bits)
+			}
+			memoryBarrierShared();
+			barrier();
+			if( lid == 0u && !( fbF( fbSBudget ) >= 0.01 ) )
+			{
+				fbArgs[7] = 1u;
+				fbSNext = 1u;
+			}
+			memoryBarrierShared();
+			barrier();
+		}
+		const bool converged = fbSNext != 0u;
+		for( uint base = 0u; base < numBricks; base += 64u )
+		{
+			const uint taken0 = fbSTaken;
+			const uint idx = base + lid;
+			bool inBox = false;
+			if( idx < numBricks )
+			{
+				const uint3 bb = uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) );
+				for( uint k = 0u; k < fbFlags.y && !inBox; ++k )
+					inBox = all( greaterThanEqual( bb, fbBoxLo[k].xyz ) ) && all( lessThan( bb, fbBoxHi[k].xyz ) );
+			}
+			if( inBox )
+			{
+				const uint sw = FB_W * idx;
+				fbState[sw + 7u] = fbU( max( fbF( fbState[sw + 7u] ), fbF( fbState[sw + 4u] ) ) );
+				fbState[sw + 9u] = max( fbState[sw + 9u], fbState[sw + 8u] );
+			}
+			fbSScan[lid] = ( inBox && fbFlags.w != 0u && !converged ) ? 1u : 0u;
+			memoryBarrierShared();
+			barrier();
+			for( uint off = 1u; off < 64u; off <<= 1u )
+			{
+				const uint v = lid >= off ? fbSScan[lid - off] : 0u;
+				memoryBarrierShared();
+				barrier();
+				fbSScan[lid] += v;
+				memoryBarrierShared();
+				barrier();
+			}
+			if( inBox && fbFlags.w != 0u && !converged )
+			{
+				const uint pos = taken0 + fbSScan[lid] - 1u;
+				const uint sw = FB_W * idx;
+				fbMask[2u * idx + 1u] = 0u;   // (this pass's move, alone: the next call's convergence test reads it)
+				fbList[pos] = fbPack( uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) ) );
+				fbState[sw] |= FB_RAN;
+				fbState[sw + 4u] = 0u;
+				fbState[sw + 5u] = 0u;
+				fbState[sw + 8u] = 0u;
+			}
+			memoryBarrierShared();
+			barrier();
+			if( lid == 0u )
+				fbSTaken = taken0 + fbSScan[63];
+			memoryBarrierShared();
+			barrier();
+		}
+		if( lid == 0u && fbFlags.w != 0u )
+		{
+			const uint taken = fbSTaken;
+			fbArgs[1] = taken;
+			fbArgs[5] = taken;
+			fbArgs[8] = taken;
+			fbArgs[11] = 0u;
+			if( taken > 0u )
+				fbArgs[3] += 1u;
 		}
 		return;
 	}

@@ -52,6 +52,7 @@
 #include <OgreVector3.h>
 #include <Math/Simple/OgreAabb.h>
 
+#include <array>
 #include <chrono>
 #include <limits>
 #include <memory>
@@ -350,7 +351,7 @@ public:
         bool pushed = false;                ///< a configuration has been applied (the scheduler is running)
         bool pendingRefresh = false;        ///< a geometry or material change waits for the stability window
         /// A mobility CLASS FLIP of an item the GI had already seen (setNodeMovable): its geometry move is ADOPTED,
-        /// never armed (MobilityChange::Soft's promise; an authoring flip's rebuild is setNodeMovable's own).
+        /// never armed (the item is GI geometry either way: the flip moves no voxel - PHOTON-7 stage 8A).
         bool mobilityFlipped = false;
         unsigned stableFrames = 0;
         /// The engine frame the scheduler last ran on (giWriterFrame): a frame that drained NO record of the
@@ -439,11 +440,28 @@ public:
         /// re-marched whole on the next frame (`relightWhole`), the latch allowing. The frame it was owed in; 0 none.
         unsigned long long remarchOwedFrame = 0ull;
         Ogre::Aabb relightBox = Ogre::Aabb::BOX_NULL;
-        /// THE EDIT'S REGION (PHOTON-7 stage 4's read R4): the dirty path's boxes that met this cascade since its last
-        /// answered rebuild (markDirtyCascadesPending; at most kEditRegionBoxes, past it their union), or ALL (a change with
-        /// no box: the dirty-all path, a forced rebuild) - a same-placement rebuild re-marches the inner cascades over it.
-        std::vector<Ogre::Aabb> editRegionBoxes;
-        bool editRegionAll = false;
+        /// THE REGION REBUILD'S DEBT (PHOTON-7 stage 8A; PhotonComponent::serviceRegions): the WORLD boxes whose geometry
+        /// this cascade re-voxelises IN PLACE - the box's cells cleared and built from the GPU scene's table - at the first
+        /// writer point after `frame` (the table that point reads is the one committed after the change). `mover`: the
+        /// box is a MOVER's (a kGpuMover slot's swept box from the last closed list), under THE CONTRACT (it moves no
+        /// rebuild count, no lighting serial, no chain owed); else an EDIT's (the dirty path's box: a still moved, an
+        /// arrival, a hide, a material), which keeps them.
+        struct RegionOwed { Ogre::Aabb box; bool mover = false; unsigned long long frame = 0; };
+        std::vector<RegionOwed> regionOwed;
+        /// ...and the DIRECT TERM'S RE-MARCH it owes because cascade `src` (this one or an outer one) re-voxelised `box`:
+        /// the box's own cells (src = this cascade) and every voxel whose march toward a light reads it
+        /// (innerRemarchRegion), as ONE delta injection at a writer point the latch allows.
+        struct MarchOwed { Ogre::Aabb box; Ogre::uint32 src = 0; bool mover = false; };
+        std::vector<MarchOwed> marchOwed;
+        /// THE MOVERS A SCROLL IN FLIGHT SAW (stage 8A): its chunks were voxelised at the poses of their frames, so the
+        /// union of every mover box that met the cascade during the flight is re-voxelised once more after the commit.
+        Ogre::Aabb scrollMoverUnion = Ogre::Aabb::BOX_NULL;
+        /// the region rebuilds served (every one; the movers' alone) and the cells they re-voxelised (cumulative), and
+        /// the last one's CPU ms (GiStatus::CascadeStatus)
+        unsigned long long regionRebuilds = 0, moverRegionRebuilds = 0, regionCells = 0;
+        /// ...and the passes its own bounce took in their frames before its convergence (read back; cumulative and the last)
+        unsigned long long regionBouncePasses = 0;
+        unsigned regionBounceLast = 0;
         /// THE RELIGHT'S SWEEP (PHOTON-7 stage 4's hitch fix: the voxels a frame relights are the tier's count,
         /// GiQualityFacts::lightWorkFrames): the owed box is relit in slabs of 4-cell planes along z, one sweep from the
         /// cursor (`relightCursor`, the world z of the next plane; NaN = the box's first) round the box once
@@ -632,7 +650,7 @@ public:
     /// A PRODUCER'S APPEND, at its point of the frame: a world box of `kind`. `cascadeMask` 0 = the cascades whose box
     /// meets it, taken at the close (a Slab names its own). At the cap the box MERGES into the entry of its kind whose
     /// margin grows least (the dirty path's metric) - never an overflow. An empty box lists nothing.
-    void appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask = 0u);
+    void appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask = 0u, bool mover = false);
     /// THE INJECTION'S REGION (injectCascade, the one writer): a scroll commit's delta lists the boxes its direct was
     /// computed over (the faces the shift moved: the slab and its band; the whole box where it has none - the
     /// outermost, an inner cascade re-injected as a delta), a whole injection at a placement the list has not heard of
@@ -650,7 +668,10 @@ public:
     /// A MOVER (the ray tier's moved or skin-posed slot, OgreEngine::listRayMovers): its swept box (kind Mover), and for
     /// a caster its sun shadow (kind MoverShadow, the same box: the header's toSun extrudes it) and its lamp shadows - the
     /// range sphere of each lamp whose range reaches the box, once a frame per lamp (kind LampShadow).
-    void listMover(const Ogre::Aabb &swept, bool casts);
+    /// `voxel`: the slot is a MOVER in the voxel store (kGpuMover - and GI-visible, or hidden: its last pose may be held)
+    /// - its swept box is also the next frame's REGION REBUILD in every cascade it meets (PHOTON-7 stage 8A: movers are
+    /// GI geometry, by region).
+    void listMover(const Ogre::Aabb &swept, bool casts, bool voxel = false);
     /// A LAMP'S EVENT (OgreScene::listLampChange): its range sphere as listed last and as it stands - the old box joined
     /// with the new (a lamp that came or went lists the one it has).
     void listLamp(bool hadSphere, const Ogre::Vector3 &oldCentre, float oldRange, bool hasSphere,
@@ -1275,6 +1296,41 @@ private:
     /// round - a change during a round never restarts it (PHOTON-7 stage 5's read A2). Every site that owes a relight.
     static void oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *part);
     void runFeedback(bool forceAll, unsigned long long frame, size_t forceInner = ~size_t(0));
+    /// THE RELIGHT'S BUDGET LAW, one text for the frame's relights and the region rebuilds that carry a slab: the count,
+    /// each owed cascade's floor, the pool.
+    void relightBudgetNow(unsigned long long floorOf[8], unsigned long long &budget, unsigned long long &left) const;
+    struct RelightSlab {
+        int lo[3] = { 0, 0, 0 }, hi[3] = { 0, 0, 0 };
+        int start = 0, end = 0, cursorPlane = 0, span = 0;
+        unsigned long long area = 0, credit = 0;
+    };
+    enum class RelightTake { Answered, Carry, ShaderWait, Pay };
+    RelightTake takeRelightSlab(size_t i, unsigned long long floorHere, unsigned long long left, bool shaderHold,
+                                RelightSlab &s);
+    unsigned long long paidRelightSlab(size_t i, const RelightSlab &s);
+    static void relightAnswered(VctCascade &c);
+    /// what the frame's region rebuilds paid of the relight's pool (their injections carried the slabs)
+    unsigned long long mRelightRegionFrame = ~0ull, mRelightRegionSpent = 0ull;
+    /// THE REGION REBUILDS (PHOTON-7 stage 8A), at the writer point after the slots' work: the last closed list's
+    /// movers and the edits whose table has come, re-voxelised in place in every cascade they meet (voxeliseRegion),
+    /// then each cascade's direct term re-marched over what they changed - its own cells and every voxel whose march
+    /// reads them - as one delta injection where the latch allows.
+    void serviceRegions();
+public:
+    /// THE FRAME'S LATE GI WORK (stage 8A): after the GPU scene's commit of this frame, before the region list closes
+    /// (OgreEngine): the region rebuilds, the light changes and the feedback, the drag's photographs.
+    void recordLate();
+private:
+    /// Cascade `idx`'s cells [lo, hi) of each box (at most eight, 4-aligned) cleared and voxelised from the table, the
+    /// mip chains regenerated.
+    void voxeliseRegion(size_t idx, const std::vector<std::array<int, 6>> &cells);
+    /// THE REGION'S OWN BOUNCE in the frame it was rebuilt (A2): passes over its bricks until their own convergence.
+    void regionBounce(size_t idx, const std::vector<std::array<int, 6>> &cells);
+    /// THE CHAIN'S OWN FEEDBACK WORK under the contract (stage 8A): feedbackOwed() while the episode is the chain's
+    /// (mFbEpisodeStill), never for an episode every activation of which came from a mover's region.
+    bool stillFeedbackOwed() const;
+    /// A region debt of the CHAIN's (an edit's region rebuild or re-march not served yet): chain work owed.
+    bool stillRegionOwed() const;
     void accumulateCardIndirect(const std::vector<char> *ran);
     /// The feedback's readings that landed (harvest): each cascade's active count and books, and the chain's REST.
     void harvestFeedback();
@@ -1394,6 +1450,21 @@ private:
     bool mJacobiOn = false;           ///< the measuring door gi.bounceJacobi was on at the last writer point   ///< the injection in progress is a relight (its region is the list's Lamp already)
     bool mGiFeedbackForceAll = false;
     bool mGiFeedbackOwedLast = false;
+    /// THE FEEDBACK EPISODE'S OWNER (PHOTON-7 stage 8A; THE CONTRACT): an episode - the feedback owing work, from an
+    /// activation to the GPU's active count reaching 0 everywhere - is the CHAIN's once ONE activation in it came from
+    /// anything but a mover's region rebuild (a lamp, an edit, an injection that is not a mover's, a whole relight, a
+    /// sky change); an episode of mover activations alone is the movers' - out of chainWorkOwed and the rest count, so
+    /// a mover frame restarts no view-wide rest. Reset only at the episode's own rest (feedbackOwed() false at the
+    /// harvest), never by a frame count.
+    bool mFbEpisodeStill = false;
+    /// The injection in progress is a mover's region re-march (its activation is the movers').
+    bool mInjectingMover = false;
+    /// THE MOVERS' REGION LIST (stage 8A): the frame's voxel movers' swept boxes (listMover with `voxel`), what the
+    /// frame's late GI work re-voxelises (recordLate: after the GPU scene's commit).
+    std::vector<Ogre::Aabb> mMoverVoxelOpen;
+    /// THE LATE WORK OWED (stage 8A, ruling (a)): the GI step ran this frame (recordCascades) and its region rebuilds,
+    /// light changes and feedback wait for the frame's table (recordLate); whether the step spent its general slot.
+    bool mLateOwed = false, mLateSpent = false;
     unsigned long long mGiFeedbackRests = 0;
     unsigned long long mInnerMarchesSkipped = 0;
     /// ...and those an inner cascade latched in its outer's commit frame OWES to the relight path (stage 4's read R1).
@@ -1915,7 +1986,17 @@ private:
         Ogre::Aabb box;
         GiRegionKind kind = GiRegionKind::Edit;
         uint32_t mask = 0u;
+        /// a MOVER's region rebuild's box (stage 8A): its feedback activation is the movers' (mFbEpisodeStill)
+        bool mover = false;
+        /// a region rebuild's re-voxelised cells (stage 8A): listed, never an activation by itself - its cells are
+        /// 4-aligned in its cascade's (a coarse cascade's are metres wide), and the occlusion reach grows with the box,
+        /// so the bricks are activated from the boxes that CHANGED (mRegionActivations)
+        bool listedOnly = false;
     };
+    /// THE FRAME'S REGION-REBUILD ACTIVATIONS (stage 8A): each changed box once (a mover's swept box, an edit's box) as
+    /// it was told, cut to the cascade that re-voxelised it - what runFeedback grows by the occlusion reach.
+    struct RegionActivation { Ogre::Aabb box; bool mover = false; };
+    std::vector<RegionActivation> mRegionActivations;
     std::vector<RegionEntry> mRegionsOpen;
     uint32_t mRegionOverflowOpen = 0u;
     uint32_t mRegionMergesOpen = 0u;

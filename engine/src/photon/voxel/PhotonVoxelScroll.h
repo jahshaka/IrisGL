@@ -102,6 +102,16 @@ namespace Ogre
         static void copyBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *src,
                              TextureGpu *dst, const uint32 srcOrigin[3], const uint32 dstOrigin[3],
                              const uint32 size[3], uint32 permAxis = 0u );
+        /// ONE BOX OF ONE VOLUME'S LEVEL 0 SET TO `clear` (Photon/ScrollCopy's clear mode; PHOTON-7 stage 8A).
+        static void clearBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *dst,
+                              const uint32 origin[3], const uint32 size[3], const float clear[4] );
+        /** THE REGION REBUILD'S CLEAR (PHOTON-7 stage 8A): the box [origin, origin + size) of the eleven geometry
+            volumes' level 0 set to what a whole build's clear writes (zero, the normal's 0.5 bias), so a voxeliser's
+            chunk build INTO THE LIVE STORE (PhotonVoxelizer::buildChunks, the identity layout) writes the box exactly
+            as a whole build would. No scratch: a scroll in flight keeps its own.
+        */
+        static void clearRegion( HlmsManager *hlmsManager, RenderSystem *renderSystem,
+                                 const PhotonVoxelizer::VolumeSet &live, const uint32 origin[3], const uint32 size[3] );
 
     private:
         RenderSystem      *mRenderSystem;

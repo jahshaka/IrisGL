@@ -608,7 +608,7 @@ bool PhotonComponent::setGiTuning(const GiParams &p) {
 //  * a configuration PUSH answers everything: the state restarts from it;
 //  * a geometry or material change ARMS a pending re-solve until it has held still for kStableFrames, then ONE re-solve
 //    (Settle: the dirty path's marks, the probe grid's staleness); a hover preview is no change;
-//  * a mobility FLIP's geometry move is adopted, never armed (MobilityChange::Soft's promise);
+//  * a mobility FLIP's geometry move is adopted, never armed (no flip moves a voxel: PHOTON-7 stage 8A);
 //  * world.refreshGi() re-solves at once;
 //  * a paused budget (updateBudget 0) follows nothing and keeps what it owes for the un-pause.
 void PhotonComponent::plan(const FrameInputScene &part, bool pushed) {
@@ -863,6 +863,8 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         c.fbActivatedFrame = frame;
         if (!commit) c.fbForce = true;
     }
+    // (an injection that is not a mover's region re-march makes the feedback's episode the chain's: stage 8A)
+    if (!mInjectingMover) mFbEpisodeStill = true;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;
@@ -917,6 +919,7 @@ bool PhotonComponent::refreshGiLighting() {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer || mVctCascades.empty()) return false;
         mGiRelightAllOwed = true;
+        mFbEpisodeStill = true;
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1106,6 +1109,13 @@ GiStatus PhotonComponent::giStatus() const {
             cs.centre     = toV(c.centre);
             cs.builtCam   = toV(c.builtCam);
             cs.rebuilds   = c.rebuilds;
+            cs.regionRebuilds = c.regionRebuilds;
+            cs.moverRegionRebuilds = c.moverRegionRebuilds;
+            cs.regionCells = c.regionCells;
+            cs.regionOwed = unsigned(c.regionOwed.size());
+            cs.marchOwed = unsigned(c.marchOwed.size());
+            cs.regionBouncePasses = c.regionBouncePasses;
+            cs.regionBounceLast = c.regionBounceLast;
             cs.pending    = c.pending;
             cs.scrolls      = c.scrolls;
             cs.scrollFrames = c.scrollFrames;
@@ -2157,7 +2167,8 @@ std::vector<Ogre::Aabb> PhotonComponent::giItemBoundsRaw() const {
     all.reserve(mScene.nodeRecords().size());
     for (const auto &kv : mScene.nodeRecords()) {
         const Ogre::Item *item = kv.second.item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        // (THE STILL WORLD's: a mover - GI geometry since PHOTON-7 stage 8A - fits no volume)
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit) || (item->getVisibilityFlags() & kMovableBit)) continue;
         if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
         // (after the scene graph — the frame's `engine.plan`, U4 stage 3 — the cached box is this frame's; the
@@ -2483,8 +2494,9 @@ namespace {
 template <class NodeT>
 bool geomSigTerm(NodeT &n, unsigned long long &term, unsigned long long &reads, bool current) {
     const Ogre::Item *item = n.item;
-    const bool dragged = n.dragMover && n.shown;
-    if (!item || n.itemSlot == size_t(-1) || (!(item->getVisibilityFlags() & kGiGeometryBit) && !dragged))
+    // (a MOVABLE is GI geometry by region since PHOTON-7 stage 8A, and its motion is the region list's, never the
+    // scheduler's: out of the term, as before; a still the gesture holds stays in it)
+    if (!item || n.itemSlot == size_t(-1) || !(item->getVisibilityFlags() & kGiGeometryBit) || n.movable)
         return false;
     Ogre::Item *it = const_cast<Ogre::Item *>(item);
     ++reads;   // an item box read, whichever form (the rows count the signature's reads)
@@ -2610,7 +2622,7 @@ bool PhotonComponent::giContentCentre(float maxEdge, Ogre::Vector3 &centre) cons
     size_t n = 0;
     for (const auto &kv : mScene.nodeRecords()) {
         const Ogre::Item *item = kv.second.item;
-        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (!item || !(item->getVisibilityFlags() & kGiGeometryBit) || (item->getVisibilityFlags() & kMovableBit)) continue;
         if (kv.second.probeGridExcluded) continue;
         ++mGiAabbReads;
         Ogre::Item *it = const_cast<Ogre::Item *>(item);   // (cached after the scene graph, as giItemBounds)
@@ -3089,36 +3101,32 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
     const bool replaced = mGiDirtyListMerged && !mGiCascadeDirtyBoxes.empty() &&
                           mGiDirtyPlacementSerial != mGiPlacementSerial;
     const std::vector<Ogre::Aabb> &boxes = replaced ? mGiDirtyMembers : mGiCascadeDirtyBoxes;
+    const unsigned long long frame = giWriterFrame();
     for (VctCascade &c : mVctCascades) {
-        // ONLY THE BOX TEST DECIDES (round-2 F2): a structural edit in one
-        // corner, or a light REMOVAL that moved no geometry, must not mark the
-        // whole chain - the removed light's bounce would vanish cascade by
-        // cascade over N frames.
-        bool hit = mGiCascadeDirtyAll;
-        if (hit) c.editRegionAll = true;   // no box: the whole chain
-        if (!hit) {
-            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
-            for (const Ogre::Aabb &d : boxes)
-                if (box.intersects(d)) {
-                    hit = true;
-                    // THE EDIT'S REGION (PHOTON-7 stage 4's read R4), kept for the rebuild's inner re-march
-                    if (c.editRegionBoxes.size() < Ogre::PhotonCommitLight::kMaxInjectBoxes) {
-                        c.editRegionBoxes.push_back(d);
-                    } else {
-                        Ogre::Aabb u = d;
-                        for (const Ogre::Aabb &e : c.editRegionBoxes) u.merge(e);
-                        c.editRegionBoxes.assign(1u, u);
-                    }
-                }
+        // A CHANGE WITH NO BOX (the dirty-all path: a texture's death, a chain shape, a flush that cannot say where): the
+        // whole cascade owes a rebuild, the scheduler's (one a frame, oldest first).
+        if (mGiCascadeDirtyAll) {
+            c.pending = 1;
+            c.pendingReason = why;
+            // Rebuilt once the frame's commit carries the edit (VctCascade::editSince).
+            if (!c.editSince) c.editSince = frame;
+            c.editLast = frame;
+            ++marked;
+            continue;
         }
-        if (!hit) continue;
-        c.pending = 1;
-        c.pendingReason = why;
-        // Rebuilt once the frame's commit carries the edit (VctCascade::editSince).
-        const unsigned long long frame = giWriterFrame();
-        if (!c.editSince) c.editSince = frame;
-        c.editLast = frame;
-        ++marked;
+        // ...AND A CHANGE WITH ONE IS ITS BOX'S (PHOTON-7 stage 8A: the whole-cascade rebuild on a dirty box is DELETED).
+        // ONLY THE BOX TEST DECIDES (round-2 F2): a structural edit in one corner, or a light REMOVAL that moved no
+        // geometry, must not mark the whole chain. Each box that meets the cascade is its REGION REBUILD, at the first
+        // writer point whose table carries the edit (the next frame's: serviceRegions), in place - the box's cells and
+        // nothing else re-voxelised, the direct term re-marched where they change it.
+        const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+        bool hit = false;
+        for (const Ogre::Aabb &d : boxes)
+            if (box.intersects(d)) {
+                hit = true;
+                c.regionOwed.push_back(VctCascade::RegionOwed{ d, false, frame });
+            }
+        if (hit) ++marked;
     }
     clearCascadeDirty();
     return marked;
@@ -3127,29 +3135,19 @@ size_t PhotonComponent::markDirtyCascadesPending(GiStaleReason why) {
 void PhotonComponent::endDragGesture() {
     if (mDragMovers.empty()) return;
     bool anyDemoted = false;
-    for (NodeId id : mDragMovers) {
-        // The box it came to rest in (the scene demotes the node: gone mid-gesture or no longer a
-        // mover, nothing owed). `scan.giBox` is where the walk last saw it, which is that box —
-        // the place it LEFT was re-voxelised at the promotion, so the chain owes only this one.
-        Ogre::Aabb rest;
-        if (!mScene.demoteDragMover(id, rest)) continue;
-        noteGiCascadeDirty(&rest);
-        noteScrollEdit(&rest);     // ENGINE-UPGRADE-U5: the target box the dirty path cannot see
-        anyDemoted = true;
-    }
+    // (The node leaves the mover channel; gone mid-gesture or no longer a mover, nothing owed. No END BOX: it stayed GI
+    // geometry and the store holds it where it stopped - PHOTON-7 stage 8A deleted the box with the whole-cascade
+    // rebuild it fed.)
+    for (NodeId id : mDragMovers)
+        if (mScene.demoteDragMover(id)) anyDemoted = true;
     mDragMovers.clear();
     if (!anyDemoted) return;
     ++mDragMoverGestures;
-    // ...AND THE GESTURE OWES ITS CLOSING WORK, ALL OF IT AT ONCE AND LAST
-    // (mDragSettleOwed's note has the measurement): one full at-rest light tick
-    // and one probe sweep, paid on the first frame the re-voxelisations have
-    // drained. NEITHER may be paid here, and that is the whole lesson of the
-    // measurement: a probe capture PHOTOGRAPHS the room as the voxels light it,
-    // so a sweep spent while the chain is still being rebuilt stores the room
-    // WITHOUT the object that has just come to rest — 161,318 pixels at up to
-    // 32/255 on the Mirror Room's dragged torus, stably, until something asked
-    // for another capture. The order is the physics: geometry, then light, then
-    // the photographs of it.
+    // ...AND THE GESTURE OWES ITS PHOTOGRAPHS, LAST (mDragSettleOwed's note has the measurement): one probe sweep, paid
+    // on the first frame the feedback owes nothing. A probe capture PHOTOGRAPHS the room as the voxels light it, so a
+    // sweep spent while the light around the object still converges stores the room as it was (161,318 pixels at up to
+    // 32/255 on the Mirror Room's dragged torus, measured when the sweep ran early). Geometry, then light, then the
+    // photographs of it.
     mDragSettleOwed = true;
 }
 
@@ -5516,31 +5514,17 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
             // bricks resume the feedback through the mask's word 0). The chain's settle used to re-solve them; a scroll's
             // commit re-marches only what its moved faces reach (below). An inner cascade already injected this frame
             // (the latch: one writer a frame) is re-marched on the next.
-            // BY REGION (PHOTON-7 stage 4's read R4): a rebuild at the SAME placement whose change the dirty path boxed (the
-            // edit's boxes that met this cascade, editRegion) re-marches only the inner voxels whose march reaches them
-            // (innerRemarchRegion); a new placement, or a change with no box, the whole inner cascade.
+            // (WHOLE: a whole rebuild is a change with no box - the dirty-all path, a forced rebuild, a new placement; an edit
+            // with a box is a region rebuild since PHOTON-7 stage 8A, serviceRegions, which re-marches by region.)
             if (!scrollLight) {
-                const bool region = samePlace && !c.editRegionAll && !c.editRegionBoxes.empty();
                 for (size_t j = idx; j-- > 0;) {
                     VctCascade &inner = mVctCascades[j];
                     if (!inner.lighting || !inner.built) continue;
                     Ogre::PhotonCommitLight innerLight;
                     innerLight.delta = true;
                     for (int a = 0; a < 3; ++a) innerLight.keepHi[a] = Ogre::uint32(inner.resolution);
-                    std::vector<Ogre::Aabb> innerWorld;
-                    if (region && !innerRemarchRegion(idx, j, c.editRegionBoxes, innerLight, innerWorld)) {
-                        ++mInnerMarchesSkipped;
-                        continue;
-                    }
                     if (injectedThisFrame(j)) {
-                        if (region) {   // owed by region (the relight path, next frame)
-                            Ogre::Aabb owed = Ogre::Aabb::BOX_NULL;
-                            for (const Ogre::Aabb &w : innerWorld) owed.merge(w);
-                            oweRelight(inner, false, &owed);
-                            ++mInnerMarchesOwed;
-                        } else {
-                            inner.remarchOwedFrame = giWriterFrame();
-                        }
+                        inner.remarchOwedFrame = giWriterFrame();
                         continue;
                     }
                     // (the field reads the inner cascades' moved voxels through its marks: the injection's moves
@@ -5641,6 +5625,21 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
     }
     c.built = true;
     ++c.rebuilds;
+    {
+        // THE REGION DEBTS IT ANSWERED (PHOTON-7 stage 8A): a whole rebuild read the table every owed box's change is in
+        // (marked before this writer point) and re-injected the whole volume and its inner cascades; a scroll's commit
+        // copied in chunks voxelised at the poses of their frames, so the movers it saw are re-voxelised once more.
+        const unsigned long long frame = giWriterFrame();
+        if (!scroll) {
+            c.regionOwed.erase(std::remove_if(c.regionOwed.begin(), c.regionOwed.end(),
+                                              [frame](const VctCascade::RegionOwed &r) { return r.frame < frame; }),
+                               c.regionOwed.end());
+            c.marchOwed.clear();
+        } else if (c.scrollMoverUnion.mHalfSize.x >= 0.0f) {   // (BOX_NULL's half size is negative)
+            c.regionOwed.push_back(VctCascade::RegionOwed{ c.scrollMoverUnion, true, frame });
+        }
+        c.scrollMoverUnion = Ogre::Aabb::BOX_NULL;
+    }
     c.tornCleared = false;   // a rebuild that succeeded: the store is a box's again (decision 14.8)
     c.tornRebuildFailures = 0u;
     c.held = false;
@@ -5720,6 +5719,339 @@ static const double kScrollRecordTriangles = 667.0;
 // A CAMERA DEBT THE CAMERA TOOK BACK (PHOTON-7 stage 2's read W2): a cascade owed a move (a cut scroll's remainder, a step)
 // whose target lattice is, by the time it is served, the one it stands on - the camera came back - owes nothing: a scroll
 // planned for it would shift by zero and still re-inject the whole cascade as a delta (and the cascades inside it).
+// `vct.regionN`: one cascade's region rebuild's voxelisation (its clears, its chunk build, its mips and its census), with
+// the GPU pair; its units the cells re-voxelised (thousands) - the region's price per m^3 a cascade (PHOTON-7 stage 8A).
+static const char *const kRegionRowNames[8] = { "vct.region0", "vct.region1", "vct.region2", "vct.region3",
+                                                "vct.region4", "vct.region5", "vct.region6", "vct.region7" };
+
+// THE REGION REBUILD (PHOTON-7 stage 8A, item A1): ANY BOX's geometry re-voxelised IN PLACE, in every cascade it meets,
+// within one frame - a mover's swept box each frame it moves (old and new pose: the last closed list's kGpuMover slots,
+// OgreEngine::listRayMovers) and an edit's box (the dirty path's: a still moved, an arrival, a hide, a material) once its
+// table has come. It replaces the whole-cascade rebuild an edit with a box used to buy (one cascade a frame, the whole
+// volume re-voxelised) and the drag's end box; a movable thing is GI geometry by it (ONE_PICTURE B2).
+//
+// THE WORK, per frame, at the writer point after the slots' (recordCascades), each cascade the latch allows:
+//   1. THE GEOMETRY (voxeliseRegion): the boxes' cells (4-aligned, disjoint, at most eight) set to a whole build's clear
+//      (Photon/ScrollCopy's clear) and voxelised from the table by the voxeliser's own chunk build into the LIVE store
+//      (the identity layout: the same dispatches, shader and merge as a whole build, so a box's voxels are a whole
+//      build's bits), the mip chains regenerated; the boxes listed (kind Edit, this cascade's bit).
+//   2. THE DIRECT TERM (one delta injection a cascade): the cells re-voxelised AND every voxel whose march toward a
+//      light reads them - in this cascade and in every cascade inside it (innerRemarchRegion: the sun's sweep, a lamp's
+//      frustum, an inner cascade's shell reach) - the changed cascade's own region first.
+//   3. THE BOUNCE: the feedback's (runFeedback, after): the boxes activate the bricks that see them (editActivationBox),
+//      the injection's changed direct terms theirs.
+// THE CONTRACT (the lead's ruling, stage 8A): a MOVER's region rebuild lists its boxes and moves no rebuild count, no
+// lighting serial, no chain owed and no feedback rest - its injection and its activations are the movers' episode
+// (mFbEpisodeStill); an EDIT's keeps them (c.rebuilds, chainWorkOwed while owed: every edit row waits giAtRest for it).
+// A cascade injected this frame already (a scroll's commit, a whole rebuild) keeps its debt for the next writer point; a
+// material conversion or refresh owed holds every region (the gather would skip an unconverted mover: a hole).
+void PhotonComponent::serviceRegions() {
+    if (mVctCascades.empty() || !mVctCascades[0].built) return;
+    const unsigned long long frame = giWriterFrame();
+    // THE MOVERS OF THIS FRAME (listed by the GPU scene's commit and the skin pass a moment ago: OgreEngine::listRayMovers),
+    // ONCE: each swept box owed to every cascade it meets (served now: the table this point reads is the one committed
+    // with them), and remembered by a scroll in flight whose TARGET it meets (its chunks hold the poses of their frames:
+    // re-voxelised once more after its commit).
+    if (!mMoverVoxelOpen.empty()) {
+        for (const Ogre::Aabb &f : mMoverVoxelOpen) {
+            for (VctCascade &c : mVctCascades) {
+                if (!c.built) continue;
+                if (Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)).intersects(f))
+                    c.regionOwed.push_back(VctCascade::RegionOwed{ f, true, frame });
+                if (c.scroll.active) {
+                    const float cell = c.cell();
+                    const Ogre::Vector3 tc(float(double(c.scroll.lattice[0]) * double(cell)),
+                                           float(double(c.scroll.lattice[1]) * double(cell)),
+                                           float(double(c.scroll.lattice[2]) * double(cell)));
+                    if (Ogre::Aabb(tc, Ogre::Vector3(c.halfSize)).intersects(f)) c.scrollMoverUnion.merge(f);
+                }
+            }
+        }
+        mMoverVoxelOpen.clear();
+    }
+    if (!mVctPendingMaterialSlots.empty() || mVctMaterialRefreshOwed) return;
+    const size_t n = mVctCascades.size();
+    // (the scene graph current once, before the first region's gather or injection: an injection reads the lights'
+    // derived poses, as every rebuild's own preamble)
+    bool graphCurrent = false;
+    const auto ensureGraph = [&]() {
+        if (!graphCurrent) giUpdateSceneGraph(mSceneMgr);
+        graphCurrent = true;
+    };
+    // (each cascade's re-voxelised cells this frame: its own passes, phase 3)
+    std::vector<std::vector<std::array<int, 6>>> rebuilt(n);
+    // ---- 1. THE GEOMETRY ------------------------------------------------------------------------------------------
+    for (size_t i = 0; i < n; ++i) {
+        VctCascade &c = mVctCascades[i];
+        if (!c.built) c.regionOwed.clear();   // (an unbuilt cascade's first build holds everything)
+        if (c.regionOwed.empty() || !c.voxelizer || !c.lighting || c.liveTorn || injectedThisFrame(i)) continue;
+        const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+        const Ogre::Vector3 corner = box.getMinimum();
+        const float cell = c.cell();
+        const int res = int(c.resolution);
+        std::vector<std::array<int, 6>> cells;
+        bool mover = true;
+        std::vector<VctCascade::RegionOwed> keep;
+        std::vector<RegionActivation> changed;
+        for (const VctCascade::RegionOwed &r : c.regionOwed) {
+            if (r.frame > frame) { keep.push_back(r); continue; }   // (a later frame's: none is - a guard)
+            // (ONE CELL PAST THE BOX on every side: the voxeliser's triangle-box test is conservative, so a face on a cell
+            // boundary is written into the cell beyond it too - measured: a bus's leading face at x = 5.0 left 1,776
+            // texels of cascade 1 in the cells past it when the box stopped at the boundary)
+            std::array<int, 6> b{};
+            bool empty = false;
+            for (int a = 0; a < 3; ++a) {
+                const int l = std::max(0, int(std::floor((r.box.getMinimum()[a] - corner[a]) / cell)) - 1);
+                const int h = std::min(res, int(std::ceil((r.box.getMaximum()[a] - corner[a]) / cell)) + 1);
+                if (h <= l) empty = true;
+                b[size_t(a)] = l / 4 * 4;
+                b[size_t(a) + 3u] = std::min(res, (h + 3) / 4 * 4);
+            }
+            if (empty) continue;   // (it left this cascade's box: nothing of it here)
+            cells.push_back(b);
+            mover = mover && r.mover;
+            Ogre::Vector3 lo = r.box.getMinimum(), hi = r.box.getMaximum();   // (cut to this cascade)
+            lo.makeCeil(box.getMinimum());
+            hi.makeFloor(box.getMaximum());
+            changed.push_back(RegionActivation{ Ogre::Aabb::newFromExtents(lo, hi), r.mover });
+        }
+        c.regionOwed.swap(keep);
+        if (cells.empty()) continue;
+        // AT MOST EIGHT (the voxeliser's octants, the gather's cap) AND DISJOINT (a cell in two octants would gather its
+        // triangles twice into the merge): folded by the least added volume, then every overlapping pair joined.
+        detail::foldInjectBoxes(cells, 8u);
+        for (bool joined = true; joined;) {
+            joined = false;
+            for (size_t p = 0; p < cells.size() && !joined; ++p)
+                for (size_t q = p + 1; q < cells.size() && !joined; ++q) {
+                    bool overlap = true;
+                    for (size_t a = 0; a < 3u; ++a)
+                        overlap = overlap && cells[p][a] < cells[q][a + 3u] && cells[q][a] < cells[p][a + 3u];
+                    if (!overlap) continue;
+                    for (size_t a = 0; a < 3u; ++a) {
+                        cells[p][a] = std::min(cells[p][a], cells[q][a]);
+                        cells[p][a + 3u] = std::max(cells[p][a + 3u], cells[q][a + 3u]);
+                    }
+                    cells.erase(cells.begin() + std::ptrdiff_t(q));
+                    joined = true;
+                }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        bool ok = false;
+        JAH_TRY {
+            ensureGraph();
+            voxeliseRegion(i, cells);
+            ok = true;
+        } JAH_CATCH(mError, (void)0);
+        if (!ok) {
+            // (logged once a scene, as a rebuild's failure; the debt stays: the next writer point tries again)
+            if (!mCascadeFailureLogged) {
+                mCascadeFailureLogged = true;
+                Ogre::LogManager::getSingleton().logMessage("Jahshaka GI: cascade " + std::to_string(i) +
+                                                            " failed a region rebuild (" + mError + ") - owed again");
+            }
+            for (const auto &b : cells)
+                c.regionOwed.push_back(VctCascade::RegionOwed{
+                    Ogre::Aabb::newFromExtents(corner + Ogre::Vector3(float(b[0]), float(b[1]), float(b[2])) * cell,
+                                               corner + Ogre::Vector3(float(b[3]), float(b[4]), float(b[5])) * cell),
+                    mover, 0ull });
+            continue;
+        }
+        c.lastCpuMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        mRegionActivations.insert(mRegionActivations.end(), changed.begin(), changed.end());
+        rebuilt[i] = cells;
+        ++c.regionRebuilds;
+        if (mover) ++c.moverRegionRebuilds;
+        else ++c.rebuilds;   // AN EDIT'S counts as the rebuild it replaces (the lighting serial moves: the contract)
+        const uint32_t bit = i < 32u ? 1u << i : 0u;
+        for (const auto &b : cells) {
+            c.regionCells += (unsigned long long)(b[3] - b[0]) * (unsigned long long)(b[4] - b[1]) *
+                             (unsigned long long)(b[5] - b[2]);
+            const Ogre::Aabb w = Ogre::Aabb::newFromExtents(
+                corner + Ogre::Vector3(float(b[0]), float(b[1]), float(b[2])) * cell,
+                corner + Ogre::Vector3(float(b[3]), float(b[4]), float(b[5])) * cell);
+            // LISTED (the contract): where the store's geometry changed, this cascade's
+            appendRegion(GiRegionKind::Edit, w, bit, mover);
+            if (!mRegionsOpen.empty() && mRegionsOpen.back().box == w) mRegionsOpen.back().listedOnly = true;
+            // ...and owed to this cascade's direct term and every inner cascade's march
+            for (size_t j = 0; j <= i; ++j)
+                if (mVctCascades[j].built && mVctCascades[j].lighting)
+                    mVctCascades[j].marchOwed.push_back(VctCascade::MarchOwed{ w, Ogre::uint32(i), mover });
+        }
+    }
+    // ---- 2. THE DIRECT TERM, one delta injection a cascade ---------------------------------------------------------
+    for (size_t j = 0; j < n; ++j) {
+        VctCascade &c = mVctCascades[j];
+        if (!c.built) c.marchOwed.clear();
+        if (c.marchOwed.empty() || !c.lighting || injectedThisFrame(j)) continue;
+        const Ogre::Aabb jb(c.centre, Ogre::Vector3(c.halfSize));
+        const Ogre::Vector3 corner = jb.getMinimum();
+        const float cell = c.cell();
+        const int res = int(c.resolution);
+        std::vector<std::array<int, 6>> boxes;
+        bool mover = true;
+        for (const VctCascade::MarchOwed &m : c.marchOwed) {
+            mover = mover && m.mover;
+            if (m.src >= n) continue;
+            // (its own re-voxelised cells: their direct terms are new whatever the lights)
+            if (m.src == Ogre::uint32(j)) {
+                std::array<int, 6> b{};
+                bool empty = false;
+                for (int a = 0; a < 3; ++a) {
+                    const int l = std::max(0, int(std::floor((m.box.getMinimum()[a] - corner[a]) / cell + 0.5f)));
+                    const int h = std::min(res, int(std::floor((m.box.getMaximum()[a] - corner[a]) / cell + 0.5f)));
+                    if (h <= l) empty = true;
+                    b[size_t(a)] = l / 4 * 4;
+                    b[size_t(a) + 3u] = std::min(res, (h + 3) / 4 * 4);
+                }
+                if (!empty) boxes.push_back(b);
+            }
+            Ogre::PhotonCommitLight tmp;
+            std::vector<Ogre::Aabb> world;
+            if (innerRemarchRegion(size_t(m.src), j, std::vector<Ogre::Aabb>(1u, m.box), tmp, world, 0u))
+                for (Ogre::uint32 b = 0; b < tmp.numInjectBoxes; ++b)
+                    boxes.push_back({ int(tmp.injectLo[b][0]), int(tmp.injectLo[b][1]), int(tmp.injectLo[b][2]),
+                                      int(tmp.injectHi[b][0]), int(tmp.injectHi[b][1]), int(tmp.injectHi[b][2]) });
+        }
+        c.marchOwed.clear();
+        if (boxes.empty()) continue;
+        // ...AND THE LAMP'S RELIGHT THIS CASCADE OWES, ITS SLAB FOR THIS FRAME (the relight's budget law, one text:
+        // takeRelightSlab): the one-writer latch lets a cascade take one injection a frame, so the region's injection pays
+        // it too - else a mover moving every frame in a cascade would hold every lamp change there owed for as long as it
+        // moved (the relights skip a cascade injected this frame).
+        RelightSlab rslab;
+        bool carriesRelight = false;
+        if (c.relightOwed) {
+            unsigned long long floorOf[8] = { 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull }, rBudget = 0ull, rLeft = 0ull;
+            relightBudgetNow(floorOf, rBudget, rLeft);
+            if (mRelightRegionFrame != frame) { mRelightRegionFrame = frame; mRelightRegionSpent = 0ull; }
+            rLeft -= std::min(rLeft, mRelightRegionSpent);
+            const bool shaderHold = mEngine && mEngine->armRegistry().on(ArmId::GiRelightShaderHold);
+            if (takeRelightSlab(j, j < 8u ? floorOf[j] : 0ull, rLeft, shaderHold, rslab) == RelightTake::Pay) {
+                carriesRelight = true;
+                boxes.push_back({ rslab.lo[0], rslab.lo[1], rslab.start, rslab.hi[0], rslab.hi[1], rslab.end });
+            }
+        }
+        detail::foldInjectBoxes(boxes, Ogre::PhotonCommitLight::kMaxInjectBoxes);
+        Ogre::PhotonCommitLight light;
+        light.delta = true;
+        for (int a = 0; a < 3; ++a) light.keepHi[a] = Ogre::uint32(res);
+        for (const auto &b : boxes) {
+            const Ogre::uint32 k = light.numInjectBoxes++;
+            for (int a = 0; a < 3; ++a) {
+                light.injectLo[k][a] = Ogre::uint32(b[size_t(a)]);
+                light.injectHi[k][a] = Ogre::uint32(b[size_t(a) + 3u]);
+            }
+        }
+        ensureGraph();
+        mInjectingMover = mover && !carriesRelight;   // (a lamp's relight is the chain's work)
+        bool ok = false;
+        JAH_TRY { ok = injectCascade(j, &light); } JAH_CATCH(mError, (void)0);
+        mInjectingMover = false;
+        if (ok && carriesRelight) mRelightRegionSpent += paidRelightSlab(j, rslab);
+        if (!ok) {
+            // (a refused injection: the cells are owed to the relight path - the chain's work - by region)
+            Ogre::Aabb owed = Ogre::Aabb::BOX_NULL;
+            for (const auto &b : boxes)
+                owed.merge(Ogre::Aabb::newFromExtents(corner + Ogre::Vector3(float(b[0]), float(b[1]), float(b[2])) * cell,
+                                                      corner + Ogre::Vector3(float(b[3]), float(b[4]), float(b[5])) * cell));
+            oweRelight(c, false, &owed);
+            mFbEpisodeStill = true;
+            continue;
+        }
+        // ---- 3. THE REGION'S OWN BOUNCE, in its frame (A2) ---------------------------------------------------------
+        if (mGi.bounces && !rebuilt[j].empty()) regionBounce(j, rebuilt[j]);
+    }
+}
+
+// THE REGION'S OWN BOUNCE IN THE FRAME OF ITS GEOMETRY (PHOTON-7 stage 8A, A2; the lead's rulings (i) and (b)). A
+// re-voxelised region's bounce starts from its direct term (the delta injection kept the old voxels' totals; a new surface
+// has none), and the feedback converges it a pass a frame: a moving object trailed 16-30 frames of stale bounce behind it
+// (gi.cascades_asan case 12: 158-224 codes against its rest). So the region's bricks take passes IN THE FRAME they are
+// rebuilt, UNTIL THEIR OWN CONVERGENCE: each pass's largest move over the region (the mask's word 1, a voxel's move
+// relative to its radiance) is read on the device before the next, and under one code the remaining passes list no brick
+// (PhotonBrickFeedback_cs.glsl's REGION mode) - the stop IS the one-code criterion, so an open region (whose series decays
+// faster than a closed box's a_max a pass) stops early. Capped at kRegionBouncePassesMax (32: a closed box at albedo 0.85
+// needs 35). The passes run on the region's bricks only (the box, never the cascade). PRINTED: the monitor row
+// vct.regionBounceN (its GPU ms: the passes run; its units the cap recorded) and the passes the convergence took
+// (GiStatus::CascadeStatus regionBounceLast / regionBouncePasses, read back with the feedback's readings).
+static const char *const kRegionBounceRowNames[8] = { "vct.regionBounce0", "vct.regionBounce1", "vct.regionBounce2",
+                                                      "vct.regionBounce3", "vct.regionBounce4", "vct.regionBounce5",
+                                                      "vct.regionBounce6", "vct.regionBounce7" };
+static constexpr unsigned kRegionBouncePassesMax = 32u;
+
+void PhotonComponent::regionBounce(size_t j, const std::vector<std::array<int, 6>> &cells) {
+    VctCascade &c = mVctCascades[j];
+    if (!c.lighting || mVctCascades.empty() || !mVctCascades[0].lighting) return;
+    const unsigned k = kRegionBouncePassesMax;   // (the cap: the device stops the loop at the region's convergence)
+    // THE REGION'S BRICKS (8^3 cells each), at most the activation's boxes; their count bounds the passes' rows
+    Ogre::PhotonFeedbackActivation act;
+    const int dims = (int(c.resolution) + 7) / 8;
+    unsigned long long bricks = 0ull;
+    for (const auto &b : cells) {
+        if (act.numBoxes >= Ogre::PhotonFeedbackActivation::kMaxBoxes) break;
+        Ogre::uint32 *lo = act.lo[act.numBoxes], *hi = act.hi[act.numBoxes];
+        unsigned long long v = 1ull;
+        for (int a = 0; a < 3; ++a) {
+            lo[a] = Ogre::uint32(std::max(0, b[size_t(a)] / 8));
+            hi[a] = Ogre::uint32(std::min(dims, (b[size_t(a) + 3u] + 7) / 8));
+            v *= (unsigned long long)(hi[a] > lo[a] ? hi[a] - lo[a] : 0u);
+        }
+        bricks += v;
+        ++act.numBoxes;
+    }
+    if (!bricks) return;
+    Ogre::PhotonVoxelLighting *chain = mVctCascades[0].lighting;
+    const Ogre::uint32 rows = Ogre::uint32(std::min<unsigned long long>(bricks, (unsigned long long)dims * dims * dims));
+    JAH_TRY {
+        chain->ensureBackScratch(rows);
+        if (mScene.rayTracingResolved()) chain->ensureSideGather(rows);
+        mScene.applyCascadeEnvironment(c.lighting);   // the sky the passes' escapes read
+        monitor::CacheScope row(CacheKind::Gi, WorkReason::Moved, (unsigned long long)j,
+                                kRegionBounceRowNames[std::min(j, size_t(7))], mRoot->getRenderSystem());
+        row.setUnits(k);   // (a plain row: every pass's dispatch is its own time - the region's price)
+        c.lighting->feedbackRegionPasses(act, k, chain);
+    } JAH_CATCH(mError, );
+}
+
+void PhotonComponent::voxeliseRegion(size_t idx, const std::vector<std::array<int, 6>> &cells) {
+    VctCascade &c = mVctCascades[idx];
+    monitor::CacheScope voxelise(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
+                                 kRegionRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
+    if (!c.feed) c.feed.reset(new detail::VoxelFeed());
+    const Ogre::PhotonVoxelizer::VolumeSet live = c.voxelizer->liveVolumes();
+    std::vector<Ogre::PhotonVoxelizer::CellBox> boxes;
+    double units = 0.0;
+    for (const auto &b : cells) {
+        const Ogre::uint32 origin[3] = { Ogre::uint32(b[0]), Ogre::uint32(b[1]), Ogre::uint32(b[2]) };
+        const Ogre::uint32 size[3] = { Ogre::uint32(b[3] - b[0]), Ogre::uint32(b[4] - b[1]), Ogre::uint32(b[5] - b[2]) };
+        Ogre::PhotonVoxelScroll::clearRegion(mRoot->getHlmsManager(), mRoot->getRenderSystem(), live, origin, size);
+        Ogre::PhotonVoxelizer::CellBox cb;
+        cb.x = origin[0]; cb.y = origin[1]; cb.z = origin[2];
+        cb.w = size[0]; cb.h = size[1]; cb.d = size[2];
+        cb.storeAxis = 0u;   // THE IDENTITY LAYOUT: each cell where a whole build stores it
+        boxes.push_back(cb);
+        units += double(size[0]) * double(size[1]) * double(size[2]);
+    }
+    voxelise.setUnits(unsigned(std::min(units * 1e-3, 4.0e9)));   // (the cells, thousands)
+    {
+        struct Restore {
+            Ogre::PhotonVoxelizer *v = nullptr;
+            ~Restore() { if (v) v->restoreOctants(); }
+        } restore{ c.voxelizer };
+        c.voxelizer->setChunkOctants(boxes.data(), boxes.size(),
+                                     Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)).getMinimum());
+        std::vector<uint32_t> mask;
+        gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
+        c.voxelizer->buildChunks(live);
+    }
+    c.voxelizer->finishScroll(Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)));   // (the region kept; the mips whole)
+    // THE CENSUS (as a scroll's commit takes it): one gather over the whole box, built into nothing, so the cascade's
+    // readings describe the box, never the last region.
+    std::vector<uint32_t> mask;
+    gatherFeed(*c.feed, c.voxelizer, cascadeGatherInputs(c, mask));
+}
+
 bool PhotonComponent::placedForCamera(size_t idx, const Ogre::Vector3 &eyePos) const {
     if (idx >= mVctCascades.size()) return false;
     const VctCascade &c = mVctCascades[idx];
@@ -6198,7 +6530,6 @@ void PhotonComponent::planCascades(const Ogre::Vector3 &eyeCamPos, FrameWork &w)
             abortScroll(size_t(forced));
             c.pending = 1;
             c.pendingReason = GiStaleReason::Refresh;
-            c.editRegionAll = true;   // a rebuild with no box: its inner re-march is whole
         }
     }
     // THE AGES (decision 7): a cascade that owes nothing has none; one the dirty path marked since the
@@ -6550,8 +6881,6 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             c.pendingSince = giWriterFrame();
         } else {
             c.pending = 0;
-            c.editRegionBoxes.clear();   // the rebuild answered the edit's region (R4)
-            c.editRegionAll = false;
             // Owes nothing: the age goes with the debt (a mark later this frame starts a new one - the
             // dirty path raises `pending` before the scheduler's own stamping can see it was clear).
             c.pendingSince = 0;
@@ -6582,19 +6911,42 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
     // ---- 3. THE READINGS THAT LANDED, BEFORE THIS FRAME'S LIGHT WORK --------------------------------------------
     harvestCommitCounts();
 
-    // ---- 4. THE FRAME'S LIGHT CHANGES AND THE FEEDBACK (PHOTON-7 stage 4) ------------------------------------------
-    // After the rebuilds and the commits (their injections are this frame's), so a lamp's delta never lights voxels a
-    // rebuild replaces and the feedback's pass sees every direct term the frame changed. (THE CHAIN'S SETTLE, the light
-    // tick and the drag's closing whole tick are deleted with the Jacobi restart they existed for: no cascade is ever
-    // off a fixed point the feedback does not converge - a rebuild's bricks resume, a commit's slab and band resume, a
-    // lamp's spheres resume.)
-    relightAndFeedback();
+    // ---- 4. THE REST IS THE FRAME'S LATE WORK (PHOTON-7 stage 8A, the lead's ruling (a)): the region rebuilds, the light
+    // changes and the feedback run after the GPU scene's commit of THIS frame (recordLate) - the store holds this
+    // frame's geometry.
+    mLateOwed = true;
+    mLateSpent = spent;
+}
 
+// THE FRAME'S LATE GI WORK (PHOTON-7 stage 8A, A2's ruling (a): physics - the store holds THIS frame's geometry). The GI
+// step (engine.plan) records the slots' work against the instance table the LAST frame committed; the frame's own
+// table - its transforms, its flags, the skin pass's poses - is committed after it (OgreEngine::applyShadowCacheDirties:
+// the compose, the commit, the ray tier, the movers listed), and THIS runs after that, before the region list closes
+// (OgreEngine, closeGiRegions): the region rebuilds (every mover listed this frame, every edit marked this frame - their
+// table is this one), then the frame's light changes and the feedback (after the rebuilds: a lamp's delta never lights
+// voxels a rebuild replaces, and the feedback's pass sees every direct term the frame changed), then the drag's
+// photographs. Only on a frame whose GI step ran (mLateOwed).
+void PhotonComponent::recordLate() {
+    if (!mLateOwed) return;
+    mLateOwed = false;
+    GiRegion region(RegionKind::Compute);
+    monitor::CacheScope lateRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.late", mRoot->getRenderSystem(), this);
+    lateRow.markAggregate();   // its dispatches no child row names file their own (photonDispatch)
+    {
+        monitor::PhaseScope phase("gi.regions", mRoot->getRenderSystem());
+        serviceRegions();
+    }
+    {
+        monitor::PhaseScope phase("gi.light", mRoot->getRenderSystem());
+        // (THE CHAIN'S SETTLE, the light tick and the drag's closing whole tick are deleted with the Jacobi restart they
+        // existed for: no cascade is ever off a fixed point the feedback does not converge - a rebuild's bricks resume, a
+        // commit's slab and band resume, a lamp's spheres resume.)
+        relightAndFeedback();
+    }
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once the re-voxelisations have drained and the
-    // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain that has
-    // been re-voxelised and whose light has converged; this is the first frame a capture can hold the room as it actually
-    // is. The sweep drains at the tier's own budget like every other staleness - a rate, not a hitch. One per gesture.
-    if (mDragSettleOwed && !spent) {
+    // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain whose light
+    // has converged; this is the first frame a capture can hold the room as it actually is. One per gesture.
+    if (mDragSettleOwed && !mLateSpent) {
         bool pending = feedbackOwed();
         for (size_t i = 0; i < mVctCascades.size() && !pending; ++i) pending = mVctCascades[i].pending != 0;
         if (!pending) {
@@ -6602,6 +6954,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             staleProbeGrid(GiStaleReason::Mobility);
         }
     }
+    if (!computeRegionDispatched() && !lateRow.submittedInside()) lateRow.cancel();
 }
 
 // THE FRAME'S LIGHT CHANGES, RELIT; THE FEEDBACK'S PASS (PHOTON-7 stage 4; SPECS/PHOTON_7_SPEC.md stage 4, L2, L3).
@@ -6643,6 +6996,124 @@ void PhotonComponent::oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *pa
     if (part) c.relightNextBox.merge(*part);
 }
 
+// THE RELIGHT'S FRAME COUNT (GiQualityFacts::lightWorkFrames: the chain's voxels over that many frames) and its FLOORS
+// (every owed cascade's credit grows by half its own share of the count on a frame it can PAY - never while its delta
+// shader builds, never on a refused injection: stage 5's read B1, a credit banked over a 40-frame shader wait relit the
+// whole chain in one frame - up to ONE 4-plane slab of its owed box or one floor, the larger); the pool spent outermost
+// first is the count less those floors. One function: the frame's relights and the region rebuilds that carry a slab
+// (serviceRegions) read the same law.
+void PhotonComponent::relightBudgetNow(unsigned long long floorOf[8], unsigned long long &budget,
+                                       unsigned long long &left) const {
+    unsigned long long chainVoxels = 0ull;
+    for (const VctCascade &c : mVctCascades)
+        if (c.lighting && c.built) chainVoxels += (unsigned long long)c.resolution * c.resolution * c.resolution;
+    const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                                                      : GiViewProfile::Desktop)
+                                                  .lightWorkFrames);
+    budget = (chainVoxels + shareFrames - 1u) / shareFrames;
+    unsigned long long floors = 0ull;
+    for (size_t i = 0; i < mVctCascades.size(); ++i) {
+        const VctCascade &c = mVctCascades[i];
+        if (i < 8u) floorOf[i] = 0ull;
+        if (!c.lighting || !c.built || !c.relightOwed) continue;
+        const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
+        const unsigned long long floor = chainVoxels ? budget * v / (2ull * chainVoxels) : 0ull;
+        if (i < 8u) floorOf[i] = floor;
+        floors += floor;
+    }
+    left = floors < budget ? budget - floors : 0ull;
+}
+
+// (the round is done: the next one begins from what the changes during it touched, or none is owed)
+void PhotonComponent::relightAnswered(VctCascade &c) {
+    const bool next = c.relightNextOwed;
+    c.relightOwed = next;
+    c.relightWhole = next && c.relightNextWhole;
+    c.relightBox = next ? c.relightNextBox : Ogre::Aabb::BOX_NULL;
+    c.relightNextOwed = c.relightNextWhole = false;
+    c.relightNextBox = Ogre::Aabb::BOX_NULL;
+    c.relightCursor = std::numeric_limits<float>::quiet_NaN();
+    c.relightSwept = 0;
+}
+
+// THE SLAB A CASCADE'S OWED RELIGHT PAYS THIS FRAME (the relight's budget law, one text): its owed cells (the box or the
+// whole volume, aligned to the injection's 4^3 groups) from the cursor - a WORLD z (PHOTON-7 stage 5's read A4: a
+// scroll shifts the planes by 2 (mod 4) cells, and the old count took the 4-aligned slab's start for the cursor and
+// closed the round 2 planes short) - in whole planes of 4 (a slab may start up to 2 planes before the cursor, relit
+// again, exact by the delta) up to the box's end, the next frame on from its end; the round counts the planes PAST THE
+// CURSOR only; its credit first, then the pool `left`. A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a
+// scroll's commit does: the delta injection's permutation is the background compiler's while it builds - the relight
+// stays owed a frame, never compiled in the frame (shader.async_after_open: 673 ms on the UI thread); such a frame
+// cannot pay and its floor accrues nothing (the test door gi.relightShaderHold holds every cascade there).
+PhotonComponent::RelightTake PhotonComponent::takeRelightSlab(size_t i, unsigned long long floorHere,
+                                                              unsigned long long left, bool shaderHold, RelightSlab &s) {
+    VctCascade &c = mVctCascades[i];
+    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    const Ogre::Vector3 corner = box.getMinimum();
+    const float cell = c.cell();
+    const int res = c.resolution;
+    for (int a = 0; a < 3; ++a) { s.lo[a] = 0; s.hi[a] = res; }
+    if (!c.relightWhole) {
+        bool empty = false;
+        for (int a = 0; a < 3; ++a) {
+            const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
+            const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
+            if (h <= l) empty = true;
+            s.lo[a] = l / 4 * 4;
+            s.hi[a] = std::min(res, (h + 3) / 4 * 4);
+        }
+        if (empty) { relightAnswered(c); return RelightTake::Answered; }
+    }
+    s.area = (unsigned long long)(s.hi[0] - s.lo[0]) * (unsigned long long)(s.hi[1] - s.lo[1]);
+    s.span = s.hi[2] - s.lo[2];
+    s.cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : s.lo[2];
+    if (s.cursorPlane < s.lo[2] || s.cursorPlane >= s.hi[2]) s.cursorPlane = s.lo[2];
+    s.start = std::max(s.lo[2], s.cursorPlane / 4 * 4);
+    const bool shaderWaits = (commitShaderAsync() && !c.lighting->commitLightReady()) || shaderHold;
+    // THE CREDIT THIS FRAME: the floor added on a frame that can pay, capped at one 4-plane slab of the owed box or one
+    // floor, the larger (a frame always spends its own floor; nothing banks past it)
+    const unsigned long long cap = std::max(4ull * s.area, floorHere);
+    s.credit = shaderWaits ? std::min(c.relightCredit, cap) : std::min(c.relightCredit + floorHere, cap);
+    c.relightSlab = cap;
+    const unsigned long long avail = s.credit + left;
+    int planes = int(std::min<unsigned long long>((unsigned long long)(s.hi[2] - s.start),
+                                                  s.area ? avail / s.area / 4ull * 4ull : 0ull));
+    planes = std::min(planes, (s.span - c.relightSwept + (s.cursorPlane - s.start) + 3) / 4 * 4);
+    if (planes < 4 || !s.area) {   // its credit grows (capped): a later frame pays the slab
+        c.relightCredit = s.credit;
+        ++c.relightCarried;
+        return RelightTake::Carry;
+    }
+    s.end = std::min(s.hi[2], s.start + planes);
+    if (shaderWaits) {
+        if (!shaderHold) ++mCommitShaderWaits;
+        return RelightTake::ShaderWait;
+    }
+    return RelightTake::Pay;
+}
+
+// THE SLAB PAID (its injection landed): the credit spent first, the relit voxels counted, the round's planes swept past the
+// cursor - the round answered at its span, else the cursor moved on. Returns what it took of the POOL.
+unsigned long long PhotonComponent::paidRelightSlab(size_t i, const RelightSlab &s) {
+    VctCascade &c = mVctCascades[i];
+    const float cell = c.cell();
+    const Ogre::Vector3 corner = Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)).getMinimum();
+    ++c.relights;
+    const unsigned long long spent = s.area * (unsigned long long)(s.end - s.start);
+    const unsigned long long fromCredit = std::min(spent, s.credit);
+    c.relightCredit = s.credit - fromCredit;
+    c.relightVoxels += spent;
+    c.relightSwept += std::max(0, s.end - s.cursorPlane);
+    if (c.relightSwept >= s.span) {
+        ++c.relightRounds;
+        relightAnswered(c);
+    } else {
+        c.relightCursor = corner.z + float(s.end >= s.hi[2] ? s.lo[2] : s.end) * cell;
+        ++c.relightCarried;
+    }
+    return spent - fromCredit;
+}
+
 void PhotonComponent::relightAndFeedback() {
     if (mVctCascades.empty() || !mVctCascades[0].built) return;
     JAH_TRY {
@@ -6681,114 +7152,33 @@ void PhotonComponent::relightAndFeedback() {
         //     the count left pays for (at least one slab on a frame nothing else spent it), and the rest carried. A
         //     voxel's delta reads its old direct term from the store, so a plane relit twice (a grown box re-swept) is
         //     exact.
-        unsigned long long chainVoxels = 0ull;
-        for (const VctCascade &c : mVctCascades)
-            if (c.lighting && c.built) chainVoxels += (unsigned long long)c.resolution * c.resolution * c.resolution;
-        const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
-                                                                                          : GiViewProfile::Desktop)
-                                                      .lightWorkFrames);
-        const unsigned long long relightBudget = (chainVoxels + shareFrames - 1u) / shareFrames;
-        // THE FLOORS (GiQualityFacts::lightWorkFrames' law): every owed cascade's credit grows by half its own share of
-        // the count on a frame it can PAY (below: never while its delta shader builds, never on a refused injection -
-        // stage 5's read B1: a credit banked over a 40-frame shader wait relit the whole chain in one frame), up to ONE
-        // 4-plane slab of its owed box or one floor, the larger; the pool spent outermost first is the count less those
-        // floors
-        unsigned long long floors = 0ull;
         unsigned long long floorOf[8] = { 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull };
-        for (size_t i = 0; i < mVctCascades.size(); ++i) {
-            VctCascade &c = mVctCascades[i];
-            if (!c.lighting || !c.built || !c.relightOwed) {
-                c.relightCredit = 0ull;
-                continue;
-            }
-            const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
-            const unsigned long long floor = chainVoxels ? relightBudget * v / (2ull * chainVoxels) : 0ull;
-            if (i < 8u) floorOf[i] = floor;
-            floors += floor;
-        }
-        unsigned long long relightLeft = floors < relightBudget ? relightBudget - floors : 0ull;
+        unsigned long long relightBudget = 0ull, relightLeft = 0ull;
+        relightBudgetNow(floorOf, relightBudget, relightLeft);
+        for (VctCascade &c : mVctCascades)
+            if (!c.lighting || !c.built || !c.relightOwed) c.relightCredit = 0ull;
+        // (what the frame's region rebuilds paid of the pool already: their injections carried the slabs, serviceRegions)
+        if (mRelightRegionFrame == frame) relightLeft -= std::min(relightLeft, mRelightRegionSpent);
         mRelightCount = relightBudget;
         const bool shaderHold = mEngine && mEngine->armRegistry().on(ArmId::GiRelightShaderHold);
         bool sceneGraphCurrent = false;
         for (size_t i = n; i-- > 0;) {
             VctCascade &c = mVctCascades[i];
             if (!c.relightOwed || !c.lighting || !c.built) continue;
-            const auto answered = [&c]() {
-                // (the round is done: the next one begins from what the changes during it touched, or none is owed)
-                const bool next = c.relightNextOwed;
-                c.relightOwed = next;
-                c.relightWhole = next && c.relightNextWhole;
-                c.relightBox = next ? c.relightNextBox : Ogre::Aabb::BOX_NULL;
-                c.relightNextOwed = c.relightNextWhole = false;
-                c.relightNextBox = Ogre::Aabb::BOX_NULL;
-                c.relightCursor = std::numeric_limits<float>::quiet_NaN();
-                c.relightSwept = 0;
-            };
             if (injectedThisFrame(i)) {
-                if (c.injectedWholeFrame == frame) answered();   // a whole volume's injection read the lights as they are
+                if (c.injectedWholeFrame == frame) relightAnswered(c);   // a whole volume's injection read the lights as they are
                 continue;
             }
+            RelightSlab slab;
+            const RelightTake take = takeRelightSlab(i, i < 8u ? floorOf[i] : 0ull, relightLeft, shaderHold, slab);
+            if (take != RelightTake::Pay) continue;
             Ogre::PhotonCommitLight d;
             d.delta = true;
             for (int a = 0; a < 3; ++a) d.keepHi[a] = Ogre::uint32(c.resolution);
-            // THE OWED CELLS: the box (or the whole volume), aligned to the injection's 4^3 groups
-            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
-            const Ogre::Vector3 corner = box.getMinimum();
-            const float cell = c.cell();
-            const int res = c.resolution;
-            int lo[3] = { 0, 0, 0 }, hi[3] = { res, res, res };
-            if (!c.relightWhole) {
-                bool empty = false;
-                for (int a = 0; a < 3; ++a) {
-                    const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
-                    const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
-                    if (h <= l) empty = true;
-                    lo[a] = l / 4 * 4;
-                    hi[a] = std::min(res, (h + 3) / 4 * 4);
-                }
-                if (empty) { answered(); continue; }
-            }
-            // THE SLAB THIS FRAME PAYS FOR: from the cursor - a WORLD z (PHOTON-7 stage 5's read A4: a scroll shifts the
-            // planes by 2 (mod 4) cells, and the old count took the 4-aligned slab's start for the cursor and closed the
-            // round 2 planes short) - in whole planes of 4 (the injection's 4^3 groups: a slab may start up to 2 planes
-            // before the cursor, relit again, exact by the delta) up to the box's end, the next frame on from its end.
-            // The round counts the planes PAST THE CURSOR only. Its credit first, then the pool.
-            const unsigned long long area = (unsigned long long)(hi[0] - lo[0]) * (unsigned long long)(hi[1] - lo[1]);
-            const int span = hi[2] - lo[2];
-            int cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
-            if (cursorPlane < lo[2] || cursorPlane >= hi[2]) cursorPlane = lo[2];
-            const int start = std::max(lo[2], cursorPlane / 4 * 4);
-            // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
-            // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
-            // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
-            // open compiled VCT/LightInjection on the UI thread, 673 ms). Such a frame cannot pay: its floor accrues
-            // nothing (the test door gi.relightShaderHold holds every cascade there).
-            const bool shaderWaits = (commitShaderAsync() && !c.lighting->commitLightReady()) || shaderHold;
-            // THE CREDIT THIS FRAME: the floor added on a frame that can pay, capped at one 4-plane slab of the owed box
-            // or one floor, the larger (a frame always spends its own floor; nothing banks past it)
-            const unsigned long long floorHere = i < 8u ? floorOf[i] : 0ull;
-            const unsigned long long cap = std::max(4ull * area, floorHere);
-            const unsigned long long credit =
-                shaderWaits ? std::min(c.relightCredit, cap) : std::min(c.relightCredit + floorHere, cap);
-            c.relightSlab = cap;
-            const unsigned long long avail = credit + relightLeft;
-            int planes = int(std::min<unsigned long long>((unsigned long long)(hi[2] - start),
-                                                          area ? avail / area / 4ull * 4ull : 0ull));
-            planes = std::min(planes, (span - c.relightSwept + (cursorPlane - start) + 3) / 4 * 4);
-            if (planes < 4 || !area) {   // its credit grows (capped): a later frame pays the slab
-                c.relightCredit = credit;
-                ++c.relightCarried;
-                continue;
-            }
-            const int end = std::min(hi[2], start + planes);
-            d.injectLo[0][0] = Ogre::uint32(lo[0]); d.injectHi[0][0] = Ogre::uint32(hi[0]);
-            d.injectLo[0][1] = Ogre::uint32(lo[1]); d.injectHi[0][1] = Ogre::uint32(hi[1]);
-            d.injectLo[0][2] = Ogre::uint32(start); d.injectHi[0][2] = Ogre::uint32(end);
+            d.injectLo[0][0] = Ogre::uint32(slab.lo[0]); d.injectHi[0][0] = Ogre::uint32(slab.hi[0]);
+            d.injectLo[0][1] = Ogre::uint32(slab.lo[1]); d.injectHi[0][1] = Ogre::uint32(slab.hi[1]);
+            d.injectLo[0][2] = Ogre::uint32(slab.start); d.injectHi[0][2] = Ogre::uint32(slab.end);
             d.numInjectBoxes = 1u;
-            if (shaderWaits) {
-                if (!shaderHold) ++mCommitShaderWaits;
-                continue;
-            }
             if (!sceneGraphCurrent) {
                 giUpdateSceneGraph(mSceneMgr);   // an injection reads the lights' DERIVED poses
                 sceneGraphCurrent = true;
@@ -6802,22 +7192,8 @@ void PhotonComponent::relightAndFeedback() {
                 mInjectingRelight = false;
                 row.setUnits(ok ? 1u : 0u);
             }
-            if (ok) {   // (a refused injection keeps the credit it had: the frame paid nothing, so it accrued nothing)
-                ++c.relights;
-                const unsigned long long spent = area * (unsigned long long)(end - start);
-                const unsigned long long fromCredit = std::min(spent, credit);
-                c.relightCredit = credit - fromCredit;
-                c.relightVoxels += spent;
-                relightLeft -= std::min(relightLeft, spent - fromCredit);
-                c.relightSwept += std::max(0, end - cursorPlane);
-                if (c.relightSwept >= span) {
-                    ++c.relightRounds;
-                    answered();
-                } else {
-                    c.relightCursor = corner.z + float(end >= hi[2] ? lo[2] : end) * cell;
-                    ++c.relightCarried;
-                }
-            }
+            // (a refused injection keeps the credit it had: the frame paid nothing, so it accrued nothing)
+            if (ok) relightLeft -= std::min(relightLeft, paidRelightSlab(i, slab));
         }
         // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi, set to N): the innermost N cascades (every one when N
         // is the chain's count or more) restarted from their direct terms where it comes on, then every brick of them a
@@ -6838,7 +7214,23 @@ void PhotonComponent::relightAndFeedback() {
             accumulateCardIndirect(nullptr);
         }
         mGiFeedbackForceAll = false;
+        mRegionActivations.clear();   // (the frame's: spent by its pass)
     } JAH_CATCH(mError, );
+    mRegionActivations.clear();
+}
+
+// THE BRICKS A CHANGE OF GEOMETRY REACHES BY OCCLUSION (PHOTON-7 stage 8A). A brick at distance d from a box sees it
+// under a solid angle of at most A / d^2 (A = the sum of the box's three face areas: the most any projection of it
+// covers), and whatever the box now blocks or no longer blocks moves the brick's gathered irradiance by at most that
+// solid angle's cosine-weighted share, (A / d^2) / pi, of an incident field as bright as its mean (E / pi a steradian)
+// - ONE CODE (1 % of the brick's own radiance) at d = sqrt(A / (0.01 pi)). A 1 m cube reaches 9.8 m, a 2.5 x 2.5 x 10 m
+// bus 42 m: the box grown by that distance (in every direction: the field is the hemisphere's).
+static Ogre::Aabb editActivationBox(const Ogre::Aabb &b) {
+    if (!(b.mHalfSize.x >= 0.0f) || !std::isfinite(b.mHalfSize.x + b.mHalfSize.y + b.mHalfSize.z)) return b;
+    const Ogre::Vector3 e = b.getSize();
+    const double area = double(e.x) * double(e.y) + double(e.y) * double(e.z) + double(e.x) * double(e.z);
+    const float reach = float(std::sqrt(std::max(area, 0.0) / (0.01 * M_PI)));
+    return Ogre::Aabb::newFromExtents(b.getMinimum() - Ogre::Vector3(reach), b.getMaximum() + Ogre::Vector3(reach));
 }
 
 void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_t forceInner) {
@@ -6852,6 +7244,7 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         if (!c.lighting || !c.built) continue;
         Ogre::PhotonFeedbackActivation &act = acts[i];
         act.all = (forceAll && i < forceInner) || c.fbForce;
+        if (act.all) mFbEpisodeStill = true;   // (a forced pass is the chain's: stage 8A)
         if (!act.all) {
             // THE REGIONS THAT MEET IT: a lamp's spheres (its direct changed there; whatever sees those walls changes) and
             // an edit's box. (A commit's Slab boxes are not activations - the commit's changed direct terms are the mask's
@@ -6862,15 +7255,30 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
             const int dims = (c.resolution + 7) / 8;
             Ogre::Aabb all = Ogre::Aabb::BOX_NULL;
             bool collapse = false;
-            for (const RegionEntry &e : mRegionsOpen) {
+            // (the frame's region rebuilds' changed boxes join the list's lamps and edits as activations; a rebuild's own
+            // listed cells do not activate - mRegionActivations' note)
+            std::vector<RegionEntry> sources;
+            sources.reserve(mRegionsOpen.size() + mRegionActivations.size());
+            for (const RegionEntry &e : mRegionsOpen)
+                if (!e.listedOnly) sources.push_back(e);
+            for (const RegionActivation &a : mRegionActivations)
+                sources.push_back(RegionEntry{ a.box, GiRegionKind::Edit, 0u, a.mover, false });
+            for (const RegionEntry &e : sources) {
                 if (e.kind != GiRegionKind::Lamp && e.kind != GiRegionKind::Edit) continue;
-                if (!box.intersects(e.box)) continue;
-                all.merge(e.box);
+                // AN EDIT'S BOX IS GEOMETRY, AND GEOMETRY OCCLUDES (PHOTON-7 stage 8A): what the changed cells now block
+                // or no longer block - the sky, another wall's bounce - changes the gather of every brick that SEES them,
+                // and a stopped brick's resume test bounds the radiance its sources move, not a visibility its sources
+                // gained or lost. The bricks it activates are those that see the box under a solid angle worth a code of
+                // their own radiance (editActivationBox): a mover in the store darkens the floor around it.
+                const Ogre::Aabb act0 = e.kind == GiRegionKind::Edit ? editActivationBox(e.box) : e.box;
+                if (!box.intersects(act0)) continue;
+                if (!e.mover) mFbEpisodeStill = true;   // (the chain's activation: stage 8A's contract)
+                all.merge(act0);
                 if (act.numBoxes >= Ogre::PhotonFeedbackActivation::kMaxBoxes) { collapse = true; continue; }
                 Ogre::uint32 *lo = act.lo[act.numBoxes], *hi = act.hi[act.numBoxes];
                 for (int a = 0; a < 3; ++a) {
-                    lo[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::floor((e.box.getMinimum()[a] - corner[a]) / brick)))));
-                    hi[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::ceil((e.box.getMaximum()[a] - corner[a]) / brick)))));
+                    lo[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::floor((act0.getMinimum()[a] - corner[a]) / brick)))));
+                    hi[a] = Ogre::uint32(std::min(dims, std::max(0, int(std::ceil((act0.getMaximum()[a] - corner[a]) / brick)))));
                 }
                 ++act.numBoxes;
             }
@@ -7081,14 +7489,22 @@ void PhotonComponent::harvestFeedback() {
             c.fbResumes += r.resumes;
             c.fbSaturated += r.saturated;
             c.fbCarried += r.carried;
+            if (r.regionPasses) {   // (the passes the frame's region rebuilds took before their convergence stopped them)
+                c.regionBouncePasses += r.regionPasses;
+                c.regionBounceLast = r.regionPasses;
+            }
             ++c.fbReadings;
         }
     }
     // (the chain's rest is counted; the field re-integrates nothing at it - its marks took every move as it came:
     // PHOTON-7 stage 5, 5-4, the rest's whole re-integration deleted with gi.hold_after_stop's frame-9 wave)
-    const bool owed = feedbackOwed();
+    // THE REST IS THE CHAIN'S EPISODE's (stage 8A, THE CONTRACT): a movers' episode coming to rest moves no count - and
+    // the episode's owner is reset only here, at its OWN rest (the feedback owing nothing: no activation unanswered, the
+    // GPU's active count 0 in every cascade), never by a frame count.
+    const bool owed = stillFeedbackOwed();
     if (mGiFeedbackOwedLast && !owed) ++mGiFeedbackRests;
     mGiFeedbackOwedLast = owed;
+    if (!feedbackOwed()) mFbEpisodeStill = false;
 }
 
 // The FAILED-BUILD path: nothing is bound yet (mVctVoxelizer/mVctLighting are
@@ -8134,7 +8550,8 @@ bool PhotonComponent::giInputsOwed() const {
 // THE CHAIN'S OWN OWED WORK (GiStatus::chainOwed, PHOTON-7 stage 1's voxel door): a rebuild, a re-voxelisation or an
 // injection the cascades still owe - the field's integration aside.
 bool PhotonComponent::chainWorkOwed() const {
-    bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty();
+    // (an edit's region rebuild not served yet is a rebuild owed; a MOVER's is not chain work - THE CONTRACT, stage 8A)
+    bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty() || stillRegionOwed();
     for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
     const bool rebuildPending = mGiCachesDirty || mGiChainShapeDirty ||
                                 mGiBuildStage != GiBuildStage::Idle || cascadePending;
@@ -8144,7 +8561,32 @@ bool PhotonComponent::chainWorkOwed() const {
     const bool resolvePending = mGiPlan.pendingRefresh && mGi.updateBudget > 0;
     // ...AND THE FEEDBACK'S OWED WORK (PHOTON-7 stage 4): a relight owed (a lamp's delta, the sun's, the host's), or a
     // cascade whose bricks are active by its last landed reading - or activated since: its bounces are still converging.
-    return rebuildPending || resolvePending || feedbackOwed();
+    // THE CHAIN'S EPISODE ONLY (PHOTON-7 stage 8A, THE CONTRACT): an episode of mover activations alone is the movers'.
+    return rebuildPending || resolvePending || stillFeedbackOwed();
+}
+
+// THE CHAIN'S OWN FEEDBACK WORK (PHOTON-7 stage 8A; THE CONTRACT, the lead's ruling 2026-10-28): what the feedback owes,
+// while its episode is the chain's (mFbEpisodeStill: one activation since its last rest came from anything but a mover's
+// region rebuild) - and a relight owed, which no mover ever owes (a lamp's spheres, the sun, the host's whole relight,
+// an outer whole rebuild's inner re-march: the chain's by construction), before its injection has tagged the episode.
+// An episode of mover activations alone owes the chain nothing: a mover frame moves no view-wide rest.
+// (THE LIMIT, named: a still change during continuous mover motion makes the episode the chain's until the GPU's
+// active count reaches 0 everywhere, which a mover that never stops holds off - a later rest, never a false one.)
+bool PhotonComponent::stillFeedbackOwed() const {
+    if (mGiRelightAllOwed || mGiFeedbackForceAll) return !mVctCascades.empty();
+    for (const VctCascade &c : mVctCascades)
+        if (c.relightOwed) return true;
+    return mFbEpisodeStill && feedbackOwed();
+}
+
+bool PhotonComponent::stillRegionOwed() const {
+    for (const VctCascade &c : mVctCascades) {
+        for (const VctCascade::RegionOwed &r : c.regionOwed)
+            if (!r.mover) return true;
+        for (const VctCascade::MarchOwed &m : c.marchOwed)
+            if (!m.mover) return true;
+    }
+    return false;
 }
 
 // THE FEEDBACK OWES CASCADE `c` WORK (PHOTON-7 stage 4): an activation the readings have not answered yet (a frame's

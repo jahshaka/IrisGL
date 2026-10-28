@@ -453,11 +453,11 @@ constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
 // bit cannot (the any-bit test above), so a mover simply stops carrying the bit
 // every capture pass asks for:
 //   * OUT, with no mask change anywhere: the reflection-probe faces
-//     (`visibility_mask 0x1` in JahshakaPcc.compositor), the PROBE-kind shadow node
-//     (shadowCasterChannels), and — through the flags, not through a mask —
-//     Instant Radiosity's trace and every GI gather that keys on
-//     kGiGeometryBit, which a movable item never carries either (it is LIT by
-//     the room's GI, it just does not voxelize or bounce into it).
+//     (`visibility_mask 0x1` in JahshakaPcc.compositor) and the PROBE-kind shadow
+//     node (shadowCasterChannels). (It IS GI geometry - kGiGeometryBit kept,
+//     PHOTON-7 stage 8A: the voxel store holds it at its live pose, re-voxelised
+//     by region each frame it moves; the still world's own bookkeeping - the
+//     cards, the lit volume, the geometry signature - keys on this channel.)
 //   * IN, because these passes ask for the channel explicitly: the planar
 //     reflection pass (OgrePlanar.cpp) and the VIEW and REFLECT shadow nodes
 //     (shadowCasterChannels again). A mover is therefore reflected by the
@@ -467,13 +467,9 @@ constexpr Ogre::uint32 kDistortionBit  = 1u << 4;
 //     the two overlay passes mask with RESERVED_VISIBILITY_FLAGS & ~kDistortion
 //     (overlayVisibilityMask), which contains this bit.
 //
-// THE GI CLASS IS THE EXPENSIVE HALF, THE CHANNEL IS FREE. Turning
-// kGiGeometryBit off is a GI edge (a from-scratch rebuild, OgreScene::
-// setNodeMovable); switching kVisibleBit for kMovableBit costs one
-// setVisibilityFlags. That difference is what makes the play-time SOFT
-// promotion (owner decision O3) possible: it changes the channel and the
-// gathers and deliberately does NOT invalidate, leaving the object's old bounce
-// light behind as a ghost until play stops, for no hitch at all.
+// THE CHANNEL IS FREE: switching kVisibleBit for kMovableBit costs one
+// setVisibilityFlags and no GI work (a mover and a still are both GI geometry,
+// PHOTON-7 stage 8A - the play-time promotion's ghost is gone with the edge).
 constexpr Ogre::uint32 kMovableBit     = 1u << 5;
 // THE SUN-DISC CHANNEL (SPECS/SKY_LIGHT_SPEC.md §3, owner pick 4). The disc
 // quad carries this bit INSTEAD OF kVisibleBit — the fourth use of the
@@ -4801,9 +4797,17 @@ public:
     /// THE CHANGED-REGION LIST'S CLOSE (PHOTON-7 stage 3): once a frame per drawn scene, before the frame's submit
     /// (renderOneFrame) - every producer of the frame has appended by then.
     void closeGiRegions() { mPhoton.closeRegions(); }
+    /// THE FRAME'S LATE GI WORK (PHOTON-7 stage 8A): after the GPU scene's commit, before the list closes.
+    void runLateGi() { mPhoton.recordLate(); }
     /// ...and the ray tier's producer (OgreEngine::listRayMovers, after the GPU scene's commit and the skin pass): one
     /// moved or posed slot's swept box, and whether it casts shadows.
-    void listGiMover(const Ogre::Aabb &swept, bool casts) { mPhoton.listMover(swept, casts); }
+    /// (`flags`: the slot's GpuInstanceFlag word - a kGpuMover slot that is GI-visible, or hidden, is a VOXEL mover:
+    /// its swept box is the next writer point's region rebuild, PHOTON-7 stage 8A)
+    void listGiMover(const Ogre::Aabb &swept, uint32_t flags) {
+        const bool voxel = (flags & detail::kGpuMover) != 0u &&
+                           ((flags & detail::kGpuGiVisible) != 0u || (flags & detail::kGpuVisible) == 0u);
+        mPhoton.listMover(swept, (flags & detail::kGpuCaster) != 0u, voxel);
+    }
     /// THE SKY'S PEAK CHANNEL as the GI reads it (the list's restart test): the ambient SH's constant band - the sky
     /// lit by its Sky Light, or the host's own ambient - 0 before one was given.
     float ambientPeakForGi() const {
@@ -5074,7 +5078,7 @@ public:
     void setNodeProbeGridExcluded(NodeId id, bool excluded) override;
     bool nodeProbeGridExcluded(NodeId id) const override;
     void setNodeHelper(NodeId id, bool helper) override;
-    void setNodeMovable(NodeId id, bool movable, MobilityChange change) override;
+    void setNodeMovable(NodeId id, bool movable) override;
     bool nodeMovable(NodeId id) const override;
     MobilityStatus mobilityStatus() const;
     bool nodeHelper(NodeId id) const override;
@@ -5588,17 +5592,6 @@ private:
         /// cascades pay ONE re-voxelisation at each end of the gesture instead
         /// of one per frame of it.
         bool                      dragMover = false;
-        /// THE SOFT PROMOTION'S HEALING KEY (owner decision O3). While a node is
-        /// softly promoted it carries no GI bit but its voxels were never
-        /// cleared — that stale bounce IS the documented ghost. If a
-        /// FROM-SCRATCH GI build happens meanwhile (a settle after a light edit,
-        /// a material change, another object's classification), the voxels are
-        /// rebuilt WITHOUT it and the ghost becomes a hole that would outlive
-        /// play. So the promotion records the rebuild count it was made at, and
-        /// the push that clears it invalidates when that count has moved.
-        /// Meaningful only while `movable && mobilitySoft`.
-        bool                      mobilitySoft = false;
-        unsigned long long        mobilitySoftRebuilds = 0;
         /// LIGHTING CHANNELS, object side (Scene::setNodeLightMask). Kept here
         /// rather than read back off the Item because the Item is REBUILT on
         /// every attachMesh/attachSkinnedMesh (a material swap destroys and
@@ -6954,7 +6947,7 @@ public:
     void bindGiIfd(Ogre::PhotonIrradianceField *ifd);
     void bindGiPcc(Ogre::ParallaxCorrectedCubemapBase *pcc, float minDist, float maxDist);
     bool unbindGiPcc(const Ogre::ParallaxCorrectedCubemapBase *pcc);   ///< true when it was bound
-    bool demoteDragMover(NodeId id, Ogre::Aabb &rest);
+    bool demoteDragMover(NodeId id);
     bool sceneLoading() const { return mSceneLoading; }
     FramePace framePace() const { return mFramePace; }
     bool inStructureEdit() const { return mStructureEditDepth > 0; }
@@ -7385,12 +7378,6 @@ private:
     /// The movement scan has run at least once: before that, every item is
     /// seen for the first time and none of them is an arrival.
     bool mGiScannedOnce = false;
-    /// How many of those rebuilds a MOBILITY change caused (MobilityStatus::
-    /// mobilityRebuilds). Its own counter and not a share of mGiRebuilds
-    /// because the question it answers is "is my classification costing me
-    /// rebuilds?", which a total cannot: every other rebuild reason (a mode
-    /// change, a destroyed object, a quality dial) is mixed into that one.
-    unsigned long long mMobilityRebuilds = 0;
     /// THE RUNNING TOTALS (U3 read 12(b)): what every node's Counted adds up to; instances by distinct skeleton.
     MobilityStatus mMobilityCounts;
     RigStats       mRigCounts;

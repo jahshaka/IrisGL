@@ -342,10 +342,10 @@ bool peakJumped(float before, float now) {
 }
 }   // namespace
 
-void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask) {
+void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask, bool mover) {
     if (regionEmpty(box)) return;
     if (mRegionsOpen.size() < kGiRegionCap) {
-        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
+        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
         return;
     }
     // AT THE CAP THE LIST MERGES, IT NEVER GIVES UP (the dirty path's lesson, PhotonComponent.h's seventeen crates: an
@@ -363,6 +363,7 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (best < mRegionsOpen.size()) {
         mRegionsOpen[best].box.merge(box);
         mRegionsOpen[best].mask |= cascadeMask;
+        mRegionsOpen[best].mover = mRegionsOpen[best].mover && mover;   // (a merge with the chain's is the chain's)
         ++mRegionMergesOpen;
         return;
     }
@@ -381,15 +382,35 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (bi < mRegionsOpen.size()) {
         mRegionsOpen[bi].box.merge(mRegionsOpen[bj].box);
         mRegionsOpen[bi].mask |= mRegionsOpen[bj].mask;
+        mRegionsOpen[bi].mover = mRegionsOpen[bi].mover && mRegionsOpen[bj].mover;
         mRegionsOpen.erase(mRegionsOpen.begin() + std::ptrdiff_t(bj));
         ++mRegionMergesOpen;
     }
-    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
+    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
 }
 
-void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts) {
+void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts, bool voxel) {
     if (regionEmpty(swept)) return;
     appendRegion(GiRegionKind::Mover, swept);
+    // A MOVER IS GI GEOMETRY (PHOTON-7 stage 8A): its swept box - where it was in the store and where it is in the table
+    // the next frame's writer point reads - is that frame's region rebuild. At the cap the boxes merge (the smallest
+    // growth of the margin, as the list's own), never drop: a mover left out would leave its ghost in the store.
+    if (voxel) {
+        constexpr size_t kMoverVoxelCap = 64u;
+        if (mMoverVoxelOpen.size() < kMoverVoxelCap) {
+            mMoverVoxelOpen.push_back(swept);
+        } else {
+            size_t best = 0u;
+            double bestGrowth = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < mMoverVoxelOpen.size(); ++i) {
+                Ogre::Aabb m = mMoverVoxelOpen[i];
+                m.merge(swept);
+                const double g = regionMargin(m) - regionMargin(mMoverVoxelOpen[i]);
+                if (g < bestGrowth) { bestGrowth = g; best = i; }
+            }
+            mMoverVoxelOpen[best].merge(swept);
+        }
+    }
     if (!casts || !mSceneMgr) return;
     // ITS SHADOWS: the sun's along -toSun from the box (the header carries the direction - the box, never the
     // extrusion's AABB), and each lamp's inside the lamp's range sphere (conservative: a lamp's shadow cannot leave
@@ -491,6 +512,8 @@ void PhotonComponent::closeRegions() {
     }
     ++mRegionCloses;
     if (!c.regions.empty() || c.overflow || c.restart) ++mRegionClosesListing;
+    // (THE MOVERS' REGION LIST is the late GI work's, spent in its frame: PhotonComponent::recordLate - a frame with no GI
+    // step keeps it for the next.)
     // ...AND THE NEXT FRAME'S LIST STARTS EMPTY.
     mRegionsOpen.clear();
     mRegionOverflowOpen = 0u;

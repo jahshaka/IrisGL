@@ -708,7 +708,6 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.areaVis = areaVisStatus();
     back.activePlanarReflectors = activePlanarReflectors();
     back.mobility = mMobilityCounts;
-    back.mobility.mobilityRebuilds = mMobilityRebuilds;
     back.rigs = mRigCounts;
     // THE COUNTERS (U3 stage 2b): what the deleted getters returned, each read once here.
     back.changes = changeStats();
@@ -954,8 +953,8 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // ...AND A DRAGGED STILL IS A MOVER FOR THE LENGTH OF ITS GESTURE
     // (MOVER-1, Node::dragMover). One OR, here and in the billboard/particle
     // branch below, is the whole of the channel half: everything the mobility
-    // design already does for a Movable object — out of the probe captures, out
-    // of the voxel bounce, lit by the field and the cones at its live pose —
+    // design already does for a Movable object — out of the probe captures, in
+    // the voxel store by region at its live pose (PHOTON-7 stage 8A) —
     // is what a dragged object wants while it is being dragged, and the
     // document's own answer is not touched.
     const bool moving = n.movable || n.dragMover;
@@ -984,15 +983,14 @@ Ogre::uint32 OgreScene::itemVisibilityFlags(Node &n, bool unlit, bool distortion
     // an imported model by its root — the common case — left every part of
     // it voxelised and bouncing light.
     //
-    // ...AND A MOVING THING IS NOT GI GEOMETRY. It is LIT by the room (it reads
-    // the probes, the voxel cone and the irradiance field like everything else)
-    // but it does not voxelize and does not bounce: keeping it would put a
-    // moving object into the lit volume, the escape and geometry signatures,
-    // the movement scan and the voxel arm — which is the entire cost this lane
-    // removes. The price is stated rather than hidden: movers cast no indirect
-    // light and do not darken the room's bounce (spec §5.3, the same limit
-    // Unreal has without Lumen). Contact darkening is SSAO's job.
-    return (n.shown && !moving) ? (channel | kGiGeometryBit) : channel;
+    // ...AND A MOVING THING IS GI GEOMETRY (PHOTON-7 stage 8A; ONE_PICTURE B2 - the old "a mover is not GI geometry"
+    // was the defect: a bus 10 m away left the floor's sky share whole). The physics knows no mover: it occludes and
+    // bounces like any surface, so it is in the voxel store at its live pose - BY REGION: each frame it moves, its swept
+    // box (where the store held it, where the table holds it now) is re-voxelised in every cascade it meets
+    // (PhotonComponent::serviceRegions), never a whole cascade. What it stays out of is the STILL world's own
+    // bookkeeping, which keys on its channel (kMovableBit): the probe captures, the cards, the lit volume and the
+    // geometry signature (giItemBounds, giContentCentre, geomSigTerm, cardEligible).
+    return n.shown ? (channel | kGiGeometryBit) : channel;
 }
 
 void OgreScene::applyNodeVisibilityFlags(Node &n) {
@@ -1371,74 +1369,40 @@ bool OgreScene::nodeBackdrop(NodeId id) const {
 // ---- MOBILITY (REALTIME_REFLECTIONS_SPEC §3.3, lane R2: spent) ------------
 //
 // THE ONE PLACE the document's answer to "does this move?" becomes render
-// state. Three things follow from one bool, and the order they are applied in
-// is what makes the cheap cases cheap:
+// state. Two things follow from one bool:
 //
-//  1. THE CHANNEL. kMovableBit instead of kVisibleBit (and the GI bit dropped)
-//     — one setVisibilityFlags per attached object, no cache touched. This is
-//     the whole of the play-time soft promotion.
+//  1. THE CHANNEL. kMovableBit instead of kVisibleBit (the GI bit kept: a mover
+//     is GI geometry, PHOTON-7 stage 8A) — one setVisibilityFlags per attached
+//     object, no cache touched.
 //  2. THE PROBES. Whether a reflection probe would CAPTURE this item changes
 //     across the flip (that is the point), so the probes that hold its picture
 //     owe a re-capture: a stale with its own reason, spread at the budget like
 //     every other input, ONCE per flip rather than once per frame of movement.
-//  3. THE VOXELS, and only for an AUTHORING change. An object entering or
-//     leaving the GI geometry set is a GI edge — the voxel arm, the lit volume
-//     and Instant Radiosity's trace were all built without it (or with it) —
-//     so the caches go and the next solve is the honest one. That is one
-//     from-scratch rebuild, counted in MobilityStatus::mobilityRebuilds so the
-//     cost is visible rather than mysterious.
 //
-//     MobilityChange::Soft refuses step 3 deliberately (owner decision O3): a
-//     script pushing a prop mid-play must not buy the author a half-second
-//     freeze, so the voxels keep the bounce light the object had where it
-//     started — a ghost — until play stops and the object is classified for
-//     real. Nothing else about it differs.
+// THE VOXELS ARE NOT A THIRD: the store holds the item at its pose in either class
+// (a mover by region each frame it moves, serviceRegions), so no flip is a GI edge,
+// and the play-time soft promotion's ghost and its heal are gone with the edge.
 //
 // A classification that arrives BEFORE the geometry (every load, every newly
 // created node: the host resolves mobility in the same walk that creates the
 // node) reaches none of the three — there is no item to re-flag and no probe
 // that ever saw it — which is why a scene full of movers costs nothing to open.
-void OgreScene::setNodeMovable(NodeId id, bool movable, MobilityChange change) {
-    if (postScene([=](OgreScene &s) { s.setNodeMovable(id, movable, change); return true; })) return;   // U3 4a: a message
+void OgreScene::setNodeMovable(NodeId id, bool movable) {
+    if (postScene([=](OgreScene &s) { s.setNodeMovable(id, movable); return true; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeMovable");
     auto it = mNodes.find(id);
     if (it == mNodes.end()) return;
     Node &n = it->second;
     if (n.movable == movable) return;
     const bool probeBefore = probeSeesItem(n);
-    const bool giBefore = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
-    // THE GHOST HAS TO HEAL (code review 2026-09-12, item 5). A soft promotion
-    // leaves the object's bounce light in the voxels where it stood — that is
-    // the deal O3 makes. But if the voxels are rebuilt from scratch while it is
-    // promoted, they are rebuilt WITHOUT it, and the ghost turns into a hole
-    // that a free clearing push would leave for ever. So the clearing push
-    // invalidates exactly when that has happened, and the counter says so.
-    const bool healing = !movable && n.mobilitySoft && n.mobilitySoftRebuilds != mPhoton.giRebuildCount();
-    n.mobilitySoft = movable && change == MobilityChange::Soft;
-    n.mobilitySoftRebuilds = mPhoton.giRebuildCount();
+    // (THE GHOST IS GONE, PHOTON-7 stage 8A: a mover is GI geometry, so a class flip changes no voxel - the store holds
+    // the item at its pose either way, and the flip is the probes' alone.)
     // ...and an item the GI walk has already seen changing class is a FLIP the scheduler adopts (a classification
     // that arrives with the geometry is an arrival, and arrivals arm as they always did).
     if (n.item && n.scan.giKnown) mPhoton.noteMobilityFlipped();
     n.movable = movable;
     recountNode(n);
     applyNodeVisibilityFlags(n);
-    const bool giAfter = n.item && (n.item->getVisibilityFlags() & kGiGeometryBit) != 0u;
-    // (a flip's box is its item's: the list gets it, the voxeliser "somewhere" - PHOTON-7 stage 3's read F3)
-    const Ogre::Aabb flipBox = n.item ? n.item->getWorldAabbUpdated() : Ogre::Aabb::BOX_NULL;
-    if (healing && giBefore != giAfter) {
-        invalidateGiCachesListed(flipBox);
-        ++mMobilityRebuilds;
-    } else if (giBefore != giAfter && change == MobilityChange::Authoring) {
-        // COUNT WHAT IT ACTUALLY COSTS. A scene with no GI arm built yet — the
-        // load path, and every scene that never turns GI on — invalidates
-        // nothing, and reporting a rebuild there would make the counter useless
-        // for the question it exists to answer ("is my classification costing
-        // me rebuilds?"). `mGiCachesDirty` already true means one is owed for
-        // another reason and this change rides it.
-        const bool wouldRebuild = mPhoton.giArmWouldRebuild();
-        invalidateGiCachesListed(flipBox);
-        if (wouldRebuild) ++mMobilityRebuilds;
-    }
     if (probeSeesItem(n) != probeBefore) staleProbeGrid(GiStaleReason::Mobility);
 }
 
@@ -1448,9 +1412,7 @@ bool OgreScene::nodeMovable(NodeId id) const {
 }
 
 MobilityStatus OgreScene::mobilityStatus() const {
-    MobilityStatus out = mMobilityCounts;   // running totals (recountNode): no walk of the graph
-    out.mobilityRebuilds = mMobilityRebuilds;
-    return out;
+    return mMobilityCounts;   // running totals (recountNode): no walk of the graph
 }
 
 // THE RUNNING TOTALS (ENGINE-UPGRADE-U3 stage 2 read 12(b)): each node's contribution is re-derived where it can
@@ -2432,7 +2394,7 @@ void OgreScene::cardCandidates(const std::vector<uint32_t> &slots, CardSceneView
         if (slot >= mItemNodes.size() || slot >= mCardFeed.filed.size() || !mCardFeed.filed[slot]) continue;
         Node *n = mItemNodes[slot];
         if (!n || !n->item || !n->node || !n->shown) continue;
-        if (!(n->item->getVisibilityFlags() & kGiGeometryBit)) continue;
+        if (!(n->item->getVisibilityFlags() & kGiGeometryBit) || (n->item->getVisibilityFlags() & kMovableBit)) continue;
         const std::vector<MeshCardDesc> *cards = mCardFeed.cardsOf[slot];
         if (!cards || cards->empty()) continue;
         CardSceneView::Candidate c;
@@ -2456,10 +2418,11 @@ void OgreScene::cardCandidates(const std::vector<uint32_t> &slots, CardSceneView
 
 /// THE CANDIDATE PREDICATE, and each clause is the statement the voxel side makes:
 ///   * `kGiGeometryBit` — a surface that BOUNCES light. It excludes the sky,
-///     unlit overlays, line meshes, billboards, helpers and backdrops for free,
-///     and it excludes a MOVER, which is the point: a card set is stored
-///     lighting, and a mover is the engine's word for "not part of the room's
-///     stored lighting".
+///     unlit overlays, line meshes, billboards, helpers and backdrops for free;
+///   * NOT `kMovableBit` — a card set is a capture of a STILL surface (stored
+///     lighting re-traced in place), and a mover - GI geometry in the voxel store
+///     since PHOTON-7 stage 8A - moves out of every capture it would hold; its
+///     bounce reaches the still cards through the store.
 ///   * `shown` — a hidden object photographs nothing.
 ///   * a baked card list — every skinned mesh, every line mesh and every model
 ///     opened without a bake has none, and gets none here.
@@ -2472,7 +2435,7 @@ void OgreScene::cardCandidates(const std::vector<uint32_t> &slots, CardSceneView
 /// The radius itself is the cache's; this decides who COULD be resident.
 bool OgreScene::cardEligible(const Node &n) const {
     if (!n.item || !n.node || !n.shown) return false;
-    if (!(n.item->getVisibilityFlags() & kGiGeometryBit)) return false;
+    if (!(n.item->getVisibilityFlags() & kGiGeometryBit) || (n.item->getVisibilityFlags() & kMovableBit)) return false;
     for (size_t si = 0; si < n.item->getNumSubItems(); ++si) {
         const Ogre::HlmsDatablock *db = n.item->getSubItem(si)->getDatablock();
         if (db && db->getBlendblock(false)->isAutoTransparent()) return false;

@@ -243,12 +243,11 @@ void main()
 					// the sample's footprint at the hit: the lobe's spread, never finer than the eye's pixel there
 					const float footprint = max( t * a, ( eyeDist + t ) * p.knobs3.y );
 					jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, t, far, far || known );
-					jahHitSeed = uint( px.x ) * 73856093u ^ uint( px.y ) * 19349663u;
-					jahHitAreaSeq = jahHitSeed ^ ( uint( p.knobs3.x ) * 2654435761u );
+					jahHitAreaSeq = ( uint( px.x ) * 73856093u ^ uint( px.y ) * 19349663u ) ^ ( uint( p.knobs3.x ) * 2654435761u );
 					bool ok = false;
 					uint source = 0u;
-					vec3 radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : slot, P, n, dir, footprint, rough < 0.08,
-														   ok, source );
+					vec3 radiance = jahHitRadianceStore( far ? 0xFFFFFFFFu : slot, P, n, dir, footprint, rough < 0.08,
+														 ok, source );
 					if( ok && finite3( radiance ) )
 						++c[source == 1u ? kCountCard : kCountVoxel];
 					else

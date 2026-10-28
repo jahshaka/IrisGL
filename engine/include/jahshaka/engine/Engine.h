@@ -1306,25 +1306,17 @@ public:
     /// (SPECS/REALTIME_REFLECTIONS_SPEC.md §3.3). The host decides it
     /// PREDICTIVELY (a physics body, an avatar, a socket rider, a playing clip,
     /// a rig with a clip, a particle emitter, or anything whose parent moves)
-    /// and pushes it on CHANGE; an editor drag is not a promotion, because
-    /// flipping an object's GI class costs a full rebuild.
+    /// and pushes it on CHANGE.
     ///
-    /// WHAT IT BUYS (lane R2): a movable object leaves the STILL-WORLD layer.
-    /// It is not captured by the reflection probes, it does not voxelize or
-    /// bounce light, it is in none of the GI signatures, it stales no probe by
-    /// moving and it renders no probe-kind shadow map — while the view, the
-    /// planar mirrors, SSR and the view/reflect shadow maps keep drawing it
-    /// every frame, in the frame it moves. So a scene full of moving things
-    /// costs the room's lighting nothing.
-    ///
-    /// WHAT IT COSTS: the GI half of the class (voxelize or not) is a GI edge,
-    /// so RE-classifying an object the scene has already been lit with costs
-    /// one from-scratch GI rebuild — reported in MobilityStatus::
-    /// mobilityRebuilds. Push mobility BEFORE the node's geometry (the way a
-    /// document walk naturally does) and it costs nothing. The play-time SOFT
-    /// promotion costs nothing by construction: see MobilityChange.
-    virtual void        setNodeMovable(NodeId, bool,
-                                       MobilityChange = MobilityChange::Authoring) = 0;
+    /// WHAT IT BUYS: a movable object leaves the STILL-WORLD layer of CAPTURES -
+    /// it is not photographed by the reflection probes, it holds no cards, it is
+    /// in none of the still world's signatures and it renders no probe-kind
+    /// shadow map - while the view, the planar mirrors, SSR and the view/reflect
+    /// shadow maps keep drawing it every frame, in the frame it moves. It STAYS
+    /// GI GEOMETRY (PHOTON-7 stage 8A: it occludes and bounces like any surface):
+    /// the voxel store re-voxelises its swept box by region each frame it moves.
+    /// So a flip costs no GI rebuild, whenever it is pushed.
+    virtual void        setNodeMovable(NodeId, bool) = 0;
     // How many nodes this scene has been told are movable, split by what they
     // carry. A pure read of the records — no walk of the graph, no allocation.
     // -> Scene::published().mobility (U3 stage 3: the getter is deleted).

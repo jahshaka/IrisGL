@@ -414,7 +414,6 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 /// field's lobe, the PHOTON-3 ruling): bounce x ( rho Dd( N.V ) + S-bar ) / ( rho Dd-bar + S-bar ).
 #ifndef JAH_HIT_GATE_DECLARED
 #define JAH_HIT_GATE_DECLARED
-float jahHitIndirectGate = 1.0;
 bool jahHitTracedLobe = false;   // (jah_rq_card.glsl states it)
 #endif
 vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, float NdotV )

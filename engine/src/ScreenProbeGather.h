@@ -277,8 +277,6 @@ struct HitSetSources {
     /// THE TIER'S COUNTERS' device address (jah_rq_alpha.glsl's JahTierCounters: [0] the reading rays' pane-list
     /// overflows - the one read's F4); 0 = none.
     uint64_t tierCounters = 0u;
-    /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs where a job asks for it).
-    bool movers = false;
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
     /// (the reflection's and the gather's); `on` false binds the stand-ins and appends nothing.
     HitListBinding hit;
@@ -290,7 +288,7 @@ struct HitSetSources {
 struct HitSetParams {
     float voxelOrigin[kGatherMaxCascades][4] = {};
     float voxelInvSize[kGatherMaxCascades][4] = {};
-    float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, a ray-traced mover exists
+    float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, unused
     float skyColour[4] = {};
     float cards[4] = {};       ///< the card slots, the card records, the reader's demand stamps on (z; its demand span)
     float hitList[4] = {};     ///< the list's capacity, width, instance entries, on
@@ -371,7 +369,7 @@ struct GatherInputs {
     const detail::OgreScene *scene = nullptr;
     Ogre::SceneManager *sceneMgr = nullptr;
     /// THE HIT SET (the TLAS, the cascades, the sky, the surface cache, the geometric normal, the hit's own surface,
-    /// the alpha table, the movers' flag and the hit list): the tier's one collection (RayQueryTier::hitSetOf), bound
+    /// the alpha table and the hit list): the tier's one collection (RayQueryTier::hitSetOf), bound
     /// by the trace through the one writer (HitSetWrite).
     HitSetSources hits;
 

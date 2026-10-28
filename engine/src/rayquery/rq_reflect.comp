@@ -776,7 +776,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	recSlot = 0u; recPrim = 0u; recGeom = 0u;
 	recBary = vec2( 0.0 );
 	recN = -L;
-	photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceSourced); 3 the sky; 4 the screen
+	photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceStore); 3 the sky; 4 the screen
 	// (1) THE SCREEN TRACE, where the chain runs one, and THE COIN'S EXPECTATION for EVERY sample (READ_B F2; the lead's
 	// round-3 ruling (i), built after the rest's tail diagnostic): a random choice between the screen's answer and the
 	// ray's, on the screen's vouch, is replaced by its MEAN - where the screen vouches fully (vouch 1) its answer alone,
@@ -912,15 +912,11 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			jahHitAreaCycle = atRest ? int( frame - uint( p.knobs.z ) ) : -1;
 			jahHitAreaCycleKey = uint( seedPix.x ) * 2654435761u ^ uint( seedPix.y ) * 40503u;
 			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct light at the hit
-			// (jahHitRadianceSourced), AND THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): one secondary ray of the
+			// (jahHitRadianceStore), AND THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): one secondary ray of the
 			// hit's lobe in place of the store's integral of it - every material alike (the metal switch, a sharp
 			// reflector's metal hit sent to the decode from metalness 0.5, is deleted: a step on the alpha -> F0 continuum).
 			// Only a hit the caches cannot hold decodes: a mover, a rigged item.
 			const bool decodeAlways = jahHitAlwaysDecodes( recSlot );
-			// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
-			// ...per texel only under the mirror cut (PHOTON-2 1c, above).
-			jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
-						 ( centre ? 0u : frame * 2654435761u );
 			const bool c2 = p.denoiser.w < 0.5;   // (the flat-hits arm answers the hit by a constant: no lobe)
 			// (the C2 draw's two uniforms: this sample's)
 			const uint c2h0 = jahReflectPcg( uint( seedPix.x ) * 2246822519u ^ uint( seedPix.y ) * 3266489917u ^
@@ -929,7 +925,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !decodeAlways )
 			{
 				jahHitTracedLobe = c2;
-				traced = jahHitRadianceSourced( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
+				traced = jahHitRadianceStore( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
 												reflectFootprint( lobeAlpha, t ), centre, ok, photonSource );
 				jahHitTracedLobe = false;
 				vec3 hAlbedo, hEmissive;

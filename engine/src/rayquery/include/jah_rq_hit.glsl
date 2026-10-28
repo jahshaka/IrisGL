@@ -101,10 +101,6 @@
 
 #ifndef JAH_HIT_GATE_DECLARED
 #define JAH_HIT_GATE_DECLARED
-/// THE STORE'S NON-DIRECT SHARE AT A HIT, AS SEEN PAST THE MOVERS (MOVER-OCCLUSION-1):
-/// the fraction of the hit's hemisphere no mover blocks, set by jahHitRadianceSourced
-/// (jah_rq_hit_radiance.glsl) around the card or voxel read it makes; 1 everywhere else.
-float jahHitIndirectGate = 1.0;
 /// C2, THE HIT's OWN SPECULAR TRACED (PHOTON-7 11-2 (3)): set by a reader that traces the hit's lobe itself
 /// (jahHitSpecularLobeTraced, jah_rq_hit_radiance.glsl) around the store's read - the store then leaves out the INDIRECT
 /// specular it holds only as the lobe's integral (the card's lobe share, the voxels' bounce share); the lights' direct
@@ -381,22 +377,6 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
 			// shaded faces at bounces 0; spikes/far-sun-2/NOTES.md section 16).
 			accBounce += rad * share * w;
-		}
-		// MOVER-OCCLUSION-1: THE SHARE A MOVER ABOVE THE HIT OCCLUDES. The store holds the
-		// lamps' direct term (D, its own volume and chain) plus what the sky and the bounce
-		// gave the surface; a mover blocks part of the hemisphere that second share came
-		// from, and the store was built without movers. So the read keeps D and gates the
-		// rest by the mover visibility jahHitRadianceSourced traced (1 = no mover: exact).
-		if( jahHitIndirectGate < 1.0 )
-		{
-			// D's chain is built from the two sides' mean (PhotonMipChain's mean-of-sides first level): level 0 is read as
-			// that mean explicitly, and a read between level 0 and 1 blends the two as the sampler would
-			const vec4 d0 = 0.5 * ( JAH_VOX_SAMPLE_DIRECT( c, lsPick, 0.0 ) + JAH_VOX_SAMPLE_DIRECT_BACK( c, lsPick, 0.0 ) );
-			const vec4 d = lod <= 0.0 ? d0
-							: ( lod < 1.0 ? mix( d0, JAH_VOX_SAMPLE_DIRECT( c, lsPick, 1.0 ), lod )
-										  : JAH_VOX_SAMPLE_DIRECT( c, lsPick, lod ) );
-			const vec3 dRad = d.w > 1e-4 ? d.xyz / d.w : vec3( 0.0 );
-			rad -= ( 1.0 - jahHitIndirectGate ) * max( rad - dRad, vec3( 0.0 ) );
 		}
 #endif
 		acc += rad * w;

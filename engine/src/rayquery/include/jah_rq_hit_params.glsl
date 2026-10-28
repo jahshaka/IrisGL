@@ -22,7 +22,7 @@ struct JahHitParams
 {
 	vec4 voxelOrigin[4];    // per cascade: its box's corner (world, xyz; w 0) - past the chain's length the last's
 	vec4 voxelInvSize[4];   // ...1 / its box's size (xyz) and its cell, the largest side (w)
-	vec4 counts;            // x the cascades, y the sky cube on, z the per-slot geometry rows, w a ray-traced mover exists
+	vec4 counts;            // x the cascades, y the sky cube on, z the per-slot geometry rows, w unused
 	vec4 skyColour;         // the flat environment with no cube (xyz)
 	vec4 cards;             // x the card slots, y the card records (0 with no cache), z the reader's demand stamps on
 	                        // (0 past its demand span: PHOTON-7 stage 10, the per-reader snapshot)
@@ -64,7 +64,6 @@ struct JahHitParams
 #define JAH_HIT_CLOUD_ON     ( JAH_HIT_PARAMS.surface.y > 0.5 )
 #define JAH_HIT_CLOUD_MAP    JAH_HIT_PARAMS.cloudMap
 #define JAH_HIT_CLOUD_SUN    JAH_HIT_PARAMS.cloudSun
-#define JAH_HIT_MOVERS_ON    ( JAH_HIT_PARAMS.counts.w > 0.5 )
 #define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 && JAH_HIT_PARAMS.levelCam.w < 1.5 )
 #define JAH_VOX_LEVEL_FOOTPRINT ( JAH_HIT_PARAMS.levelCam.w > 1.5 )
 #define JAH_VOX_LEVEL_CAM    JAH_HIT_PARAMS.levelCam.xyz

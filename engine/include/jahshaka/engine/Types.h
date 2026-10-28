@@ -788,54 +788,16 @@ struct SceneChangeStats {
 /// §3.3, lane R1). The host resolves every node's mobility from the document
 /// (drivers, parents, the user's setting) and pushes the answer with
 /// Scene::setNodeMovable; these are what the engine RECORDED, and the way to
-/// see that a push landed. The renderer SPENDS it (lane R2): a movable object
-/// carries no GI-geometry bit, so it does not voxelize and bounces no light,
-/// and a classification that crosses that edge invalidates the GI caches
-/// (`mobilityRebuilds`) or stales the probe grid with reason Mobility.
+/// see that a push landed. The renderer SPENDS it on the CHANNEL alone: a
+/// movable object leaves the probe captures (a flip stales the probe grid with
+/// reason Mobility) and stays GI geometry - the voxel store holds it at its live
+/// pose, by region (PHOTON-7 stage 8A), so no flip is a GI edge and none costs a
+/// rebuild (the old `mobilityRebuilds` counter and the play-time soft
+/// promotion's MobilityChange are deleted with that edge).
 struct MobilityStatus {
     size_t movableItems = 0;    ///< movable nodes carrying drawable geometry
     size_t movableLights = 0;   ///< movable nodes carrying a light
     size_t movableNodes = 0;    ///< every node the host marked movable
-    /// From-scratch GI rebuilds a mobility CHANGE caused, and the reason is
-    /// always the same one: an object's GI class turning on or off is a GI edge
-    /// (a movable object does not voxelize), so RE-classifying a live object
-    /// the room has already been lit with costs one rebuild.
-    ///
-    /// WHICH FLIPS COST ONE, honestly: an AUTHORING change (the user sets
-    /// Movable or Static in the properties panel) on an object that is already
-    /// in the scene, in a scene whose GI arm is built. A classification that
-    /// arrives BEFORE the object's geometry does — which is every load and
-    /// every newly added node, because the host resolves mobility in the same
-    /// walk that creates the node — costs nothing at all, and neither does the
-    /// play-time SOFT promotion (MobilityChange::Soft, owner decision O3).
-    unsigned long long mobilityRebuilds = 0;
-};
-
-/// WHY a node's mobility changed, which decides what the renderer may spend on
-/// it (REALTIME_REFLECTIONS_SPEC §3.3.3).
-enum class MobilityChange : unsigned {
-    /// The classification the document derived or the user set. The GI class
-    /// follows it: an object becoming movable LEAVES the voxel bounce and an
-    /// object becoming static JOINS it, and either edge costs one from-scratch
-    /// GI rebuild if the scene is already lit (counted in mobilityRebuilds).
-    Authoring = 0,
-    /// THE PLAY-TIME SOFT PROMOTION (owner decision O3): something nobody
-    /// marked Movable started moving while the document is playing. The render
-    /// channel and every GI gather drop it from that frame, and nothing is
-    /// RE-SOLVED: no voxelization, no from-scratch rebuild, no mobilityRebuilds
-    /// — the voxels keep the bounce light it had where it started, as a ghost,
-    /// until play stops. That is the whole point: a surprise mover must never
-    /// buy the author a half-second freeze mid-play.
-    ///
-    /// IT DOES COST ONE PROBE-GRID CATCH-UP, and deliberately (clean-2 lane,
-    /// 2026-09-13, correcting this doc rather than the code): a promoted object
-    /// leaves the probe channel as well — a movable item carries kMovableBit
-    /// INSTEAD OF kVisibleBit — so every probe holding its photograph is
-    /// holding an object the probes no longer capture. Leaving those captures
-    /// alone would freeze the mover's image into the room's reflections for the
-    /// rest of play, following nothing. So the grid is staled once, with reason
-    /// Mobility, and drains at the budget; that is a rate, not a hitch.
-    Soft = 1
 };
 
 /// A posed bone: LOCAL to its parent bone (a root bone: local to the mesh node).
@@ -2505,7 +2467,7 @@ enum class RayTracingMode { Auto, Off, On };
 ///   `Fog`       the fog description changed
 ///   `Mobility`  an object's mobility class changed, so it left (or joined) the
 ///               channel the probes capture — the probes holding its photograph
-///               owe one re-capture (see MobilityChange)
+///               owe one re-capture (Scene::setNodeMovable)
 ///   `Camera`    the CAMERA moved, and a camera-following cache had to redo work
 ///               (Photon's cascade chain re-centring — the one reason in this
 ///               list that is not an edit, which is exactly why it needs its own
@@ -4986,6 +4948,15 @@ struct GiStatus {
         /// floor credit at its last owed frame - one 4-plane slab of the owed box or one floor, the larger (a frame
         /// relights at most its credit plus the frame's pool, under GiStatus::relightCount).
         unsigned long long relightVoxels = 0, relightSlab = 0;
+        /// THE REGION REBUILDS (PHOTON-7 stage 8A): the region rebuilds served (an edit's box or a mover's, re-voxelised
+        /// in place - an edit's also counts in `rebuilds`, the movers' never), the movers' alone, the cells they
+        /// re-voxelised (cumulative), and the cascade's debt left (boxes owed to its geometry, to its direct term).
+        unsigned long long regionRebuilds = 0, moverRegionRebuilds = 0, regionCells = 0;
+        unsigned regionOwed = 0, marchOwed = 0;
+        /// THE REGION'S OWN BOUNCE (A2): the passes its rebuilds ran in their frames before their own convergence stopped
+        /// them (read back with the feedback's readings; cumulative, and the last frame's - at most 32 a rebuild).
+        unsigned long long regionBouncePasses = 0;
+        unsigned regionBounceLast = 0;
         /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
         /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
         /// and the most since the chain was built.
