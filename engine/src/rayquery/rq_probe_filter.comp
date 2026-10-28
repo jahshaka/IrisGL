@@ -141,6 +141,10 @@ shared uint gUnsampled;
 /// world direction.
 shared vec4 gTexL[64];
 shared vec3 gTexD[64];
+/// THE PROBE'S SKY SHARE (PHOTON-7 10-4 R11): a texel's cosine-weighted solid angle where its own ray MISSED (the sky),
+/// reduced beside the SH sums; over the cosine-weighted hemisphere it is the probe's measured sky visibility, kept in
+/// the record's free 28th float (sh[6].w) for the integrate's jahSkyVis.
+shared float gMiss[64];
 /// The most roughness levels the prefilter writes (the image's layers; p.roughLevels.z).
 const int kRoughLevelsMax = 3;
 
@@ -260,6 +264,7 @@ void main()
 	// mean, not the hemisphere's (measured: photon-room's floor +13 to +26 codes under the overflow arm); its pixels
 	// keep their history instead (rq_probe_integrate.comp), exactly as for a probe that lost every ray.
 	bool sampled = false;
+	bool missed = false;   // (the texel's own ray met nothing: the sky - R11's sky share)
 
 	if( onSurface && lane < rays )
 	{
@@ -278,6 +283,7 @@ void main()
 
 		const vec4 own = imageLoad( probeAtlas, block + texel );
 		sampled = !( own.w <= kAtlasNoSample + 0.5 );
+		missed = sampled && own.w < 0.0;
 		if( !sampled )
 			atomicAdd( gUnsampled, 1u );
 		vec3 sum = sampled ? own.xyz : vec3( 0.0 );
@@ -409,13 +415,17 @@ void main()
 	for( int v = 0; v < 7; ++v )
 		gSum[v][lane] = vec4( part[4 * v], part[4 * v + 1], part[4 * v + 2], part[4 * v + 3] );
 	gSum[7][lane] = vec4( dw, filtered * ( cosine * dw ) );
+	gMiss[lane] = missed ? cosine * dw : 0.0;
 	// The fixed-order tree: lane k adds lane k+s for s = 32, 16, 8, 4, 2, 1.
 	for( uint s = 32u; s > 0u; s >>= 1u )
 	{
 		barrier();
 		if( lane < s )
+		{
 			for( int v = 0; v < 8; ++v )
 				gSum[v][lane] += gSum[v][lane + s];
+			gMiss[lane] += gMiss[lane + s];
+		}
 	}
 	barrier();
 	if( lane == 0u )
@@ -473,6 +483,8 @@ void main()
 				e = vec3( 0.0 );
 			}
 		}
+		// (THE SKY SHARE in the free 28th float: the cosine-weighted miss over the cosine-weighted hemisphere - R11)
+		rec.sh[6].w = answered ? clamp( gMiss[0] / cosSum, 0.0, 1.0 ) : 0.0;
 		records.r[probe].sh = rec.sh;
 		// w: 1 answered; -1 NO SAMPLE (on a surface, a ray's record dropped by a full hit list: the integrate's pixels
 		// keep their history rather than read a part of the hemisphere or hand the frame to the fallback); 0 no answer.

@@ -1,0 +1,313 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, the lead's design (D); L9: the renderer follows the ray).
+//
+// WHAT IT IS: a blended or refractive fragment at the ray tier lights its specular lobe's OPEN share - the voxel rays'
+// escapes (PhotonVct_piece_ps.any's jahRaySpecular) - by the ENVIRONMENT, which is the sky only past the world: inside
+// the world box an escape out of the voxel chain meets whatever the chain no longer holds (a distant building beyond the
+// outermost cascade). So the fragment appends a RECORD of that share (its origin, the lobe's dominant direction, where
+// the chain's read ended, the weight the pixel's light takes of it) and lights nothing of it; this job, ONE THREAD A
+// RECORD, traces the record's ray on the scene's TLAS from where the chain ended and answers it the reflection's way:
+//   * a HIT reads the hit readers (jah_rq_hit_radiance.glsl: the instance's card, the cascades), and where neither holds
+//     the hit (past every cache) its DIRECT light from its own material (jahHitMaterial / jahHitDirect: every light's
+//     term with its own shadow ray and the emissive - the indirect is the caches' and none reaches there: a named
+//     limit, counted);
+//   * a MISS reads the environment along the lobe (jahEnvLobe, the record's roughness) - the light the fragment would
+//     have taken;
+//   * the panes the ray crosses pass their transmittance and add their own light (jah_rq_panes.glsl);
+//   * the leg's media are the reflection's law (jah_fog_along.glsl: jahFogAlong to a hit, jahFogAlongSky past one);
+//   * THE PANES IN FRONT OF THE FRAGMENT (the one read's F5: the add lands on top of every blended layer drawn after
+//     the fragment, so a pane in front of it passed its light whole - stacked glass over-counted by the front pane's
+//     coverage): one light-style ray from the record's eye to the record's point multiplies the answer by the panes'
+//     product along it (JAH_RQ_PROCEED_TRANSMIT: every pane, no cap) - what the layers drawn over the fragment pass of
+//     it. Named limits: a blended surface the TLAS does not hold (particles, an unlit blend) is not counted; Modulate
+//     is an occluder there and its colour is not a scalar; a pane's T is its word's, on 2047 steps.
+// The answer, times the record's weight, is ADDED in fixed point to the record's pixel (three uint words a pixel, one
+// atomic a channel; a word that would pass its 32 bits SATURATES, counted - the one read's F11: it wrapped silently at 64
+// brightest terms); rq_glass_escape_add.comp adds the pixel's sum to the pass's colour target. A hit's answer is bounded as
+// every reflection's (kMaxRadiance); a MISS is the environment the fragment itself would have taken, unbounded as the
+// fragment's own environment term is (F11: a sun glint in glass read the same on every tier). SAME FRAME: the job runs
+// right after the pass that appended the records (the blended pass, the refractives), before anything reads its target.
+//
+// THE RECORD (32 bytes, two uvec4 - OgreRayQuery.cpp kEscapeRecordWords; PhotonVct_piece_ps.any writes it):
+//   [0].xyz the origin (world, lifted off the surface on the lobe's side: jahRayOrigin), [0].w half2( the chain's read
+//   length along the ray in metres - the ray starts there -, the eye's distance to the surface );
+//   [1].x the direction (snorm2x16 octahedral, world), [1].y the pixel (x bits 0-14, y 15-29, the eye's layer bit 30),
+//   [1].z half2( the weight's r, g ), [1].w half2( the weight's b, the perceptual roughness ).
+// A record whose weight is zero (its fragment was discarded after it appended) traces nothing.
+//
+// THE COUNTS (one atomic a subgroup a count): the records traced, answered by a card, by the cascades, by the direct
+// term alone (past every cache), by a far copy (the coarsest level: its normal faces the ray - no near row names its
+// triangle; a named limit), by the environment, back faces, no sample (a hit no reader could shade: 0 expected), and the
+// records whose add saturated a pixel's word.
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+const int kMaxCascades = 4;
+
+#define JAH_HIT_PARAMS p.hit
+#include "jah_rq_hit_params.glsl"
+layout( std140, set = 0, binding = 1 ) uniform Params
+{
+	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text)
+	vec4 knobs;			// x = the list's capacity, y = the near copies' length (metres), z = the far query's start, w = its
+						// end (0 = none)
+	vec4 knobs2;		// x = one eye's width, y = its height, z = the eyes, w = the fixed-point scale
+	vec4 knobs3;		// x = the frame (an area light's stratum draw), y = the pixel's angle (radians), z = the ray mask
+	vec4 fog[8];		// THE MEDIA ALONG THE RAY (OgreScene::fogAlong)
+	vec4 eye[2];		// each eye's position (world; xyz): the panes in front of a record's fragment (the one read's F5)
+} p;
+#include "jah_world_exit.glsl"
+
+layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+
+/// THE LIST (the blended pass's appends): its header - the records appended (past the capacity: dropped, the demand
+/// law's count), this job's indirect groups, the add's - then the records.
+layout( std430, set = 0, binding = 2 ) readonly buffer Records
+{
+	uint count;
+	uint traceGroups[3];
+	uint addGroups[3];
+	uint addFull;
+	uvec4 rec[];
+};
+/// THE PIXELS' SUMS: three words a pixel (r, g, b in fixed point), eye-major rows
+layout( std430, set = 0, binding = 3 ) buffer Accum { uint accum[]; };
+layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
+const uint kCountTraced = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountDirect = 3u, kCountFar = 4u, kCountSky = 5u,
+		   kCountBack = 6u, kCountNoSample = 7u, kCountSaturated = 8u;
+const uint kCountWords = 9u;   // (OgreRayQuery.cpp kEscapeCounts)
+
+/// ADDS v (fixed point, >= 0) to a pixel's word, SATURATING at its 32 bits (the one read's F11): an add that passed them
+/// leaves the word at its top, whatever other adds raced it (each one that passes the top again restores it). True when
+/// it saturated.
+bool jahEscapeAdd( uint at, float v )
+{
+	if( !( v >= 1.0 ) )
+		return false;
+	const bool big = v >= 4294967040.0;   // (the largest float under 2^32)
+	const uint u = big ? 0xFFFFFFFFu : uint( v + 0.5 );
+	const uint was = atomicAdd( accum[at], u );
+	if( big || was > 0xFFFFFFFFu - u )
+	{
+		atomicMax( accum[at], 0xFFFFFFFFu );
+		return true;
+	}
+	return false;
+}
+
+// THE HIT SET (RayQueryTier's kCardGatherHitSlots numbering: the records jobs' one text). A REFLECTION'S READER: its card
+// reads stamp the reflection's demand (reader 0), and a hit's specular lobe is read along the ray (no lobe integral).
+#define JAH_CARD_DEMAND 0
+#include "jah_rq_hit_set_records.glsl"
+
+layout( set = 0, binding = 37 ) uniform sampler3D fogAerial;
+#define JAH_FOG_P( k ) p.fog[k]
+#define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
+#define JAH_FOG_HAS_AIR
+#define JAH_FOG_HAS_HEIGHT_FOG
+#include "jah_atmosphere.glsl"
+#include "jah_height_fog.glsl"
+#include "jah_fog_along.glsl"
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	const uint cap = uint( p.knobs.x );
+	uint c[kCountWords] = uint[kCountWords]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
+	vec3 answer = vec3( 0.0 );
+	bool missed = false;   // the answer the environment's (unbounded: the fragment's own term)
+	vec3 weight = vec3( 0.0 );
+	uint at = 0xFFFFFFFFu;
+	if( i < min( count, cap ) )
+	{
+		const uvec4 r0 = rec[2u * i];
+		const uvec4 r1 = rec[2u * i + 1u];
+		const vec3 origin = uintBitsToFloat( r0.xyz );
+		const vec2 startEye = unpackHalf2x16( r0.w );
+		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( r1.x ) );
+		const vec2 wrg = unpackHalf2x16( r1.z ), wbr = unpackHalf2x16( r1.w );
+		weight = vec3( wrg, wbr.x );
+		const float rough = clamp( wbr.y, 0.0, 1.0 );
+		const ivec2 px = ivec2( int( r1.y & 0x7FFFu ), int( ( r1.y >> 15u ) & 0x7FFFu ) );
+		const uint layer = ( r1.y >> 30u ) & 1u;
+		const uint w = uint( p.knobs2.x ), h = uint( p.knobs2.y );
+		if( max( weight.x, max( weight.y, weight.z ) ) > 0.0 && finite3( origin ) && finite3( weight ) &&
+			uint( px.x ) < w && uint( px.y ) < h && float( layer ) < p.knobs2.z )
+		{
+			at = ( ( layer * h + uint( px.y ) ) * w + uint( px.x ) ) * 3u;
+			++c[kCountTraced];
+			const float tStart = max( startEye.x, 0.0 );
+			const float eyeDist = max( startEye.y, 0.0 );
+			const float a = max( rough * rough, 1e-4 );
+			const uint mask = uint( p.knobs3.z );
+			// (1) THE NEAR COPIES from where the chain's read ended to the near length, (2) THE FAR COPIES past it (the
+			// reflection's continuation, rq_reflect.comp: from the near length less the hand-over gap to the far plane)
+			const float nearT = p.knobs.y;
+			// A MISS IS AN EXIT (10-3 R4; W5 at the 10-4 merge): the ray's last query ends where it leaves the world's box -
+			// the far copies' end where they are traced, else the near copies' (no far copies: the near query is the whole
+			// ray); the near query's end stays the hand-over length where the far query follows it
+			const bool farOn = p.knobs.w > 0.0 && ( mask & 0x10u ) != 0u;
+			const float nearEnd = farOn ? nearT : jahWorldExitT( origin, dir, nearT );
+			const float farEnd = farOn ? jahWorldExitT( origin, dir, p.knobs.w ) : 0.0;
+			bool hit = false, far = false;
+			float t = 0.0;
+			uint slot = 0u, prim = 0u, geomIdx = 0u;
+			vec2 bary = vec2( 0.0 );
+			mat4x3 toWorld = mat4x3( 1.0 );
+			JahPanes panes = jahPanesNone();
+			JahPanes panesFar = jahPanesNone();
+			if( tStart < nearEnd )
+			{
+				rayQueryEXT rq;
+				rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask & 0x0Fu, origin, tStart, dir,
+									   nearEnd );
+				JAH_RQ_PROCEED_PANES( rq, panes )
+				if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+				{
+					hit = true;
+					t = rayQueryGetIntersectionTEXT( rq, true );
+					slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+					prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+					geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
+					bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
+					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+				}
+				jahPanesInFront( panes, hit ? t : nearEnd );
+			}
+			const float farFrom = max( p.knobs.z, tStart );
+			if( !hit && farOn && farEnd > farFrom )
+			{
+				rayQueryEXT rqFar;
+				rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, farFrom, dir,
+									   farEnd );
+				JAH_RQ_PROCEED_PANES( rqFar, panesFar )
+				if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+				{
+					hit = true;
+					far = true;
+					t = rayQueryGetIntersectionTEXT( rqFar, true );
+					slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
+					prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
+					geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rqFar, true ) );
+					bary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
+					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rqFar, true );
+				}
+				// (a pane the near query crossed is not crossed twice: the far copies' past its end)
+				jahPanesBetween( panesFar, max( nearT, tStart ), hit ? t : farEnd );
+			}
+			// THE PANES IN FRONT: their own light and the throughput past them, the near list then the far one
+			float through = 1.0;
+			vec3 paneLight = vec3( 0.0 );
+			if( panes.n + panesFar.n > 0 )
+			{
+				[[dont_unroll]] for( int list = 0; list < 2; ++list )
+				{
+					float th = 1.0;
+					const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, dir, th );
+					paneLight += through * own;
+					through *= th;
+				}
+			}
+			if( !hit )
+			{
+				// THE ENVIRONMENT along the lobe: what the fragment would have lit the share by
+				answer = paneLight + through * jahFogAlongSky( jahEnvLobe( dir, rough ), origin.y, dir, eyeDist );
+				missed = true;
+				++c[kCountSky];
+			}
+			else
+			{
+				vec3 n = -dir;
+				bool known = false;
+				if( !far )
+					known = jahHitGeometricNormal( slot, geomIdx, prim, toWorld, dir, n );
+				// A BACK FACE of a surface drawn one-sided: the inside of a closed shell holds none of its outside's light
+				vec3 wound;
+				const bool woundKnown = !far && jahHitWoundNormal( slot, geomIdx, prim, toWorld, wound );
+				if( woundKnown && dot( wound, dir ) > 0.0 && ( jahHitFlags( slot ) & kJahHitGpuTwoSided ) == 0u )
+				{
+					answer = paneLight;
+					++c[kCountBack];
+				}
+				else
+				{
+					const vec3 P = origin + dir * t;
+					// the sample's footprint at the hit: the lobe's spread, never finer than the eye's pixel there
+					const float footprint = max( t * a, ( eyeDist + t ) * p.knobs3.y );
+					jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, t, far, far || known );
+					jahHitSeed = uint( px.x ) * 73856093u ^ uint( px.y ) * 19349663u;
+					jahHitAreaSeq = jahHitSeed ^ ( uint( p.knobs3.x ) * 2654435761u );
+					bool ok = false;
+					uint source = 0u;
+					vec3 radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : slot, P, n, dir, footprint, rough < 0.08,
+														   ok, source );
+					if( ok && finite3( radiance ) )
+						++c[source == 1u ? kCountCard : kCountVoxel];
+					else
+					{
+						// PAST EVERY CACHE: the hit's direct light from its own material (the indirect is the caches')
+						vec3 albedo, emissive;
+						float hitRough;
+						vec4 metal;
+						ok = jahHitMaterial( footprint, albedo, emissive, hitRough, metal );
+						if( ok )
+						{
+							radiance = jahHitDirect( P, normalize( n ), -dir, albedo, hitRough, metal ) + emissive;
+							ok = finite3( radiance );
+							radiance = ok ? clamp( radiance, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+						}
+						++c[ok ? ( far ? kCountFar : kCountDirect ) : kCountNoSample];
+					}
+					if( ok )
+						answer = paneLight + through * jahFogAlong( radiance, origin.y, dir, t, eyeDist );
+				}
+			}
+		}
+	}
+	// THE PANES IN FRONT OF THE FRAGMENT (the head): the eye's ray to the record's point, stopped a hair short of it
+	if( at != 0xFFFFFFFFu )
+	{
+		const uvec4 r0 = rec[2u * i];
+		const vec3 point = uintBitsToFloat( r0.xyz );
+		const vec3 eyeP = p.eye[( rec[2u * i + 1u].y >> 30u ) & 1u].xyz;
+		const vec3 toPoint = point - eyeP;
+		const float dist = length( toPoint );
+		if( dist > 1e-3 && finite3( toPoint ) )
+		{
+			rayQueryEXT rqEye;
+			rayQueryInitializeEXT( rqEye, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
+								   0.0, toPoint * ( 1.0 / dist ), dist * ( 1.0 - 1e-4 ) );
+			float front = 1.0;
+			JAH_RQ_PROCEED_TRANSMIT( rqEye, front )
+			// (an opaque commit before the point: the fragment passed its depth test, so a coarser copy or a float
+			// edge - the panes' product counts, the commit does not)
+			answer *= front;
+		}
+	}
+	// THE PIXEL'S SUM, in fixed point (one atomic a channel, saturating; a hit's term bounded as every reflection's, a miss
+	// the environment's own)
+	if( at != 0xFFFFFFFFu && finite3( answer ) )
+	{
+		const vec3 v = ( missed ? max( answer, vec3( 0.0 ) ) : clamp( answer, vec3( 0.0 ), vec3( kMaxRadiance ) ) ) * weight *
+					   p.knobs2.w;
+		bool saturated = jahEscapeAdd( at, v.x );
+		saturated = jahEscapeAdd( at + 1u, v.y ) || saturated;
+		saturated = jahEscapeAdd( at + 2u, v.z ) || saturated;
+		if( saturated )
+			++c[kCountSaturated];
+	}
+	for( uint k = 0u; k < kCountWords; ++k )
+	{
+		const uint s = subgroupAdd( c[k] );
+		if( subgroupElect() && s != 0u )
+			atomicAdd( counts[k], s );
+	}
+}

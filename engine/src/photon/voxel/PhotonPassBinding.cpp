@@ -58,6 +58,7 @@ const Ogre::IdString kNormal("hlms_normal");
 const Ogre::IdString kTangent("hlms_tangent");
 const Ogre::IdString kQTangent("hlms_qtangent");
 const Ogre::IdString kShadowCaster("hlms_shadowcaster");
+const Ogre::IdString kJahLampChain("jah_lamp_chain");
 
 /// The light volumes per cascade, in the order the voxel lighting lists them
 /// (PhotonVoxelLighting::getLightVoxelTextures) and the pieces declare them — the
@@ -77,6 +78,7 @@ bool fieldBound(const SceneGiBinding *b) { return b && b->ifd; }
 struct HostBinds {
     Ogre::PhotonVoxelLighting *vct = nullptr;
     Ogre::PhotonIrradianceField *ifd = nullptr;
+    Ogre::PhotonVoxelLighting *lampChain = nullptr;   ///< the no-ray tier's lamp chain (lampChainOf)
 };
 HostBinds sHost[Ogre::HLMS_MAX];   // render thread only
 
@@ -89,6 +91,13 @@ const char *const kVolumeRegisters[] = { "vctProbes",    "vctProbeX",    "vctPro
 static_assert(sizeof(kVolumeRegisters) / sizeof(kVolumeRegisters[0]) ==
                   size_t(Ogre::PhotonVoxelLighting::kVolumesPerCascade),
               "one register name per light volume the voxel lighting lists");
+// THE LAMP CHAIN'S FOUR VOLUMES: the coverage and the surface position per half - kVolumeRegisters' entries 4 to 7 (the
+// voxel lighting's own order: getLightVoxelTextures(c)[4 + k]) - each an array of the chain's cascades
+constexpr Ogre::int32 kLampChainFirstVolume = 4;
+constexpr Ogre::int32 kLampChainVolumes = 4;
+const char *const kLampChainRegisters[] = { "jahLampCovP", "jahLampCovN", "jahLampPosP", "jahLampPosN" };
+static_assert(sizeof(kLampChainRegisters) / sizeof(kLampChainRegisters[0]) == size_t(kLampChainVolumes),
+              "one register per lamp chain volume");
 
 /// THE OPAQUE PASSES' DOOR (7-1): one record per (pass, host), the newest preparation's.
 std::mutex sPassRecordsLock;
@@ -173,6 +182,29 @@ bool PhotonPassBinding::scenePassReadsGi(const Ogre::SceneManager *sceneManager)
     return !def || passReadsGi(def);
 }
 
+Ogre::PhotonVoxelLighting *PhotonPassBinding::lampChainOf(bool casterPass, const Ogre::SceneManager *sceneManager) {
+    if (casterPass || !sceneManager || scenePassReadsGi(sceneManager) || FogHlmsListener::lampRaysOn(sceneManager))
+        return nullptr;
+    const SceneGiBinding *b = bindingOf(sceneManager);
+    if (!b || !b->vct || !b->vct->getVoxelizer()) return nullptr;
+    const Ogre::CompositorPass *current = sceneManager->getCurrentCompositorPass();
+    const Ogre::CompositorPassDef *def = current ? current->getDefinition() : sScenePass;
+    // THE PASSES THAT SHADE THE OPAQUE PICTURE (OgreChain.cpp's L4): the opaque pass and the Atom screen decode
+    if (!def || def->getType() != Ogre::PASS_SCENE || def->mShadowMapIdx != ~Ogre::uint32(0) ||
+        static_cast<const Ogre::CompositorPassSceneDef *>(def)->mShadowNodeRecalculation == Ogre::SHADOW_NODE_CASTER_PASS)
+        return nullptr;
+    if (def->mIdentifier != planar::kPlanarUpdatePassIdentifier && def->mIdentifier != kScreenDecodePassIdentifier)
+        return nullptr;
+    return b->vct;
+}
+
+Ogre::PhotonVoxelLighting *PhotonPassBinding::lampVoxelsOf(bool casterPass, const Ogre::SceneManager *sceneManager) {
+    if (casterPass || !sceneManager || FogHlmsListener::lampRaysOn(sceneManager)) return nullptr;
+    if (Ogre::PhotonVoxelLighting *chain = lampChainOf(casterPass, sceneManager)) return chain;
+    const SceneGiBinding *b = bindingOf(sceneManager);
+    return b && b->vct && b->vct->getVoxelizer() && scenePassReadsGi(sceneManager) ? b->vct : nullptr;
+}
+
 void PhotonPassBinding::installPassListener(Ogre::CompositorManager2 *cm) {
     if (!cm) return;
     // ONCE PER MANAGER (the stage-2 read's wl4: the Hlms registration's retry calls this again).
@@ -195,6 +227,12 @@ void PhotonPassBinding::preparePassHash(bool casterPass, Ogre::SceneManager *sce
     if (!b) return;
     if (!scenePassReadsGi(sceneManager)) {   // no GI on a pass that samples none
         if (b->vct || fieldBound(b)) ++sNonReaderPrepares;
+        // ...but the opaque passes of a scene that does not trace bind the chain's GEOMETRY for the lamps (L4's one
+        // exception: lampChainOf)
+        if (Ogre::PhotonVoxelLighting *chain = lampChainOf(casterPass, sceneManager)) {
+            hb.lampChain = chain;
+            hlms->_setProperty(Ogre::Hlms::kNoTid, kJahLampChain, Ogre::int32(chain->getNumCascades()));
+        }
         return;
     }
     if (b->vct || fieldBound(b)) ++sReaderPrepares;
@@ -227,13 +265,24 @@ Ogre::uint16 PhotonPassBinding::numExtraPassTextures(const Ogre::HlmsPropertyVec
     if (casterPass) return 0u;
     const Ogre::int32 cascades = Ogre::Hlms::getProperty(properties, kJahVctCascades);
     const bool ifd = Ogre::Hlms::getProperty(properties, kJahIfd) != 0;
-    return Ogre::uint16(cascades * kVolumesPerCascade + (ifd ? kFieldTextures : 0));
+    const Ogre::int32 lamp = Ogre::Hlms::getProperty(properties, kJahLampChain);
+    return Ogre::uint16(cascades * kVolumesPerCascade + (ifd ? kFieldTextures : 0) + lamp * kLampChainVolumes);
 }
 
 void PhotonPassBinding::propertiesMerged(Ogre::Hlms *hlms, size_t tid, Ogre::int32 endSlot) {
     if (hlms->_getProperty(tid, kShadowCaster)) return;
     const Ogre::int32 cascades = hlms->_getProperty(tid, kJahVctCascades);
     const bool ifd = hlms->_getProperty(tid, kJahIfd) != 0;
+    const Ogre::int32 lamp = hlms->_getProperty(tid, kJahLampChain);
+    if (lamp > 0) {
+        // THE LAMP CHAIN (lampChainOf): its four arrays last, in bind()'s order - after the volumes and the field
+        Ogre::int32 lampSlot = endSlot - lamp * kLampChainVolumes;
+        for (Ogre::int32 k = 0; k < kLampChainVolumes; ++k) {
+            hlms->_setTextureReg(tid, Ogre::PixelShader, kLampChainRegisters[k], lampSlot);
+            lampSlot += lamp;
+        }
+        endSlot -= lamp * kLampChainVolumes;
+    }
     if (cascades <= 0 && !ifd) return;
     // The same count numExtraPassTextures gave HlmsPbs for this property set.
     Ogre::int32 slot =
@@ -271,6 +320,16 @@ void PhotonPassBinding::setupRootLayout(Ogre::RootLayout &rootLayout,
     // HlmsPbs::setupRootLayout adds the total's array and the three axes (upstream's
     // own volumes, vct_anisotropic always 1) whenever `vct_num_probes` > 1; the rest
     // are ours.
+    // THE LAMP CHAIN's four arrays (lampChainOf), one binding of its cascades each
+    const Ogre::int32 lamp = Ogre::Hlms::getProperty(properties, kJahLampChain);
+    if (lamp > 1) {
+        Ogre::int32 at = Ogre::Hlms::getProperty(properties, Ogre::IdString(kLampChainRegisters[0]));
+        for (Ogre::int32 k = 0; k < kLampChainVolumes; ++k) {
+            rootLayout.addArrayBinding(Ogre::DescBindingTypes::Texture,
+                                       Ogre::RootLayout::ArrayDesc(Ogre::uint16(at), Ogre::uint16(lamp)));
+            at += lamp;
+        }
+    }
     const Ogre::int32 cascades = Ogre::Hlms::getProperty(properties, kVctNumProbes);
     if (cascades <= 1) return;
     Ogre::int32 idx = Ogre::Hlms::getProperty(properties, Ogre::IdString("vctProbes"));
@@ -336,13 +395,37 @@ size_t PhotonPassBinding::bind(bool casterPass, Ogre::CommandBuffer *commandBuff
         *commandBuffer->addCommand<Ogre::CbTexture>() =
             Ogre::CbTexture(Ogre::uint16(texUnit++), hb.ifd->getDepthVarianceTex(), sFieldSampler);
     }
+    if (hb.lampChain) {
+        // THE LAMP CHAIN (lampChainOf): its coverage and position per half, each an array of its cascades; read by
+        // texelFetch (no sampler)
+        Ogre::PhotonVoxelLighting *chain = hb.lampChain;
+        const size_t numCascades = chain->getNumCascades();
+        for (Ogre::int32 k = 0; k < kLampChainVolumes; ++k)
+            for (size_t c = 0u; c < numCascades; ++c) {
+                Ogre::TextureGpu **volumes = chain->getLightVoxelTextures(c);
+                *commandBuffer->addCommand<Ogre::CbTexture>() =
+                    Ogre::CbTexture(Ogre::uint16(texUnit++), volumes[kLampChainFirstVolume + k], nullptr);
+            }
+    }
     return texUnit;
 }
 
 void PhotonPassBinding::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
                                         Ogre::ResourceTransitionArray &resourceTransitions,
                                         const Ogre::SceneManager *sceneManager, bool casterPass) {
-    if (casterPass || !scenePassReadsGi(sceneManager)) return;
+    if (casterPass) return;
+    if (Ogre::PhotonVoxelLighting *chain = lampChainOf(casterPass, sceneManager)) {
+        // THE LAMP CHAIN's four volumes (lampChainOf), read by the opaque pass's pixel shader
+        for (size_t c = 0u; c < chain->getNumCascades(); ++c) {
+            Ogre::TextureGpu **volumes = chain->getLightVoxelTextures(c);
+            for (Ogre::int32 k = 0; k < kLampChainVolumes; ++k)
+                barrierSolver.resolveTransition(resourceTransitions, volumes[kLampChainFirstVolume + k],
+                                                Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                                1u << Ogre::PixelShader);
+        }
+        return;
+    }
+    if (!scenePassReadsGi(sceneManager)) return;
     const SceneGiBinding *b = bindingOf(sceneManager);
     if (!b) return;
     if (Ogre::PhotonVoxelLighting *vct = b->vct) {
@@ -371,6 +454,7 @@ void PhotonPassBinding::forget(const void *volume) {
     for (HostBinds &hb : sHost) {
         if (hb.vct == volume) hb.vct = nullptr;
         if (hb.ifd == volume) hb.ifd = nullptr;
+        if (hb.lampChain == volume) hb.lampChain = nullptr;
     }
 }
 

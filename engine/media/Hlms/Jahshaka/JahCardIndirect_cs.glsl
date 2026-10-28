@@ -143,7 +143,9 @@ void main()
 	const uint e = gl_WorkGroupID.x;
 	if( e >= caMode.y )
 		return;
-	const vec4 rect = csRelights[9u * e];
+	// (the relight record: five vec4, then the card's 48-lamp table in twelve - seventeen vec4 a card, OgreSurfaceCache.cpp's
+	// kRelightFloats; PHOTON-7 10-4 R9 (3))
+	const vec4 rect = csRelights[17u * e];
 	const uint ax = uint( rect.x ), ay = uint( rect.y ), size = uint( rect.z ), mode = uint( rect.w );
 	const uint lid = gl_LocalInvocationIndex;
 	if( lid == 0u )

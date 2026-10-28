@@ -30,7 +30,8 @@ struct JahHitParams
 	vec4 hitSun;            // xyz toward the sun, w a sun
 	vec4 hitSun2;           // x the hit's sun ray's mask, z its length, w a far copy's sun-leg lift
 	vec4 tables;            // xy the alpha table's device address, zw the hit table's (float bits)
-	vec4 surface;           // x the voxeliser's texture pool bound, y the cloud field bound
+	vec4 surface;           // x the voxeliser's texture pool bound, y the cloud field bound, zw the tier's counters' device
+	                        // address (float bits; jah_rq_alpha.glsl's JahTierCounters, 0 = none)
 	vec4 cloudMap;          // the cloud layer's 1 / tile, strength, scroll x, z
 	vec4 cloudSun;          // ...its sun throw x, z, altitude, 1 / mu_s
 	vec4 levelCam;          // THE LEVEL RULE: the GI camera (xyz); w 1 a view's level by the camera (10-2e), 2 a cache's

@@ -78,6 +78,10 @@ vec3 jahConeStart( vec3 posLS, vec3 biasDirLS )
 /// cache texel.
 const int kJahPixelDiffuseRays = 8;
 
+/// THE LAST CALL'S OPEN SHARE (PHOTON-7 10-4 R11): the cosine-weighted share of its rays that left the chain, each by
+/// what the panes it crossed passed (1 with no ray taken) - the no-ray integrate's measured sky visibility (jahSkyVis).
+float gJahRayDiffuseOpen = 1.0;
+
 vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, ivec4 ownCell,
 					float firstShellC0, float lastShellC0, bool planeTest0 )
 {
@@ -86,7 +90,7 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 	const float binCos = 1.0 - 1.0 / float( n );
 	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
 	vec3 sum = vec3( 0.0, 0.0, 0.0 );
-	float taken = 0.0;
+	float taken = 0.0, open = 0.0;
 	for( int i = 0; i < n; ++i )
 	{
 		const vec3 d = basis * jahRayCosineDir( i, n );
@@ -102,10 +106,12 @@ vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, iv
 			// (OUTSIDE: no cascade held the ray - the chain knows nothing of that world, and the diffuse takes what GI
 			// off takes there, the sky over the bin: gi.cascades 4 and 5 - a pixel beyond a one-cascade chain, a
 			// teleport's window before the chain is rebuilt around the eye - read black, 0.06 x the ambient)
-			sum += jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );
+			sum += r.radiance + r.throughput * jahEnvCone( JAH_CONES_TO_WORLD( d ), binTan );   // (the panes: PHOTON-7 10-4 R7)
 			taken += 1.0;
+			open += r.throughput;
 		}
 	}
+	gJahRayDiffuseOpen = taken > 0.0 ? open / taken : 1.0;
 	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0, 0.0, 0.0 );
 }
 
@@ -129,6 +135,8 @@ struct JahRaySpecular
 	float open;		// the lobe's share no geometry stopped
 	float hitC0;	// the hits' mean distance, cascade 0's units (0: no hit)
 	float hits;		// the hits' weight
+	float openC0;	// THE OPEN SHARE'S READ LENGTH (PHOTON-7 10-4 R4): how far the chain read the escapes before they left it,
+					// their mean, cascade 0's units (0: no escape, or none a cascade held) - where a traced escape starts
 };
 float jahRadicalInverse2( uint b )
 {
@@ -147,6 +155,7 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 	o.open = 0.0;
 	o.hitC0 = 0.0;
 	o.hits = 0.0;
+	o.openC0 = 0.0;
 	const int n = max( rays, 1 );
 	const float a = max( perceptualRoughness * perceptualRoughness, 1e-4 );
 	// THE SET IS BUILT IN THE WORLD, whatever the caller's space: the screen integrate (world) and the pixel (the
@@ -189,10 +198,14 @@ JahRaySpecular jahRaySpecular( vec3 surfLS, vec3 nLS, vec3 R, vec3 N, float perc
 		}
 		else if( r.exitReason == kJahRayEscaped || r.exitReason == kJahRayOutside )
 		{
+			// (the panes crossed: their own light, and what they pass of the open share - PHOTON-7 10-4 R7)
+			o.radiance += r.radiance * w;
 			wSum += w;
-			wOpen += w;
+			wOpen += w * r.throughput;
+			o.openC0 += w * r.throughput * ( r.exitReason == kJahRayEscaped ? r.tC0 : 0.0 );
 		}
 	}
+	o.openC0 = wOpen > 0.0 ? o.openC0 / wOpen : 0.0;
 	if( wSum > 0.0 )
 	{
 		o.radiance *= 1.0 / wSum;

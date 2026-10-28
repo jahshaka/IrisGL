@@ -163,6 +163,25 @@ namespace Ogre
             for( size_t i = 0; i < 4; ++i )
                 shaderMaterial.bgDiffuse[i] = bgDiffuse[i];
             shaderMaterial.diffuse[3] = pbsDatablock->getTransparency();
+            // ADDITIVE ABSORBS NOTHING (the one read's F8; paneTransmittance): its coverage is 0 - a pane of T = 1 the
+            // voxels' rays pass whole (the voxeliser's coverage is the projected area x alpha)
+            if( pbsDatablock->getTransparencyMode() != HlmsPbsDatablock::None &&
+                pbsDatablock->getBlendblock()->mDestBlendFactor == SBF_ONE )
+                shaderMaterial.diffuse[3] = 0.0f;
+            // A GLASS's OWN LIGHT (PHOTON-7 10-4 R7, C): Ogre's Transparent and Refractive pixel draws kD x alpha^2
+            // (premultiplied on upload, OgreHlmsPbsDatablock.cpp), a Fade's alpha x kD. The voxel's coverage already
+            // carries one alpha (Voxelizer: the projected area x alpha) and a ray crossing a pane takes alpha of the
+            // row-shaded light (OgreScene::gpuPaneWordFor), so the row holds kD x alpha for those two and kD for Fade:
+            // every route then sends Ogre's alpha^2 kD for a glass and alpha kD for a Fade.
+            {
+                const HlmsPbsDatablock::TransparencyModes mode = pbsDatablock->getTransparencyMode();
+                if( mode == HlmsPbsDatablock::Transparent || mode == HlmsPbsDatablock::Refractive )
+                {
+                    const float a = std::min( 1.0f, std::max( 0.0f, pbsDatablock->getTransparency() ) );
+                    for( size_t i = 0; i < 3; ++i )
+                        shaderMaterial.diffuse[i] *= a;
+                }
+            }
             // THE SPECULAR LOBE OF EVERY WORKFLOW (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1, PHOTON-4): HlmsPbs's lobe
             // is kS ( F0 ( 1 - Fc ) + Fc ) D Vis (Rs = F x D x G x kS, 800.PixelShader / 200.BRDFs), so the row
             // carries what the lobes take: F0 x kS and the Fresnel-90 weight kS - kS's MEAN (a tinted kS is not
@@ -175,7 +194,7 @@ namespace Ogre
             //   (ENGINE-POLISH-PHOTON-1 stage 2).
             //   THE SPECULAR WORKFLOWS (SpecularWorkflow, SpecularAsFresnelWorkflow): pixelData.F0 is the
             //   datablock's Fresnel (a scalar F0 is held in x alone unless hasSeparateFresnel - y and z then hold
-            //   whatever an earlier value left, OgreGpuScene.cpp gpuIsMetal), untinted by the albedo map, and the
+            //   whatever an earlier value left), untinted by the albedo map, and the
             //   diffuse lobe the diffuse colour whole: m = 0 and the Fresnel rides f0Packed, above the dielectric's
             //   so a 0.04 dielectric is exact (0) and a white F0 exact (1023). STATED: an F0 below 0.04 clamps at
             //   the dielectric's (the store's encoding is relative to it), and the lane is 10 bits (1 / 2046 of F0).

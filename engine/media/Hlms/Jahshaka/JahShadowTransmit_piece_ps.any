@@ -1,0 +1,44 @@
+// THE SHADOWS' TRANSMITTANCE (PHOTON-7 10-4 R8; L9: the sun and the lamps follow the ray through glass, attenuated by its
+// material). A PANE (a surface that blends with what is behind it: Fade, Transparent, Refractive under alpha 1 -
+// OgreScene's paneTransmittance) occludes no light: it is in no depth map, and casts only into the shadow node's
+// TRANSMITTANCE LAYER, atlasT (OgreShadow.cpp: R8, the depth atlas's own layout, cleared to 1, built only while a drawn
+// scene holds a pane), each map's pane pass testing that map's opaque depth read-only - so a pane behind the nearest
+// opaque caster is not between the light and its receiver - and multiplying the layer by its 1 - alpha (the caster's
+// blendblock: dest x src; no depth write). NEUTRAL, by Ogre's own glass model: Ogre's blend passes 1 - alpha whatever the
+// colour (a tinted, RGB transmittance is on the owner's review list).
+//
+// (1) THE WRITER: a pane caster's pixel in a pass with a colour target (the layer's) writes its transmittance - ONE
+//     shader for every alpha (the one read's F12: the value rode the permutation, and an alpha drag compiled up to 255
+//     caster PSOs with the shadow missing while each built): `jah_pane_caster` 1 (ScenePbs::calculateHashForPreCaster)
+//     reads its material's 1 - alpha in the vertex stage (ScenePbs::fillBuffersForV2 binds the material buffer for a
+//     pane's caster) and hands it flat to the pixel; 2 an Additive, which passes everything (1). After DoShadowCastPS,
+//     over the depth it wrote into the colour output.
+// (2) THE READER: every shadow lookup of a shadowed colour pass (`jah_shadow_transmit`, the listener's: OgreFog.cpp;
+//     a node without the layer binds a white texel, so the permutation never depends on whether a pane was drawn) is
+//     multiplied by the layer at the lookup's own uv - one bilinear read where the depth is
+//     PCF-filtered - inside the fork's getShadow / getShadowPoint (custom_shadow_transmit_uv / custom_shadow_transmit),
+//     before the map rectangle's clamp, so a lookup outside its map stays lit.
+// THE AT-SIGN RULE: no directive mark in any comment of this file.
+
+@property( hlms_shadowcaster && jah_pane_caster && !hlms_render_depth_only )
+@piece( custom_ps_posExecution )
+	@property( jah_pane_caster == 2 )
+		outColour = 1.0;
+	@else
+		outColour = inPs.jahPaneT;
+	@end
+@end
+@end
+// (its vertex stage's pieces - the material's declaration, the value, the flat interpolant - are in a file both stages
+// read: JahFog_piece_vs_piece_ps.any, beside the hooks they ride)
+
+@property( jah_shadow_transmit && !hlms_shadowcaster )
+@piece( custom_shadow_transmit_uv )
+	float2 jahShadowTransmitUv = uv;
+	float jahShadowTransmitAt = fDepth;
+@end
+@piece( custom_shadow_transmit )
+	if( jahShadowTransmitPast( jahShadowTransmitUv, jahShadowTransmitAt ) )
+		retVal *= midf_c( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahShadowTransmitUv, 0.0 ).x );
+@end
+@end

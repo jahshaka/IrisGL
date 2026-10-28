@@ -449,6 +449,9 @@
 		// THE GATHER'S RECORD (the record's bit 28, jah_rq_hit_record.glsl): the
 		// diffuse response only (the piece custom_ps_preLights below).
 		bool atomHitDiffuseOnly = false;
+		// A REFLECTION RECORD WHOSE LOBE THE TRACE TRACED (the record's bit 29: C2, PHOTON-7 11-2 (3)): its environment
+		// specular is the traced secondary ray's (the record's delta), the piece custom_ps_preEnvBrdf below.
+		bool atomHitTracedLobe = false;
 		float2 fwdCustomFragCoord = float2( 0.0, 0.0 );
 		bool fwdCustomHasCell = false;
 	@end
@@ -466,7 +469,7 @@
 			bool atomOk = atomIds.x != 0xFFFFFFFFu && atomListIdx < inAtom.hitCount;
 			// The record's aux words, CLAMPED into the buffer (a lane past the count
 			// - a helper lane - still loads).
-			uint atomAuxAt = min( 12u + 8u * atomListIdx, max( uint( atomHitBuf.length() ), 12u ) - 8u );
+			uint atomAuxAt = min( 12u + 10u * atomListIdx, max( uint( atomHitBuf.length() ), 12u ) - 10u );
 			float2 atomAux = unpackHalf2x16( atomHitBuf[atomAuxAt] );
 		@else
 			uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
@@ -634,26 +637,9 @@
 			float4 atomHitClip = mul( float4( atomHitPos, 1.0 ), passBuf.viewProj );
 			b.clipW = atomHitClip.w;
 			atomOk = atomOk && all( lessThan( floatBitsToUint( atomHitPos ) & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) ) );
-			// THE FORWARD+ CELL (the fork's fwdCustomFragCoord): the hit's own pixel
-			// of this target's grid - the grid is the camera frustum's - and no cell
-			// outside that frustum.
-			fwdCustomHasCell = atomOk && atomHitClip.w > 0.0 &&
-							   all( lessThanEqual( abs( atomHitClip.xy ), float2( atomHitClip.w, atomHitClip.w ) ) );
-			@property( atom_hit_world_all )
-				// THE MEASUREMENT ARM's "one list" value (atom.hitWorldLights = 2):
-				// no hit takes a cell, every hit takes the world list.
-				fwdCustomHasCell = false;
-			@end
-			{
-				float2 atomRes = float2( textureSize( atomIdTex, 0 ) );
-				float2 atomNdc = fwdCustomHasCell ? atomHitClip.xy / atomHitClip.w : float2( 0.0, 0.0 );
-				@property( hlms_forwardplus_flipY )
-					fwdCustomFragCoord = float2( ( atomNdc.x * 0.5 + 0.5 ) * atomRes.x, ( 0.5 + atomNdc.y * 0.5 ) * atomRes.y );
-				@else
-					fwdCustomFragCoord = float2( ( atomNdc.x * 0.5 + 0.5 ) * atomRes.x, ( 0.5 - atomNdc.y * 0.5 ) * atomRes.y );
-				@end
-				fwdCustomFragCoord = clamp( fwdCustomFragCoord, float2( 0.0, 0.0 ), atomRes - float2( 0.5, 0.5 ) );
-			}
+			// NO FORWARD+ CELL FOR A HIT (PHOTON-7 10-4 R9, the lead's ruling): every hit takes the WORLD list
+			// (AtomHitWorldLights), each lamp of it traced from the hit (jahLampRayView) - the cell's lamps had no
+			// visibility, and the frustum's cells are the camera's, not the hit's. fwdCustomHasCell stays false.
 			// THE EYE IS THE RAY'S ORIGIN: the reversed ray, in view space.
 			{
 				float3 atomDirW = atomOctDecode( unpackSnorm2x16( atomRec.w ) );
@@ -665,6 +651,7 @@
 			}
 			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
 			atomHitDiffuseOnly = ( atomIds.x & 0x10000000u ) != 0u;
+			atomHitTracedLobe = ( atomIds.x & 0x20000000u ) != 0u;
 			if( !atomOk )
 			{
 				b.w = float3( 1.0, 0.0, 0.0 );
@@ -944,6 +931,14 @@
 		@end
 		outPs_colour0.w = midf_c( 1.0 );
 	@end
+	// C2 (PHOTON-7 11-2 (3), the lead's ruling on D5): a reflection record whose lobe the trace traced takes its
+	// ENVIRONMENT specular from that secondary ray (rq_reflect.comp adds it to the record's delta); the decode's own
+	// environment specular - the cube, the VCT cone, the probes, gathered into envColourS - is zeroed before the split
+	// DFG weighs it (the fork's hook custom_ps_preEnvBrdf, just before BRDF_EnvMap). The lights' lobe stays the decode's.
+	@piece( custom_ps_preEnvBrdf )
+		if( atomHitTracedLobe )
+			pixelData.envColourS = midf3_c( 0.0, 0.0, 0.0 );
+	@end
 	// THE EYE VECTOR IS THE REVERSED RAY. Upstream's LightingHeader computes it from
 	// the view-space position (the camera's pinhole); the hook right after it is
 	// the per-datablock custom_ps_preLights, which a decode twin never carries (a
@@ -1023,7 +1018,6 @@
 	// the forward loop (the one falloff, the spot cone and profile,
 	// the same BRDF), in view space through the pass's view.
 	@piece( AtomHitWorldLights )
-		if( !fwdCustomHasCell )
 		{
 			uint atomWlLen = uint( atomWorldLights.length() );
 			float4 atomWlHead = readOnlyFetch( atomWorldLights, 0 );
@@ -1051,6 +1045,14 @@
 					@property( light_profiles_texture )
 						atomWlAtten *= float( getPhotometricAttenuation( midf_c( atomWlCos ), atomWlSpotDir.w
 																		 OGRE_PHOTOMETRIC_ARG ) );
+					@end
+					// THE LAMP'S RAY FROM THE HIT (PHOTON-7 10-4 R9): exact, per lamp - 0 behind an opaque caster, the
+					// panes' transmittance between (JahLampRay_piece_ps.any, the colour passes' own)
+					@property( jah_lamp_rays && ( hlms_normal || hlms_qtangent ) )
+						if( atomWlAtten > 0.0 && max( dot( float3( pixelData.normal ), atomWlDir ),
+													  dot( float3( pixelData.geomNormal ), atomWlDir ) ) > 0.0 )
+							atomWlAtten *= jahLampRayView( inPs.pos, inPs.pos + atomWlDir * atomWlDist,
+														   float3( pixelData.geomNormal ) );
 					@end
 					if( atomWlAtten > 0.0 )
 					{

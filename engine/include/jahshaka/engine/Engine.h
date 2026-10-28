@@ -1986,6 +1986,10 @@ public:
     static std::unique_ptr<Engine> create(const EngineConfig &, std::string &error);
     /// True while an Engine exists in this process.
     static bool isAlive();
+    /// Program loads that FAILED to compile in this process, every engine's (the fork's GpuProgram::getJahCompileErrors:
+    /// AsyncShaderStats::compileErrors' source), readable with no engine alive - the fixtures' exit check
+    /// (tests/support/enginetesthelpers.h, URGENT #83's law for the fixtures).
+    static unsigned long long processShaderCompileErrors();
 
     /// ORDER MATTERS. A View must be created before any Scene: the underlying engine
     /// only starts its material and buffer systems when the first render target

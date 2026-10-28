@@ -1009,6 +1009,9 @@ bool buildReceiverGrid(const AtomPassContext &ctx, Ogre::RenderSystem *rs, OgreS
         p.map[0] = mapW;
         p.map[1] = mapH;
         p.map[2] = tile;
+        // (the medium a receiver too where the pass fogs: the atmosphere component sets hlms_fog - JahReceiverGrid_cs's
+        // head; gi.fog_far_hall)
+        p.map[3] = scene->sceneManager() && scene->sceneManager()->getAtmosphereRaw() ? 1u : 0u;
         p.misc[0] = rs->isReverseDepth() ? 0.0f : 1.0f;
         p.misc[1] = dilationTexels[0];
         p.misc[2] = depthMargin;

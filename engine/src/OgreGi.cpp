@@ -21,6 +21,10 @@
 #include <optional>
 
 #include <OgreHlmsManager.h>
+#include <CommandBuffer/OgreCommandBuffer.h>
+#include <CommandBuffer/OgreCbShaderBuffer.h>
+#include <OgreConstBufferPool.h>
+#include <Vao/OgreConstBufferPacked.h>
 #include <OgreAsyncTextureTicket.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
@@ -94,6 +98,14 @@ void ScenePbs::analyzeBarriers(Ogre::BarrierSolver &barrierSolver,
     // The Photon volumes the pixel stage reads (HlmsPbs's own walk did this while it
     // held them — OWN-GI-1).
     PhotonPassBinding::analyzeBarriers(barrierSolver, resourceTransitions, sm, bCasterPass);
+    // THE SHADOWS' TRANSMITTANCE LAYER (PHOTON-7 10-4 R8), sampled by this colour pass's fragments: Ogre's own scene
+    // pass moves the shadow node's DEPTH maps to the texture layout (CompositorPassScene::analyzeBarriers, the
+    // contiguous shadow maps) and knows nothing of the layer the listener binds - its pane passes leave it a render
+    // target.
+    if (!bCasterPass && sm)
+        if (Ogre::TextureGpu *t = FogHlmsListener::shadowTransmitBound(sm->getCurrentShadowNode()))
+            barrierSolver.resolveTransition(resourceTransitions, t, Ogre::ResourceLayout::Texture,
+                                            Ogre::ResourceAccess::Read, 1u << Ogre::PixelShader);
 }
 
 Ogre::HlmsCache ScenePbs::preparePassHash(const Ogre::CompositorShadowNode *shadowNode,
@@ -122,6 +134,27 @@ void ScenePbs::calculateHashFor(Ogre::Renderable *renderable, Ogre::uint32 &outH
 }
 
 void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces) {
+    // A BLEND A LATER ADD CANNOT FOLLOW (PHOTON-7 10-4 R4): the blended passes' escapes add their traced light into the
+    // pixel after the pass (rq_glass_escape_add.comp) - right for a source factor of one (Transparent, Refractive) or
+    // the fragment's alpha (Fade, Additive: the weight takes the alpha, PhotonVct's JahGlassEscapeWeight), never for any
+    // other (Modulate's destination colour): such a material lights its open share by the environment, as before.
+    {
+        const Ogre::HlmsDatablock *db = renderable ? renderable->getDatablock() : nullptr;
+        const Ogre::HlmsBlendblock *bb = db ? db->getBlendblock(false) : nullptr;
+        if (bb && bb->mIsTransparent && bb->mSourceBlendFactor != Ogre::SBF_ONE &&
+            bb->mSourceBlendFactor != Ogre::SBF_SOURCE_ALPHA) {
+            static const Ogre::IdString kNoEscape("jah_blend_no_escape");
+            setProperty(kNoTid, kNoEscape, 1);
+        }
+        // ...and WHICH of the two: the blend's source factor is the fragment's alpha (the record's weight takes it). The
+        // shader cannot tell: Ogre's Transparent mode without a diffuse map sets no transparent_mode (its alpha is
+        // precomputed on the material, OgreHlmsPbsDatablock.cpp uploadToConstBuffer) and blends with a source factor one,
+        // exactly as Fade's shader does with its source factor alpha.
+        if (bb && bb->mIsTransparent && bb->mSourceBlendFactor == Ogre::SBF_SOURCE_ALPHA) {
+            static const Ogre::IdString kSrcAlpha("jah_escape_src_alpha");
+            setProperty(kNoTid, kSrcAlpha, 1);
+        }
+    }
 #ifdef OGRE_BUILD_COMPONENT_PLANAR_REFLECTIONS
     // THE RENDERABLE'S OWN SCENE: an Item's SubItem -> its Item -> its
     // SceneManager -> that scene's record. Anything else (a v1 renderable, an
@@ -141,6 +174,37 @@ void ScenePbs::calculateHashForPreCreate(Ogre::Renderable *renderable, Ogre::Pie
 #else
     Ogre::HlmsPbs::calculateHashForPreCreate(renderable, inOutPieces);
 #endif
+}
+
+void ScenePbs::calculateHashForPreCaster(Ogre::Renderable *renderable, Ogre::PiecesMap *inOutPieces,
+                                         const Ogre::PiecesMap *normalPassPieces) {
+    Ogre::HlmsPbs::calculateHashForPreCaster(renderable, inOutPieces, normalPassPieces);
+    const float T = paneTransmittance(renderable->getDatablock());
+    if (T >= 0.0f) {
+        static const Ogre::IdString kPaneCaster("jah_pane_caster");
+        setProperty(kNoTid, kPaneCaster, T < 1.0f ? 1 : 2);
+    }
+}
+
+Ogre::uint32 ScenePbs::fillBuffersForV2(const Ogre::HlmsCache *cache, const Ogre::QueuedRenderable &queuedRenderable,
+                                        bool casterPass, Ogre::uint32 lastCacheHash, Ogre::CommandBuffer *commandBuffer) {
+    const Ogre::uint32 instance =
+        Ogre::HlmsPbs::fillBuffersForV2(cache, queuedRenderable, casterPass, lastCacheHash, commandBuffer);
+    if (casterPass) {
+        // (HlmsPbs::fillBuffersFor's own binding, for a pane's caster: both stages, the pool remembered)
+        const auto *db = static_cast<const Ogre::HlmsPbsDatablock *>(queuedRenderable.renderable->getDatablock());
+        const float T = paneTransmittance(db);
+        const Ogre::ConstBufferPool::BufferPool *pool = db->getAssignedPool();
+        if (T >= 0.0f && T < 1.0f && pool && mLastBoundPool != pool) {
+            const Ogre::uint32 bytes = Ogre::uint32(pool->materialBuffer->getTotalSizeBytes());
+            *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
+                Ogre::CbShaderBuffer(Ogre::VertexShader, 1, pool->materialBuffer, 0, bytes);
+            *commandBuffer->addCommand<Ogre::CbShaderBuffer>() =
+                Ogre::CbShaderBuffer(Ogre::PixelShader, 1, pool->materialBuffer, 0, bytes);
+            mLastBoundPool = pool;
+        }
+    }
+    return instance;
 }
 
 // THE PROBE FACE PASS'S RENDER-QUEUE CEILING — `rq_last 200` in

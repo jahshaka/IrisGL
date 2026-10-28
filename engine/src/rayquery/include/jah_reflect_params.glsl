@@ -108,9 +108,6 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
 	/// (jah_fog_along.glsl states them).
 	vec4 fog[8];
-	/// THE METAL HIT'S ROUTE (REFLECT-FIX-1): x = the reflector's perceptual roughness
-	/// below which a hit on a metal is decoded; above it the voxel store answers it.
-	vec4 metal;
 	/// THE REST BLOCK (PHOTON-2 round 2): x = 1 = THE GI FREEZE (the arm "gi.freeze", M1's measuring arm: the temporal
 	/// pass keeps every moving history as carried - no new sample, no clamp; a fixed estimator takes its ray;
 	/// rq_reflect_temporal.comp).

@@ -2037,13 +2037,11 @@ struct LightDesc {
     /// it back and so the two cannot silently disagree.
     int       forwardShadingPriority = 0;
 
-    /// Is this the scene's SUN — the one directional light allowed to cast?
-    /// Our shadow node has a single directional slot (three PSSM splits at slot
-    /// 0), so a second casting directional would be picked by Ogre's own
-    /// castShadows-then-light-id sort, i.e. by creation order, silently and
-    /// differently across reloads. setLight forces `castShadows` false on a
-    /// directional that is not the primary, which leaves Ogre's sort exactly
-    /// one candidate. Meaningless on point/spot/area lights (always true).
+    /// Is this the scene's SUN — the directional light that takes the shadow
+    /// node's PSSM splits (slot 0)? Every further casting directional takes a
+    /// focused map. setLight gives the primary the higher shadow sort priority,
+    /// so Ogre's directional sort puts it first on every frame and reload
+    /// (creation order would not). Meaningless on point/spot/area lights.
     bool      primaryDirectional = true;
 
     /// "Is this the same light state I last pushed?" — the guard a host with a
@@ -4103,11 +4101,15 @@ struct CardSample {
     /// plus the specular lobe's re-emission - what the texel sends the same way to
     /// every direction; inside `radiance` too.
     float flat[3] = { 0, 0, 0 };
-    /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3): bit j of `lampMask` = lamp j of the card's
-    /// table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the lamps past it.
-    unsigned lampMask = 0u;
+    /// THE LAMPS' TRACED VISIBILITY AT THE TEXEL (PHOTON-7 stage 5, 5-3; 48 lamps since 10-4 R9): bit j of `lampMask`
+    /// = lamp j of the card's table (`lampIds`, world ids: SceneLightList::documentId's 31 bits), `lampOverflowVis` the
+    /// lamps past it (and the area lights); bit j of `lampThroughMask` = lamp j reached through panes (the one read's F3),
+    /// which reads `lampThroughVis` (the transmitted lamps' share-weighted visibility); a lamp in neither mask is blocked.
+    unsigned long long lampMask = 0ull;
     float lampOverflowVis = 1.0f;
-    unsigned lampIds[16] = {};
+    unsigned long long lampThroughMask = 0ull;
+    float lampThroughVis = 1.0f;
+    unsigned lampIds[48] = {};
     unsigned lampCount = 0u;
     /// WHICH card and WHICH atlas texel answered (Scene::readCardAt; -1 from
     /// readCardTexel), and whether its radiance carries a marched indirect
@@ -5208,20 +5210,13 @@ struct FogDesc {
     float  heightFalloff = 0.1f;  ///< per world unit; larger = thins out faster with altitude
     float  heightLevel   = 0.0f;  ///< world Y where heightDensity applies
 
-    /// Brightness breakthrough: bright pixels (a sun disc, an emissive sign)
-    /// resist the fog instead of dissolving into it. `breakMinBrightness` is the
-    /// luminance where breaking through starts, `breakFalloff` how fast it takes
-    /// hold. breakFalloff = 0 turns it off, leaving pure exponential fog. It
-    /// applies to the distance fog while this fog is enabled; the air alone
-    /// (fog disabled under the analytic sky) is pure extinction.
-    float  breakMinBrightness = 0.25f;
-    float  breakFalloff       = 0.1f;
+    // (the brightness "breakthrough" - bright pixels resisting the fog by their own luminance - is DELETED, PHOTON-7
+    // 10-4 R11: a medium's transmittance is its optical depth alone; its in-scatter is lit by what reaches it)
 
     bool operator==(const FogDesc &o) const {
         return enabled == o.enabled && colour == o.colour && density == o.density &&
                heightDensity == o.heightDensity && heightFalloff == o.heightFalloff &&
-               heightLevel == o.heightLevel && breakMinBrightness == o.breakMinBrightness &&
-               breakFalloff == o.breakFalloff;
+               heightLevel == o.heightLevel;
     }
     bool operator!=(const FogDesc &o) const { return !(*this == o); }
 };
@@ -5569,6 +5564,33 @@ struct RayQueryStatus {
     unsigned long long hitRecords = 0;
     unsigned long long hitDropped = 0;
     unsigned long long hitCapacity = 0;
+    /// THE BLENDED PASSES' ESCAPE LISTS (PHOTON-7 10-4 R4): a blended or refractive fragment's open specular share, traced
+    /// on the TLAS after its pass. Over the scene's LIVE views (the hit list's rule), the newest read-back frame:
+    /// `escapeRecords` the records the fragments appended (summed over the blended and the refractives' lists; may pass
+    /// the capacity), `escapeDropped` of those, the ones a full list could not hold (lit by the environment instead, the
+    /// list grows to the demand: 0 = every list held its own), `escapeCapacity` the largest view's two lists' size; then
+    /// what answered each traced record: a card, the cascades, the hit's direct light alone (past every cache: no indirect
+    /// - a named limit), a far copy's (the coarsest level: its normal faces the ray - a named limit), the environment, a
+    /// back face, and no sample (a hit no reader could shade: 0 expected). Read several frames late, never with a wait.
+    unsigned long long escapeRecords = 0;
+    unsigned long long escapeDropped = 0;
+    unsigned long long escapeCapacity = 0;
+    unsigned long long escapeTraced = 0;
+    unsigned long long escapeCard = 0;
+    unsigned long long escapeVoxel = 0;
+    unsigned long long escapeDirect = 0;
+    unsigned long long escapeFar = 0;
+    unsigned long long escapeSky = 0;
+    unsigned long long escapeBack = 0;
+    unsigned long long escapeNoSample = 0;
+    /// ...and the records whose add SATURATED a pixel's fixed-point word (its top, 65536 a channel: the one read's F11 -
+    /// a sum that once wrapped silently; 0 expected outside a sun's glint).
+    unsigned long long escapeSaturated = 0;
+    /// THE PANE LIST'S OVERFLOW (the one read's F4): the reading rays (a gather's, a reflection's, a card's, the voxel
+    /// sides', the escape's) that met more panes than they list (jah_rq_alpha.glsl kJahPanesMax, the nearest kept): the
+    /// rest are applied - their transmittance multiplied, their own light left out. Cumulative over the tier's life (every
+    /// scene), read a few frames late; 0 = no ray met more. A light ray has no list (no cap) and is never counted.
+    unsigned long long panesOverflow = 0;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append
@@ -7141,6 +7163,11 @@ struct AsyncShaderStats {
     /// threads built one shared program's parameter definitions at once, and a dispatch read
     /// past its parameters until the GPU lost its context).
     unsigned long long paramsMisfits = 0;
+    /// Program loads that FAILED with a compile error, every program of the process (a running total: the fork's
+    /// GpuProgram::getJahCompileErrors). Ogre catches and logs a failed load and never throws it, so a compute job
+    /// whose shader does not compile never dispatches and the picture is merely wrong: 0 on a sound build - the
+    /// engine selftest's verdict (URGENT #83: a piece left out of the light injection's list killed the job silently).
+    unsigned long long compileErrors = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk
@@ -8006,13 +8033,14 @@ struct RenderStats {
 
 /// One SHADOW-MAP SLOT, as the renderer currently holds it
 /// (`world.shadowStatus()`). A slot is a LIGHT's place in the atlas, not a
-/// texture rectangle: slot 0 is the directional light and owns all three PSSM
-/// splits, and slots 1..N are the focused point/spot maps, one light each.
+/// texture rectangle: slot 0 is the sun (the primary directional) and owns all
+/// three PSSM splits, and slots 1..N are the focused maps, one light each: every
+/// further casting directional first, then the point/spot lights.
 /// That is Ogre's own bookkeeping (CompositorShadowNode::getShadowCastingLights
 /// is indexed by light, not by map), and reporting anything else here would
 /// mean inventing a second numbering the engine does not use.
 struct ShadowMapInfo {
-    unsigned slot = 0;        ///< 0 = the directional/PSSM slot, 1..N the focused maps
+    unsigned slot = 0;        ///< 0 = the sun's PSSM slot, 1..N the focused maps
     NodeId   node = 0;        ///< the light occupying it, 0 when the slot is empty or foreign
     /// The lamp-map cache holds this slot's light (every point/spot map is
     /// cached — ENGINE_CACHE_POLICY_SPEC P2 — unless the view has more lamps
@@ -8039,14 +8067,16 @@ struct ShadowStatus {
     bool     live = false;
     unsigned resolution = 0;     ///< the base size the layout derives from
     unsigned maps = 0;           ///< TEXTURE rectangles in the atlas: pssmSplits + focusedMaps
-    unsigned pssmSplits = 0;     ///< always 3 here: one directional light, three splits
-    unsigned focusedMaps = 0;    ///< point/spot maps the atlas has room for
+    unsigned pssmSplits = 0;     ///< always 3 here: the sun, three splits
+    unsigned focusedMaps = 0;    ///< single maps the atlas has room for (point/spot, further directionals)
     /// LIGHT slots — 1 (the directional/PSSM set) + focusedMaps, and the length
     /// of `mapped`. Not the same number as `maps`: three of the rectangles
     /// belong to one light.
     unsigned lightSlots = 0;
-    /// Shadow-casting point/spot lights in the scenes being drawn — the demand
-    /// the count is derived from. `casters > focusedMaps` is the exceeded case.
+    /// The focused-map casters in the scenes being drawn (shadow-casting
+    /// point/spot lights and every casting directional after the sun) — the
+    /// demand the count is derived from. `casters > focusedMaps` is the
+    /// exceeded case.
     unsigned casters = 0;
     unsigned budget = 0;         ///< the EFFECTIVE ceiling (resolution-capped)
     unsigned requestedBudget = 0;///< what the host asked for before the cap
@@ -8062,7 +8092,7 @@ struct ShadowStatus {
     unsigned long long probeAtlasBytes = 0;
     /// Every light SLOT the live shadow node holds, in slot order.
     std::vector<ShadowMapInfo> mapped;
-    /// Shadow-casting point/spot lights with NO map this frame — the lights
+    /// Focused-map casters (as `casters`) with NO map this frame — the lights
     /// whose shadows are silently missing. Empty is the healthy state.
     std::vector<NodeId> unmapped;
     /// WAS THE LAST RENDERED FRAME MEASURED AT ALL?
@@ -9496,6 +9526,9 @@ struct MonitorRecord {
     unsigned    shadowPassesProbe = 0;  ///< probes' shadow nodes
     unsigned    planarRenders = 0;
     unsigned    shaderCompiles = 0;
+    /// Program loads failed with a compile error, the process's running total at this frame's end
+    /// (AsyncShaderStats::compileErrors): any value above 0 is a dead shader in the running app.
+    unsigned long long shaderCompileErrors = 0;
     /// Was the render system COUNTING while this frame rendered? Recording is
     /// off in Ogre until something asks for `renderStats()`, and a frame
     /// rendered with it off reports zeros for every geometry counter — a fact

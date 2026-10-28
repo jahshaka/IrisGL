@@ -47,6 +47,7 @@
 #include <Compositor/Pass/OgreCompositorPassDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <OgreCamera.h>
+#include <OgreGpuProgram.h>
 #include <OgreLight.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
@@ -247,6 +248,7 @@ void FrameMonitor::endFrame(unsigned scenesUpdated) {
     const auto t = std::chrono::steady_clock::now();
     mCurrent.totalMs = float(std::chrono::duration<double, std::milli>(t - mFrameStart).count());
     mCurrent.scenesUpdated = scenesUpdated;
+    mCurrent.shaderCompileErrors = Ogre::GpuProgram::getJahCompileErrors();
     // The counters the pass records imply, summed here so nothing downstream
     // has to re-derive them and `frames.jsonl` reads on its own.
     for (const FramePass &p : mCurrent.passes) {
@@ -1514,9 +1516,9 @@ constexpr ArmDef kArms[] = {
       "THE DECODE'S DISCRIMINATOR (a test door, ATOM-BLACK-FRAMES-1): 1 = a colour code per failed "
       "validity term instead of the discard, 2 = also the code chart. 0 = shipped. scale's decode "
       "rows. Was JAHSHAKA_ATOM_DISCRIMINATE (a per-pass read)." },
-    { ArmId::AtomHitWorldLights, 0.0, 0.0, 2.0,
-      "The ray-hit decode's light list: 0 = shipped (the world list where the hit has no cell), "
-      "1 = off (the picture before the list), 2 = all (every hit the world list, no Forward+ cell). "
+    { ArmId::AtomHitWorldLights, 0.0, 0.0, 1.0,
+      "The ray-hit decode's light list: 0 = shipped (every hit the world list, each lamp traced from the hit - "
+      "PHOTON-7 10-4 R9 deleted the hit's Forward+ cell), 1 = off (the picture before the list). "
       "gi.hit_shade. Was JAHSHAKA_HIT_WORLD_LIGHTS (a per-pass read)." },
     { ArmId::AtomHitVctSpecular, 1.0, 0.0, 1.0,
       "The voxel specular (the roughness split: K(alpha) rays and the field along R) in the ray-hit decode. 0 = "
@@ -1533,12 +1535,6 @@ constexpr ArmDef kArms[] = {
       "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
       "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
       "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
-    { ArmId::ReflectMetalDecode, kReflectMetalDecodeRoughness, 0.0, 1.0,
-      "THE METAL HIT'S ROUTE (REFLECT-FIX-1): a reflection ray from a reflector of perceptual "
-      "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
-      "bounce cone); a glossier reflector takes the metal hit like any other hit - its card, else the "
-      "store with the hit's direct light (it blurs the reflection anyway). 0 = never decoded, 1 = always "
-      "(the full-decode reference)." },
     { ArmId::ReflectNee, 1.0, 0.0, 1.0,
       "THE REFLECTION'S NEXT-EVENT ESTIMATION (PHOTON-7 stage 11, 11-1b): 1 = every VNDF draw of a texel an emitter of "
       "the table reaches is paired with ONE ray drawn in an emitter's bounding-sphere cone, the two combined by the "
@@ -1640,6 +1636,11 @@ constexpr ArmDef kArms[] = {
       "1 = every frame the ray tier copies its jahAreaVis (RG32_UINT: x the forward LTC light i's diffuse visible share in "
       "byte i, y its specular share) "
       "into a host ring, ScenePublished::areaVis.vis the latest retired frame's. 0 = shipped (nothing copied)." },
+    { ArmId::GlassEscapeOff, 0.0, 0.0, 1.0,
+      "THE BLENDED PASSES' ESCAPES UNTRACED (PHOTON-7 10-4 R4; a test door, gi.glass_escape): 1 = the ray tier registers "
+      "no escape list for the blended pass and the refractives (the same permutation: a zero address), so a blended "
+      "fragment lights its specular lobe's open share by the environment, as before the escapes followed the ray - the "
+      "row's reference for the record's weight and its red. 0 = shipped." },
     { ArmId::GiScreenBindMissing, 0.0, 0.0, 1.0,
       "THE NO-RAY SCREEN PASSES WITH THEIR INPUTS MISSING (PHOTON-7 stage 7; a test door, gi.screen_bind): 1 = the screen "
       "integrate and the area visibility's two passes read their inputs as missing and STAND DOWN - their shared jobs "

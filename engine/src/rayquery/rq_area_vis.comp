@@ -52,14 +52,17 @@ layout( set = 0, binding = 18 ) uniform sampler2D gBufShadowRoughness;
 #include "jah_area_strata.glsl"
 #include "jah_reproject.glsl"
 
-/// A STRATUM SEEN BY ONE RAY: from its start along its direction for its reach against every shadow caster (0 or 1)
+/// A STRATUM SEEN BY ONE RAY: from its start along its direction for its reach against every shadow caster (0 or 1; a
+/// pane between passes its transmittance)
 float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 {
 	rayQueryEXT rqa;
 	rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), uint( p.knobs.z ), originQ,
 						   0.0, wq, reachQ );
-	JAH_RQ_PROCEED( rqa )
-	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : 1.0;
+	// THROUGH THE PANES (PHOTON-7 10-4 R8)
+	float T = 1.0;
+	JAH_RQ_PROCEED_TRANSMIT( rqa, T )
+	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
 }
 #define JAH_AREA_DEPTH( pix ) texelFetch( sceneDepth, pix, 0 ).x
 #define JAH_AREA_NORMAL( pix ) texelFetch( gBufNormals, pix, 0 ).xyz

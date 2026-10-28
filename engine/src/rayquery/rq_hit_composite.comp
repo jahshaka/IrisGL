@@ -48,7 +48,7 @@ layout( set = 0, binding = 0 ) uniform Params
 	vec4 fog[8];
 } p;
 /// The list's buffer: [0] the records appended, then the records' words from
-/// word 12, eight a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
+/// word 12, ten a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
 /// this job reads the weight (the gather's re-weight; the reflection's records carry
 /// their ray's share), the fog's two, a run record's screen share and the NEE delta (PHOTON-7 11-1b).
 layout( std430, set = 0, binding = 1 ) buffer JahHitBuf { uint jahHitBuf[]; };
@@ -78,14 +78,8 @@ layout( rg32ui, set = 0, binding = 11 ) uniform readonly uimage2DArray statePrev
 #include "jah_fog_along.glsl"
 #include "jah_atlas_sample.glsl"
 
-/// The record's direction (jah_rq_hit_record.glsl jahOctEncode, inverted).
-vec3 jahOctDecodeDir( vec2 e )
-{
-	vec3 n = vec3( e, 1.0 - abs( e.x ) - abs( e.y ) );
-	if( n.z < 0.0 )
-		n.xy = ( 1.0 - abs( n.yx ) ) * vec2( n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0 );
-	return normalize( n );
-}
+/// The record's direction (jahOctEncode, inverted): the one text.
+#include "jah_oct_dir.glsl"
 
 /// kMaxRadiance and finite3: the one copy (jah_rq_finite.glsl).
 #include "jah_rq_finite.glsl"
@@ -98,7 +92,7 @@ float gExposure = 1.0;
 const uint kDestGather = 0x80000000u;
 /// jah_rq_hit_record.glsl kJahHitAuxBase and kJahHitAuxWords.
 const uint kAuxBase = 12u;
-const uint kAuxWords = 8u;
+const uint kAuxWords = 10u;
 
 void main()
 {
@@ -111,7 +105,7 @@ void main()
 	const uint w = max( uint( p.list.y ), 1u );
 	const ivec2 at = ivec2( int( i % w ), int( i / w ) );
 	const uint dest = texelFetch( jahHitDest, at, 0 ).x;
-	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 12, eight a record).
+	// The record's words (jah_rq_hit_record.glsl: kJahHitAuxBase 12, ten a record).
 	const uint aux = kAuxBase + kAuxWords * i;
 	const float weight = uintBitsToFloat( jahHitBuf[aux + 1u] );
 	const vec4 rad = texelFetch( jahHitRadiance, at, 0 );
@@ -125,7 +119,8 @@ void main()
 		// AN UNSHADED RECORD IS NO SAMPLE (PHOTON-2 1b H3), never a black ray at its hit's distance: the texel's distance
 		// becomes kAtlasNoSample, which keeps it out of the filter and the SH sums like a dropped record.
 		const vec4 texel = imageLoad( probeAtlas, xy );
-		imageStore( probeAtlas, xy, shaded ? vec4( min( radiance * weight, vec3( kMaxRadiance ) ), texel.w )
+		// (ADDED to what the trace wrote: the crossed panes' own light, PHOTON-7 10-4 R7 - 0 where no pane was crossed)
+		imageStore( probeAtlas, xy, shaded ? vec4( min( texel.xyz + radiance * weight, vec3( kMaxRadiance ) ), texel.w )
 										   : vec4( 0.0, 0.0, 0.0, kAtlasNoSample ) );
 		return;
 	}
@@ -187,11 +182,15 @@ void main()
 												 uintBitsToFloat( jahHitBuf[auxj + 2u] ), dirj, lengthsj.x, lengthsj.y );
 				// (+ the NEE delta, PHOTON-7 11-1b: the NEE part less the BRDF's share of the emission it found)
 				// (and the ray share at the estimator's gain, PHOTON-7 11-2 (1): the screen share and the delta carry theirs)
+				// (through the panes the ray crossed, words 8-9 - F6: their own light, in front, plus the throughput x what
+				// originates beyond them - the hit's fogged radiance and the NEE delta, which lives at the hit)
 				const vec2 dj01 = unpackHalf2x16( jahHitBuf[auxj + 6u] );
 				const vec2 dj2g = unpackHalf2x16( jahHitBuf[auxj + 7u] );
 				const vec3 deltaJ = vec3( dj01, dj2g.x );
 				const float gainJ = finite1( dj2g.y ) ? dj2g.y : 0.0;
-				sampleJ = screenShare.xyz + rayShare * gainJ * fogged + ( finite3( deltaJ ) ? deltaJ : vec3( 0.0 ) );
+				const vec4 paneJ = vec4( unpackHalf2x16( jahHitBuf[auxj + 8u] ), unpackHalf2x16( jahHitBuf[auxj + 9u] ) );
+				sampleJ = screenShare.xyz + rayShare * gainJ * ( paneJ.xyz + paneJ.w * fogged ) +
+						  paneJ.w * ( finite3( deltaJ ) ? deltaJ : vec3( 0.0 ) );
 				tj = max( screenShare.w + rayShare * max( lengthsj.x, 1e-3 ), 1e-3 );
 			}
 			else if( rayShare < 1.0 )
@@ -235,14 +234,17 @@ void main()
 		const vec3 dir = jahOctDecodeDir( unpackSnorm2x16( imageLoad( jahHitIds, at ).w ) );
 		const float originY = uintBitsToFloat( jahHitBuf[aux + 2u] );
 		const vec2 lengths = unpackHalf2x16( jahHitBuf[aux + 3u] );
-		const vec3 fogged = jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
+		// (through the panes the ray crossed, words 8-9: their light plus the throughput x the hit's - the one read's F6)
+		const vec4 pane = vec4( unpackHalf2x16( jahHitBuf[aux + 8u] ), unpackHalf2x16( jahHitBuf[aux + 9u] ) );
+		const vec3 fogged = pane.xyz + pane.w * jahFogAlong( radiance, originY, dir, lengths.x, lengths.y );
 		const vec4 was = share ? imageLoad( reflectSample, at3 ) : vec4( 0.0 );
 		// THE NEE DELTA (PHOTON-7 11-1b, the preflight's gap G3): the NEE part less the BRDF's share ( 1 - v ) ( 1 - w_b )
 		// E T of the emission this hit holds - added to the shaded sample (an unshaded one is the screen's whole or none)
 		const vec2 d01 = unpackHalf2x16( jahHitBuf[aux + 6u] );
 		const vec2 d2g = unpackHalf2x16( jahHitBuf[aux + 7u] );
 		vec3 delta = vec3( d01, d2g.x );
-		delta = finite3( delta ) ? delta : vec3( 0.0 );
+		// (it lives at the hit, beyond the panes the ray crossed: their throughput attenuates it, as the run composite's)
+		delta = pane.w * ( finite3( delta ) ? delta : vec3( 0.0 ) );
 		// THE ESTIMATOR's GAIN (PHOTON-7 11-2 (1), the record's word): the decoded ray share at the draw's gain - the
 		// screen's share the trace wrote and the delta carry theirs already
 		const float gain = finite1( d2g.y ) ? d2g.y : 0.0;
