@@ -1112,7 +1112,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		if( record )
 			recDelta = corrB + neePart;
 		else if( finite3( traced ) )
-			traced = max( traced + corrB + neePart, vec3( 0.0 ) );
+			traced = p.rest.y > 0.5 ? traced + corrB + neePart : max( traced + corrB + neePart, vec3( 0.0 ) );   // ARM
 	}
 	// THE RECORD's TRACED LOBE (C2) at the sample's gain and its ray share (the screen's share is the trace's own)
 	if( record && recTraced )
@@ -1253,7 +1253,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	}
 	// THE SAMPLE: the radiance and the hit's distance (an escape's is a length no hit has, so its virtual point lies
 	// beyond every surface: the sky's history moves with the camera's turn alone).
-	imageStore( reflectSample, ivec3( tc, gEye ), vec4( clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) ), sampleT ) );
+	imageStore( reflectSample, ivec3( tc, gEye ), vec4( clamp( traced, vec3( p.rest.y > 0.5 ? -kMaxRadiance : 0.0 ), vec3( kMaxRadiance ) ), sampleT ) );   // ARM
 	imageStore( reflectNee, ivec3( tc, gEye ), vec4( clamp( s.nee, vec3( 0.0 ), vec3( kMaxRadiance ) ), 0.0 ) );
 	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :

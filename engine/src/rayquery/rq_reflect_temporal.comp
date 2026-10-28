@@ -338,7 +338,7 @@ void main()
 			return;   // a stopped texel: its rest is held as it is
 		const vec4 s = imageLoad( reflectSample, ivec3( tc, gEye ) );
 		const bool hasSample = s.w > 0.0 && finite3( s.xyz );
-		const vec3 sample1 = hasSample ? clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		const vec3 sample1 = hasSample ? clamp( s.xyz, vec3( p.rest.y > 0.5 ? -kMaxRadiance : 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );   // ARM
 		const float N = max( p.stereo.w, 1.0 );
 		// H = the frozen moving history (its count: the frozen half's state); M = the rest half in place, its v rest
 		// samples the state's (the first rest frame: v = 0).
