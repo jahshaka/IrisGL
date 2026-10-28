@@ -286,7 +286,8 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     // the medium between the light and the pane read the light whole. A point light's rectangle holds the NEAR depth
     // (its panes are drawn into a cube and copied as colour): every receiver is past it, T applies to all (a named limit).
     // A process that never drew a pane builds none of it: no memory, no pass (the lead's condition).
-    const Ogre::String transName = "atlasT", transRtv = "atlasTRtv", cubeTName = "tmpCubemapT", transDepth = "atlasTD";
+    const Ogre::String transName = "atlasT", transRtv = "atlasTRtv", cubeTName = "tmpCubemapT", transDepth = "atlasTD",
+                       transRelease = "atlasTRelease";
     if (panes) {
         Ogre::TextureDefinitionBase::TextureDefinition *texDef = def->addTextureDefinition(transName);
         texDef->width  = std::max(1u, plan.width);
@@ -295,8 +296,10 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         texDef->depthBufferId = Ogre::DepthBuffer::POOL_NO_DEPTH;
         texDef->preferDepthTexture = false;
         texDef->fsaa = "1";
-        // (cached lamp maps keep their layer with their depth: the atlas's keep_content rule)
-        if (perMapClears) texDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+        // KEEP CONTENT ALWAYS (the fix round's F1): cached lamp maps keep their layer with their depth (the atlas's
+        // keep_content rule), and the node's release quad ((d) below) READS the layer every frame - a discardable texture's
+        // first transition being a read throws ("from Undefined to a read-only layout") and aborts the pass
+        texDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
         // the layer's own view, no depth (its whole clear: (a1) below)
         def->addRenderTextureView(transName)->setForTextureDefinition(transName, texDef);
         Ogre::RenderTargetViewDef *rtv = def->addRenderTextureView(transRtv);
@@ -314,8 +317,16 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         depthDef->depthBufferFormat = Ogre::PFG_D32_FLOAT;
         depthDef->preferDepthTexture = false;
         depthDef->fsaa = "1";
-        if (perMapClears) depthDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+        depthDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);   // (keep content: the layer's rule)
         def->addRenderTextureView(transDepth)->setForTextureDefinition(transDepth, depthDef);
+        // ...and the 1 x 1 target of the node's last pass, the one that hands both to the readers ((d) below)
+        Ogre::TextureDefinitionBase::TextureDefinition *relDef = def->addTextureDefinition(transRelease);
+        relDef->width = relDef->height = 1u;
+        relDef->format = Ogre::PFG_R8_UNORM;
+        relDef->depthBufferId = Ogre::DepthBuffer::POOL_NO_DEPTH;
+        relDef->preferDepthTexture = false;
+        relDef->fsaa = "1";
+        def->addRenderTextureView(transRelease)->setForTextureDefinition(transRelease, relDef);
         if (N) {
             Ogre::TextureDefinitionBase::TextureDefinition *cubeDef = def->addTextureDefinition(cubeTName);
             cubeDef->width  = std::max(64u, cubeResolution);
@@ -385,10 +396,10 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
     // (+ the transmittance layer's: its clears, one scene pass per PSSM split and spot map, six cube faces + a copy per
     // point map; + its nearest pane's depth: one target a PSSM split and spot map, its copy and its panes, and one a
-    // point map, its NEAR quad - 3 + 2N. A count short of the passes is no error in a build without asserts: the
+    // point map, its NEAR quad - 3 + 2N; + the release quad, 1. A count short of the passes is no error in a build without asserts: the
     // vector reallocates under the pointers addTargetPass returned - the heap corrupted, every map black)
     def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u +
-                          (panes ? (perMapClears ? numMaps : 1u) + 3u + N * 8u + 3u + 2u * N : 0u));
+                          (panes ? (perMapClears ? numMaps : 1u) + 3u + N * 8u + 3u + 2u * N + 1u : 0u));
 
     // THE ATOM CASTERS (ATOM-SHADOWS-1; OgreAtomCasterPass.cpp): where this device
     // runs the visibility buffer, every caster scene pass SKIPS the Atom queue and is
@@ -676,6 +687,23 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
             nq->mStoreActionDepth = Ogre::StoreAction::Store;
             setRect(nq, 3u + i);
         }
+    }
+    // (d) THE LAYER AND ITS DEPTH READY TO BE READ (the fix round's F1): a 1 x 1 quad that names both as its texture
+    //     sources, every frame, at the node's end - Ogre's quad pass moves its sources to the texture layout, so every
+    //     colour pass that samples them (JahShadowTransmit_piece_ps.any, the fog's march) finds them there whatever the
+    //     node's last pass into them was (app.engine_selftest_validation: VUID-vkCmdDrawIndexed-imageLayout-00344 on
+    //     jahShadowTransmitDepth, a pane-depth pass's attachment layout)
+    if (panes) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transRelease);
+        target->setNumPasses(1u);
+        Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(target->addPass(Ogre::PASS_QUAD));
+        quad->mMaterialIsHlms = false;
+        quad->mMaterialName = "Jahshaka/ShadowTransmitRelease";
+        quad->addQuadTextureSource(0, transName);
+        quad->addQuadTextureSource(1, transDepth);
+        quad->setAllLoadActions(Ogre::LoadAction::DontCare);
+        quad->mStoreActionColour[0] = Ogre::StoreAction::DontCare;
+        quad->mProfilingId = "Jahshaka shadow transmittance release";
     }
 }
 
