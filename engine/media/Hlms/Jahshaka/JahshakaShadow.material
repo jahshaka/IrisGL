@@ -282,9 +282,9 @@ material Jahshaka/ShadowTransmitNearRev
 	}
 }
 
-// THE LAYER'S RELEASE (PHOTON-7 10-4 fix round, F1; OgreShadow.cpp (d)): a 1 x 1 quad naming atlasT and atlasTD as its
-// texture sources at the shadow node's end, so Ogre moves both to the texture layout for the colour passes that read them;
-// it writes 1 into its own 1 x 1 target and reads nothing.
+// THE LAYER'S RELEASE (PHOTON-7 10-4 fix round, F1; OgreShadow.cpp (d)): the 1 x 1 quad that EXPOSES atlasT and atlasTD at
+// the shadow node's end, so Ogre moves both to the texture layout for the colour passes that read them; it writes 1 into
+// its own 1 x 1 target and reads nothing.
 material Jahshaka/ShadowTransmitRelease
 {
 	technique
@@ -301,17 +301,6 @@ material Jahshaka/ShadowTransmitRelease
 
 			fragment_program_ref Jahshaka/ShadowTransmitClear_ps
 			{
-			}
-
-			texture_unit
-			{
-				filtering none
-				tex_address_mode clamp
-			}
-			texture_unit
-			{
-				filtering none
-				tex_address_mode clamp
 			}
 		}
 	}

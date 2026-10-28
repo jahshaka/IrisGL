@@ -688,19 +688,22 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
             setRect(nq, 3u + i);
         }
     }
-    // (d) THE LAYER AND ITS DEPTH READY TO BE READ (the fix round's F1): a 1 x 1 quad that names both as its texture
-    //     sources, every frame, at the node's end - Ogre's quad pass moves its sources to the texture layout, so every
-    //     colour pass that samples them (JahShadowTransmit_piece_ps.any, the fog's march) finds them there whatever the
-    //     node's last pass into them was (app.engine_selftest_validation: VUID-vkCmdDrawIndexed-imageLayout-00344 on
-    //     jahShadowTransmitDepth, a pane-depth pass's attachment layout)
+    // (d) THE LAYER AND ITS DEPTH READY TO BE READ (the fix round's F1): Ogre's own `expose` (mExposedTextures - a
+    //     pass's texture dependencies, moved to the texture layout by CompositorPass::analyzeBarriers) on a 1 x 1 quad at
+    //     the node's end, every frame, so every colour pass that samples them (JahShadowTransmit_piece_ps.any, the fog's
+    //     march) finds them there whatever the node's last pass into them was (app.engine_selftest_validation:
+    //     VUID-vkCmdDrawIndexed-imageLayout-00344 on jahShadowTransmitDepth). A QUAD, because no drawless pass can carry
+    //     it here: every pass after the node's last writes into them is gated on its own map (skipped with its barriers
+    //     when the map holds no light), and a clear pass does not run the base barrier analysis
+    //     (CompositorPassClear::analyzeBarriers, OgreCompositorPassClear.cpp:138, the base call commented out).
     if (panes) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(transRelease);
         target->setNumPasses(1u);
         Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(target->addPass(Ogre::PASS_QUAD));
         quad->mMaterialIsHlms = false;
         quad->mMaterialName = "Jahshaka/ShadowTransmitRelease";
-        quad->addQuadTextureSource(0, transName);
-        quad->addQuadTextureSource(1, transDepth);
+        quad->mExposedTextures.push_back(Ogre::IdString(transName));
+        quad->mExposedTextures.push_back(Ogre::IdString(transDepth));
         quad->setAllLoadActions(Ogre::LoadAction::DontCare);
         quad->mStoreActionColour[0] = Ogre::StoreAction::DontCare;
         quad->mProfilingId = "Jahshaka shadow transmittance release";
