@@ -109,6 +109,11 @@ const char *kSkyCaptureWorkspace = "JahshakaSkyCaptureWorkspace";
 const Ogre::uint32 kSkyCaptureSize = 128u;
 /// ...and the mip whose faces the ambient integral reads (128 >> 2 = 32).
 const Ogre::uint8  kSkyShMip = 2u;
+/// THE CAPTURE's CEILING (the 10-3 read's F3, ruled): a cubemap sky's or a dome's faces are captured at their own size
+/// up to 2048 a face - a 4K face set captured whole is 6 x 4096^2 x 8 B x 4/3 = 1.07 GB transient plus 1.07 GB
+/// convolved per gain change (a Sky Light drag: ~2 GB a frame); at 2K, 268 MB + 268 MB. The SH and the convolved cube
+/// lose nothing a user sees at 2K (the mirror reads the convolved cube, never the faces themselves).
+const Ogre::uint32 kSkyCaptureMaxSize = 2048u;
 /// THE AMBIENT'S LEVEL OF A CAPTURE OF ANY SIZE (PHOTON-7 10-3 R5: a cubemap sky is captured at its faces' size):
 /// the first mip whose faces are no larger than 128 >> kSkyShMip (32^2), and that mip's edge.
 void skyShLevel(const Ogre::TextureGpu *cube, Ogre::uint8 &mip, Ogre::uint32 &n) {
@@ -1067,13 +1072,14 @@ void OgreScene::applyPendingSkyCapture() {
     Ogre::TextureGpu *cube = nullptr;
     JAH_TRY {
         // THE CAPTURE'S SIZE: 128 for every sky but a CUBEMAP one, which is captured at its faces' own size
-        // (no less): its environment is its capture like every other sky's (PHOTON-7 10-3 R5, the sky emits what
-        // it shows), and a 128 capture would throw its detail away.
+        // (no less, and no more than kSkyCaptureMaxSize, 2048): its environment is its capture like every other
+        // sky's (PHOTON-7 10-3 R5, the sky emits what it shows), and a 128 capture would throw its detail away.
         // (A DOME, R5b, is a cubemap too: captured at its faces' size.)
         const Ogre::TextureGpu *faces = mEnvDesc.source == EnvironmentSource::Cubemap ? mDomeCube
                                         : mSkyDesc.mode == SkyMode::Cubemap        ? mSkyOwnedTex
                                                                                    : nullptr;
-        const Ogre::uint32 size = faces ? std::max(kSkyCaptureSize, faces->getWidth()) : kSkyCaptureSize;
+        const Ogre::uint32 size =
+            faces ? std::min(kSkyCaptureMaxSize, std::max(kSkyCaptureSize, faces->getWidth())) : kSkyCaptureSize;
         cube = renderSkyCaptureCube("skycapture", size, true, true);
 
         // THE AMBIENT, off the sky the capture just took. The SUN DISC is
