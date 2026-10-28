@@ -164,7 +164,12 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 	const uint reader = uint( JAH_CARD_DEMAND );
 	// THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): a reader past its rest indices [1, N + the due]
 	// stamps nothing - its demand is that span in every run (the face hits below are counted all the same)
+	// (...and a reader whose rest clock lives on the device gates them on it there: JAH_CARD_STAMP_GATE, the gather's)
+#ifdef JAH_CARD_STAMP_GATE
+	const bool stamps = JAH_HIT_PARAMS.cards.z > 0.5 && JAH_CARD_STAMP_GATE;
+#else
 	const bool stamps = JAH_HIT_PARAMS.cards.z > 0.5;
+#endif
 	if( stamps && pick.ok )
 	{
 		const uvec4 at = jahCards[pick.card].atlas;

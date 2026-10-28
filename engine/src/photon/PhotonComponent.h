@@ -650,7 +650,7 @@ public:
     /// A PRODUCER'S APPEND, at its point of the frame: a world box of `kind`. `cascadeMask` 0 = the cascades whose box
     /// meets it, taken at the close (a Slab names its own). At the cap the box MERGES into the entry of its kind whose
     /// margin grows least (the dirty path's metric) - never an overflow. An empty box lists nothing.
-    void appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask = 0u, bool mover = false);
+    void appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask = 0u);
     /// THE INJECTION'S REGION (injectCascade, the one writer): a scroll commit's delta lists the boxes its direct was
     /// computed over (the faces the shift moved: the slab and its band; the whole box where it has none - the
     /// outermost, an inner cascade re-injected as a delta), a whole injection at a placement the list has not heard of
@@ -685,6 +685,13 @@ public:
     /// the frame's low word} and vec4 {toSun.xyz, sun ? 1 : 0}, then per region vec4 {lo.xyz, kind's bits} and vec4
     /// {hi.xyz, cascade mask's bits}. Null before the first close. Re-written at every close.
     Ogre::ConstBufferPacked *regionBuffer() const { return mRegionBuffer; }
+    /// THE LIST's CLOSES (PHOTON-7 stage 8B, B1): counted (a reader reads each close once), with the GI writer's frame
+    /// at the close - a cascade's brick mask whose clear was that frame holds the changes the list's frame made.
+    unsigned long long regionCloseSerial() const { return mRegionCloses; }
+    unsigned long long regionCloseFrame() const { return mRegionCloseFrame; }
+    /// THE FIELD AT WORK (PHOTON-7 stage 8B, B1): its integration, empties, restarts or refinements owed - the gather's
+    /// cells that read its fallback resume while it is (rq_probe_resume.comp).
+    bool fieldWideWorkOwed() const;
     /// An item the GI walk has seen changed its mobility class (setNodeMovable).
     void noteMobilityFlipped() { mGiPlan.mobilityFlipped = true; }
     /// Would an invalidation now cost a rebuild? (an arm is built and none is owed yet)
@@ -767,8 +774,6 @@ public:
     /// What breaks a reflection's rest view-wide: the lighting writes and edits its rays read, never a move
     /// (OgreRayQuery.cpp; the reflection's rest key, PHOTON-2 F5, round 2 G6).
     unsigned long long reflectionReadsKey() const;
-    /// The gather's inputs still owe work (PHOTON-2 stage 2's round, H1: a view SETTLES, never rests, until none is).
-    bool gatherInputsBusy() const;
     /// The READERS' HOLD is owed to the surface cache (SurfaceCache::restHoldOwed; R3's ruling): the gather and the
     /// reflection rest, but do not hold, until the stop's one decision and its work are done and no relight's report is
     /// still in flight (a relight's visibility is read back late: neither reader holds over an unread change).
@@ -1326,8 +1331,7 @@ private:
     void voxeliseRegion(size_t idx, const std::vector<std::array<int, 6>> &cells);
     /// THE REGION'S OWN BOUNCE in the frame it was rebuilt (A2): passes over its bricks until their own convergence.
     void regionBounce(size_t idx, const std::vector<std::array<int, 6>> &cells);
-    /// THE CHAIN'S OWN FEEDBACK WORK under the contract (stage 8A): feedbackOwed() while the episode is the chain's
-    /// (mFbEpisodeStill), never for an episode every activation of which came from a mover's region.
+    /// THE CHAIN'S FEEDBACK WORK: a relight owed, or feedbackOwed() (a mover's activations included since 8B, B1).
     bool stillFeedbackOwed() const;
     /// A region debt of the CHAIN's (an edit's region rebuild or re-march not served yet): chain work owed.
     bool stillRegionOwed() const;
@@ -1450,15 +1454,6 @@ private:
     bool mJacobiOn = false;           ///< the measuring door gi.bounceJacobi was on at the last writer point   ///< the injection in progress is a relight (its region is the list's Lamp already)
     bool mGiFeedbackForceAll = false;
     bool mGiFeedbackOwedLast = false;
-    /// THE FEEDBACK EPISODE'S OWNER (PHOTON-7 stage 8A; THE CONTRACT): an episode - the feedback owing work, from an
-    /// activation to the GPU's active count reaching 0 everywhere - is the CHAIN's once ONE activation in it came from
-    /// anything but a mover's region rebuild (a lamp, an edit, an injection that is not a mover's, a whole relight, a
-    /// sky change); an episode of mover activations alone is the movers' - out of chainWorkOwed and the rest count, so
-    /// a mover frame restarts no view-wide rest. Reset only at the episode's own rest (feedbackOwed() false at the
-    /// harvest), never by a frame count.
-    bool mFbEpisodeStill = false;
-    /// The injection in progress is a mover's region re-march (its activation is the movers').
-    bool mInjectingMover = false;
     /// THE MOVERS' REGION LIST (stage 8A): the frame's voxel movers' swept boxes (listMover with `voxel`), what the
     /// frame's late GI work re-voxelises (recordLate: after the GPU scene's commit).
     std::vector<Ogre::Aabb> mMoverVoxelOpen;
@@ -1986,8 +1981,6 @@ private:
         Ogre::Aabb box;
         GiRegionKind kind = GiRegionKind::Edit;
         uint32_t mask = 0u;
-        /// a MOVER's region rebuild's box (stage 8A): its feedback activation is the movers' (mFbEpisodeStill)
-        bool mover = false;
         /// a region rebuild's re-voxelised cells (stage 8A): listed, never an activation by itself - its cells are
         /// 4-aligned in its cascade's (a coarse cascade's are metres wide), and the occlusion reach grows with the box,
         /// so the bricks are activated from the boxes that CHANGED (mRegionActivations)
@@ -1995,7 +1988,7 @@ private:
     };
     /// THE FRAME'S REGION-REBUILD ACTIVATIONS (stage 8A): each changed box once (a mover's swept box, an edit's box) as
     /// it was told, cut to the cascade that re-voxelised it - what runFeedback grows by the occlusion reach.
-    struct RegionActivation { Ogre::Aabb box; bool mover = false; };
+    struct RegionActivation { Ogre::Aabb box; };
     std::vector<RegionActivation> mRegionActivations;
     std::vector<RegionEntry> mRegionsOpen;
     uint32_t mRegionOverflowOpen = 0u;
@@ -2008,6 +2001,7 @@ private:
     GiChangedRegions mRegionsClosed;
     float mRegionSunPeak = -1.0f, mRegionSkyPeak = -1.0f;
     unsigned long long mRegionCloses = 0, mRegionClosesListing = 0;
+    unsigned long long mRegionCloseFrame = 0ull;   ///< regionCloseFrame
     Ogre::ConstBufferPacked *mRegionBuffer = nullptr;
     std::vector<float> mRegionCpu;
     /// The GPU list goes with the scene's GI objects (teardownGi; the close makes it again).

@@ -218,7 +218,37 @@ struct StillnessRun::Impl {
     Image prev;                                       ///< the previous frame's picture (inside a window)
     Image trailPrev;                                  ///< ...and inside a move's trail
     std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
-    unsigned long long lastKeyMoves = 0;              ///< GatherStatus::keyMoves after the last frame (L7)
+    /// THE GATHER's PER-CELL REST, BY THE FRAME IT BELONGS TO (PHOTON-7 stage 8B, B1): the gather decides its cells on the
+    /// device and its records retire a few frames late (GatherStatus::restLog, by gather frame), so the door maps each
+    /// gather frame to the window frame that drew it and fills that frame's hold from its own record at the window's end
+    /// (applyGatherRest) - never from the record that happened to arrive in it.
+    struct RestAt { int window = -1; bool trail = false; size_t index = 0; };
+    std::map<unsigned, RestAt> byGatherRest;
+    unsigned lastGatherRest = 0u;
+    std::map<unsigned, GatherRestRecord> restByGather;
+    void mapGatherRest(const GatherStatus &g, int window, bool trail, size_t index)
+    {
+        for (const GatherRestRecord &r : g.restLog) restByGather[r.frame] = r;
+        if (!g.running || g.frame == 0u || g.frame <= lastGatherRest) return;
+        byGatherRest[g.frame - 1u] = { window, trail, index };
+        lastGatherRest = g.frame;
+    }
+    void applyGatherRest(StillnessWindow &w, size_t win)
+    {
+        for (const auto &kv : byGatherRest) {
+            if (kv.second.window != int(win)) continue;
+            const auto r = restByGather.find(kv.first);
+            if (r == restByGather.end()) continue;
+            std::vector<StillnessFrame> &list = kv.second.trail ? w.trail : w.frames;
+            if (kv.second.index >= list.size()) continue;
+            StillnessFrame &f = list[kv.second.index];
+            // THE HOLD WAITED ON THIS FRAME: an input reached a cell (its clock restarted); THE GATHER HELD: every cell
+            f.holdKey = r->second.reached > 0u;
+            f.gatherHeld = r->second.everyHeld;
+            if (!kv.second.trail) f.held = f.gatherHeld && f.reflOk;
+            f.restFrames = r->second.restK;
+        }
+    }
     unsigned long long lastFoliageRule = 0;           ///< GatherStatus::foliageRuleAccepts after the last frame (L8)
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
@@ -630,6 +660,7 @@ struct StillnessRun::Impl {
 
     void completeWindow(StillnessWindow &w, size_t win)
     {
+        applyGatherRest(w, win);
         const unsigned n = classes();
         {
             std::map<std::string, std::pair<unsigned, unsigned long long>> sum;   // name -> (frames, units)
@@ -720,6 +751,27 @@ void stillnessDeriveLiveness(StillnessWindow &w) {
     for (size_t i = 1; i < n && w.decisionFrame < 0; ++i)
         if (w.frames[i].cardsDecisions > w.frames[i - 1].cardsDecisions) w.decisionFrame = int(i);
     if (w.decisionFrame < 0) return;
+    // THE REST THE DECISION READ (PHOTON-7 stage 8B, B1): the gather rests PER CELL, so its clock can start on the window's
+    // first frame and restart on every input that reaches a cell after it (a relight landing, the field at work); the
+    // decision waits for EVERY reader's demand (the gather's and the reflection's spans) - so the bound counts from the
+    // later of the two readers' rests that ran UNBROKEN to the decision: each one's last start before it (1 after 0, or
+    // a restart; the decision's own frame may restart both - its work lands there). A reader not resting on the frame
+    // before the decision does not move it.
+    {
+        int start = w.firstRestFrame;
+        for (int reader = 0; reader < 2; ++reader) {
+            const auto restOf = [&](size_t i) { return reader == 0 ? w.frames[i].restFrames : w.frames[i].reflRestFrames; };
+            for (int i = w.decisionFrame - 1; i > 0; --i) {
+                const unsigned now = restOf(size_t(i)), before = restOf(size_t(i) - 1u);
+                if (now >= 1u && (before == 0u || now < before)) {
+                    start = std::max(start, i);
+                    break;
+                }
+                if (now == 0u) break;   // (not resting at the decision: no unbroken run to it)
+            }
+        }
+        w.firstRestFrame = start;
+    }
     w.decisionWorkEnd = w.decisionFrame;
     for (size_t i = size_t(w.decisionFrame); i < n; ++i)
         if (w.frames[i].giRowCount) w.decisionWorkEnd = int(i);
@@ -959,6 +1011,7 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
         m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
+        m.mapGatherRest(g, p.window, true, w.trail.size() - p.index);
         if (!m.spec.dumpDir.empty() && pub.rayQuery.reflectFrame > m.lastTraced) {
             m.byTracedTrail[pub.rayQuery.reflectFrame - 1u] = w.trail.size() - p.index;
             m.lastTraced = pub.rayQuery.reflectFrame;
@@ -967,9 +1020,10 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
-        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
+        // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
+        // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
+        // the gather's any more)
+        f.holdKey = false;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1098,13 +1152,15 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.frames[p.index];
         m.mapGatherFrame(g, p.window, false, p.index);
+        m.mapGatherRest(g, p.window, false, p.index);
         f.engineFrame = engineFrame;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
-        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
+        // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
+        // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
+        // the gather's any more)
+        f.holdKey = false;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1156,7 +1212,8 @@ bool StillnessRun::frameDone(std::string &err)
         // where the reflection traces, the reflection held - a still view whose reflection still converges moves its
         // pixels, and the door's hold was blind to it (Showroom 2: 29-56 codes a frame for 100+ frames after the
         // gather's hold, past the canary)
-        f.held = g.running && g.held && (!pub.rayQuery.reflect || pub.rayQuery.reflectHeld);
+        f.reflOk = !pub.rayQuery.reflect || pub.rayQuery.reflectHeld;
+        f.held = g.running && g.held && f.reflOk;
         f.gatherHeld = g.running && g.held;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
@@ -1222,7 +1279,6 @@ bool StillnessRun::frameDone(std::string &err)
         m.prev = std::move(pic);
         if (p.index + 1u == w.frames.size()) m.snapshotWindow(w, size_t(p.window), m.prev);   // (the window's last frame)
     }
-    m.lastKeyMoves = g.keyMoves;
     m.lastFoliageRule = g.foliageRuleAccepts;
     // THE FROZEN WALK (StillnessSpec::freezeWalk): the next frame is the walk's first - the freeze is switched on for
     // it (an arm latches at the top of the next frame) only when THIS frame is converged: the gather HELD (its true rest

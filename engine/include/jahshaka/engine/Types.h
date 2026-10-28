@@ -3767,6 +3767,16 @@ struct GatherRay {
 };
 
 /// What the gather did on the last drawn frame of this scene.
+/// ONE RETIRED GATHER FRAME's REST (PHOTON-7 stage 8B, B1; GatherStatus::restLog): its gather frame (GatherStatus::frame's
+/// count before it advanced: the frame it traced), its rest clock K, the cells an input reached, held and active after
+/// it, and whether every cell held.
+struct GatherRestRecord {
+    unsigned frame = 0u;
+    unsigned restK = 0u;
+    unsigned reached = 0u, held = 0u, active = 0u;
+    bool everyHeld = false;
+};
+
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
     /// traces (a ray-capable device, the project's ray row not Off).
@@ -3853,19 +3863,23 @@ struct GatherStatus {
     unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
-    /// THE HOLD ITSELF: every latest view of the scene HELD its last frame (dispatched nothing). Past its rest length a
-    /// view holds unless its hold is owed to the cards' rest decision (PHOTON-7 stage 10, R3: it rests and waits) - so
-    /// `restFrames > settleFrames` alone is not the hold.
+    /// THE HOLD ITSELF: EVERY CELL of every latest view of the scene holds (PHOTON-7 stage 8B, B1: the rest is per
+    /// screen cell - a cell an input reached resumes, every other cell keeps its rest picture; the view's rest clock
+    /// past N means every cell holds).
     bool held = false;
-    /// THE HOLD'S REASONS (PHOTON-2 round 2, L7): the frames the gather's rest key has moved (every input write, the
-    /// ones that file no GI row included: a ray-level refit, a shadow scan, a light write), and whether the inputs owed
-    /// work on the last gathered frame. A frame where either moved is one the hold waited on.
-    unsigned long long keyMoves = 0ull;
+    /// THE CELLS (PHOTON-7 stage 8B, B1), the latest retired frame's (a few frames late): the cells an input reached
+    /// that frame, those held and those active after it, those traced as the ring of an active cell; and the frames
+    /// any cell resumed on (cumulative).
+    unsigned cellsReached = 0u, cellsHeld = 0u, cellsActive = 0u, cellsRing = 0u;
+    unsigned long long resumes = 0ull;
+    /// ...AND THE RETIRED FRAMES' OWN RECORDS (the last 32, oldest first), by the gather frame each one traced (`frame`
+    /// counts them: a record names the frame it belongs to, so a reader attributes it there and not to the frame it
+    /// arrived in): its rest clock, the cells reached, held and active, and whether every cell held after it.
+    std::vector<GatherRestRecord> restLog;
     /// THE CAMERA CUTS (PHOTON-2 round 2, N3): the frames a view of the gather detected a cut on (a view axis turned
     /// more than 75 degrees or the eye moved more than 100 m between two frames - Lumen's rule) and restarted its
     /// history; the most any view counted.
     unsigned cameraCuts = 0u;
-    bool inputsBusy = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS (PHOTON-2 L8, K5's guard): the pixels whose history only the foliage class's
     /// looser test accepted (a depth delta between the 1 % and the 3 % bounds), summed over the gathered frames since
     /// the view began (a few frames late). 0 under gather.classOff by construction.

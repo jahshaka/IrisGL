@@ -863,8 +863,6 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
         c.fbActivatedFrame = frame;
         if (!commit) c.fbForce = true;
     }
-    // (an injection that is not a mover's region re-march makes the feedback's episode the chain's: stage 8A)
-    if (!mInjectingMover) mFbEpisodeStill = true;
     if (mGiInjectionCountFrame != frame) {
         mGiInjectionCountFrame = frame;
         mGiInjectionsThisFrame = 0;
@@ -919,7 +917,6 @@ bool PhotonComponent::refreshGiLighting() {
     JAH_TRY {
         if (!mVctLighting || !mVctVoxelizer || mVctCascades.empty()) return false;
         mGiRelightAllOwed = true;
-        mFbEpisodeStill = true;
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -1253,7 +1250,7 @@ GiStatus PhotonComponent::giStatus() const {
 // THE LIGHTING SERIAL (PHOTON-GATHER-1d). What the gather's hits read — the
 // voxels' radiance, the environment the misses read, the cards the hits read
 // first — changes at a light write and where the chain's radiance finishes moving (the feedback's rest, PHOTON-7
-// stage 4: the bounces converge over frames, and gatherInputsBusy holds the gather meanwhile); the settled
+// stage 4: the bounces converge over frames, and the brick mask resumes the gather's cells they reach meanwhile); the settled
 // history counts its frames from the last change. Folded from the same terms as
 // the surface cache's re-injection signature (OgreScene::updateSurfaceCache) plus
 // the write-time light serial: here a write MUST restart the count (the history
@@ -5741,8 +5738,8 @@ static const char *const kRegionRowNames[8] = { "vct.region0", "vct.region1", "v
 //   3. THE BOUNCE: the feedback's (runFeedback, after): the boxes activate the bricks that see them (editActivationBox),
 //      the injection's changed direct terms theirs.
 // THE CONTRACT (the lead's ruling, stage 8A): a MOVER's region rebuild lists its boxes and moves no rebuild count, no
-// lighting serial, no chain owed and no feedback rest - its injection and its activations are the movers' episode
-// (mFbEpisodeStill); an EDIT's keeps them (c.rebuilds, chainWorkOwed while owed: every edit row waits giAtRest for it).
+// lighting serial and no chain owed (its feedback's rest is counted since 8B, B1: the movers' episode exemption went
+// with the view-wide rests); an EDIT's keeps them (c.rebuilds, chainWorkOwed while owed: every edit row waits giAtRest for it).
 // A cascade injected this frame already (a scroll's commit, a whole rebuild) keeps its debt for the next writer point; a
 // material conversion or refresh owed holds every region (the gather would skip an unconverted mover: a hole).
 void PhotonComponent::serviceRegions() {
@@ -5813,7 +5810,7 @@ void PhotonComponent::serviceRegions() {
             Ogre::Vector3 lo = r.box.getMinimum(), hi = r.box.getMaximum();   // (cut to this cascade)
             lo.makeCeil(box.getMinimum());
             hi.makeFloor(box.getMaximum());
-            changed.push_back(RegionActivation{ Ogre::Aabb::newFromExtents(lo, hi), r.mover });
+            changed.push_back(RegionActivation{ Ogre::Aabb::newFromExtents(lo, hi) });
         }
         c.regionOwed.swap(keep);
         if (cells.empty()) continue;
@@ -5871,7 +5868,7 @@ void PhotonComponent::serviceRegions() {
                 corner + Ogre::Vector3(float(b[0]), float(b[1]), float(b[2])) * cell,
                 corner + Ogre::Vector3(float(b[3]), float(b[4]), float(b[5])) * cell);
             // LISTED (the contract): where the store's geometry changed, this cascade's
-            appendRegion(GiRegionKind::Edit, w, bit, mover);
+            appendRegion(GiRegionKind::Edit, w, bit);
             if (!mRegionsOpen.empty() && mRegionsOpen.back().box == w) mRegionsOpen.back().listedOnly = true;
             // ...and owed to this cascade's direct term and every inner cascade's march
             for (size_t j = 0; j <= i; ++j)
@@ -5889,9 +5886,7 @@ void PhotonComponent::serviceRegions() {
         const float cell = c.cell();
         const int res = int(c.resolution);
         std::vector<std::array<int, 6>> boxes;
-        bool mover = true;
         for (const VctCascade::MarchOwed &m : c.marchOwed) {
-            mover = mover && m.mover;
             if (m.src >= n) continue;
             // (its own re-voxelised cells: their direct terms are new whatever the lights)
             if (m.src == Ogre::uint32(j)) {
@@ -5944,10 +5939,8 @@ void PhotonComponent::serviceRegions() {
             }
         }
         ensureGraph();
-        mInjectingMover = mover && !carriesRelight;   // (a lamp's relight is the chain's work)
         bool ok = false;
         JAH_TRY { ok = injectCascade(j, &light); } JAH_CATCH(mError, (void)0);
-        mInjectingMover = false;
         if (ok && carriesRelight) mRelightRegionSpent += paidRelightSlab(j, rslab);
         if (!ok) {
             // (a refused injection: the cells are owed to the relight path - the chain's work - by region)
@@ -5956,7 +5949,6 @@ void PhotonComponent::serviceRegions() {
                 owed.merge(Ogre::Aabb::newFromExtents(corner + Ogre::Vector3(float(b[0]), float(b[1]), float(b[2])) * cell,
                                                       corner + Ogre::Vector3(float(b[3]), float(b[4]), float(b[5])) * cell));
             oweRelight(c, false, &owed);
-            mFbEpisodeStill = true;
             continue;
         }
         // ---- 3. THE REGION'S OWN BOUNCE, in its frame (A2) ---------------------------------------------------------
@@ -7244,7 +7236,6 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
         if (!c.lighting || !c.built) continue;
         Ogre::PhotonFeedbackActivation &act = acts[i];
         act.all = (forceAll && i < forceInner) || c.fbForce;
-        if (act.all) mFbEpisodeStill = true;   // (a forced pass is the chain's: stage 8A)
         if (!act.all) {
             // THE REGIONS THAT MEET IT: a lamp's spheres (its direct changed there; whatever sees those walls changes) and
             // an edit's box. (A commit's Slab boxes are not activations - the commit's changed direct terms are the mask's
@@ -7262,7 +7253,7 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
             for (const RegionEntry &e : mRegionsOpen)
                 if (!e.listedOnly) sources.push_back(e);
             for (const RegionActivation &a : mRegionActivations)
-                sources.push_back(RegionEntry{ a.box, GiRegionKind::Edit, 0u, a.mover, false });
+                sources.push_back(RegionEntry{ a.box, GiRegionKind::Edit, 0u, false });
             for (const RegionEntry &e : sources) {
                 if (e.kind != GiRegionKind::Lamp && e.kind != GiRegionKind::Edit) continue;
                 // AN EDIT'S BOX IS GEOMETRY, AND GEOMETRY OCCLUDES (PHOTON-7 stage 8A): what the changed cells now block
@@ -7272,7 +7263,6 @@ void PhotonComponent::runFeedback(bool forceAll, unsigned long long frame, size_
                 // their own radiance (editActivationBox): a mover in the store darkens the floor around it.
                 const Ogre::Aabb act0 = e.kind == GiRegionKind::Edit ? editActivationBox(e.box) : e.box;
                 if (!box.intersects(act0)) continue;
-                if (!e.mover) mFbEpisodeStill = true;   // (the chain's activation: stage 8A's contract)
                 all.merge(act0);
                 if (act.numBoxes >= Ogre::PhotonFeedbackActivation::kMaxBoxes) { collapse = true; continue; }
                 Ogre::uint32 *lo = act.lo[act.numBoxes], *hi = act.hi[act.numBoxes];
@@ -7498,13 +7488,12 @@ void PhotonComponent::harvestFeedback() {
     }
     // (the chain's rest is counted; the field re-integrates nothing at it - its marks took every move as it came:
     // PHOTON-7 stage 5, 5-4, the rest's whole re-integration deleted with gi.hold_after_stop's frame-9 wave)
-    // THE REST IS THE CHAIN'S EPISODE's (stage 8A, THE CONTRACT): a movers' episode coming to rest moves no count - and
-    // the episode's owner is reset only here, at its OWN rest (the feedback owing nothing: no activation unanswered, the
-    // GPU's active count 0 in every cascade), never by a frame count.
+    // (THE MOVERS' EPISODE EXEMPTION is DELETED, PHOTON-7 stage 8B B1's CRUD: it kept a movers-only episode out of the
+    // rest count and chainWorkOwed so a mover frame moved no VIEW-WIDE rest; the gather's rest is per cell now, and a
+    // mover's store change reaches the cells it changes through the brick mask - the count is the feedback's again.)
     const bool owed = stillFeedbackOwed();
     if (mGiFeedbackOwedLast && !owed) ++mGiFeedbackRests;
     mGiFeedbackOwedLast = owed;
-    if (!feedbackOwed()) mFbEpisodeStill = false;
 }
 
 // The FAILED-BUILD path: nothing is bound yet (mVctVoxelizer/mVctLighting are
@@ -8538,13 +8527,19 @@ void PhotonComponent::teardownIrradianceField() {
 
 // THE ONE SETTLE PREDICATE (GiStatus::giAtRest = its negation; the gather's inputsBusy reads it too, PHOTON-2 stage
 // 2's round): the chain's own owed work.
+/// THE FIELD AT WORK (PHOTON-7 stage 8B, B1): its integration running, its empties, the probes it restarted (an edit's
+/// marks, the brick moves' accumulation - anywhere its probes' rays read a change) or its refinements owed: what a
+/// fallback pixel reads moves until none is (giInputsOwed's field term, the same terms).
+bool PhotonComponent::fieldWideWorkOwed() const {
+    return mIfd && mIfdTotalProbes > 0u &&
+           (!mIfd->isWorkDone() || mIfd->getOwedEmpty() > 0u || mIfd->getOwedRestarts() > 0u ||
+            (mIfdProbesPerFrame > 0u && mIfd->getOwedRefines() > 0u));
+}
+
 bool PhotonComponent::giInputsOwed() const {
     // (the field's: its work running, the marked probes' restarts or the refinements owed - PHOTON-7 stage 5, 5-4:
     // the ledger's; a paused field refines nothing and runs its restarts inline)
-    const bool fieldBusy = mIfd && mIfdTotalProbes > 0u &&
-                           (!mIfd->isWorkDone() || mIfd->getOwedEmpty() > 0u || mIfd->getOwedRestarts() > 0u ||
-                            (mIfdProbesPerFrame > 0u && mIfd->getOwedRefines() > 0u));
-    return chainWorkOwed() || fieldBusy;
+    return chainWorkOwed() || fieldWideWorkOwed();
 }
 
 // THE CHAIN'S OWN OWED WORK (GiStatus::chainOwed, PHOTON-7 stage 1's voxel door): a rebuild, a re-voxelisation or an
@@ -8565,18 +8560,14 @@ bool PhotonComponent::chainWorkOwed() const {
     return rebuildPending || resolvePending || stillFeedbackOwed();
 }
 
-// THE CHAIN'S OWN FEEDBACK WORK (PHOTON-7 stage 8A; THE CONTRACT, the lead's ruling 2026-10-28): what the feedback owes,
-// while its episode is the chain's (mFbEpisodeStill: one activation since its last rest came from anything but a mover's
-// region rebuild) - and a relight owed, which no mover ever owes (a lamp's spheres, the sun, the host's whole relight,
-// an outer whole rebuild's inner re-march: the chain's by construction), before its injection has tagged the episode.
-// An episode of mover activations alone owes the chain nothing: a mover frame moves no view-wide rest.
-// (THE LIMIT, named: a still change during continuous mover motion makes the episode the chain's until the GPU's
-// active count reaches 0 everywhere, which a mover that never stops holds off - a later rest, never a false one.)
+// THE CHAIN'S FEEDBACK WORK: a relight owed (a lamp's spheres, the sun, the host's whole relight, an outer whole
+// rebuild's inner re-march) or the feedback owing passes - a mover's activations included (PHOTON-7 stage 8B, B1: the
+// movers' episode exemption is deleted with the view-wide rests it served).
 bool PhotonComponent::stillFeedbackOwed() const {
     if (mGiRelightAllOwed || mGiFeedbackForceAll) return !mVctCascades.empty();
     for (const VctCascade &c : mVctCascades)
         if (c.relightOwed) return true;
-    return mFbEpisodeStill && feedbackOwed();
+    return feedbackOwed();
 }
 
 bool PhotonComponent::stillRegionOwed() const {

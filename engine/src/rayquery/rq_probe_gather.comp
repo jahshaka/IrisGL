@@ -73,6 +73,17 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 #define JAH_PROBE_PARAMS_BINDING 1
 #include "jah_probe_params.glsl"
+/// THE CELLS' REST (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): the clock (the frame's sample index and K), the cells'
+/// state (a probe whose cell holds outside every active cell's ring is not traced) and their distance store (an active
+/// cell's rays at rest write its bins' least and most hit distance: what the resume tests a held cell by).
+#define JAH_REST_CLOCK_BINDING 38
+#include "jah_probe_rest.glsl"
+layout( std430, set = 0, binding = 39 ) readonly buffer JahCellState { uint jahCellState[]; };
+layout( std430, set = 0, binding = 40 ) buffer JahCellStore { uint jahCellStore[]; };
+/// THE DEMAND SPAN ON THE CLOCK (PHOTON-7 stage 10's per-reader snapshot, read on the device since 8B: the rest clock is
+/// the GPU's): the view stamps the cards it reads at its rest indices [1, span] alone (p.knobs6.x = the span; 0 = no
+/// span: always) - moving, K = 0, it always stamps.
+#define JAH_CARD_STAMP_GATE ( p.knobs6.x < 0.5 || jahClock[0] == 0u || float( jahClock[0] ) <= p.knobs6.x )
 #include "jah_ray_origin.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
@@ -227,7 +238,6 @@ void main()
 
 	const vec4 posW = records.r[probe].posW;
 	const vec4 normalW = records.r[probe].normalW;
-	const bool onSurface = posW.w > 0.5;
 
 	// THE PROBE'S CELL IS WHAT THE SAMPLE SEQUENCE IS KEYED ON, NEVER ITS LIST
 	// SLOT, and this is the line that makes the adaptive pass deterministic. An
@@ -241,7 +251,16 @@ void main()
 	const bool adaptive = probe >= uniformProbes;
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % gridW, int( cellIndex ) / gridW );
-	const uint frame = uint( p.knobs.z );
+	const uint frame = jahFrameIndex();
+	// THE CELL'S REST (PHOTON-7 stage 8B, B1): a HELD cell outside every active cell's ring is not traced (nothing reads
+	// its probes this frame: its own pixels write their history through) - its block reads "no answer", as a probe on
+	// nothing; an ACTIVE cell keeps its rays' distances by world direction (since the camera stopped: rq_probe_resume.comp).
+	const uint cells = uint( max( p.resolution.x, 1.0 ) * max( p.resolution.y, 1.0 ) );
+	const uint cellSt = jahCellState[cellIndex];
+	const bool cellHeld = ( cellSt & kCellHeld ) != 0u;
+	const bool traced = !cellHeld || jahCellState[cells + cellIndex] != 0u;
+	const bool onSurface = posW.w > 0.5 && traced;
+	const bool keepsDistance = !cellHeld;
 	// ...and the two probes of one cell are decorrelated by a constant, so the
 	// second is not a second sample of the same 64 directions.
 	const uint sequence = adaptive ? 4096u : 0u;
@@ -471,6 +490,20 @@ void main()
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
 		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
+		// THE STILL CAMERA's DISTANCES (PHOTON-7 stage 8B, B1): this ray's bin of world directions keeps the least and the
+		// most distance its cell's rays went to a hit since the camera stopped, or a bit that one escaped
+		if( keepsDistance )
+		{
+			const uint bin = jahRestBin( dir );
+			const uint at = kRestStoreWords * cellIndex;
+			if( hit )
+			{
+				atomicMin( jahCellStore[at + bin], floatBitsToUint( max( tHit, 0.0 ) ) );
+				atomicMax( jahCellStore[at + 64u + bin], floatBitsToUint( max( tHit, 0.0 ) ) );
+			}
+			else
+				atomicOr( jahCellStore[at + 128u + ( bin >> 5u )], 1u << ( bin & 31u ) );
+		}
 		// ---- THE GATHER-HITS INSTRUMENT (FAR-SUN-1): the uniform probes' rays only (an
 		// adaptive probe is its cell's second, and the readback is the grid's).
 		if( !adaptive && ( p.hits.x > 0.5 || p.hits.y > 0.5 ) )

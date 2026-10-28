@@ -358,6 +358,32 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h.d"
         COMMENT "Compiling the screen-probe integrate at SPIR-V 1.4"
         VERBATIM)
+    # THE GATHER'S RESUME, PER CELL (PHOTON-7 stage 8B, B1): one source, five jobs by their defines.
+    foreach(_jah_resume IN ITEMS "test;;krq_probeResumeSpv;rq_probe_resume_spv.h"
+                                 "pyramid;-DJAH_RESUME_PYRAMID;krq_probeResumePyramidSpv;rq_probe_resume_pyramid_spv.h"
+                                 "clock;-DJAH_RESUME_CLOCK;krq_probeResumeClockSpv;rq_probe_resume_clock_spv.h"
+                                 "final;-DJAH_RESUME_FINAL;krq_probeResumeFinalSpv;rq_probe_resume_final_spv.h"
+                                 "ring;-DJAH_RESUME_RING;krq_probeResumeRingSpv;rq_probe_resume_ring_spv.h")
+        set(_jah_resume_list "${_jah_resume}")
+        list(GET _jah_resume_list 0 _jah_resume_job)
+        list(GET _jah_resume_list 1 _jah_resume_def)
+        list(GET _jah_resume_list 2 _jah_resume_var)
+        list(GET _jah_resume_list 3 _jah_resume_out)
+        set(_jah_resume_defs)
+        if(_jah_resume_def)
+            set(_jah_resume_defs "${_jah_resume_def}")
+        endif()
+        add_custom_command(
+            OUTPUT "${JAH_RQ_GEN_DIR}/${_jah_resume_out}"
+            COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/${_jah_resume_out}.d" --target-env spirv1.4 -S comp -x
+                    ${_jah_resume_defs} "-I${JAH_RQ_INCLUDE}" "-I${JAH_RQ_GEN_DIR}"
+                    --vn ${_jah_resume_var} -o "${JAH_RQ_GEN_DIR}/${_jah_resume_out}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_resume.comp"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_probe_resume.comp"
+            DEPFILE "${JAH_RQ_GEN_DIR}/${_jah_resume_out}.d"
+            COMMENT "Compiling the screen-probe gather's resume (${_jah_resume_job}) at SPIR-V 1.4"
+            VERBATIM)
+    endforeach()
     # HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1, RY-R3): one ray per pixel towards
     # the sun from the prepass' surface, geometry only — rq_rays.comp's shape.
     add_custom_command(
@@ -576,7 +602,12 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h")
+                              "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_pyramid_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_clock_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_final_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_ring_spv.h")
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()
 set(JAH_RAY_QUERY_OK "${JAH_RAY_QUERY_OK}" PARENT_SCOPE)

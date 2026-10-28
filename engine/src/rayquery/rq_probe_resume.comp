@@ -1,0 +1,528 @@
+#version 460
+// THE SCREEN-PROBE GATHER'S RESUME, PER CELL (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl says what a cell's state is).
+//
+// The view's frame runs, before the placement, five small jobs (OgreScreenProbeGather.cpp record):
+//   JAH_RESUME_PYRAMID  per cascade whose BRICK MASK is this frame's (the GI step's light work wrote it before the list
+//                       closed: PhotonVoxelLighting's brick buffer, two words a brick - the direct term's and the
+//                       feedback's relative change - read IN THE FRAME, no read-back): a pyramid of "a changed brick
+//                       within one node" bits, level l a node of 2^l bricks, so a cone of any width asks one word.
+//   (default)           THE TEST, one workgroup a cell, camera still: a cell RESUMES (its clock restarts) when
+//                       (1) the frame's changed-region list overflowed (the sun, the sky, a change with no box);
+//                       (2) a listed GEOMETRY box (a mover's swept box, an edit) meets its EYE COLUMN - the pyramid from
+//                           the eye through the cell's pixels out to its farthest surface (what the pixels see moved);
+//                       (3) a listed box meets one of its rays' 64 world-direction bins over the rest: a geometry box
+//                           anywhere on the bin's segment [0, the bin's farthest hit] (it blocks or unblocks the rays),
+//                           a lighting box (a slab re-injected, a card relit, a lamp, a lamp's shadow) on the bin's hit
+//                           footprint [nearest, farthest hit], a mover's SUN shadow where the footprint's sun rays cross
+//                           its box (the list's toSun) - each bin widened by its cone and the cell's own extent;
+//                       (4) a changed brick (one code: 1 % of the voxel's radiance, either word) under a bin's footprint,
+//                           in the cascade the view's hit reads there (the camera's level, jah_rq_hit.glsl);
+//                       (5) the irradiance field is at work (its integration, empties, restarts - an edit's marks, the
+//                           brick moves' accumulation - or refinements owed) and a pixel of the cell read its fallback
+//                           since the camera stopped (the integrate's bit): what that fallback reads moves.
+//   JAH_RESUME_CLOCK    one thread: K = 0 when the view moved or any cell resumed, else K + 1; the frame's sample index.
+//   JAH_RESUME_FINAL    one thread a cell: moving - every cell active, its distance store and its field bit emptied;
+//                       an active cell past N holds (its last integrate was K = N: the rest mean exactly).
+//   JAH_RESUME_RING     one thread a cell: a held cell within the ring's reach of an active one is traced this frame.
+// A MOVING CAMERA puts every cell in MOVING (FINAL resets them, K = 0), so nothing that changed during motion is lost:
+// every cell settles from K = 0 at the stop, its rest sampling the scene as it is then.
+#extension GL_GOOGLE_include_directive : require
+
+#if defined( JAH_RESUME_CLOCK )
+layout( local_size_x = 1, local_size_y = 1, local_size_z = 1 ) in;
+#elif defined( JAH_RESUME_PYRAMID ) || defined( JAH_RESUME_FINAL ) || defined( JAH_RESUME_RING )
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+#else
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+#endif
+
+#define JAH_PROBE_PARAMS_BINDING 0
+#include "jah_probe_params.glsl"
+#define JAH_REST_CLOCK_BINDING 5
+#define JAH_REST_CLOCK_QUALIFIER
+#include "jah_probe_rest.glsl"
+
+const uint kRestCascades = 4u;
+const uint kRestPyramidLevels = 8u;
+/// THE RESUME'S OWN BLOCK (ScreenProbeGather.cpp RestParams; vec4s only)
+layout( std140, set = 0, binding = 1 ) uniform RestParams
+{
+	/// x 1 = the camera still (the tests run), 0 = moving (every cell settles); y N, the rest length; z the ring's reach
+	/// in cells; w 1 = the view rests at all (0: the temporal lever off, stereo, the rest off - K stays 0)
+	vec4 mode;
+	/// x the moving frame counter, y the rest sequence's base (kRestSequenceBase + the seed), z 1 = the frozen index
+	/// (every sample at index 0: the A/B's freeze), w a sky pixel's column depth (the far plane)
+	vec4 seq;
+	/// x the list's regions this view reads this frame (0: none, or read already), y 1 = it overflowed or restarted,
+	/// z unused, w the cascades with this frame's brick mask
+	vec4 lists;
+	/// per cascade (the hit set's order): xyz its bricks, w 1 = its mask is this frame's
+	uvec4 brickDims[kRestCascades];
+	/// ...xyz its brick grid's corner (the voxeliser's origin), w a brick in metres
+	vec4 brickOrigin[kRestCascades];
+	/// ...x the pyramid's first word, y its levels, z the first word of level l = brickLevelOffset[c][l]
+	uvec4 brickPyramid[kRestCascades];
+	uvec4 brickLevelOffset[kRestCascades][2];   // eight levels, four a uvec4
+	/// x 1 = the irradiance field owes work over itself (its build, a fresh pass, its empties, its refinements): a cell
+	/// whose rest read its fallback resumes
+	vec4 field;
+} r;
+
+layout( set = 0, binding = 2 ) uniform sampler2DArray sceneDepth;
+/// THE CELLS' STATE: [i] the state bits of cell i (jah_probe_rest.glsl), [cells + i] its ring bit
+layout( std430, set = 0, binding = 3 ) buffer CellState { uint cellState[]; };
+/// THE CELLS' DISTANCE STORE (jah_probe_rest.glsl kRestStoreWords): cell i's bins' least and most hit distance (float
+/// bits) and their escape bits. An empty bin: least +inf, most 0, no escape.
+layout( std430, set = 0, binding = 4 ) buffer CellStore { uint cellStore[]; };
+/// THE CHANGED-REGION LIST (PhotonComponent::closeRegions' one buffer): a header of two vec4s (count, overflow,
+/// restart, frame | toSun, sun) then two vec4s a region (lo, kind | hi, cascades)
+layout( std140, set = 0, binding = 6 ) uniform Regions { vec4 regionWords[2 + 2 * 128]; };
+/// THE BRICK MASKS, one per cascade (stand-ins where none is this frame's)
+layout( std430, set = 0, binding = 7 ) readonly buffer BrickMask { uint w[]; } brickMask[kRestCascades];
+/// THE PYRAMIDS of the four cascades, one buffer
+layout( std430, set = 0, binding = 8 ) buffer BrickPyramid { uint brickPyramid[]; };
+
+const uint kRegionSlab = 1u, kRegionCard = 2u, kRegionEdit = 3u, kRegionMover = 4u, kRegionMoverShadow = 5u,
+		   kRegionLampShadow = 6u, kRegionLamp = 7u;
+/// A brick changed by a code: one per cent of the voxel's own radiance (GiBrickMask's law), either word.
+const float kRestBrickCode = 0.01;
+
+uint levelOffset( uint c, uint l ) { return r.brickLevelOffset[c][l >> 2u][l & 3u]; }
+uvec3 levelDims( uint c, uint l )
+{
+	const uvec3 d = r.brickDims[c].xyz;
+	return max( ( d + ( 1u << l ) - 1u ) >> l, uvec3( 1u ) );
+}
+bool brickChanged( uint c, uint idx )
+{
+	float a = 0.0, b = 0.0;
+	// (an array of blocks is indexed by a constant: the four cascades spelt out)
+	if( c == 0u ) { a = uintBitsToFloat( brickMask[0].w[2u * idx] ); b = uintBitsToFloat( brickMask[0].w[2u * idx + 1u] ); }
+	else if( c == 1u ) { a = uintBitsToFloat( brickMask[1].w[2u * idx] ); b = uintBitsToFloat( brickMask[1].w[2u * idx + 1u] ); }
+	else if( c == 2u ) { a = uintBitsToFloat( brickMask[2].w[2u * idx] ); b = uintBitsToFloat( brickMask[2].w[2u * idx + 1u] ); }
+	else { a = uintBitsToFloat( brickMask[3].w[2u * idx] ); b = uintBitsToFloat( brickMask[3].w[2u * idx + 1u] ); }
+	// (a NaN word is a change: the bits are tested, never x == x)
+	const bool na = ( floatBitsToUint( a ) & 0x7F800000u ) == 0x7F800000u, nb = ( floatBitsToUint( b ) & 0x7F800000u ) == 0x7F800000u;
+	return na || nb || a >= kRestBrickCode || b >= kRestBrickCode;
+}
+
+#if defined( JAH_RESUME_PYRAMID )
+// ---- THE PYRAMID: thread = one node of one cascade (y), over all its levels ---------------------------------------------
+// node (l, n) = 1 iff a changed brick lies in [ (n - 1) 2^l, (n + 2) 2^l ) on every axis: its own bricks and ONE NODE's
+// margin, so a point that reads 0 at level l has no changed brick within 2^l bricks of it.
+void main()
+{
+	const uint c = gl_WorkGroupID.y;
+	if( c >= kRestCascades || r.brickDims[c].w == 0u )
+		return;
+	const uint levels = r.brickPyramid[c].y;
+	uint i = gl_GlobalInvocationID.x;
+	uint l = 0u;
+	for( ; l < levels; ++l )
+	{
+		const uvec3 d = levelDims( c, l );
+		const uint n = d.x * d.y * d.z;
+		if( i < n )
+			break;
+		i -= n;
+	}
+	if( l >= levels )
+		return;
+	const uvec3 d = levelDims( c, l );
+	const uvec3 node = uvec3( i % d.x, ( i / d.x ) % d.y, i / ( d.x * d.y ) );
+	const ivec3 full = ivec3( r.brickDims[c].xyz );
+	const int span = 1 << int( l );
+	const ivec3 lo = max( ( ivec3( node ) - 1 ) * span, ivec3( 0 ) );
+	const ivec3 hi = min( ( ivec3( node ) + 2 ) * span, full );
+	uint any = 0u;
+	for( int z = lo.z; z < hi.z && any == 0u; ++z )
+		for( int y = lo.y; y < hi.y && any == 0u; ++y )
+			for( int x = lo.x; x < hi.x; ++x )
+				if( brickChanged( c, uint( ( z * full.y + y ) * full.x + x ) ) )
+				{
+					any = 1u;
+					break;
+				}
+	brickPyramid[r.brickPyramid[c].x + levelOffset( c, l ) + i] = any;
+}
+
+#elif defined( JAH_RESUME_CLOCK )
+// ---- THE CLOCK ----------------------------------------------------------------------------------------------------------
+void main()
+{
+	const bool moving = r.mode.x < 0.5 || r.mode.w < 0.5;
+	const bool any = jahClock[2] != 0u;
+	const uint K = ( moving || any ) ? 0u : min( jahClock[0] + 1u, 1u << 20 );
+	jahClock[0] = K;
+	if( any && !moving )
+		jahClock[6] += 1u;
+	const uint index = r.seq.z > 0.5 ? 0u : K > 0u ? uint( r.seq.y ) + K : uint( r.seq.x );
+	jahClock[1] = index;
+	jahClock[4] = 0u;
+	jahClock[5] = 0u;
+	jahClock[7] = 0u;
+}
+
+#elif defined( JAH_RESUME_FINAL )
+// ---- THE FINALIZE: one thread a cell -------------------------------------------------------------------------------------
+void main()
+{
+	const uint cells = uint( p.resolution.x ) * uint( p.resolution.y );
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= cells )
+		return;
+	const bool moving = r.mode.x < 0.5 || r.mode.w < 0.5;
+	uint st = moving ? 0u : cellState[i];
+	const uint K = jahClock[0];
+	// THE DISTANCE STORE IS THE STILL CAMERA's: every ray an active cell traced since the camera stopped (its settle and
+	// its rest), emptied when the view moves - a superset of the rest's own rays (the test can only resume more), and
+	// never empty on the frame after a resume (an empty store answers no test: a cell an input reaches every frame would
+	// step its clock 0, 1, 0, 1 - the rest sequence's first sample taken again and again)
+	if( moving )
+		for( uint b = 0u; b < kRestBins; ++b )
+		{
+			cellStore[kRestStoreWords * i + b] = 0x7F800000u;   // +inf: no hit yet
+			cellStore[kRestStoreWords * i + 64u + b] = 0u;
+			if( b < 2u )
+				cellStore[kRestStoreWords * i + 128u + b] = 0u;   // no escape yet
+		}
+	// PAST N THE CELL HOLDS: its last integrate was the rest's N-th frame, whose answer IS the rest mean
+	if( ( st & kCellHeld ) == 0u && !moving && float( K ) > r.mode.y )
+		st |= kCellHeld;
+	cellState[i] = st;
+}
+
+#elif defined( JAH_RESUME_RING )
+// ---- THE RING: one thread a cell -----------------------------------------------------------------------------------------
+void main()
+{
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const uint cells = uint( grid.x * grid.y );
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= cells )
+		return;
+	const uint st = cellState[i];
+	uint ring = 0u;
+	if( ( st & kCellHeld ) != 0u )
+	{
+		const ivec2 cell = ivec2( int( i ) % grid.x, int( i ) / grid.x );
+		const int eye = jahEyeOfCell( cell.x );
+		const ivec2 x0 = ivec2( eye * jahEyeGridW(), 0 ), x1 = x0 + ivec2( jahEyeGridW(), grid.y ) - 1;
+		const int D = int( r.mode.z );
+		for( int y = max( cell.y - D, x0.y ); y <= min( cell.y + D, x1.y ) && ring == 0u; ++y )
+			for( int x = max( cell.x - D, x0.x ); x <= min( cell.x + D, x1.x ); ++x )
+				if( ( cellState[uint( y * grid.x + x )] & kCellHeld ) == 0u )
+				{
+					ring = 1u;
+					break;
+				}
+		atomicAdd( jahClock[4], 1u );
+		if( ring != 0u )
+			atomicAdd( jahClock[7], 1u );
+	}
+	else
+		atomicAdd( jahClock[5], 1u );
+	cellState[cells + i] = ring;
+}
+
+#else
+// ---- THE TEST: one workgroup a cell, 64 threads --------------------------------------------------------------------------
+shared vec3 sLo[64];
+shared vec3 sHi[64];
+shared float sFar[64];
+shared uint sReached;
+
+vec4 regionLo( uint k ) { return regionWords[2u + 2u * k]; }
+vec4 regionHi( uint k ) { return regionWords[3u + 2u * k]; }
+uint regionKind( uint k ) { return floatBitsToUint( regionLo( k ).w ); }
+
+/// The least distance between the segments a0 + u (a1 - a0) and b0 + v (b1 - b0), u, v in [0, 1].
+float segmentsDistance( vec3 a0, vec3 a1, vec3 b0, vec3 b1 )
+{
+	const vec3 d1 = a1 - a0, d2 = b1 - b0, w = a0 - b0;
+	const float a = dot( d1, d1 ), e = dot( d2, d2 ), f = dot( d2, w );
+	float s = 0.0, t = 0.0;
+	if( a <= 1e-12 && e <= 1e-12 )
+		return length( w );
+	if( a <= 1e-12 )
+		t = clamp( f / e, 0.0, 1.0 );
+	else
+	{
+		const float c = dot( d1, w );
+		if( e <= 1e-12 )
+			s = clamp( -c / a, 0.0, 1.0 );
+		else
+		{
+			const float b = dot( d1, d2 ), den = a * e - b * b;
+			s = den > 1e-12 ? clamp( ( b * f - c * e ) / den, 0.0, 1.0 ) : 0.0;
+			t = ( b * s + f ) / e;
+			if( t < 0.0 ) { t = 0.0; s = clamp( -c / a, 0.0, 1.0 ); }
+			else if( t > 1.0 ) { t = 1.0; s = clamp( ( b - c ) / a, 0.0, 1.0 ); }
+		}
+	}
+	return length( ( a0 + d1 * s ) - ( b0 + d2 * t ) );
+}
+/// Is a box (lo, hi) inside the half-space dot( n, x - o ) <= 0 nowhere (wholly on its positive side)?
+bool boxOutside( vec3 n, vec3 o, vec3 lo, vec3 hi )
+{
+	// the box's corner farthest along -n
+	const vec3 q = vec3( n.x > 0.0 ? lo.x : hi.x, n.y > 0.0 ? lo.y : hi.y, n.z > 0.0 ? lo.z : hi.z );
+	return dot( n, q - o ) > 0.0;
+}
+
+/// Does the cone from o along d (half-angle C: cosC, sinC) between distances t0 and t1 meet the sphere (c, R)? The
+/// sphere's angular radius seen from o joins the cone's; a sphere about o meets it at once.
+bool coneMeetsSphere( vec3 o, vec3 d, float cosC, float sinC, float t0, float t1, vec3 c, float R )
+{
+	const vec3 v = c - o;
+	const float L = length( v );
+	if( L <= R )
+		return true;
+	if( L - R > t1 || L + R < t0 )
+		return false;
+	const float sinR = clamp( R / L, 0.0, 1.0 );
+	const float cosR = sqrt( max( 1.0 - sinR * sinR, 0.0 ) );
+	// cos( C + asin( R / L ) ), the widest angle a direction to the sphere can make with d and still lie in the cone
+	const float cosWide = cosC * cosR - sinC * sinR;
+	if( cosWide <= -1.0 + 1e-6 )
+		return true;
+	return dot( v, d ) >= cosWide * L;
+}
+
+/// THE CONE MARCH OVER THE PYRAMIDS: does a changed brick lie within the bin's cone over its hit footprint? At each step
+/// the cone's radius picks the level whose node is at least twice it (a 0 there: nothing within a node), the step half
+/// a node; in the cascade the view's hit reads at the point (the finest box holding it, the next one out where the
+/// point is in the camera level's band, jah_rq_hit.glsl).
+bool footprintMeetsBricks( vec3 o, vec3 d, float ta, float tb, float rho, float tanCone )
+{
+	const int count = min( JAH_VOX_COUNT, int( kRestCascades ) );
+	float t = ta;
+	for( int guard = 0; guard < 256 && t <= tb; ++guard )
+	{
+		const vec3 x = o + d * t;
+		const float rad = rho + t * tanCone;
+		float step = 1e30;
+		for( int c = 0; c < count; ++c )
+		{
+			const vec4 bo = r.brickOrigin[c];
+			const float brick = max( bo.w, 1e-4 );
+			const uvec3 dims = r.brickDims[c].xyz;
+			// (within the cone's radius of the grid: its rays reach the cascade's edge bricks)
+			const float m = rad / brick;
+			const vec3 g0 = ( x - bo.xyz ) / brick;
+			const bool inside = all( greaterThanEqual( g0, vec3( -m ) ) ) && all( lessThan( g0, vec3( dims ) + m ) );
+			if( !inside )
+				continue;
+			const vec3 g = clamp( g0, vec3( 0.0 ), vec3( dims ) - 0.5 );
+			if( r.brickDims[c].w != 0u )
+			{
+				uint l = 0u;
+				while( l + 1u < r.brickPyramid[c].y && float( 1u << l ) * brick < 2.0 * rad )
+					++l;
+				const uvec3 ld = levelDims( c, l );
+				const uvec3 n = min( uvec3( g ) >> l, ld - 1u );
+				if( brickPyramid[r.brickPyramid[c].x + levelOffset( c, l ) + ( n.z * ld.y + n.y ) * ld.x + n.x] != 0u )
+					return true;
+				step = min( step, 0.5 * float( 1u << l ) * brick );
+			}
+			else
+				step = min( step, 0.5 * max( brick, 2.0 * rad ) );
+			// THE LEVEL (the view's hit): the point inside this cascade's level radius whole - the next one out reads none
+			if( !JAH_VOX_LEVEL_ON || c == count - 1 )
+				break;
+			const vec3 dv = abs( x - JAH_VOX_LEVEL_CAM );
+			const vec4 lv = JAH_VOX_LEVEL( c );
+			if( max( max( dv.x, dv.y ), dv.z ) <= lv.x - lv.y )
+				break;
+		}
+		if( step > 1e29 )
+			step = max( 0.5 * rad, 0.05 );   // in no cascade: no store read there
+		t += max( step, 1e-3 );
+	}
+	return t <= tb;   // (the guard spent before the footprint's end: a change is not ruled out)
+}
+
+void main()
+{
+	const ivec2 grid = ivec2( p.resolution.xy );
+	const ivec2 cell = ivec2( gl_WorkGroupID.xy );
+	const uint tid = gl_LocalInvocationIndex;
+	if( any( greaterThanEqual( cell, grid ) ) || r.mode.x < 0.5 || r.mode.w < 0.5 )
+		return;   // (uniform across the workgroup)
+	const uint index = uint( cell.y * grid.x + cell.x );
+	const int s = int( max( p.knobs.x, 1.0 ) );
+	const int eye = jahEyeOfCell( cell.x );
+	const ivec2 own = jahLocalCell( cell );
+	const ivec2 full = ivec2( p.resolution.zw );
+	const JahEye e = jahEyeNow( eye );
+	if( tid == 0u )
+		sReached = 0u;
+
+	// ---- THE CELL'S SURFACE: its pixels' world box and its farthest view distance (a sky pixel: the far plane) ----------
+	vec3 lo = vec3( 1e30 ), hi = vec3( -1e30 );
+	float far = 0.0;
+	const ivec2 o0 = own * s;
+	const ivec2 o1 = min( o0 + s, full );
+	for( uint k = tid; k < uint( s * s ); k += 64u )
+	{
+		const ivec2 q = o0 + ivec2( int( k ) % s, int( k ) / s );
+		if( any( greaterThanEqual( q, o1 ) ) )
+			continue;
+		const vec2 local = ( vec2( q ) + 0.5 ) / vec2( full );
+		const float raw = texture( sceneDepth, vec3( local, float( eye ) ) ).x;
+		if( raw <= 0.0 || raw >= 1.0 )
+		{
+			far = max( far, r.seq.w );
+			continue;
+		}
+		const float dist = jahViewDistance( raw );
+		const vec3 w = jahWorldAt( e, local, dist );
+		if( !finite3( w ) )
+			continue;
+		lo = min( lo, w );
+		hi = max( hi, w );
+		far = max( far, dist );
+	}
+	sLo[tid] = lo;
+	sHi[tid] = hi;
+	sFar[tid] = far;
+	barrier();
+	for( uint h = 32u; h > 0u; h >>= 1u )
+	{
+		if( tid < h )
+		{
+			sLo[tid] = min( sLo[tid], sLo[tid + h] );
+			sHi[tid] = max( sHi[tid], sHi[tid + h] );
+			sFar[tid] = max( sFar[tid], sFar[tid + h] );
+		}
+		barrier();
+	}
+	lo = sLo[0];
+	hi = sHi[0];
+	far = sFar[0] * 1.001 + 1e-3;
+	const bool surface = all( lessThanEqual( lo, hi ) );
+	const vec3 centre = surface ? 0.5 * ( lo + hi ) : e.camPos;
+	const float rho = surface ? 0.5 * length( hi - lo ) : 0.0;
+
+	const uint regions = min( uint( r.lists.x ), 128u );
+	// ---- (1) THE OVERFLOW ------------------------------------------------------------------------------------------------
+	bool reached = r.lists.y > 0.5;
+	// ---- (5) THE FIELD AT WORK under a cell that read its fallback ---------------------------------------------------------
+	reached = reached || ( r.field.x > 0.5 && ( cellState[index] & kCellField ) != 0u );
+
+	// ---- (2) THE EYE COLUMN: the pyramid from the eye through the cell's rectangle to its farthest surface --------------
+	{
+		const vec2 a = vec2( o0 ) / vec2( full ), b = vec2( o1 ) / vec2( full );
+		const vec3 p00 = e.rayTL + e.rayRight * a.x + e.rayDown * a.y, p10 = e.rayTL + e.rayRight * b.x + e.rayDown * a.y;
+		const vec3 p11 = e.rayTL + e.rayRight * b.x + e.rayDown * b.y, p01 = e.rayTL + e.rayRight * a.x + e.rayDown * b.y;
+		const bool persp = e.perspective > 0.5;
+		// the side planes' outward normals (the eye's frame: the rectangle's corners clockwise from the top left, seen
+		// from the eye looking along fwd) - an orthographic column's sides are parallel to fwd
+		vec3 n[4];
+		vec3 at[4];
+		if( persp )
+		{
+			n[0] = cross( p10, p00 ); n[1] = cross( p11, p10 ); n[2] = cross( p01, p11 ); n[3] = cross( p00, p01 );
+			at[0] = at[1] = at[2] = at[3] = e.camPos;
+		}
+		else
+		{
+			n[0] = cross( p10 - p00, e.fwd ); n[1] = cross( p11 - p10, e.fwd );
+			n[2] = cross( p01 - p11, e.fwd ); n[3] = cross( p00 - p01, e.fwd );
+			at[0] = e.camPos + p00; at[1] = e.camPos + p10; at[2] = e.camPos + p11; at[3] = e.camPos + p01;
+		}
+		// (the winding is checked against the rectangle's own centre: a normal facing it is flipped)
+		const vec3 mid = persp ? e.camPos + 0.25 * ( p00 + p10 + p11 + p01 ) : e.camPos + 0.25 * ( p00 + p10 + p11 + p01 ) + e.fwd;
+		for( int k = 0; k < 4; ++k )
+			if( dot( n[k], mid - at[k] ) > 0.0 )
+				n[k] = -n[k];
+		for( uint k = tid; k < regions && !reached; k += 64u )
+		{
+			const uint kind = regionKind( k );
+			if( kind != kRegionMover && kind != kRegionEdit )
+				continue;
+			const vec3 blo = regionLo( k ).xyz, bhi = regionHi( k ).xyz;
+			bool outside = false;
+			for( int j = 0; j < 4 && !outside; ++j )
+				outside = boxOutside( n[j], at[j], blo, bhi );
+			// beyond the farthest surface (the view distance along fwd), or wholly behind the eye
+			outside = outside || boxOutside( e.fwd, e.camPos + e.fwd * far, blo, bhi ) ||
+					  boxOutside( -e.fwd, e.camPos, blo, bhi );
+			if( !outside )
+				reached = true;
+		}
+	}
+
+
+	// ---- (3) AND (4) THE BINS: thread = one world-direction bin of the cell's still camera -----------------------------
+	if( !reached && surface )
+	{
+		const uint b = tid;
+		const uint at = kRestStoreWords * index;
+		const float tMin = uintBitsToFloat( cellStore[at + b] );
+		const float tMax = uintBitsToFloat( cellStore[at + 64u + b] );
+		const bool hits = tMax > 0.0 && tMin <= tMax;
+		const bool escapes = ( cellStore[at + 128u + ( b >> 5u )] & ( 1u << ( b & 31u ) ) ) != 0u;
+		if( hits || escapes )
+		{
+			const vec2 uv = ( vec2( b % kRestBinSide, b / kRestBinSide ) + 0.5 ) / float( kRestBinSide );
+			const vec3 d = jahRestOctDir( uv );
+			// THE BIN's CONE: the widest angle from its centre to its corners and edge middles
+			float cosCone = 1.0;
+			for( int k = 0; k < 8; ++k )
+			{
+				const vec2 c = ( vec2( b % kRestBinSide, b / kRestBinSide ) +
+								 vec2( k == 0 || k == 3 || k == 7 ? 0.0 : k == 4 || k == 6 ? 0.5 : 1.0,
+									   k < 2 || k == 4 ? 0.0 : k == 5 || k == 7 ? 0.5 : 1.0 ) ) /
+							   float( kRestBinSide );
+				cosCone = min( cosCone, dot( d, jahRestOctDir( clamp( c, vec2( 0.0 ), vec2( 1.0 ) ) ) ) );
+			}
+			const float sinCone = sqrt( max( 1.0 - cosCone * cosCone, 0.0 ) );
+			const float tanCone = cosCone > 1e-3 ? sinCone / cosCone : 1e3;
+			const vec3 toSun = regionWords[1].xyz;
+			const bool sun = regionWords[1].w > 0.5;
+			// a geometry box blocks or unblocks the rays anywhere on their way (an escaping ray's way has no end); a
+			// lighting box changes what a HIT reads (the footprint: the bin's nearest to its farthest hit)
+			const float wayEnd = escapes ? 1e30 : tMax;
+			for( uint k = 0u; k < regions && !reached; ++k )
+			{
+				const uint kind = regionKind( k );
+				const vec3 blo = regionLo( k ).xyz, bhi = regionHi( k ).xyz;
+				const vec3 q = 0.5 * ( blo + bhi );
+				const float R = 0.5 * length( bhi - blo );
+				if( kind == kRegionMover || kind == kRegionEdit )
+					reached = coneMeetsSphere( centre, d, cosCone, sinCone, 0.0, wayEnd, q, R + rho );
+				else if( !hits )
+					continue;
+				else if( kind == kRegionMoverShadow )
+				{
+					if( !sun )
+						continue;
+					// the footprint's sun rays cross the box: the footprint's axis against the box's shadow line, widened
+					// by the cone at its far end and the cell's extent
+					const float dist = segmentsDistance( centre + d * tMin, centre + d * tMax, q, q - toSun * 1e4 );
+					reached = dist <= R + rho + tMax * tanCone;
+				}
+				else
+					reached = coneMeetsSphere( centre, d, cosCone, sinCone, tMin, tMax, q, R + rho );
+			}
+			if( !reached && hits && r.lists.w > 0.5 )
+				reached = footprintMeetsBricks( centre, d, tMin, tMax, rho, tanCone );
+		}
+	}
+	if( reached )
+		atomicOr( sReached, 1u );
+	barrier();
+	if( tid == 0u )
+	{
+		uint st = cellState[index] & ~kCellReached;
+		if( sReached != 0u )
+		{
+			st = ( st & ~kCellHeld ) | kCellReached;
+			atomicOr( jahClock[2], 1u );
+			atomicAdd( jahClock[3], 1u );
+		}
+		cellState[index] = st;
+	}
+}
+#endif

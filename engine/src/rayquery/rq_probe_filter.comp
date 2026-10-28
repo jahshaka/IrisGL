@@ -107,6 +107,10 @@ layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
 layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
 /// THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3; the header's job 3): one layer a roughness level.
 layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray prefilteredAtlas;
+/// THE CELLS' STATE (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): a probe the trace skipped (its cell held, outside every
+/// active cell's ring) is not filtered - nothing reads it this frame.
+layout( std430, set = 0, binding = 5 ) readonly buffer JahCellState { uint jahCellState[]; };
+const uint kFilterCellHeld = 1u;
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -185,6 +189,11 @@ void main()
 	const bool adaptive = probe >= uniformProbes;
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
+	{
+		const uint cells = uint( max( grid.x, 1 ) * max( grid.y, 1 ) );
+		if( ( jahCellState[cellIndex] & kFilterCellHeld ) != 0u && jahCellState[cells + cellIndex] == 0u )
+			return;   // (uniform across the workgroup: one probe a group)
+	}
 	if( lane == 0u )
 		gUnsampled = 0u;		// (ordered before every lane's count by the tap table's barrier)
 

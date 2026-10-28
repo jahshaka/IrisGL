@@ -65,6 +65,10 @@ layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } re
 /// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks).
 layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; uint row[]; } counter;
 layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
+/// THE REST CLOCK (PHOTON-7 stage 8B, B1): the frame's sample index is the GPU's (jah_probe_rest.glsl) - the jitter and
+/// the adaptive window follow the view's one rest clock, so every active cell's probes stand where its rest needs them.
+#define JAH_REST_CLOCK_BINDING 6
+#include "jah_probe_rest.glsl"
 
 /// The surface a pixel drew, or `valid` false where it drew none (the sky, a
 /// pixel the prepass never touched); `geomN` = its GEOMETRIC normal (the ray
@@ -185,7 +189,7 @@ void main()
 	const uint eyes = jahStereo() ? 2u : 1u;
 	const uint cap = uint( max( p.knobs3.y, 0.0 ) ) / eyes;
 	demand = max( demand, 1u );
-	const uint shift = ( ( uint( p.knobs.z ) % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
+	const uint shift = ( ( jahFrameIndex() % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
 	const uint rank = ( raw + demand - shift ) % demand;
 	if( rank >= cap )
 		return;
@@ -250,7 +254,7 @@ void main()
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const float stride = max( p.knobs.x, 1.0 );
 	const int s = int( stride );
-	const uint frame = uint( p.knobs.z );
+	const uint frame = jahFrameIndex();
 	// THE CELL'S EYE AND ITS ORIGIN IN THAT EYE'S IMAGE (PHOTON-GA-VR,
 	// LAYERED-STEREO-1): under stereo the right eye's cells follow the left
 	// eye's in the probe LIST, and a cell's origin is its own-grid coordinate x

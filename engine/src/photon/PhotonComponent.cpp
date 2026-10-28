@@ -342,10 +342,10 @@ bool peakJumped(float before, float now) {
 }
 }   // namespace
 
-void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask, bool mover) {
+void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask) {
     if (regionEmpty(box)) return;
     if (mRegionsOpen.size() < kGiRegionCap) {
-        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
+        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
         return;
     }
     // AT THE CAP THE LIST MERGES, IT NEVER GIVES UP (the dirty path's lesson, PhotonComponent.h's seventeen crates: an
@@ -363,7 +363,6 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (best < mRegionsOpen.size()) {
         mRegionsOpen[best].box.merge(box);
         mRegionsOpen[best].mask |= cascadeMask;
-        mRegionsOpen[best].mover = mRegionsOpen[best].mover && mover;   // (a merge with the chain's is the chain's)
         ++mRegionMergesOpen;
         return;
     }
@@ -382,11 +381,10 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (bi < mRegionsOpen.size()) {
         mRegionsOpen[bi].box.merge(mRegionsOpen[bj].box);
         mRegionsOpen[bi].mask |= mRegionsOpen[bj].mask;
-        mRegionsOpen[bi].mover = mRegionsOpen[bi].mover && mRegionsOpen[bj].mover;
         mRegionsOpen.erase(mRegionsOpen.begin() + std::ptrdiff_t(bj));
         ++mRegionMergesOpen;
     }
-    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
+    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
 }
 
 void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts, bool voxel) {
@@ -511,6 +509,7 @@ void PhotonComponent::closeRegions() {
         c.regions.push_back(r);
     }
     ++mRegionCloses;
+    mRegionCloseFrame = frame;
     if (!c.regions.empty() || c.overflow || c.restart) ++mRegionClosesListing;
     // (THE MOVERS' REGION LIST is the late GI work's, spent in its frame: PhotonComponent::recordLate - a frame with no GI
     // step keeps it for the next.)

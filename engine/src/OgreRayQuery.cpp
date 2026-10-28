@@ -8672,7 +8672,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, gatherRestKeyArmed(scene), scene->gatherRestartKey(), out);
+    if (mGather) mGather->statsInto(scene, scene->gatherRestartKey(), out);
 }
 
 /// THE CARDS' VIEW READERS' REST DEMAND COMPLETE (PHOTON-7 stage 10, R3 (b), the lead's ruling): every reader of the
@@ -8694,7 +8694,7 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     // L = N + the due (SurfaceCache::demandDueFrames), and the demand is complete once every reader has traced its L -
     // so the decision, a due later, reads exactly each reader's span whatever its rest started on
     const unsigned due = SurfaceCache::demandDueFrames();
-    if (mGather) complete = mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1], n, due, active[1]);
+    if (mGather) complete = mGather->restDemandComplete(scene, restFrames[1], n, due, active[1]);
     else n = ScreenProbeGather::shippedRestLength();
     mDemandSpan = n + due;
     for (const auto &kv : mReflects) {
@@ -8714,7 +8714,7 @@ bool RayQueryTier::gatherRestPastHandOver(const OgreScene *scene) const {
     if (!mGather) return true;
     unsigned restFrames = 0u, n = 0u;
     bool active = false;
-    return mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames, n, 0u, active);
+    return mGather->restDemandComplete(scene, restFrames, n, 0u, active);
 }
 
 bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
@@ -8867,9 +8867,53 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (arm(ArmId::GatherIrradianceReadback, false)) in.tuning.readback = true;
         if (arm(ArmId::GatherHistoryReadback, false)) in.tuning.historyReadback = true;
     }
-    in.restKey = gatherRestKeyArmed(scene);
-    in.inputsBusy = scene->photon().gatherInputsBusy();
-    in.holdOwed = scene->photon().readersHoldOwed();
+    // THE RESUME'S INPUTS (PHOTON-7 stage 8B, B1; GatherRestInputs): the frame's changed-region list as it closed before
+    // the render (its buffer, read by the cells' tests on the device), each cascade's brick mask this frame's light work
+    // wrote (in the hit set's order: the cascades the hits read), and whether the field is at work. The view-wide rest key,
+    // gatherInputsBusy and the readers' hold owed are no longer the gather's (8B's CRUD).
+    {
+        GatherRestInputs &r = in.rest;
+        const PhotonComponent &ph = scene->photon();
+        r.drawSerial = scene->drawSerial();
+        r.regionSerial = ph.regionCloseSerial();
+        const GiChangedRegions &list = ph.changedRegions();
+        if (Ogre::ConstBufferPacked *rb = ph.regionBuffer()) {
+            auto *bi = static_cast<Ogre::VulkanBufferInterface *>(rb->getBufferInterface());
+            r.regions = bi->getVboName();
+            r.regionsOffset = VkDeviceSize(rb->_getFinalBufferStart()) * rb->getBytesPerElement();
+            r.regionsRange = rb->getTotalSizeBytes();
+            r.regionCount = list.available ? unsigned(list.regions.size()) : 0u;
+            r.overflow = list.available ? list.overflow : 0u;
+            r.restart = list.available && list.restart;
+        }
+        std::vector<PhotonComponent::Volume> vols;
+        ph.volumes(vols);
+        unsigned c = 0u;
+        for (const PhotonComponent::Volume &vol : vols) {
+            if (c >= GatherRestInputs::kCascades) break;   // (hitSetOf's order and skips: the hits' cascades)
+            if (!vol.lighting || !vol.voxelizer) continue;
+            Ogre::TextureGpu **tex = vol.lighting->getLightVoxelTextures();
+            if (!tex || !tex[0]) continue;   // (the hit set's own skip: the same order)
+            GatherRestInputs::Bricks &b = r.bricks[c++];
+            Ogre::UavBufferPacked *mask = vol.lighting->getBrickMaskBuffer();
+            const Ogre::uint32 *dims = vol.lighting->getBrickMaskDims();
+            const Ogre::Vector3 og = vol.voxelizer->getVoxelOrigin();
+            const Ogre::Vector3 cl = vol.voxelizer->getVoxelCellSize();
+            for (int a = 0; a < 3; ++a) {
+                b.dims[a] = dims[a];
+                b.origin[a] = og[a];
+            }
+            b.brickMetres = 8.0f * std::max(std::max(cl.x, cl.y), cl.z);
+            if (mask) {
+                auto *bi = static_cast<Ogre::VulkanBufferInterface *>(mask->getBufferInterface());
+                b.buffer = bi->getVboName();
+                b.offset = VkDeviceSize(mask->_getFinalBufferStart()) * mask->getBytesPerElement();
+                b.range = mask->getTotalSizeBytes();
+                b.live = vol.lighting->getBrickMaskFrame() == ph.regionCloseFrame();
+            }
+        }
+        r.fieldBusy = ph.fieldWideWorkOwed();
+    }
     in.demandDue = SurfaceCache::demandDueFrames();   // (the gather's demand span: its rest indices [1, N + this])
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
@@ -8894,6 +8938,10 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         std::memcpy(&bits, &in.roughGateRamp, sizeof bits);
         fold(bits);
         fold(in.roughQuadrature);
+        // ...AND THE A/B ARMS THE ESTIMATE DEPENDS ON (FAR-SUN-2's gi.hitDirect, the GI freeze; were the armed rest key's,
+        // deleted with it, 8B): a paired A/B flips one on a still view, which restarts the view's rest whole
+        fold(arm(ArmId::GiHitDirect, true) ? 1ull : 0ull);
+        fold(arm(ArmId::GiFreeze, false) ? 1ull : 0ull);
         in.chainKey = key;
     }
     {
@@ -12982,7 +13030,9 @@ bool PhotonComponent::probeGatherWanted() const {
     return mScene.rayTracingResolved();
 }
 
-/// THE GATHER'S REST KEY (PHOTON-GATHER-1d; PHOTON-2 stage 2's round, H1): what PREVENTS THE HOLD — every write to an
+/// THE SCENE'S VIEW-WIDE REST KEY - NO LONGER THE GATHER'S (PHOTON-7 stage 8B, B1: the gather rests per screen cell on the
+/// changed-region list and the brick masks, rq_probe_resume.comp); its one reader left is the area visibility's history
+/// (OgreAreaVis), which B2 moves to the list too. Its history: (PHOTON-GATHER-1d; PHOTON-2 stage 2's round, H1) what PREVENTED THE HOLD — every write to an
 /// input of the gather's answer, the frame it is recorded: a light or environment write and a light removed, a node
 /// moved (the transform epoch with the shadow scan's writes), a material edit, an injection landing or a cascade
 /// rebuilt (giLightingSerial, the settle's steps included), the cloud layer's GI (cloudGiSerial - a restart-class
@@ -12990,8 +13040,7 @@ bool PhotonComponent::probeGatherWanted() const {
 /// CPU as it is recorded: no readback latency) and the surface cache's captures and VISIBLE relights (a texel moved a code: R3 (a)). With the camera still
 /// and this key moving, the gather is SETTLING: its EMA goes on taking every input's change at its rate, no rest
 /// mean starts and nothing holds — the stage-2 key that left these out held the picture over changing inputs, and
-/// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). The key and
-/// gatherInputsBusy (work still OWED between two writes) together decide RESTING. What RESTARTS is another key
+/// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). What RESTARTS is another key
 /// (gatherRestartKey: restart-class events only) — a write never restarts a history. The reflection folds what its
 /// rays read beside these (reflectionReadsKey).
 unsigned long long PhotonComponent::gatherRestKey() const {
@@ -13035,16 +13084,6 @@ unsigned long long PhotonComponent::gatherRestKey() const {
 /// rest runs across relights whose visibility is still in flight, and neither holds until every report is read.
 bool PhotonComponent::readersHoldOwed() const {
     return mSurfaceCache && mSurfaceCache->restHoldOwed();
-}
-
-bool PhotonComponent::gatherInputsBusy() const {
-    if (giInputsOwed()) return true;
-    if (mSurfaceCache) {
-        CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
-        if (cs.queueLength > 0u || cs.stillPending > 0u) return true;
-    }
-    return false;
 }
 
 /// WHAT BREAKS A REFLECTION'S REST VIEW-WIDE (PHOTON-2 F5; round 2, G6): every LIGHTING write a reflection ray reads -
