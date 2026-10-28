@@ -422,6 +422,14 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
         // Shadow maps cover nothing until these are set (Ogre's samples set both).
         sm->setShadowDirectionalLightExtrusionDistance(500.0f);
         sm->setShadowFarDistance(500.0f);
+        // NO DIFFUSE GI FROM THE REFLECTION PROBE, FROM BIRTH (PHOTON-7 11-2, gi.photon_window's measured leak, L9):
+        // Ogre's envFeatures default (0xffffffff) carries EnvFeatures_DiffuseGiFromReflectionProbe, which adds the
+        // bound cube's roughest mip to every pixel's diffuse, unoccluded. applyAmbientSh writes 0 there, but only when
+        // somebody pushes an ambient (a host's setAmbient / setAmbientSh, or setEnvironmentLight's capture SH); a scene
+        // nobody lit kept the default, and since 10-3 R5 binds every sky's capture as the environment it drew the
+        // sky's diffuse inside a sealed room (+0.43 at the floor, both tiers, the pane not in it). The diffuse
+        // environment is the GI's (its rays escape to the sky through what is open), never this.
+        sm->setAmbientLight(Ogre::ColourValue::Black, Ogre::ColourValue::Black, Ogre::Vector3::UNIT_Y, 1.0f, 0u);
         // PARTICLE QUOTA CEILING — must be set HERE, before anything in this
         // scene calls init() on a particle definition or a billboard set.
         // ParticleSystemManager2 sizes ONE shared index buffer for the whole
