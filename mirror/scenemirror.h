@@ -1933,8 +1933,10 @@ private:
     jahshaka::engine::TextureId mSkyTexture = 0;
     jahshaka::engine::TextureId mSkyFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
     /// THE SKY LIGHT's DOME (R5b, SkyLightSource::Cubemap): the cube texture last uploaded and its six faces, held while
-    /// the engine's environment names them (the engine copies them into its dome cube).
-    const iris::Texture2D *mDomeSource = nullptr;
+    /// the engine's environment names them (the engine copies them into its dome cube). HELD, never a bare address (the
+    /// 10-3 read's W3): a dome cleared and a new one bound in one sync could reuse the freed address and keep the old
+    /// faces - a held texture cannot be freed, so the pointer is its identity exactly.
+    QSharedPointer<iris::Texture2D> mDomeSource;
     jahshaka::engine::TextureId mDomeFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
     void releaseDome();
     /// THE CLOUD LAYER'S WEATHER MAP (CLOUDS-2D-1), uploaded from its decoded

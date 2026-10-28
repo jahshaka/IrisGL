@@ -7706,8 +7706,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // authored; a World sky with lighting off is an UNLIT BACKDROP - drawn, photographing nothing. A dome wins
         // (it is the light; the backdrop says only that the drawn sky emits nothing).
         EnvironmentDesc env;
-        const iris::Texture2D *cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
-                                          ? skyLight->skyCubeTexture.data() : nullptr;
+        const QSharedPointer<iris::Texture2D> cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
+                                                         ? skyLight->skyCubeTexture : QSharedPointer<iris::Texture2D>();
         const QImage *faces = cube ? cube->cubeFaces() : nullptr;
         if (cube != mDomeSource) {
             releaseDome();
@@ -8026,7 +8026,7 @@ jahshaka::engine::AtmosphereSky SceneMirror::atmosphereOf(const SkySource &src)
 void SceneMirror::releaseDome()
 {
     for (TextureId &t : mDomeFaceTextures) { if (t) postCall(&jahshaka::engine::Scene::destroyTexture, t); t = 0; }
-    mDomeSource = nullptr;
+    mDomeSource.reset();
 }
 
 SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
