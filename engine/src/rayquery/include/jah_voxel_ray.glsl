@@ -336,8 +336,7 @@ vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirL
 	{
 		const float e = pJ[bothAxis] + dirLS[bothAxis] * s0j * tIn;
 		const bool outside = e < min( bothPlanes.x, bothPlanes.y ) || e > max( bothPlanes.x, bothPlanes.y );
-		if( !outside )   // MEASURING ARM (11-2 small_emitter, reverted): outside the two faces the ray reads the face toward it
-
+		if( !( outside && na == bothAxis ) )
 		{
 			const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
 			return ( dot( iso.xyz, luma ) <= dot( bk.xyz, luma ) ? iso.xyz : bk.xyz ) * ( 1.0 / iso.w );
