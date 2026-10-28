@@ -402,6 +402,18 @@ vec4 photonDisc( ivec2 pix, int lx, ivec2 cell, ivec2 cellOff, ivec2 gridEye, iv
 /// a start NO CASCADE holds continue through the TLAS from the surface to the world's exit - a hit read by
 /// jahHitRadianceStore (a back face of a one-sided surface 0; nothing to shade it no sample), a miss the sky; an EXHAUSTED
 /// ray is no sample. The mean is over the rays that are.
+/// THIS THREAD's PIXEL as the depth holds it (main sets it): the texel, the eye, the raw depth - the TLAS rays' origin
+/// is the one law's (jah_ray_origin.glsl) at it.
+ivec2 gPixQ = ivec2( 0 );
+int gPixEye = 0;
+float gPixRaw = 0.0;
+int gnEye = 0;
+#define JAH_GN_RAW( q ) texelFetch( sceneDepth, ivec3( ( q ), gnEye ), 0 ).x
+#define JAH_GN_WORLD( q, raw ) jahWorldAt( jahEyeNow( gnEye ), ( vec2( q ) + 0.5 ) / p.resolution.zw, \
+										   jahViewDistance( raw ) )
+#include "jah_geometric_normal.glsl"
+#include "jah_ray_origin.glsl"
+
 vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 {
 	const int n = kJahPixelDiffuseRays;
@@ -412,8 +424,27 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 	const mat3 basis = jahConeBasisWorld( worldNormal );
 	const float binCos = 1.0 - 1.0 / float( n );
 	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;
-	// the TLAS rays' start: one finest cell off the surface along its normal, the voxel rays' own start bias
-	const vec3 origin = worldPos + worldNormal * JAH_VOX_INVSIZE( 0 ).w;
+	// THE TLAS RAYS' START IS THE ONE ORIGIN LAW (DOCS/traps/ENGINE.md; the 10-3 read's W1): the pixel lifted along the
+	// drawn surface's GEOMETRIC normal by its float bound, the depth point's own error and the drawn surface's bound
+	// against level 0 - the gather's probes' own rule (rq_probe_gather.comp), tMin 0. (It started one finest voxel cell
+	// off along the SHADED normal - the voxel rays' bias, centimetres: an occluder within it, under a sofa, was skipped.)
+	gnEye = gPixEye;
+	const JahEye pe = jahEyeNow( gPixEye );
+	const vec3 pc = JAH_GN_WORLD( gPixQ, gPixRaw );
+	const vec3 pv = pe.perspective < 0.5 ? -pe.fwd : normalize( pe.camPos - pc );
+	vec3 geomN = jahGeometricNormal( gPixQ, ivec2( p.resolution.zw ), gPixRaw, pc, worldNormal, pv );
+	if( !finite3( geomN ) )
+		geomN = worldNormal;
+	const bool persp = pe.perspective > 0.5;
+	const float pdist = jahViewDistance( gPixRaw );
+	const float pixelSize = length( pe.rayDown ) / p.resolution.w * ( persp ? pdist : 1.0 );
+	const float pointError = jahDepthPointError( gPixRaw, pdist, p.projParams.y, persp,
+												 persp ? ( worldPos - pe.camPos ) / max( pdist, 1e-6 ) : pe.fwd, pe.fwd,
+												 geomN, pixelSize, p.projParams.w );
+	const vec3 origin = jahRayOrigin( worldPos, geomN, jahViewDistanceOf( pe, worldPos ),
+									  ( finite1( pointError ) ? pointError : 0.0 ) +
+										  jahViewDrawnBound( p.knobs2.y, worldPos, pe.camPos, pe.rayDown, p.resolution.w,
+															 persp ) );
 	vec3 sum = vec3( 0.0 );
 	float taken = 0.0;
 	for( int i = 0; i < n; ++i )
@@ -747,6 +778,9 @@ void main()
 									 p.viewAxisZ.xyz * normalVS.z );
 			pixelDist = jahViewDistance( rawDepth );
 			pixelWorld = jahWorldAt( thisEye, local, pixelDist );
+			gPixQ = min( ivec2( local * vec2( full ) ), full - 1 );
+			gPixEye = eye;
+			gPixRaw = rawDepth;
 			pixelValid = finite3( pixelWorld ) && finite3( pixelNormal ) && finite1( pixelDist );
 		}
 	}
