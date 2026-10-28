@@ -384,9 +384,11 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //   PSSM:    one scene pass per split                         (3)
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
     // (+ the transmittance layer's: its clears, one scene pass per PSSM split and spot map, six cube faces + a copy per
-    // point map)
+    // point map; + its nearest pane's depth: one target a PSSM split and spot map, its copy and its panes, and one a
+    // point map, its NEAR quad - 3 + 2N. A count short of the passes is no error in a build without asserts: the
+    // vector reallocates under the pointers addTargetPass returned - the heap corrupted, every map black)
     def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u +
-                          (panes ? (perMapClears ? numMaps : 1u) + 3u + N * 8u : 0u));
+                          (panes ? (perMapClears ? numMaps : 1u) + 3u + N * 8u + 3u + 2u * N : 0u));
 
     // THE ATOM CASTERS (ATOM-SHADOWS-1; OgreAtomCasterPass.cpp): where this device
     // runs the visibility buffer, every caster scene pass SKIPS the Atom queue and is
