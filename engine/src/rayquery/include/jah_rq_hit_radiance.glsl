@@ -181,9 +181,6 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #endif
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
-#ifndef JAH_HIT_LOBE_ARM
-#define JAH_HIT_LOBE_ARM 0.0
-#endif
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -220,7 +217,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	JAH_RQ_PROCEED( q )
 	vec3 rad = vec3( 0.0 );
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
-		rad = JAH_HIT_LOBE_ARM > 1.5 ? vec3( 0.0 ) : JAH_HIT_LOBE_SKY( L2, alpha, centre );   // an exit: the sky (MEASURING ARM 2: none)
+		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre );   // an exit: the sky
 	else
 	{
 		const float t2 = rayQueryGetIntersectionTEXT( q, true );
@@ -250,16 +247,6 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			jahHitTracedLobe = tracedWas;
 			jahHitIndirectGate = gateWas;
 			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
-			if( JAH_HIT_LOBE_ARM > 0.5 && JAH_HIT_LOBE_ARM < 1.5 )   // MEASURING ARM 1 (reverted): an emitting second hit reads 0
-			{
-				vec3 aAl, aEm;
-				float aR;
-				vec4 aM;
-				jahHitSurf = JahHitSurface( slot2, geom2, prim2, bary2, toWorld2, t2, false, known );
-				if( jahHitMaterial( max( 2.0 * t2 * sqrt( alpha ), 1e-4 ), aAl, aEm, aR, aM ) && max( aEm.x, max( aEm.y, aEm.z ) ) > 0.0 )
-					rad = vec3( 0.0 );
-				jahHitSurf = first;
-			}
 		}
 	}
 	const vec3 c = w * rad * gain;
