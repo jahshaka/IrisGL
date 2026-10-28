@@ -588,6 +588,13 @@ namespace Ogre
         void feedbackSelect( const PhotonFeedbackActivation &activation, PhotonVoxelLighting *chain, uint32 chainIndex,
                              bool first, uint32 budget, uint32 floor );
         void feedbackRun();
+        /** A REGION REBUILD'S OWN PASSES (PHOTON-7 stage 8A, A2): `passes` bounce passes over every brick inside `boxes`
+            (their bricks, active or not), in the frame the region was re-voxelised and injected - a moving object's
+            bounce belongs to the frame of its geometry - the last one's moves folded into the frame's injection words so
+            the stopped bricks' and the cards' accumulations see them (PhotonBrickFeedback_cs.glsl's REGION mode). No
+            budget word, no cursor, no stop rule: the frame's own feedback runs after it as ever. `chain` the innermost
+            cascade (its back scratch holds the rows: the host grows it to the region's bricks first). */
+        void feedbackRegionPasses( const PhotonFeedbackActivation &boxes, uint32 passes, PhotonVoxelLighting *chain );
         /// THE CHAIN'S BACK SCRATCH (PHOTON-7 stage 7; on the innermost cascade): rows for at least `bricks` listed bricks
         /// (the host's frame count, at most the largest cascade's bricks), created or grown once a frame BEFORE the
         /// selections - never resized between a cascade's dispatches.

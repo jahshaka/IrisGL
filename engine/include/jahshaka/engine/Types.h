@@ -4951,6 +4951,10 @@ struct GiStatus {
         /// re-voxelised (cumulative), and the cascade's debt left (boxes owed to its geometry, to its direct term).
         unsigned long long regionRebuilds = 0, moverRegionRebuilds = 0, regionCells = 0;
         unsigned regionOwed = 0, marchOwed = 0;
+        /// THE REGION'S OWN BOUNCE (A2): the passes its rebuilds ran in their frames (cumulative) and the last one's k
+        /// (ceil( ln(1/255) / ln(the region's largest albedo) ), at most 32).
+        unsigned long long regionBouncePasses = 0;
+        unsigned regionBounceLast = 0;
         /// THE LAG (PHOTON-7 stage 2): the frames from the frame the camera's step test first owed this cascade a
         /// move to the rebuild (a scroll's commit, or a whole rebuild) that placed it for the camera - the last one
         /// and the most since the chain was built.

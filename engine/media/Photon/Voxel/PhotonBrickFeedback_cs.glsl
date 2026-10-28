@@ -63,7 +63,8 @@
 // this frame, [1 + k] cascade k's selection cursor (the brick index its next selection starts from).
 // THE MODES (fbDims.w): 0 CLEAR (the frame's mask and arguments), 1 PRE (activation), 5 SELECT (the frame's list under
 // the budget: ONE workgroup), 2 POST (the stop and resume rules), 3 ACCUM (one source cascade's moves into the stopped
-// bricks' would-move), 4 SHIFT (a scroll commit's state moved with the store). The copy job (jah_brick_copy) copies the
+// bricks' would-move), 4 SHIFT (a scroll commit's state moved with the store), 6 REGION (a region rebuild's own passes:
+// ONE workgroup - the last pass folded into the frame's injection words, the region's bricks listed). The copy job (jah_brick_copy) copies the
 // pass's target back into the total over the listed bricks.
 
 @property( jah_brick_copy )
@@ -275,6 +276,77 @@ void main()
 			fbArgs[5] = taken;
 			fbArgs[8] = taken;
 			fbArgs[11] = fbSCarry;
+		}
+		return;
+	}
+	if( mode == 6u )
+	{
+		// REGION (one workgroup; PHOTON-7 stage 8A, A2): the passes a region rebuild runs over ITS OWN bricks in the frame
+		// it re-voxelised them (PhotonVoxelLighting::feedbackRegionPasses) - every brick inside the boxes (fbBoxLo /
+		// fbBoxHi, fbFlags.y of them), active or not, in index order. First each one's LAST region pass is FOLDED into the
+		// frame's injection words - its move [4] into [7], its moved flux [8] into [9], the larger of each - so the
+		// stopped bricks' and the cards' accumulations see the frame's whole change (they read [4] plus [7]: an injection
+		// is what a pass outside the frame's own selection is to them). Then, with fbFlags.w, they are LISTED and marked
+		// passed, their pass words cleared for the next pass's atomicMax, the arguments set as a selection sets them; the
+		// chain's budget words and cursors are not touched (the region's passes are its own, never the frame's count).
+		const uint lid = gl_LocalInvocationIndex;
+		if( lid == 0u )
+			fbSTaken = 0u;
+		memoryBarrierShared();
+		barrier();
+		for( uint base = 0u; base < numBricks; base += 64u )
+		{
+			const uint taken0 = fbSTaken;
+			const uint idx = base + lid;
+			bool inBox = false;
+			if( idx < numBricks )
+			{
+				const uint3 bb = uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) );
+				for( uint k = 0u; k < fbFlags.y && !inBox; ++k )
+					inBox = all( greaterThanEqual( bb, fbBoxLo[k].xyz ) ) && all( lessThan( bb, fbBoxHi[k].xyz ) );
+			}
+			if( inBox )
+			{
+				const uint sw = FB_W * idx;
+				fbState[sw + 7u] = fbU( max( fbF( fbState[sw + 7u] ), fbF( fbState[sw + 4u] ) ) );
+				fbState[sw + 9u] = max( fbState[sw + 9u], fbState[sw + 8u] );
+			}
+			fbSScan[lid] = ( inBox && fbFlags.w != 0u ) ? 1u : 0u;
+			memoryBarrierShared();
+			barrier();
+			for( uint off = 1u; off < 64u; off <<= 1u )
+			{
+				const uint v = lid >= off ? fbSScan[lid - off] : 0u;
+				memoryBarrierShared();
+				barrier();
+				fbSScan[lid] += v;
+				memoryBarrierShared();
+				barrier();
+			}
+			if( inBox && fbFlags.w != 0u )
+			{
+				const uint pos = taken0 + fbSScan[lid] - 1u;
+				const uint sw = FB_W * idx;
+				fbList[pos] = fbPack( uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) ) );
+				fbState[sw] |= FB_RAN;
+				fbState[sw + 4u] = 0u;
+				fbState[sw + 5u] = 0u;
+				fbState[sw + 8u] = 0u;
+			}
+			memoryBarrierShared();
+			barrier();
+			if( lid == 0u )
+				fbSTaken = taken0 + fbSScan[63];
+			memoryBarrierShared();
+			barrier();
+		}
+		if( lid == 0u && fbFlags.w != 0u )
+		{
+			const uint taken = fbSTaken;
+			fbArgs[1] = taken;
+			fbArgs[5] = taken;
+			fbArgs[8] = taken;
+			fbArgs[11] = 0u;
 		}
 		return;
 	}
