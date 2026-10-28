@@ -167,3 +167,117 @@ material Jahshaka/ShadowTransmitClear
 		}
 	}
 }
+
+// THE NEAREST PANE's DEPTH (PHOTON-7 10-4 fix round, the one read's F1; OgreShadow.cpp): the opaque depth copied into
+// atlasTD per map rectangle (the panes are then drawn into it depth-only), and a point light's rectangle set NEAR.
+fragment_program Jahshaka/ShadowDepthCopy_ps_GLSL glsl
+{
+	source JahShadowDepthCopy_ps.glsl
+}
+fragment_program Jahshaka/ShadowDepthCopy_ps_VK glslvk
+{
+	source JahShadowDepthCopy_ps.glsl
+}
+fragment_program Jahshaka/ShadowDepthCopy_ps unified
+{
+	delegate Jahshaka/ShadowDepthCopy_ps_GLSL
+	delegate Jahshaka/ShadowDepthCopy_ps_VK
+}
+material Jahshaka/ShadowDepthCopy
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowDepthCopy_ps
+			{
+			}
+
+			texture_unit
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps_GLSL glsl
+{
+	source JahShadowTransmitNear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps_VK glslvk
+{
+	source JahShadowTransmitNear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps unified
+{
+	delegate Jahshaka/ShadowTransmitNear_ps_GLSL
+	delegate Jahshaka/ShadowTransmitNear_ps_VK
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps_GLSL glsl : Jahshaka/ShadowTransmitNear_ps_GLSL
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps_VK glslvk : Jahshaka/ShadowTransmitNear_ps_VK
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps unified
+{
+	delegate Jahshaka/ShadowTransmitNearRev_ps_GLSL
+	delegate Jahshaka/ShadowTransmitNearRev_ps_VK
+}
+material Jahshaka/ShadowTransmitNear
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitNear_ps
+			{
+			}
+		}
+	}
+}
+material Jahshaka/ShadowTransmitNearRev
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitNearRev_ps
+			{
+			}
+		}
+	}
+}

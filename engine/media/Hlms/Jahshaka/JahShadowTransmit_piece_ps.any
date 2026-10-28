@@ -35,8 +35,10 @@
 @property( jah_shadow_transmit && !hlms_shadowcaster )
 @piece( custom_shadow_transmit_uv )
 	float2 jahShadowTransmitUv = uv;
+	float jahShadowTransmitAt = fDepth;
 @end
 @piece( custom_shadow_transmit )
-	retVal *= midf_c( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahShadowTransmitUv, 0.0 ).x );
+	if( jahShadowTransmitPast( jahShadowTransmitUv, jahShadowTransmitAt ) )
+		retVal *= midf_c( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahShadowTransmitUv, 0.0 ).x );
 @end
 @end

@@ -80,6 +80,7 @@ constexpr ExtraPassSlot kExtraPassSlots[] = {
     { "jah_area_vis",     "jahAreaVis" },
     { "jah_atmo_ap",      "jahAtmoAerial" },
     { "jah_shadow_transmit", "jahShadowTransmit" },   // PHOTON-7 10-4 R8: the shadow node's transmittance layer
+    { "jah_shadow_transmit", "jahShadowTransmitDepth" },   // ...and its nearest pane's depth (the fix round's F1)
     { "jah_sky_vis",      "jahSkyVis" },          // PHOTON-7 10-4 R11: the measured sky visibility (the fog's in-scatter)
 };
 constexpr size_t kNumExtraPassSlots = sizeof(kExtraPassSlots) / sizeof(kExtraPassSlots[0]);
@@ -373,6 +374,7 @@ void FogHlmsListener::hlmsTypeChanged(bool casterPass, Ogre::CommandBuffer *comm
         { pb.areaVis, pb.areaVisSampler },
         { pb.atmoAerial, pb.atmoSampler },
         { pb.shadowTransmit, pb.shadowTransmitSampler },
+        { pb.shadowTransmitDepth, pb.shadowTransmitDepthSampler },
         { pb.skyVis, pb.probeGatherSampler },
     };
     static_assert(sizeof(bound) / sizeof(bound[0]) == kNumExtraPassSlots,
@@ -678,14 +680,22 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // A LINEAR sampler: one bilinear read where the depth is PCF-filtered. A node without the layer binds the white
     // stand-in (createShadowTransmitNone): the property is a constant of every shadowed colour pass, so the layer's
     // process-wide arrival changes no permutation.
+    // ...AND ITS NEAREST PANE's DEPTH (the fix round's F1, OgreShadow.cpp atlasTD), POINT-sampled: a receiver applies T
+    // only past it. The stand-in for a node without the layer is the white texel too (T is 1 there whatever the depth).
     pb.shadowTransmit = nullptr;
     pb.shadowTransmitSampler = nullptr;
+    pb.shadowTransmitDepth = nullptr;
+    pb.shadowTransmitDepthSampler = nullptr;
     if (shadowNode && !casterPass) {
-        if (Ogre::TextureGpu *t = shadowTransmitBound(shadowNode)) {
+        Ogre::TextureGpu *t = shadowTransmitBound(shadowNode), *d = shadowTransmitDepthBound(shadowNode);
+        if (t && d) {
             const Ogre::HlmsSamplerblock *linear = acquireSampler(hlms->getHlmsManager(), true);
-            if (linear) {
+            const Ogre::HlmsSamplerblock *point = acquireSampler(hlms->getHlmsManager(), false);
+            if (linear && point) {
                 pb.shadowTransmit = t;
                 pb.shadowTransmitSampler = linear;
+                pb.shadowTransmitDepth = d;
+                pb.shadowTransmitDepthSampler = point;
                 hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_shadow_transmit", 1);
             }
         }
@@ -931,6 +941,11 @@ void FogHlmsListener::releaseShadowTransmitNone(Ogre::TextureGpuManager *tm) {
 Ogre::TextureGpu *FogHlmsListener::shadowTransmitBound(const Ogre::CompositorShadowNode *node) {
     if (!node) return nullptr;
     Ogre::TextureGpu *t = shadowTransmitLayer(node);
+    return t ? t : gShadowTransmitNone;
+}
+Ogre::TextureGpu *FogHlmsListener::shadowTransmitDepthBound(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    Ogre::TextureGpu *t = shadowTransmitDepthLayer(node);
     return t ? t : gShadowTransmitNone;
 }
 

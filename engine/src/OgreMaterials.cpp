@@ -457,7 +457,10 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
         // (above: a blended surface occludes nothing in the picture), so a blended material that is not a pane - alpha
         // 1, whose pixel passes nothing of what lies behind it - cast no shadow on the stock caster's path (a skinned
         // item, a front-culled caster); its caster is an opaque silhouette, the Atom cut's own answer
-        caster.mDepthWrite = !pane;
+        // ...AND A PANE's TOO (the fix round's F1): a pane draws only in the shadow node's pane passes (paneMask), where
+        // the transmittance pass loads the opaque atlas READ-ONLY (Ogre forces its depth write off) and the pane-depth
+        // pass writes the nearest pane's depth into atlasTD (OgreShadow.cpp)
+        caster.mDepthWrite = true;
         const Ogre::HlmsMacroblock *cur = db->getMacroblock(true);
         if (!cur || *cur != caster) db->setMacroblock(caster, true);
     }

@@ -760,6 +760,8 @@ inline Ogre::uint32 paneShadowPassMask(ShadowNodeKind kind) {
 /// node DEFINED with the layer has it: getDefinedTexture throws for a name its definition lacks). Its two readers: the
 /// colour pass's binding (FogHlmsListener::preparePassHash) and that pass's barrier (ScenePbs::analyzeBarriers).
 Ogre::TextureGpu *shadowTransmitLayer(const Ogre::CompositorShadowNode *node);
+/// ...and its nearest pane's depth, atlasTD (the fix round's F1): null where the node holds none.
+Ogre::TextureGpu *shadowTransmitDepthLayer(const Ogre::CompositorShadowNode *node);
 inline Ogre::uint32 allShadowCasterChannels() {
     return shadowCasterChannels(ShadowNodeKind::View) |
            shadowCasterChannels(ShadowNodeKind::Reflect) |
@@ -3582,6 +3584,8 @@ public:
     static void releaseShadowTransmitNone(Ogre::TextureGpuManager *tm);
     /// What a colour pass reads as the layer: the node's own (shadowTransmitLayer), else the stand-in; null without either.
     static Ogre::TextureGpu *shadowTransmitBound(const Ogre::CompositorShadowNode *node);
+    /// ...and its nearest pane's depth: the node's atlasTD (shadowTransmitDepthLayer), else the same stand-in.
+    static Ogre::TextureGpu *shadowTransmitDepthBound(const Ogre::CompositorShadowNode *node);
     static const Ogre::HlmsSamplerblock *acquireSampler(Ogre::HlmsManager *mgr, bool trilinear);
     /// The cloud field's block: trilinear and WRAPPED (the field tiles), taken
     /// once per manager like the two above and released with them.
@@ -3776,6 +3780,8 @@ private:
         const Ogre::HlmsSamplerblock *atmoSampler = nullptr;
         Ogre::TextureGpu             *shadowTransmit = nullptr;         // PHOTON-7 10-4 R8 (the shadow node's atlasT)
         const Ogre::HlmsSamplerblock *shadowTransmitSampler = nullptr;
+        Ogre::TextureGpu             *shadowTransmitDepth = nullptr;    // ...its nearest pane's depth (atlasTD, F1)
+        const Ogre::HlmsSamplerblock *shadowTransmitDepthSampler = nullptr;
         Ogre::TextureGpu             *skyVis = nullptr;                 // PHOTON-7 10-4 R11 (the gather's sampler)
         /// PHOTON-3: the constant-buffer slot of the specular lobe's albedo table
         /// (PhotonSpecularAlbedoBuffer.h) in this pass, -1 for a pass that declares none.

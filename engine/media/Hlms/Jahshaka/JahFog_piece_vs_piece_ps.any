@@ -294,6 +294,22 @@
 		@property( syntax == glslvk )
 			layout( ogre_s@value(jahShadowTransmit) ) uniform sampler jahShadowTransmitSampler;
 		@end
+		// ...and its NEAREST PANE's DEPTH (the fix round's F1: atlasTD, point-sampled): T applies only past it
+		vulkan_layout( ogre_t@value(jahShadowTransmitDepth) ) uniform texture2D jahShadowTransmitDepth;
+		@property( syntax == glslvk )
+			layout( ogre_s@value(jahShadowTransmitDepth) ) uniform sampler jahShadowTransmitDepthSampler;
+		@end
+		/// IS A RECEIVER at the map depth `at` PAST the nearest pane at `uv` (farther from the light: the smaller value
+		/// under reverse depth)? A pane's own lit face (its receiver offset toward the light) is not.
+		bool jahShadowTransmitPast( float2 uv, float at )
+		{
+			const float pane = OGRE_SampleLevel( jahShadowTransmitDepth, jahShadowTransmitDepthSampler, uv, 0.0 ).x;
+			@property( hlms_no_reverse_depth )
+				return at > pane;
+			@else
+				return at < pane;
+			@end
+		}
 	@end
 	// THE SUN CONTACT VISIBILITY (PHOTON-RAYS-1): R8, 1 = the sun reaches the
 	// surface this texel's ray started from. Declared wherever the pass claimed
@@ -499,7 +515,8 @@
 				const float2 jahUv = posL.xy / posL.w;
 				float jahV = jahFogShadowTap( hlms_shadowmap@n, @insertpiece( UseSamplerShadow ) jahUv, jahDepth );
 				@property( jah_shadow_transmit )
-					jahV *= float( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahUv, 0.0 ).x );
+					if( jahShadowTransmitPast( jahUv, jahDepth ) )
+						jahV *= float( OGRE_SampleLevel( jahShadowTransmit, jahShadowTransmitSampler, jahUv, 0.0 ).x );
 				@end
 				@property( hlms_shadowmap@n_uvs_fulltex )
 					// (outside its map's rectangle of the atlas: unshadowed, getShadow's rule)
