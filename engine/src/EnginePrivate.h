@@ -4939,6 +4939,7 @@ public:
     /// scene not tracing (0) or its structure not there (2) - PhotonVoxelLighting::setSideTracer's answer - and the counts.
     int gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &job, unsigned cascade);
     void voxelSideCounts(GiStatus::VoxelSideCounts &out) const;
+    bool giVoxelSideShares(GiVoxelSideShares &out) override;
     /// The ray tier can trace the cards at all: open, its card-trace pipeline not refused (a scene whose structure is not
     /// built yet is still a trace that WAITS - SurfaceCache's lamps stay stale for it, never lit unshadowed for good).
     bool cardTracePresent() const;

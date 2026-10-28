@@ -41,7 +41,7 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 {
 	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text)
 	vec4 knobs;		// x = the rays a side N, y = the reach (metres), z = the start's lift (the finest cell, metres), w = the mask
-	uvec4 cascade;	// x = this cascade's place in the hit set's chain, yz = its bricks along x and y
+	uvec4 cascade;	// x = this cascade's place in the hit set's chain, yz = its bricks along x and y, w = write the escape shares
 } p;
 #include "jah_world_exit.glsl"
 
@@ -51,6 +51,10 @@ layout( std430, set = 0, binding = 2 ) readonly buffer FbList { uint jahFbList[]
 /// THE SIDE-GATHER SCRATCH (the head of this file).
 layout( std430, set = 0, binding = 3 ) writeonly buffer SideGather { uint jahSideGather[]; };
 layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
+/// THE ESCAPE SHARES (PHOTON-7 11-2 (6), the openings' instrument): cascade 0's one word a voxel, x fastest over its
+/// grid (the bricks x 8 a side) - bits 0-7 the front side's share of its cosine rays that EXIT the world (the sky), 8-15
+/// the back side's, bit 16 written, bit 17 two-sided, 18-31 the front normal's octahedral map (Engine.h GiVoxelSideShares)
+layout( std430, set = 0, binding = 37 ) buffer SideShare { uint jahSideShare[]; };
 
 // ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
 layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
@@ -113,6 +117,7 @@ void jahCardLobeHemi( float r, out float a, out float b )
 // THE BURIED ORIGIN (jah_ray_origin.glsl's second part: after the hit table's functions)
 #define JAH_RAY_ORIGIN_BURIED
 #include "jah_ray_origin.glsl"
+#include "jah_oct_dir.glsl"
 
 const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
 		   kCountTexels = 6u, kCountEmpty = 7u, kCountBuried = 8u;
@@ -120,8 +125,9 @@ const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, 
 /// THE SIDE'S GATHER (the head of this file): the mean of the N rays' answers from world point P along the side's
 /// world normal n; `sky` counts the misses. A BURIED side (jahRayOriginBuried: its lift crosses a front face - its
 /// origin behind a surface, inside a solid) gathers nothing; `pointError` its stored position's quantum along n.
-vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9] )
+vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out float share )
 {
+	share = 0.0;
 	const int rays = max( int( p.knobs.x ), 1 );
 	const vec3 origin = jahRayOrigin( P, n, 0.0, p.knobs.z );
 	if( jahRayOriginBuried( P, n, origin, pointError, uint( p.knobs.w ) ) )
@@ -156,6 +162,7 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9] )
 		{
 			sum += paneLight + through * jahEnvCone( dir, binTan );
 			taken += 1.0;
+			share += 1.0 / float( rays );   // an exit: the sky (the escape share, 11-2 (6))
 			++c[kCountSky];
 			continue;
 		}
@@ -197,6 +204,13 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9] )
 	return taken > 0.0 ? min( sum * ( 1.0 / taken ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 }
 
+/// THE FRONT NORMAL in the share word's top fourteen bits (18-24, 25-31): its octahedral map, seven bits a coordinate
+uint jahShareNormalBits( vec3 n )
+{
+	const vec2 e = clamp( jahOctEncode( n ) * 0.5 + 0.5, 0.0, 1.0 );
+	return ( uint( round( e.x * 127.0 ) ) << 18u ) | ( uint( round( e.y * 127.0 ) ) << 25u );
+}
+
 void main()
 {
 	const uint packed = jahFbList[gl_WorkGroupID.y];
@@ -208,13 +222,18 @@ void main()
 	const int cc = int( p.cascade.x );
 	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	vec3 gathered[2] = vec3[2]( vec3( 0.0 ), vec3( 0.0 ) );
+	float shares[2] = float[2]( 0.0, 0.0 );
+	bool twoSidedV = false;
+	vec3 frontN = vec3( 0.0, 0.0, 1.0 );
 	const ivec3 ic = ivec3( cell );
 	const float coverage = texelFetch( voxelIso[cc], ic, 0 ).w;
 	if( coverage > 0.0 )
 	{
 		const vec4 normalVal = texelFetch( voxelNrm[cc], ic, 0 );
 		const bool twoSided = normalVal.a > 0.0;
+		twoSidedV = twoSided;
 		const vec3 n0 = normalize( normalVal.xyz * 2.0 - 1.0 );
+		frontN = n0;
 		const vec3 invSize = p.hit.voxelInvSize[cc].xyz;
 		const vec3 invRes = invSize * p.hit.voxelInvSize[cc].w;   // 1 / the resolution per axis
 		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
@@ -236,8 +255,17 @@ void main()
 			// centre where the half holds nothing
 			const float cellW = invRes[a] / invSize[a];
 			const float posQ = o > 0.0 ? cellW * ( 0.5 / 65535.0 + 0.5 / 1023.0 * clamp( pO / o, 0.0, 1.0 ) ) / o : 0.5 * cellW;
-			gathered[side] = jahSideGatherTlas( P, nWorld, posQ, c );
+			gathered[side] = jahSideGatherTlas( P, nWorld, posQ, c, shares[side] );
 		}
+	}
+	if( p.cascade.w == 1u && coverage > 0.0 )
+	{
+		const uint w = p.cascade.y * 8u, h = p.cascade.z * 8u;
+		const uint idx = cell.x + w * ( cell.y + h * cell.z );
+		if( idx < uint( jahSideShare.length() ) )
+			jahSideShare[idx] = uint( round( clamp( shares[0], 0.0, 1.0 ) * 255.0 ) ) |
+								( uint( round( clamp( shares[1], 0.0, 1.0 ) * 255.0 ) ) << 8u ) | ( 1u << 16u ) |
+								( twoSidedV ? ( 1u << 17u ) : 0u ) | jahShareNormalBits( frontN );
 	}
 	for( int side = 0; side < 2; ++side )
 	{

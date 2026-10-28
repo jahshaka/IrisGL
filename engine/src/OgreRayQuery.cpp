@@ -124,8 +124,11 @@
 #include <OgreSubItem.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <future>
+#include <unordered_set>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
@@ -167,6 +170,22 @@ struct RawBuffer {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize  size = 0;
     void         *mapped = nullptr;
+};
+
+/// THE PORTAL SCAN's INPUT AND ANSWER (updatePortals): a copy of the shares and their grid, the SH in force; the table's
+/// words and the published entries - a pure function of its input, run on its own thread (no render-thread stall: the
+/// scan is ~0.3 s at 128^3 in a Debug build).
+struct PortalScanIn {
+    std::vector<uint32_t> words;
+    int W = 0, H = 0, D = 0;
+    float origin[3] = {}, cell[3] = {};
+    float sh[27] = {};
+    bool haveSh = false;
+};
+struct PortalScanOut {
+    std::vector<uint32_t> words;
+    std::vector<RayQueryStatus::ReflectEmitter> table;
+    double ms = 0.0;
 };
 
 /// Every device entry point this tier uses; all are extension functions, so
@@ -629,6 +648,14 @@ private:
         unsigned long long emitterWrites = ~0ull, emitterRows = ~0ull, emitterEdits = ~0ull, emitterMeshes = ~0ull;
         uint32_t emitterSlotCount = ~0u, emitterCap = ~0u;
         bool emitterDirty = true;   ///< the section changed since the hit table last took it
+        /// THE SKY's PORTALS (PHOTON-7 11-2 (6); updatePortals): the openings the voxel sides' escape shares show, as
+        /// emitter-table targets (slot kPortalSlot) appended after the emitters; the shares' write count they were built
+        /// from and their serial (the emitter table re-derives when it moves)
+        std::vector<uint32_t> portalWords;
+        unsigned long long portalBuiltWrites = ~0ull, portalSerial = 0ull, emitterPortalSerial = ~0ull;
+        unsigned long long portalScans = 0ull;
+        double portalScanMs = 0.0;
+        std::future<PortalScanOut> portalJob;   ///< the scan in flight (its own thread)
         /// THE HIT TABLE's AREA LIGHTS (PHOTON-7 11-2 (2)): how many it holds - a rest texel's stop then waits for one
         /// full cycle of the hit's time-stratified area draw (kHitAreaStrataPerHit samples).
         uint32_t hitAreaLights = 0u;
@@ -1321,6 +1348,7 @@ private:
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
     void updateEmitterTable(OgreScene *scene, SceneAs &sa);
+    void updatePortals(OgreScene *scene, SceneAs &sa);
     void updateHitTable(OgreScene *scene, SceneAs &sa);
 public:
     /// The table's address a job hands its shader (0: none - the hit reads the store whole).
@@ -1939,6 +1967,7 @@ private:
 public:
     int gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSideTrace &job, unsigned cascade);
     void voxelSideCounts(OgreScene *scene, GiStatus::VoxelSideCounts &out);
+    bool voxelSideShares(OgreScene *scene, GiVoxelSideShares &out);
     void forgetVoxelSides(OgreScene *scene);
 
 private:
@@ -1953,6 +1982,15 @@ private:
         bool            countsPending[kVoxelSideRing] = {};
         unsigned call = 0;
         GiStatus::VoxelSideCounts total;
+        /// THE ESCAPE SHARES (PHOTON-7 11-2 (6)): cascade 0's one word a voxel, host-visible (rq_voxel_sides.comp
+        /// binding 37), at the grid's voxel dims; reallocated (zeroed) when they change
+        RawBuffer shares;
+        uint32_t  sharesDims[3] = {};
+        /// ...how many cascade-0 passes wrote them, the frame of the last, and the grid they were written over (its
+        /// corner and cell, world metres) - what the portal scan (updatePortals) reads them against
+        unsigned long long sharesWrites = 0ull;
+        uint32_t  sharesFrame = 0u;
+        float     sharesOrigin[3] = {}, sharesCell[3] = {};
     };
     bool makeVoxelSidePipeline(std::string &err) {   // (the ahead build's answer, else the build now: aheadOr)
         return aheadOr(kAheadVoxelSides, err, [this](std::string &e) { return makeVoxelSidePipelineNow(e); });
@@ -4803,6 +4841,7 @@ void RayQueryTier::updateScene(OgreScene *scene) {
     // gate: a mask that became ready, or a slot's near level the ray rule moved,
     // changes it with nothing else moving.
     updateAlphaTable(scene, sa);
+    updatePortals(scene, sa);
     updateEmitterTable(scene, sa);
     updateHitTable(scene, sa);
     // A COMPACTION OWED, from its own list (decision 14.4: this was a walk of every structure every
@@ -7548,6 +7587,10 @@ constexpr uint32_t kHitHeaderWords = 7u;
 /// AN EMITTER TARGET (PHOTON-7 stage 11, 11-1a; jah_rq_emitters.glsl reads it): the world bounding sphere's centre
 /// and radius (vec4), the row's emissive radiance (xyz) and the instance's SLOT (w, its bits).
 constexpr uint32_t kEmitterWords = 8u;
+/// A PORTAL's slot word (PHOTON-7 11-2 (6); jah_rq_emitters.glsl kJahPortalSlot): a target that is an opening to the sky
+constexpr uint32_t kPortalSlot = 0xFFFFFFFFu;
+/// the most portals a scene's table holds (the largest openings by power first)
+constexpr size_t kMaxPortals = 16u;
 }   // namespace
 
 /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the instances the reflection's next-event estimation aims at. An
@@ -7563,6 +7606,227 @@ constexpr uint32_t kEmitterWords = 8u;
 /// key, whose material edits, rows and slot count already carry every change of the set (reflectRestKey says why).
 /// Re-derived only when its inputs moved (the GPU scene's writes, its slot count and mesh set, the rows, the edits,
 /// the cap); the hit table re-writes only when the section's words changed.
+/// THE SKY's PORTALS (PHOTON-7 11-2 (6), the lead's ruling - the RIM form): an opening to the sky is bounded by the surfaces
+/// around it, and the voxel sides' TLAS gather measured each surface voxel's ESCAPE SHARE (rq_voxel_sides.comp: the share
+/// of its cosine rays that left the world). A RIM PAIR is two surface voxels facing each other across empty cells along
+/// one axis (each one's front normal dominant on that axis, the signs opposed), both of an intermediate share (they see
+/// the sky in part: 0 < s <= kRimHigh - an interior wall's sides read 0, an exterior face ~1); the empty cells between
+/// them are the OPENING's cells. Connected opening cells are one opening; its cells' principal axes give its quad, whose
+/// bounding sphere is the table's target (the 8-word emitter form, slot kPortalSlot), its weight the sky's largest
+/// mean radiance over the quad's two normals (the SH in force). The set is an OPTIMISATION'S: the reflection's C2 draws
+/// toward it by NEE and weighs the BRDF's sky escapes by the balance heuristic against it, unbiased for ANY set - a soft
+/// or empty set (a courtyard, a porch, no rim) costs variance only, never bias. Re-built when the shares were written
+/// again and have landed (a few frames after the last cascade-0 pass).
+namespace {
+PortalScanOut scanPortals(const PortalScanIn &in) {
+    const auto scanStart = std::chrono::steady_clock::now();
+    PortalScanOut out;
+    const int W = in.W, H = in.H, D = in.D;
+    const uint32_t *words = in.words.data();
+    const auto at = [&](int x, int y, int z) -> uint32_t {
+        return (x < 0 || y < 0 || z < 0 || x >= W || y >= H || z >= D) ? 0u : words[(size_t(z) * H + y) * W + x];
+    };
+    constexpr float kRimHigh = 0.85f;
+    constexpr int kMaxGap = 64;
+    const auto shareOf = [](uint32_t w) { return float(w & 255u) / 255.0f; };
+    const auto normalOf = [](uint32_t w) {
+        const float ex = float((w >> 18u) & 127u) / 127.0f * 2.0f - 1.0f, ey = float((w >> 25u) & 127u) / 127.0f * 2.0f - 1.0f;
+        float n[3] = { ex, ey, 1.0f - std::fabs(ex) - std::fabs(ey) };
+        if (n[2] < 0.0f) {
+            const float ox = (1.0f - std::fabs(ey)) * (ex >= 0.0f ? 1.0f : -1.0f), oy = (1.0f - std::fabs(ex)) * (ey >= 0.0f ? 1.0f : -1.0f);
+            n[0] = ox; n[1] = oy;
+        }
+        return std::array<float, 3>{ n[0], n[1], n[2] };
+    };
+    const auto rim = [&](uint32_t w) {
+        const float f = shareOf(w);
+        return (w & (1u << 16u)) && f > 0.0f && f <= kRimHigh;
+    };
+    // (the candidates first: one tight pass over the words)
+    std::vector<uint32_t> candidates;
+    const size_t total = size_t(W) * H * D;
+    for (size_t i = 0; i < total; ++i)
+        if (rim(words[i])) candidates.push_back(uint32_t(i));
+    std::vector<uint32_t> openList;
+    std::unordered_set<uint32_t> open;
+    for (const uint32_t i0 : candidates) {
+        const int x = int(i0 % uint32_t(W)), y = int((i0 / uint32_t(W)) % uint32_t(H)), z = int(i0 / uint32_t(W * H));
+        const uint32_t w = words[i0];
+        {
+            const auto n = normalOf(w);
+            int a = 0;
+            for (int k = 1; k < 3; ++k) if (std::fabs(n[k]) > std::fabs(n[a])) a = k;
+            const int sg = n[a] > 0.0f ? 1 : -1;
+            int p[3] = { x, y, z };
+            int steps = 0;
+            bool paired = false;
+            for (; steps < kMaxGap; ++steps) {
+                p[a] += sg;
+                const uint32_t q = at(p[0], p[1], p[2]);
+                if (!(q & (1u << 16u))) continue;   // an empty cell (or a solid's inside: no surface)
+                if (steps > 0 && rim(q)) {
+                    const auto m = normalOf(q);
+                    int b = 0;
+                    for (int k = 1; k < 3; ++k) if (std::fabs(m[k]) > std::fabs(m[b])) b = k;
+                    paired = b == a && (m[a] > 0.0f ? 1 : -1) == -sg;
+                }
+                break;
+            }
+            if (!paired) continue;
+            int c[3] = { x, y, z };
+            for (int k = 0; k < steps; ++k) {
+                c[a] += sg;
+                const uint32_t j = uint32_t((size_t(c[2]) * H + c[1]) * W + c[0]);
+                if (open.insert(j).second) openList.push_back(j);
+            }
+        }
+    }
+    // THE OPENINGS: the connected opening cells (6-neighbours), each one's principal axes
+    struct Portal { float c[3]; float r; float n[3]; double power; float L[3]; };
+    std::vector<Portal> portals;
+    const float *sh = in.sh;
+    const bool haveSh = in.haveSh;
+    std::vector<int> stack;
+    std::unordered_set<uint32_t> seen;
+    for (const uint32_t i0 : openList) {
+        if (!seen.insert(i0).second) continue;
+        double sum[3] = {}, cov[3][3] = {};
+        size_t count = 0;
+        stack.assign(1, int(i0));
+        std::vector<std::array<float, 3>> cells;
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % W, y = (i / W) % H, z = i / (W * H);
+            const std::array<float, 3> pw = { in.origin[0] + (x + 0.5f) * in.cell[0],
+                                              in.origin[1] + (y + 0.5f) * in.cell[1],
+                                              in.origin[2] + (z + 0.5f) * in.cell[2] };
+            cells.push_back(pw);
+            for (int k = 0; k < 3; ++k) sum[k] += pw[k];
+            ++count;
+            const int nb[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+            for (const auto &d : nb) {
+                const int X = x + d[0], Y = y + d[1], Z = z + d[2];
+                if (X < 0 || Y < 0 || Z < 0 || X >= W || Y >= H || Z >= D) continue;
+                const uint32_t j = uint32_t((size_t(Z) * H + Y) * W + X);
+                if (open.count(j) && seen.insert(j).second) stack.push_back(int(j));
+            }
+        }
+        if (count < 4u) continue;   // a stray pair, no opening
+        const double mean[3] = { sum[0] / count, sum[1] / count, sum[2] / count };
+        for (const auto &pw : cells)
+            for (int r = 0; r < 3; ++r)
+                for (int c2 = 0; c2 < 3; ++c2) cov[r][c2] += (pw[r] - mean[r]) * (pw[c2] - mean[c2]);
+        // the principal axes: Jacobi rotations of the 3x3 covariance
+        double A[3][3], V[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+        for (int r = 0; r < 3; ++r) for (int c2 = 0; c2 < 3; ++c2) A[r][c2] = cov[r][c2];
+        for (int sweep = 0; sweep < 16; ++sweep)
+            for (int pI = 0; pI < 2; ++pI)
+                for (int qI = pI + 1; qI < 3; ++qI) {
+                    if (std::fabs(A[pI][qI]) < 1e-12) continue;
+                    const double th = 0.5 * std::atan2(2.0 * A[pI][qI], A[qI][qI] - A[pI][pI]);
+                    const double cs = std::cos(th), sn = std::sin(th);
+                    for (int k = 0; k < 3; ++k) {
+                        const double akp = A[k][pI], akq = A[k][qI];
+                        A[k][pI] = cs * akp - sn * akq;
+                        A[k][qI] = sn * akp + cs * akq;
+                    }
+                    for (int k = 0; k < 3; ++k) {
+                        const double apk = A[pI][k], aqk = A[qI][k];
+                        A[pI][k] = cs * apk - sn * aqk;
+                        A[qI][k] = sn * apk + cs * aqk;
+                    }
+                    for (int k = 0; k < 3; ++k) {
+                        const double vkp = V[k][pI], vkq = V[k][qI];
+                        V[k][pI] = cs * vkp - sn * vkq;
+                        V[k][qI] = sn * vkp + cs * vkq;
+                    }
+                }
+        double half[3] = {};
+        for (const auto &pw : cells)
+            for (int e = 0; e < 3; ++e) {
+                double d = 0.0;
+                for (int k = 0; k < 3; ++k) d += (pw[k] - mean[k]) * V[k][e];
+                half[e] = std::max(half[e], std::fabs(d));
+            }
+        const double cellMax = std::max({ in.cell[0], in.cell[1], in.cell[2] });
+        int thin = 0;
+        for (int e = 1; e < 3; ++e) if (A[e][e] < A[thin][thin]) thin = e;
+        Portal pt;
+        double r2 = 0.0;
+        for (int e = 0; e < 3; ++e) r2 += (half[e] + 0.5 * cellMax) * (half[e] + 0.5 * cellMax);
+        for (int k = 0; k < 3; ++k) { pt.c[k] = float(mean[k]); pt.n[k] = float(V[k][thin]); }
+        pt.r = float(std::sqrt(r2));
+        // the weight: the sky's largest mean radiance over the quad's two normals (the SH's basis 1, y, z, x, ...)
+        for (int ch = 0; ch < 3; ++ch) {
+            float best = haveSh ? sh[ch] : 0.0f;
+            for (int sgn = -1; sgn <= 1; sgn += 2) {
+                const float x = sgn * pt.n[0], y = sgn * pt.n[1], z = sgn * pt.n[2];
+                const float b[9] = { 1.0f, y, z, x, x * y, y * z, 3.0f * z * z - 1.0f, z * x, x * x - y * y };
+                float e = 0.0f;
+                for (int k = 0; k < 9; ++k) e += b[k] * sh[k * 3 + ch];
+                if (haveSh) best = std::max(best, e);
+            }
+            pt.L[ch] = std::max(best, 0.0f);
+        }
+        const float lmax = std::max({ pt.L[0], pt.L[1], pt.L[2] });
+        if (!(lmax > 0.0f) || !std::isfinite(pt.r) || !(pt.r > 0.0f)) continue;
+        pt.power = double(lmax) * 3.14159265358979 * double(pt.r) * double(pt.r);
+        portals.push_back(pt);
+    }
+    std::stable_sort(portals.begin(), portals.end(), [](const Portal &a, const Portal &b) { return a.power > b.power; });
+    if (portals.size() > kMaxPortals) portals.resize(kMaxPortals);
+    auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
+    for (const Portal &pt : portals) {
+        const uint32_t e[kEmitterWords] = { bits(pt.c[0]), bits(pt.c[1]), bits(pt.c[2]), bits(pt.r),
+                                            bits(pt.L[0]), bits(pt.L[1]), bits(pt.L[2]), kPortalSlot };
+        out.words.insert(out.words.end(), e, e + kEmitterWords);
+        RayQueryStatus::ReflectEmitter pub;
+        pub.slot = kPortalSlot;
+        for (int c2 = 0; c2 < 3; ++c2) { pub.centre[c2] = pt.c[c2]; pub.radiance[c2] = pt.L[c2]; }
+        pub.radius = pt.r;
+        out.table.push_back(pub);
+    }
+    out.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scanStart).count();
+    return out;
+}
+}   // namespace
+
+void RayQueryTier::updatePortals(OgreScene *scene, SceneAs &sa) {
+    // (1) A SCAN THAT FINISHED: its answer becomes the table's portals
+    if (sa.portalJob.valid() && sa.portalJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        PortalScanOut r = sa.portalJob.get();
+        sa.st.reflectPortals = int(r.table.size());
+        sa.st.reflectPortalTable = r.table;
+        ++sa.portalScans;
+        sa.portalScanMs = r.ms;
+        Ogre::LogManager::getSingleton().logMessage("Jahshaka portals: scan " + std::to_string(sa.portalScans) + ", " +
+                                                    std::to_string(r.table.size()) + " portal(s), " +
+                                                    std::to_string(r.ms) + " ms off the render thread (frame " +
+                                                    std::to_string(frameNow()) + ")");
+        if (r.words != sa.portalWords) {
+            sa.portalWords.swap(r.words);
+            ++sa.portalSerial;
+        }
+    }
+    // (2) SHARES REWRITTEN AND LANDED, no scan running: a copy goes to a new one
+    auto it = mVoxelSides.find(scene);
+    if (it == mVoxelSides.end() || sa.portalJob.valid()) return;
+    const VoxelSideView &v = it->second;
+    if (!v.shares.mapped || !v.sharesDims[0] || v.sharesWrites == sa.portalBuiltWrites) return;
+    if (frameNow() - v.sharesFrame < kFramesInFlight + 2u) return;   // the last pass's words have not landed yet
+    sa.portalBuiltWrites = v.sharesWrites;
+    auto in = std::make_shared<PortalScanIn>();
+    in->W = int(v.sharesDims[0]);
+    in->H = int(v.sharesDims[1]);
+    in->D = int(v.sharesDims[2]);
+    in->words.resize(size_t(in->W) * in->H * in->D);
+    std::memcpy(in->words.data(), v.shares.mapped, in->words.size() * sizeof(uint32_t));
+    for (int k = 0; k < 3; ++k) { in->origin[k] = v.sharesOrigin[k]; in->cell[k] = v.sharesCell[k]; }
+    in->haveSh = scene->skyAmbientSh(in->sh);
+    sa.portalJob = std::async(std::launch::async, [in]() { return scanPortals(*in); });
+}
+
 void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
     const detail::GpuScene &gs = scene->gpuScene();
     const Ogre::PhotonVoxelMaterial *store = scene->photon().materials();
@@ -7573,8 +7837,10 @@ void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
     const uint32_t slotCount = gs.live() ? gs.slotCount() : 0u;
     const uint32_t cap = giQualityFacts(scene->giParams().quality).reflectEmitters;
     if (writes == sa.emitterWrites && rowsSerial == sa.emitterRows && edits == sa.emitterEdits &&
-        meshes == sa.emitterMeshes && slotCount == sa.emitterSlotCount && cap == sa.emitterCap)
+        meshes == sa.emitterMeshes && slotCount == sa.emitterSlotCount && cap == sa.emitterCap &&
+        sa.portalSerial == sa.emitterPortalSerial)
         return;
+    sa.emitterPortalSerial = sa.portalSerial;
     sa.emitterWrites = writes;
     sa.emitterRows = rowsSerial;
     sa.emitterEdits = edits;
@@ -7645,6 +7911,10 @@ void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
         sa.st.reflectEmitterTable.push_back(pub);
     }
     sa.st.reflectEmitters = int(all.size());
+    // ...AND THE SKY's PORTALS after them (PHOTON-7 11-2 (6), updatePortals: slot kPortalSlot; the reflection's emitter
+    // NEE skips them, C2's sky NEE takes them alone - jah_rq_emitters.glsl's kind)
+    words.insert(words.end(), sa.portalWords.begin(), sa.portalWords.end());
+    setKey.insert(setKey.end(), sa.portalWords.begin(), sa.portalWords.end());
     if (setKey != sa.emitterSetKey) {
         sa.emitterSetKey.swap(setKey);
         ++sa.st.reflectEmitterSetSerial;
@@ -10592,10 +10862,11 @@ struct VoxelSideParams {
     float knobs[4] = {};       ///< the rays a side, the reach, the start's lift, the ray mask
     uint32_t cascade[4] = {};  ///< the cascade's place in the hit set's chain, its bricks along x and y
 };
-/// The job's own four (the params, the list, the scratch, the counts) and the hit set at 0 and 5..36 (the cards'
-/// gather's slots).
-constexpr unsigned kVoxelSideBindings = 37u;
-static_assert(kVoxelSideBindings == kHitSetBindings + 4u, "the sides' gather set is the hit set and its own four");
+/// The job's own four (the params, the list, the scratch, the counts), the hit set at 0 and 5..36 (the cards'
+/// gather's slots) and the escape shares at 37 (PHOTON-7 11-2 (6)).
+constexpr unsigned kVoxelSideBindings = 38u;
+constexpr unsigned kVoxelSideShareBinding = 37u;
+static_assert(kVoxelSideBindings == kHitSetBindings + 5u, "the sides' gather set is the hit set, its own four and the shares");
 constexpr unsigned kVoxelSideCounts = 9u;
 }   // namespace
 
@@ -10615,6 +10886,10 @@ bool RayQueryTier::makeVoxelSidePipelineNow(std::string &err) {
         b[1u + i].descriptorCount = 1u;
         b[1u + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
+    b[kVoxelSideShareBinding].binding = kVoxelSideShareBinding;   // the escape shares (11-2 (6))
+    b[kVoxelSideShareBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    b[kVoxelSideShareBinding].descriptorCount = 1u;
+    b[kVoxelSideShareBinding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     DescriptorPoolPlan plan;
     if (!plan.makeLayout(mVk, b, kVoxelSideBindings, kMaxTimedScenes * kVoxelSideRing, mVsSetLayout, err,
                          "rayquery/voxel-sides"))
@@ -10755,6 +11030,32 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     pp.cascade[0] = cascade;
     pp.cascade[1] = job.brickDims[0];
     pp.cascade[2] = job.brickDims[1];
+    // THE ESCAPE SHARES (PHOTON-7 11-2 (6)): cascade 0 writes its voxels' words into the scene's host-visible copy (its
+    // grid's voxel dims; re-made, zeroed, when they change); every other cascade binds the same buffer and writes nothing
+    {
+        const uint32_t dims[3] = { job.brickDims[0] * 8u, job.brickDims[1] * 8u, job.brickDims[2] * 8u };
+        if (cascade == 0u && (dims[0] != v.sharesDims[0] || dims[1] != v.sharesDims[1] || dims[2] != v.sharesDims[2])) {
+            if (v.shares.buffer) retire(v.shares);
+            const VkDeviceSize bytes = std::max<VkDeviceSize>(VkDeviceSize(dims[0]) * dims[1] * dims[2] * 4u, 1024u);
+            if (!makeBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, v.shares, err)) return wait();
+            std::memset(v.shares.mapped, 0, size_t(bytes));
+            for (int k = 0; k < 3; ++k) v.sharesDims[k] = dims[k];
+        }
+        if (!v.shares.buffer) {   // a cascade before cascade 0's first pass: a small zeroed stand-in
+            if (!makeBuffer(1024u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, v.shares, err)) return wait();
+            std::memset(v.shares.mapped, 0, 1024u);
+        }
+        pp.cascade[3] = cascade == 0u && v.sharesDims[0] ? 1u : 0u;
+        if (pp.cascade[3]) {
+            ++v.sharesWrites;
+            v.sharesFrame = frameNow();
+            for (int k = 0; k < 3; ++k) {
+                v.sharesOrigin[k] = pp.hit.voxelOrigin[0][k];
+                const float inv = pp.hit.voxelInvSize[0][k];
+                v.sharesCell[k] = inv > 0.0f ? 1.0f / (inv * float(dims[k])) : 0.0f;
+            }
+        }
+    }
     std::memcpy(v.params[slot].mapped, &pp, sizeof(pp));
 
     // ---- THE SET: the job's own four, then the hit set through its one writer
@@ -10790,6 +11091,10 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     own(2u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &lb;
     own(3u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &sb;
     own(4u, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &cb;
+    VkDescriptorBufferInfo shb{};
+    shb.buffer = v.shares.buffer;
+    shb.range = v.shares.size;
+    own(kVoxelSideShareBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &shb;
     vkUpdateDescriptorSets(mVk, kVoxelSideBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS through Ogre's solver, before the command buffer is taken: the hit set read, the list and the
@@ -10844,6 +11149,21 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     return 1;
 }
 
+bool RayQueryTier::voxelSideShares(OgreScene *scene, GiVoxelSideShares &out) {
+    out = GiVoxelSideShares();
+    auto it = mVoxelSides.find(scene);
+    if (it == mVoxelSides.end() || !it->second.shares.mapped || !it->second.sharesDims[0]) return false;
+    const VoxelSideView &v = it->second;
+    out.width = int(v.sharesDims[0]);
+    out.height = int(v.sharesDims[1]);
+    out.depth = int(v.sharesDims[2]);
+    const size_t n = size_t(out.width) * out.height * out.depth;
+    out.words.resize(n);
+    std::memcpy(out.words.data(), v.shares.mapped, n * sizeof(uint32_t));
+    out.available = true;
+    return true;
+}
+
 void RayQueryTier::voxelSideCounts(OgreScene *scene, GiStatus::VoxelSideCounts &out) {
     out = GiStatus::VoxelSideCounts();
     auto it = mVoxelSides.find(scene);
@@ -10861,11 +11181,16 @@ void RayQueryTier::forgetVoxelSides(OgreScene *scene) {
         retire(it->second.rowOfSlot[i]);
         retire(it->second.counts[i]);
     }
+    retire(it->second.shares);
     mVoxelSides.erase(it);
 }
 
 int OgreScene::gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &job, unsigned cascade) {
     return mEngine && mEngine->mRayTier ? mEngine->mRayTier->gatherVoxelSides(this, job, cascade) : 0;
+}
+bool OgreScene::giVoxelSideShares(GiVoxelSideShares &out) {
+    out = GiVoxelSideShares();
+    return mEngine && mEngine->mRayTier ? mEngine->mRayTier->voxelSideShares(this, out) : false;
 }
 void OgreScene::voxelSideCounts(GiStatus::VoxelSideCounts &out) const {
     out = GiStatus::VoxelSideCounts();
@@ -13063,6 +13388,7 @@ bool OgreScene::traceCardMovers(const CardMoverTrace &) { return false; }
 CardGatherResult OgreScene::gatherCards(const CardGatherTrace &) { return CardGatherResult::NoRays; }
 int OgreScene::gatherVoxelSides(const Ogre::PhotonVoxelSideTrace &, unsigned) { return 0; }
 void OgreScene::voxelSideCounts(GiStatus::VoxelSideCounts &out) const { out = GiStatus::VoxelSideCounts(); }
+bool OgreScene::giVoxelSideShares(GiVoxelSideShares &out) { out = GiVoxelSideShares(); return false; }
 void OgreScene::cardGatherCounts(CardCacheStatus::GatherCounts &out) const { out = CardCacheStatus::GatherCounts(); }
 void OgreScene::cardGatherSky(std::vector<std::pair<unsigned, unsigned>> &out) { out.clear(); }
 bool OgreScene::cardTracePresent() const { return false; }

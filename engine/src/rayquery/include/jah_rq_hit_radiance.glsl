@@ -181,6 +181,7 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #endif
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
+#include "jah_rq_emitters.glsl"
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -209,6 +210,24 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			return vec3( 0.0 );   // a draw that left the surface: no light (G2 is 0)
 		gain = jahReflectGain( N, N, V, L2, alpha, sa + sb );
 	}
+	// THE SKY's PORTALS (PHOTON-7 11-2 (6), the lead's ruling): the sky seen through an opening is a small emitter, so its
+	// share of this lobe is estimated by BOTH strategies at the balance heuristic - the BRDF draw's escape weighs
+	// q / ( q + p_l ), and one NEE draw toward the table's portals (jah_rq_emitters.glsl, kind portals) adds what it sees
+	// of the sky at p_l / ( q + p_l ); a geometry hit stays the BRDF draw's at weight 1 (the NEE ray that meets geometry
+	// adds 0). Unbiased for ANY portal set; no portal (W 0): the BRDF draw alone, as before.
+	JahNeePick sky;
+	sky.ok = false;
+	sky.pdfB = 0.0;
+	if( !centre )
+	{
+		const uint k0 = jahReflectPcg( floatBitsToUint( u.x ) ^ jahReflectPcg( floatBitsToUint( u.y ) ^ 0x5CA1AB1Eu ) );
+		const uint k1 = jahReflectPcg( k0 ^ 0xA54FF53Au );
+		const vec3 u3 = vec3( float( k0 & 0xFFFFFFu ) * ( 1.0 / 16777216.0 ), float( k1 & 0xFFFFu ) / 65536.0,
+							  float( k1 >> 16u ) / 65536.0 );
+		sky = jahNeePick( P, N, reflect( -V, N ), alpha, L2, true, u3, true );
+	}
+	const float qB = centre ? 0.0 : jahReflectFoldedPdf( N, N, V, L2, alpha );
+	const float wSkyB = centre || !( sky.pdfB > 0.0 ) ? 1.0 : qB / max( qB + sky.pdfB, 1e-30 );
 	// THE RAY: the one origin law off a hit on level 0 (no drawn surface's bound), to the world's exit
 	const vec3 o = jahRayOrigin( P, N, carried, 0.0 );
 	rayQueryEXT q;
@@ -217,7 +236,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	JAH_RQ_PROCEED( q )
 	vec3 rad = vec3( 0.0 );
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
-		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre );   // an exit: the sky
+		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
 	else
 	{
 		const float t2 = rayQueryGetIntersectionTEXT( q, true );
@@ -249,7 +268,23 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
 		}
 	}
-	const vec3 c = w * rad * gain;
+	vec3 c = w * rad * gain;
+	// ...AND THE PORTALS' DRAW: its ray to the world's exit - the sky it sees at p_l / ( q + p_l ), 0 on geometry
+	if( sky.ok && dot( sky.L, N ) > 0.0 )
+	{
+		rayQueryEXT qn;
+		rayQueryInitializeEXT( qn, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L,
+							   jahWorldExitT( o, sky.L, 1.0e4 ) );
+		JAH_RQ_PROCEED( qn )
+		if( rayQueryGetIntersectionTypeEXT( qn, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		{
+			const float qL = jahReflectFoldedPdf( N, N, V, sky.L, alpha );
+			const float ab = sa + sb;
+			if( ab > 1e-4 )
+				c += w * JAH_HIT_LOBE_SKY( sky.L, alpha, false ) *
+					 ( jahReflectFoldedTarget( N, N, V, sky.L, alpha ) / ( ab * max( qL + sky.pdfL, 1e-30 ) ) );
+		}
+	}
 	return finite3( c ) ? clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 }
 

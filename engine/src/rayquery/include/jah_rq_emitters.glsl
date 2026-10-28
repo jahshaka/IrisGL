@@ -24,7 +24,11 @@
 /// The words a target (OgreRayQuery.cpp kEmitterWords) and the most a shader walks (the tier's cap is at most this:
 /// GiQualityFacts::reflectEmitters; a corrupt count is clamped here, the bounded-loop law).
 const uint kJahEmitterWords = 8u;
-const uint kJahEmitterMax = 64u;
+const uint kJahEmitterMax = 80u;   // (the tier cap 64 emitters + RayQueryTier kMaxPortals 16 portals)
+/// A PORTAL (PHOTON-7 11-2 (6), RayQueryTier::updatePortals): an opening to the sky in the table's emitter form, slot
+/// this word - the reflection's emitter NEE skips it, C2's sky NEE (jah_rq_hit_radiance.glsl) takes portals alone; each
+/// strategy's density p_l is its own kind's (`portals` below)
+const uint kJahPortalSlot = 0xFFFFFFFFu;
 
 uint jahEmitterCount()
 {
@@ -116,7 +120,7 @@ bool jahEmitterGate( JahEmitterCone k, vec3 g, vec3 R, float alpha )
 /// THE PICK at x: W, the light density of the BRDF draw's direction Lb (p_l( Lb ) - its balance weight's), the chosen
 /// target and its draw's direction L (uniform in its set: u.x the pick, u.yz the direction), and p_l( L ) - over every
 /// target whose set holds L, not the chosen one's alone. ok false: no target reaches (W 0) - the texel takes the BRDF's
-/// draw alone (its weight 1).
+/// draw alone (its weight 1). `portals`: this strategy's kind - the sky's portals alone, else the emitters alone.
 struct JahNeePick
 {
 	bool ok;
@@ -126,7 +130,7 @@ struct JahNeePick
 	float pdfL;   // p_l( L )
 	uint slot;    // the chosen target's (the hit-rate counter's)
 };
-JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb, vec3 u )
+JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb, vec3 u, bool portals )
 {
 	JahNeePick o;
 	o.ok = false;
@@ -144,7 +148,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		o.W += e.lmax * k.omega;
 		if( haveLb && jahEmitterConeHolds( k, g, Lb ) )
@@ -163,7 +167,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		acc += e.lmax * k.omega;
 		chosen = k;
@@ -190,7 +194,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		if( jahEmitterConeHolds( k, g, o.L ) )
 			sumL += e.lmax;

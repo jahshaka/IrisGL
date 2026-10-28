@@ -748,7 +748,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	if( neeArm && vndf )
 	{
 		nee = jahNeePick( world, geomN, reflect( -V, worldN ), lobeAlpha, L, true,
-						  jahNeeSample3( seedPix, frame + uint( p.denoiser.z ) ) );
+						  jahNeeSample3( seedPix, frame + uint( p.denoiser.z ) ), false );
 		if( nee.W > 0.0 )
 			neeQB = jahReflectFoldedPdf( worldN, geomN, V, L, lobeAlpha );
 	}

@@ -1111,6 +1111,10 @@ public:
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
     virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// THE VOXEL SIDES' ESCAPE SHARES of cascade 0 (GiVoxelSideShares; PHOTON-7 11-2 (6)) as the ray tier's last sides'
+    /// gathers left them - a host-visible copy, read without a stall (a few frames behind the GPU). False without the ray
+    /// tier's sides' gather or before its first cascade-0 pass.
+    virtual bool giVoxelSideShares(GiVoxelSideShares &out) { out = GiVoxelSideShares(); return false; }
     /// THE FEEDBACK'S BRICK STATE of one cascade as it stands (GiFeedbackBricks; a stalling readback - a law's instrument:
     /// the store's rounding orbits against their bricks' bounds). False without a built cascade there.
     virtual bool giFeedbackBricks(int cascade, GiFeedbackBricks &out) { (void)cascade; out = GiFeedbackBricks(); return false; }
