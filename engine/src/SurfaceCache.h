@@ -131,6 +131,9 @@ constexpr unsigned kCardPageSize = 128u;
 /// full size. Phase 5 (SURFACE-CACHE-2) is where this grows a page table and a
 /// feedback loop and stops being a fixed number.
 constexpr unsigned kCardAtlasSize = 2048u;
+/// THE CARD'S LAMP TABLE's size (PHOTON-7 10-4 R9 (3), the lead's ruling: 48 lamps exact a texel, the SunVis texel's
+/// 48-bit mask - jah_card_sunvis.glsl): the lamps past it share the fractional byte (on the review list).
+constexpr unsigned kCardLampTable = 48u;
 /// THE SMALLEST CARD THE ALLOCATOR WILL CUT, and it is 16 because the
 /// sub-allocation mask says so: a page that cuts cards of side S holds
 /// (128/S)^2 slots, the free-slot mask is ONE uint64, and S = 16 is exactly 64
@@ -210,10 +213,10 @@ struct CardRec {
     unsigned long long lastRead = 0ull;
     unsigned long long readBy[2] = { 0ull, 0ull };
     /// THE CARD'S LAMP TABLE (PHOTON-7 stage 5, 5-3): the world ids (SceneLightList::documentId) of the lamps its last
-    /// relight shaded, up to 16 - in the scene's one world order, the 16 with the largest share of the card's direct
-    /// when more reach it - each texel's lamp bit j the traced visibility of lamp j (the SunVis layer's green and
-    /// alpha); carried in the card's GPU record so every reader maps its own lamps to the bits by id.
-    unsigned lampIds[16] = {};
+    /// relight shaded, up to kCardLampTable (48) - in the scene's one world order, the 48 with the largest share of the
+    /// card's direct when more reach it - each texel's lamp bit j the traced visibility of lamp j (the SunVis texel's
+    /// 48-bit mask); carried in the card's GPU record so every reader maps its own lamps to the bits by id.
+    unsigned lampIds[kCardLampTable] = {};
     unsigned lampCount = 0u;
     /// ...and the lamps its last relight took through the FRACTIONAL byte (the SunVis layer's blue: the 5-3 fix): the
     /// area lights that reach it (never in the table) and the lamps past the table.
@@ -611,6 +614,8 @@ public:
     /// the read's specular lobe of the sun takes, PHOTON-3). In the order
     /// jah_rq_card_bindings.glsl declares them from JAH_CARD_VIEW_BINDING_BASE.
     static constexpr unsigned kViewLayers = 7u;
+    /// ...the SunVis layer's place among them (RGBA32_UINT: its binding is a usampler).
+    static constexpr unsigned kViewSunVis = 6u;
     void viewLayers(Ogre::TextureGpu *out[kViewLayers]) const {
         out[0] = mIndirect;
         out[1] = mFlat;
@@ -618,7 +623,7 @@ public:
         out[3] = mAtlas[unsigned(CardLayer::Albedo)];
         out[4] = mAtlas[unsigned(CardLayer::Normal)];
         out[5] = mAtlas[unsigned(CardLayer::Specular)];
-        out[6] = mSunVis;
+        out[kViewSunVis] = mSunVis;
     }
     /// The item slot of a node's instance, or -1 when it holds no cards.
     long itemSlotOf(NodeId node) const;

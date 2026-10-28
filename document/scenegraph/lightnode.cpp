@@ -191,7 +191,13 @@ bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
     if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return markedParams(); }
     if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return markedParams(); }
     // The shadow-map fields live on the node's ShadowMap; reflect through it.
-    if (valueName == "shadowMapType")     { setShadowMapType(static_cast<ShadowMapType>(value.toInt())); return markedParams(); }
+    // (a filter only: no value means "no shadow" - ShadowMapType's header; a value outside the three is refused)
+    if (valueName == "shadowMapType") {
+        const int t = value.toInt();
+        if (t < int(ShadowMapType::Hard) || t > int(ShadowMapType::VerySoft)) return false;
+        setShadowMapType(static_cast<ShadowMapType>(t));
+        return markedParams();
+    }
     if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return markedParams(); }
     if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
     if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }

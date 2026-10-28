@@ -63,13 +63,14 @@ layout( buffer_reference, std430, buffer_reference_align = 16 ) readonly buffer 
 
 const uint kJahAlphaNone = 0xFFFFFFFFu;
 
-/// The ray flags a query asks with: opaque (the pre-lane fast path, every
-/// candidate committed by the hardware) where the scene has no alpha table,
-/// none where it has one (only a FORCE_NO_OPAQUE instance then makes candidates).
+/// The ray flags a query asks with: NONE - every bottom-level structure is opaque, so
+/// only a FORCE_NO_OPAQUE instance (a cut-out, or a PANE: PHOTON-7 10-4 R7) makes a
+/// candidate, and every other triangle commits inside the traversal as before. (The
+/// opaque flag this used to ask where the scene had no alpha table would make a pane
+/// opaque.)
 uint jahAlphaRayFlags( uint extra )
 {
-	const uvec2 t = JAH_ALPHA_TABLE;
-	return ( ( t.x | t.y ) == 0u ? gl_RayFlagsOpaqueEXT : gl_RayFlagsNoneEXT ) | extra;
+	return gl_RayFlagsNoneEXT | extra;
 }
 
 /// Is the candidate triangle SOLID at its barycentrics? `instanceId` is the TLAS
@@ -130,5 +131,205 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 						   rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                   \
 			rayQueryConfirmIntersectionEXT( q );                                                  \
 	}
+
+/// THE PANES (PHOTON-7 10-4 R7; L9: a transparent surface transmits a ray, attenuated by its material). A blended
+/// item's TLAS instance is FORCE_NO_OPAQUE and carries its PANE WORD in its shader-binding-table offset
+/// (rq_tlas_write.comp; GpuScene.h kGpuPaneOn: T and its own light's share on 2047 steps, and whether its material
+/// draws both faces). A ray never COMMITS a pane: each pane candidate is listed (its distance, its word, and the
+/// surface: slot, near/far, submesh, triangle, barycentrics), and after the traversal the panes NEARER than the
+/// committed opaque hit (or than the ray's end, on a miss) are folded in crossing order - the throughput the product
+/// of their T, each one's own light weighted by the panes in front of it (jahPanesFold). A pane's FACING decides as
+/// the raster does: the back face of a one-sided pane is culled there, so it transmits whole and adds nothing; a
+/// two-sided pane takes both faces.
+/// NEVER A SILENT CAP (the one read's F4: the 9th pane used to be CONFIRMED - a lamp behind a shelf of wine glasses
+/// went black). A LIGHT ray needs no list: its visibility is the order-free product of every pane's T, multiplied as
+/// the traversal meets them (JAH_RQ_PROCEED_TRANSMIT; an opaque commit answers 0 whatever). A READING ray keeps the
+/// kJahPanesMax NEAREST panes (each one's own light needs its surface), and every pane past them is APPLIED: its T
+/// multiplied into the overflow's product (overT), its distance range kept (overMin, overMax); after the traversal the
+/// overflow counts when it lies in front of the ray's end - all of it in front, none of it behind; a hit among the
+/// overflow's panes takes the whole product (the nearest-list's limit: a pane past the hit dims it) - and its own light
+/// is left out. A ray that overflows is counted once (jahPanesOverflowCount: the tier's counter, giStatus
+/// rayQuery.panesOverflow).
+/// The order the hardware reports candidates in is free, so the list keeps them unsorted and the fold sorts.
+const uint kJahPaneOn = 1u << 23u;
+const uint kJahPaneTwoSided = 1u << 22u;
+const int kJahPanesMax = 8;
+struct JahPanes
+{
+	int n;
+	float t[kJahPanesMax];
+	uint word[kJahPanesMax];
+	uint slotFar[kJahPanesMax];	// slot in bits 0-23, bit 31 the far copy, bits 24-30 the submesh
+	uint prim[kJahPanesMax];
+	uint bary[kJahPanesMax];	// packHalf2x16
+	float overT;				// the overflow's product of T (1: none)
+	float overMin, overMax;		// ...its panes' distance range
+	float overApplied;			// what the overflow multiplies the throughput by, set by jahPanesBetween
+};
+float jahPaneT( uint word ) { return float( word & 2047u ) * ( 1.0 / 2047.0 ); }
+float jahPaneOwn( uint word ) { return float( ( word >> 11u ) & 2047u ) * ( 1.0 / 2047.0 ); }
+
+#if defined( JAH_HIT_PARAMS ) && defined( GL_EXT_buffer_reference )
+/// THE TIER'S COUNTERS (the hit set's surface.zw: a host-visible buffer's address, OgreRayQuery.cpp mTierCounters):
+/// [0] the reading rays' pane-list overflows
+layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer JahTierCounters { uint c[]; };
+void jahPanesOverflowCount()
+{
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) != 0u )
+		atomicAdd( JahTierCounters( a ).c[0], 1u );
+}
+#else
+void jahPanesOverflowCount() {}
+#endif
+/// ...a pane to the overflow
+void jahPanesOverflow( inout JahPanes p, float t, uint w )
+{
+	if( p.overMax < -1e29 )
+		jahPanesOverflowCount();	// once a ray
+	p.overT *= jahPaneT( w );
+	p.overMin = min( p.overMin, t );
+	p.overMax = max( p.overMax, t );
+}
+
+/// A pane candidate of query q (its word w nonzero): listed, skipped (the back of a one-sided pane), or - the list full
+/// - the nearest kept: the farther of it and the list's farthest goes to the overflow (applied, never confirmed).
+#define JAH_RQ_PANE_CANDIDATE( q, panes, w )                                                          \
+	{                                                                                                 \
+		if( ( ( w ) & kJahPaneTwoSided ) != 0u || rayQueryGetIntersectionFrontFaceEXT( q, false ) )   \
+		{                                                                                             \
+			const float ct_ = rayQueryGetIntersectionTEXT( q, false );                               \
+			int k_ = -1;                                                                              \
+			if( ( panes ).n < kJahPanesMax )                                                          \
+				k_ = ( panes ).n++;                                                                   \
+			else                                                                                      \
+			{                                                                                         \
+				int f_ = 0;                                                                           \
+				for( int i_ = 1; i_ < kJahPanesMax; ++i_ )                                            \
+					if( ( panes ).t[i_] > ( panes ).t[f_] ) f_ = i_;                                  \
+				if( ct_ < ( panes ).t[f_] )                                                           \
+				{                                                                                     \
+					jahPanesOverflow( panes, ( panes ).t[f_], ( panes ).word[f_] );                   \
+					k_ = f_;                                                                          \
+				}                                                                                     \
+				else                                                                                  \
+					jahPanesOverflow( panes, ct_, ( w ) );                                            \
+			}                                                                                         \
+			if( k_ >= 0 )                                                                             \
+			{                                                                                         \
+				( panes ).t[k_] = ct_;                                                                \
+				( panes ).word[k_] = ( w );                                                           \
+				( panes ).slotFar[k_] = ( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ) & 0xFFFFFFu ) | \
+					( ( uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ) & 127u ) << 24u ) |       \
+					( ( uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ) & 1u ) << 31u );            \
+				( panes ).prim[k_] = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) );    \
+				( panes ).bary[k_] = packHalf2x16( rayQueryGetIntersectionBarycentricsEXT( q, false ) ); \
+			}                                                                                         \
+		}                                                                                             \
+	}
+
+/// THE LOOP of a LIGHT ray (a lamp's, the sun's, an area stratum's, a card's lamp and sun, the mover sky gate): every
+/// pane's T multiplied as it is met into the float `T` (order-free: no list, no cap); an alpha-tested candidate
+/// confirmed where its mask is solid. The caller answers 0 on an opaque commit, else T.
+#define JAH_RQ_PROCEED_TRANSMIT( q, T )                                                               \
+	while( rayQueryProceedEXT( q ) )                                                                  \
+	{                                                                                                 \
+		if( rayQueryGetIntersectionTypeEXT( q, false ) != gl_RayQueryCandidateIntersectionTriangleEXT ) \
+			continue;                                                                                 \
+		const uint w_ = uint( rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT( q, false ) ); \
+		if( ( w_ & kJahPaneOn ) != 0u )                                                               \
+		{                                                                                             \
+			if( ( w_ & kJahPaneTwoSided ) != 0u || rayQueryGetIntersectionFrontFaceEXT( q, false ) )  \
+				( T ) *= jahPaneT( w_ );                                                              \
+		}                                                                                             \
+		else if( jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),    \
+								uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),             \
+								uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),          \
+								uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),         \
+								rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                \
+			rayQueryConfirmIntersectionEXT( q );                                                      \
+	}
+
+/// THE LOOP of a ray that CROSSES panes (the caches' gathers, the screen gather, the reflection; R8 the light rays):
+/// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0.
+#define JAH_RQ_PROCEED_PANES( q, panes )                                                              \
+	while( rayQueryProceedEXT( q ) )                                                                  \
+	{                                                                                                 \
+		if( rayQueryGetIntersectionTypeEXT( q, false ) != gl_RayQueryCandidateIntersectionTriangleEXT ) \
+			continue;                                                                                 \
+		const uint w_ = uint( rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT( q, false ) ); \
+		if( ( w_ & kJahPaneOn ) != 0u )                                                               \
+			JAH_RQ_PANE_CANDIDATE( q, panes, w_ )                                                     \
+		else if( jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),    \
+								uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),             \
+								uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),          \
+								uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),         \
+								rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                \
+			rayQueryConfirmIntersectionEXT( q );                                                      \
+	}
+
+JahPanes jahPanesNone()
+{
+	JahPanes p;
+	p.n = 0;
+	p.overT = 1.0;
+	p.overMin = 1e30;
+	p.overMax = -1e30;
+	p.overApplied = 1.0;
+	return p;
+}
+
+/// THE PANES BETWEEN tStart AND tEnd (jahPanesInFront: nearer than tEnd), in crossing order (an insertion sort of the list in place; the ones past tEnd dropped):
+/// returns how many there are; the throughput past them all is jahPanesThroughput.
+int jahPanesBetween( inout JahPanes p, float tStart, float tEnd )
+{
+	int m = 0;
+	for( int i = 0; i < p.n; ++i )
+	{
+		if( !( p.t[i] < tEnd ) || p.t[i] < tStart )
+			continue;
+		const float t = p.t[i];
+		const uint w = p.word[i], sf = p.slotFar[i], pr = p.prim[i], b = p.bary[i];
+		int j = m - 1;
+		while( j >= 0 && p.t[j] > t )
+		{
+			p.t[j + 1] = p.t[j];
+			p.word[j + 1] = p.word[j];
+			p.slotFar[j + 1] = p.slotFar[j];
+			p.prim[j + 1] = p.prim[j];
+			p.bary[j + 1] = p.bary[j];
+			--j;
+		}
+		p.t[j + 1] = t;
+		p.word[j + 1] = w;
+		p.slotFar[j + 1] = sf;
+		p.prim[j + 1] = pr;
+		p.bary[j + 1] = b;
+		++m;
+	}
+	p.n = m;
+	// THE OVERFLOW (the head): wholly in front of tEnd and past tStart - all of it; wholly outside - none; a range an end
+	// falls in - all of it (the nearest list's limit)
+	p.overApplied = ( p.overMax < tStart || !( p.overMin < tEnd ) ) ? 1.0 : p.overT;
+	return m;
+}
+int jahPanesInFront( inout JahPanes p, float tEnd ) { return jahPanesBetween( p, -1e30, tEnd ); }
+/// A light segment's transmittance from a reading list (the sun ray's fade segment, whose opaque end is known only after
+/// the traversal): the listed panes nearer than tEnd, the overflow when it starts nearer
+float jahPanesTransmit( JahPanes p, float tEnd )
+{
+	float T = p.overMin < tEnd ? p.overT : 1.0;
+	for( int i = 0; i < p.n; ++i )
+		if( p.t[i] < tEnd )
+			T *= jahPaneT( p.word[i] );
+	return T;
+}
+float jahPanesThroughput( JahPanes p )
+{
+	float T = p.overApplied;
+	for( int i = 0; i < p.n; ++i )
+		T *= jahPaneT( p.word[i] );
+	return T;
+}
 
 #endif   // JAH_RQ_ALPHA_GLSL

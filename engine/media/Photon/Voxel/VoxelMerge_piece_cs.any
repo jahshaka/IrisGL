@@ -39,8 +39,8 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY-SEVEN ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
-	/// z*27+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
+	/// ONE VOXEL'S TWENTY-EIGHT ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// z*28+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
 	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
 	/// RAW normal sum at +4..6 (xyz, two's complement),
 	/// emissive sum at +7..9 (rgb), FOLDED normal sum at +10..12 (xyz), the
@@ -52,7 +52,7 @@
 	/// below), and the metal's three, and THE EMITTERS' COVERAGE per half packed into +23 (looking
 	/// +a) and +24 (-a) with THE EMITTERS' WEIGHT at +25 (JUNCTION-NORMAL-1, THE EMISSIVE PER HALF
 	/// below), and THE EMISSIVE'S SHARED EXPONENT at +26 (PHOTON-7 stage 10-3, R2: the voxel's brightest emissive
-	/// contribution, the max pre-pass's): twenty-seven, because only those carry anything — a
+	/// contribution, the max pre-pass's), and THE KINDS OF FACES at +27 (PHOTON-7 10-4 R7, THE PANE FACES below): twenty-eight, because only those carry anything — a
 	/// fourth channel on the three vectors would be 25 MB read and written for nothing
 	/// at 128^3.
 	/// Interleaved rather than stacked planes so the shader needs no knowledge of
@@ -76,9 +76,26 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 27u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 28u + chan );
 	}
 
+
+	/// THE PANE FACES (PHOTON-7 10-4 R7; the lead's cell rule, 2026-10-27). A PANE - a face whose material blends with
+	/// what is behind it - transmits a ray, attenuated by its coverage (its projected area x its alpha: the coverage's own
+	/// sums), where an occluder's face stops it. A HALF-AXIS whose faces are ALL panes' is a PANE FACE: the occupancy ray
+	/// crosses it by the one face model (jah_voxel_faces.glsl) and goes on; a half-axis holding ANY occluder's face is
+	/// an occluder's, occupancy or the plane test as before (a wall's end beside a window is never passed: the rule's
+	/// opaque half). PER HALF-AXIS, not per cell: a window's reveal (a wall face on one axis) and its pane (on another)
+	/// share the cells of its rim, and the reveal's own rays leave through the pane. The kinds are OR-ed into the
+	/// accumulator's +27 (bit h x 3 + a a pane's face on half h, axis a; bit 6 + h x 3 + a an occluder's), and the
+	/// answer is three bits a half: axes x and y in the coverage's ALPHA (R10G10B10A2's two bits, unused before: the
+	/// value bits / 3), axis z in the surface position's SIXTEENTH BIT (above the caster share's fifteen, which no
+	/// reader of it sees: jahInjectCasterShare masks its fields). A store without panes is the store it was, bit for bit.
+	INLINE uint voxelMergePaneAxes( uint kinds, uint h )
+	{
+		const uint pane = ( kinds >> ( 3u * h ) ) & 7u, occluder = ( kinds >> ( 6u + 3u * h ) ) & 7u;
+		return pane & ~occluder;
+	}
 
 	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
 	///
@@ -272,7 +289,8 @@
 	/// POSITION alpha (16-bit UNORM, otherwise unused; the light injection's jahInjectCasterShare
 	/// unpacks them): 31 = 1.0 exactly when every surface casts, so an all-caster voxel marches as
 	/// before, bit for bit.
-	INLINE float voxelMergeCasterShare( uint casterPacked, uint coveragePacked )
+	/// ...and THE PANE FACE of axis z in the sixteenth bit (THE PANE FACES above, PHOTON-7 10-4 R7).
+	INLINE float voxelMergeCasterShare( uint casterPacked, uint coveragePacked, uint paneZ )
 	{
 		const float3 sc = min( float3( voxelMergeAxisUnpack( casterPacked ) ), float3( 512.0f, 512.0f, 512.0f ) );
 		const float3 all = min( float3( voxelMergeAxisUnpack( coveragePacked ) ), float3( 512.0f, 512.0f, 512.0f ) );
@@ -282,6 +300,7 @@
 			const float share = all[a] > 0.0f ? min( sc[a], all[a] ) / all[a] : 1.0f;
 			packed |= uint( share * 31.0f + 0.5f ) << uint( 5 * a );
 		}
+		packed |= ( paneZ & 1u ) << 15u;
 		return float( packed ) / 65535.0f;
 	}
 	/// THE EMISSIVE PER HALF-AXIS (JUNCTION-NORMAL-1, ENGINE-UPGRADE-U5 decision 21). The emissive

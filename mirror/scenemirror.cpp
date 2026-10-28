@@ -1586,11 +1586,9 @@ void SceneMirror::refreshLightAggregates()
         if (!light) continue;
         // Exactly the walk's own test, in the walk's own order: a Sky Light
         // returns before the fold (it is the ambient, not a light), an Area
-        // light can never cast, and None is not a request.
+        // light can never cast (its visibility is the area job's).
         if (light->lightType == iris::LightType::Sky) continue;
         if (light->lightType == iris::LightType::Area) continue;
-        if (light->shadowMap.shadowType == iris::ShadowMapType::None)
-            continue;
         ShadowFilter f = ShadowFilter::Hard;
         if (light->shadowMap.shadowType == iris::ShadowMapType::Soft)          f = ShadowFilter::Soft;
         else if (light->shadowMap.shadowType == iris::ShadowMapType::VerySoft) f = ShadowFilter::VerySoft;
@@ -5525,25 +5523,21 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     d.doubleSided = light->doubleSided;
     // The asset binding travels as a resolved absolute path — the engine has no
     // database. The backend decides what each light type can actually honour
-    // (profiles: spot always, point only unshadowed).
+    // (profiles: spot and point lights, shadowed or not; never directional or area).
     d.iesProfilePath = light->iesProfilePath.toStdString();
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
-    d.castShadows = light->lightType != iris::LightType::Area &&
-                    light->shadowMap.shadowType != iris::ShadowMapType::None;
+    // (every other light casts: no document setting lets a light through a wall - PHOTON-7 10-4 R9)
+    d.castShadows = light->lightType != iris::LightType::Area;
     // ---- THE SUN, and the secondary directionals -----------------------
-    // Our shadow node declares exactly ONE directional slot (three PSSM splits
-    // at slot 0; every focused slot accepts spot/point only — OgreShadow.cpp).
-    // With two shadow-casting directionals Ogre filled that slot by its own
-    // castShadows-then-light-id sort, i.e. by engine creation order, which can
-    // flip across a reload: one of the two suns cast, silently, and which one
-    // was luck. The document's ONE resolver decides instead, and a directional
-    // that is not the sun is pushed as a non-caster — Ogre's sort then has a
-    // single candidate and the answer is the same on every frame and reload.
-    // (This is Unreal's Forward Shading Priority semantic exactly: one main
-    // directional casts. A SECOND PSSM set is out of scope — it is three more
-    // full-view-frustum scene passes EVERY frame, the most expensive shadow we
-    // render.)
+    // EVERY directional casts what its own flag says (PHOTON-7 10-4 R8: a light
+    // is blocked by geometry on every path). The shadow node gives the PSSM
+    // splits (slot 0) to ONE directional and a focused map to each further one
+    // (upstream's path: HlmsPbs shades every casting directional after the first
+    // from a single map). Which one gets the splits is the document's ONE
+    // resolver's answer, `primaryDirectional`, which the backend turns into the
+    // light's shadow sort priority (the fork's Light::setShadowSortPriority) —
+    // never Ogre's creation-order id, which flips across a reload.
     if (light->lightType == iris::LightType::Directional) {
         d.forwardShadingPriority = light->forwardShadingPriority;
         // Through the light's OWN scene, which is what makes this a pure
@@ -5560,7 +5554,6 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
             resolved = own.data();
         }
         d.primaryDirectional = !resolved || resolved == light;
-        if (!d.primaryDirectional) d.castShadows = false;
         // ...AND A SUN THAT CANNOT MOVE A PIXEL CASTS NOTHING (round-2 review
         // item 4; made ABSOLUTE by lane SKY-SMALL). Three full-view-frustum
         // PSSM passes every frame buy a shadow whose depth is the difference
@@ -7474,8 +7467,9 @@ void SceneMirror::buildViewEnvironment(FrameInputView &part, View *view, const i
 
 void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record, bool offscreenChain)
 {
-    // World-panel Enable Shadows (used to be hardcoded on).
-    part.shadows = mSource->shadowEnabled;
+    // SHADOWS ARE ALWAYS ON (PHOTON-7 10-4 fix round, F7: the World panel's switch is deleted - turning every map off
+    // let every light through every wall). A view's shadows stay the engine's door for tests (View::setShadows).
+    part.shadows = true;
     // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
     // frame — the engine ignores a repeat of the value already REQUESTED (the
     // achieved count may be clamped lower by the driver, so comparing against
@@ -7752,8 +7746,6 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         fog.heightDensity = mSource->fogHeightDensity;
         fog.heightFalloff = mSource->fogHeightFalloff;
         fog.heightLevel = mSource->fogHeightLevel;
-        fog.breakMinBrightness = mSource->fogBreakMinBrightness;
-        fog.breakFalloff = mSource->fogBreakFalloff;
         scene.fog = fog;
     }
     // THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1): the document's dials are
@@ -7889,7 +7881,7 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // see the mode table, which is exactly why the invariant exists.
         pr.budget = mSource->planarReflectionBudget < 0 ? 0
                                                         : qBound(0, mSource->planarReflectionBudget, 8);
-        // Resolution and shadows follow the budget unless the scene pins them.
+        // Resolution follows the budget unless the scene pins it.
         // This IS the mode table's reflection row, expressed where the mirror
         // can reach it: Epic's budget of 2 gets 1024 + shadows, High's 1 gets
         // 512 and no shadows. Two extra world-mode rows would say the same
@@ -7898,9 +7890,9 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         pr.resolution = mSource->planarReflectionResolution > 0
                             ? unsigned(qBound(256, mSource->planarReflectionResolution, 2048))
                             : unsigned(autoRes);
-        pr.shadows = mSource->planarReflectionShadows >= 0
-                         ? mSource->planarReflectionShadows != 0
-                         : pr.budget >= 2;
+        // A MIRROR'S SHADOWS FOLLOW THE SCENE'S - always on (PHOTON-7 10-4 fix round: a mirror without its shadow
+        // maps showed every light through every wall; the option is deleted)
+        pr.shadows = true;
         // Glossy floors need the mip chain (the shader samples at
         // roughness * numMips); without it every reflector is a perfect mirror.
         pr.mipmaps = true;

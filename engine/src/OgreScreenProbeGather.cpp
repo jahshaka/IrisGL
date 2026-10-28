@@ -151,9 +151,11 @@ constexpr unsigned kFilterBindings = 5u;
 /// and THE ROUGH SPECULAR's six (12 - 17, 7-3): the prepass's shadow / roughness,
 /// the prefiltered maps, the output, the lobe's history pair and its rest mean; and THE HIT SET (18 - 50, PHOTON-7 10-3
 /// R3 (b), R4 (c1) and (iii): the unanswered share past the field's window gathered by the voxel chain's rays and,
-/// where the chain cannot answer, continued through the TLAS - its one writer, kIntegrateHitSlots).
+/// where the chain cannot answer, continued through the TLAS - its one writer, kIntegrateHitSlots); and THE SKY
+/// VISIBILITY (51, PHOTON-7 10-4 R11), after the hit set.
 constexpr unsigned kIntegrateHitFirst = 18u;
-constexpr unsigned kIntegrateBindings = kIntegrateHitFirst + kHitSetBindings;
+constexpr unsigned kIntegrateSkyVisBinding = kIntegrateHitFirst + kHitSetBindings;
+constexpr unsigned kIntegrateBindings = kIntegrateSkyVisBinding + 1u;
 /// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
 /// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
 constexpr HitSetSlots kIntegrateHitSlots = {
@@ -167,15 +169,16 @@ constexpr HitSetSlots kIntegrateHitSlots = {
     49u,
     50u,
 };
-static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateBindings == 51u,
-              "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50");
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 52u,
+              "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50, the sky "
+              "visibility at 51");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
 /// of the ping-pong — the shared-exponent mean and the geometry word.
 constexpr unsigned kHistoryTexelBytes = 8u;
 /// The integrate set's STORAGE IMAGES: the irradiance, the history's two halves, the rest mean and the photon overlay
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
-/// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3).
-constexpr unsigned kIntegrateStorageImages = 9u;
+/// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3); the sky visibility (51, 10-4 R11).
+constexpr unsigned kIntegrateStorageImages = 10u;
 static_assert(kIntegrateBindings == 9u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
               "roughness and the prefiltered maps, the hit set");
@@ -454,6 +457,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             t[i] = i < kIntegrateHitFirst ? own[i] : hb[i].descriptorType;
             counts[i] = i < kIntegrateHitFirst ? 1u : ( hb[i].descriptorCount ? hb[i].descriptorCount : 1u );
         }
+        t[kIntegrateSkyVisBinding] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   // the sky visibility (51, 10-4 R11)
+        counts[kIntegrateSkyVisBinding] = 1u;
         if (!makeLayout(kIntegrateBindings, t, counts, mIntegrateLayout, "integrate")) return false;
     }
 
@@ -664,6 +669,15 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     r->setNumMipmaps(1u);
     r->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     v.roughSpec = r;
+    // THE SKY VISIBILITY (PHOTON-7 10-4 R11), `jahSkyVis`: R8, the integrate's, read by the colour passes' fog
+    Ogre::TextureGpu *sv = tm->createTexture("JahSkyVis/" + std::to_string(sSerial), Ogre::GpuPageOutStrategy::Discard,
+                                             Ogre::TextureFlags::Uav,
+                                             in.stereo ? Ogre::TextureTypes::Type2DArray : Ogre::TextureTypes::Type2D);
+    sv->setResolution(in.width, in.height, v.layers);
+    sv->setPixelFormat(Ogre::PFG_R8_UNORM);
+    sv->setNumMipmaps(1u);
+    sv->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    v.skyVis = sv;
 
     // The atlas, the records, the irradiance target (8 bytes a pixel), the
     // pixel history's two packed halves (8 bytes a pixel each) and the rest mean
@@ -675,7 +689,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull + (unsigned long long)total * kRecordBytes +
                   pixels * 8ull + v.historyBytes + (unsigned long long)restW * restH * 8ull +
                   1ull * v.atlasW * v.atlasH * 4ull * v.prefilteredLayers + pixels * 8ull + pixels * 2ull * 4ull +
-                  (unsigned long long)restW * restH * 8ull;
+                  (unsigned long long)restW * restH * 8ull + pixels * 1ull;   // (+ the sky visibility, 1 byte a pixel)
     v.targetsReady = true;
     v.atlasNeedsClear = true;
     v.age = 0u;
@@ -769,6 +783,8 @@ void ScreenProbeGather::drop(View &v) {
     v.irradiance = nullptr;
     if (v.roughSpec) mHost.gatherRetireTexture(v.roughSpec);
     v.roughSpec = nullptr;
+    if (v.skyVis) mHost.gatherRetireTexture(v.skyVis);
+    v.skyVis = nullptr;
     v.targetsReady = false;
     v.atlasNeedsClear = false;
     // ...AND THE IN-FLIGHT RECORDS GO WITH THE BUFFERS THEY NAME. A resize frees
@@ -952,12 +968,19 @@ void ScreenProbeGather::releaseBinding(const void *key) {
     detail::FogHlmsListener::setProbeGather(it->second.sceneMgr, detail::FogHlmsListener::ProbeGatherBind());
 }
 
+Ogre::TextureGpu *ScreenProbeGather::skyVisOf(const void *key) const {
+    auto it = mViews.find(key);
+    if (it == mViews.end()) return nullptr;
+    const View &v = it->second;
+    return v.sceneMgr && v.skyVis && v.age > 0u ? v.skyVis : nullptr;
+}
+
 bool ScreenProbeGather::rebindThisFrame(const void *key) {
     auto it = mViews.find(key);
     if (it == mViews.end()) return false;
     const View &v = it->second;
     if (!v.sceneMgr || !v.irradiance || v.recordedFrame != mHost.gatherFrameNow()) return false;
-    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec });
+    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec, nullptr, v.skyVis });
     return true;
 }
 
@@ -975,9 +998,11 @@ bool ScreenProbeGather::holdLast(const void *key, unsigned w, unsigned h, unsign
                                  1u << Ogre::GPT_FRAGMENT_PROGRAM);
         solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
                                  1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.skyVis, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         rs->executeResourceTransition(trans);
     }
-    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec });
+    detail::FogHlmsListener::setProbeGather(v.sceneMgr, { v.irradiance, v.roughSpec, nullptr, v.skyVis });
     return true;
 }
 
@@ -1343,9 +1368,11 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture,
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.skyVis, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         rs->executeResourceTransition(trans);
     }
-    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec });
+    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec, nullptr, v.skyVis });
     ++v.age;
     v.lastTemporal = temporal;
     v.recordedFrame = mHost.gatherFrameNow();
@@ -2019,6 +2046,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         if (!integrateHits.write(mHost, v.integrateSets[ring], kIntegrateHitSlots, in.hits,
                                  geomSlots ? v.geomRowOfSlot[ring] : VK_NULL_HANDLE, w, ihErr))
             return;
+        // THE SKY VISIBILITY (51, 10-4 R11)
+        VkDescriptorImageInfo skyOut{};
+        skyOut.imageView = mHost.gatherLayerView(v.skyVis, true);
+        skyOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        if (!skyOut.imageView) return;
+        w[kIntegrateSkyVisBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[kIntegrateSkyVisBinding].pImageInfo = &skyOut;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -2034,6 +2068,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         solver.resolveTransition(trans, v.irradiance, Ogre::ResourceLayout::Uav,
                                  Ogre::ResourceAccess::ReadWrite, computeStage);
         solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
+                                 computeStage);
+        // (the sky visibility keeps a no-answer pixel's last share: read and written)
+        solver.resolveTransition(trans, v.skyVis, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::ReadWrite,
                                  computeStage);
         if (in.photonOverlay)
             solver.resolveTransition(trans, in.photonOverlay, Ogre::ResourceLayout::Uav,
@@ -2431,13 +2468,15 @@ void ScreenProbeGather::finish(const void *key) {
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         solver.resolveTransition(trans, v.roughSpec, Ogre::ResourceLayout::Texture,
                                  Ogre::ResourceAccess::Read, 1u << Ogre::GPT_FRAGMENT_PROGRAM);
+        solver.resolveTransition(trans, v.skyVis, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                 1u << Ogre::GPT_FRAGMENT_PROGRAM);
         rs->executeResourceTransition(trans);
     }
     // THE PROPERTY AND THE TEXTURE ARE SET TOGETHER OR NOT AT ALL — the same
     // rule the sky's env slot states: a slot claimed by getNumExtraPassTextures
     // and left unbound is an undefined descriptor. The registration is
     // PASS-SCOPED and `releaseBinding` takes it away when the pass ends.
-    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec });
+    detail::FogHlmsListener::setProbeGather(in.sceneMgr, { v.irradiance, v.roughSpec, nullptr, v.skyVis });
     // ...AND THIS FRAME BECOMES THE PREVIOUS ONE: its camera, its half of each
     // pair, one more frame of age.
     std::memcpy(v.prevCamPos, in.camPos, sizeof(v.prevCamPos));

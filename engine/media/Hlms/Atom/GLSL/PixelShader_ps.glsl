@@ -7,6 +7,9 @@
 @piece( CustomGlslExtensions )
 	#extension GL_EXT_buffer_reference: require
 	#extension GL_EXT_buffer_reference_uvec2: require
+	@property( jah_lamp_rays )
+		#extension GL_EXT_ray_query : require
+	@end
 @end
 @insertpiece( SetCrossPlatformSettings )
 @insertpiece( SetCompatibilityLayer )

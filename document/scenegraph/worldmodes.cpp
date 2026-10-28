@@ -1462,14 +1462,6 @@ static QVector<ParamRow> buildFogParams()
         QStringLiteral("The world height at which the height layer has its full density — the "
                        "surface of the mist, usually the ground."),
         &iris::Scene::fogHeightLevel);
-    add("breakMinBrightness", "Breakthrough Brightness", 0.0, 4.0, 3,
-        QStringLiteral("How bright a pixel has to be before it starts cutting through the fog "
-                       "instead of dissolving into it — the sun, a lamp, an emissive sign."),
-        &iris::Scene::fogBreakMinBrightness);
-    add("breakFalloff", "Breakthrough Falloff", 0.0, 2.0, 3,
-        QStringLiteral("How sharply bright pixels break through. 0 switches breakthrough off, "
-                       "leaving plain exponential fog."),
-        &iris::Scene::fogBreakFalloff);
     return out;
 }
 

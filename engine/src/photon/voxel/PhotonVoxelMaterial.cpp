@@ -163,6 +163,25 @@ namespace Ogre
             for( size_t i = 0; i < 4; ++i )
                 shaderMaterial.bgDiffuse[i] = bgDiffuse[i];
             shaderMaterial.diffuse[3] = pbsDatablock->getTransparency();
+            // ADDITIVE ABSORBS NOTHING (the one read's F8; paneTransmittance): its coverage is 0 - a pane of T = 1 the
+            // voxels' rays pass whole (the voxeliser's coverage is the projected area x alpha)
+            if( pbsDatablock->getTransparencyMode() != HlmsPbsDatablock::None &&
+                pbsDatablock->getBlendblock()->mDestBlendFactor == SBF_ONE )
+                shaderMaterial.diffuse[3] = 0.0f;
+            // A GLASS's OWN LIGHT (PHOTON-7 10-4 R7, C): Ogre's Transparent and Refractive pixel draws kD x alpha^2
+            // (premultiplied on upload, OgreHlmsPbsDatablock.cpp), a Fade's alpha x kD. The voxel's coverage already
+            // carries one alpha (Voxelizer: the projected area x alpha) and a ray crossing a pane takes alpha of the
+            // row-shaded light (OgreScene::gpuPaneWordFor), so the row holds kD x alpha for those two and kD for Fade:
+            // every route then sends Ogre's alpha^2 kD for a glass and alpha kD for a Fade.
+            {
+                const HlmsPbsDatablock::TransparencyModes mode = pbsDatablock->getTransparencyMode();
+                if( mode == HlmsPbsDatablock::Transparent || mode == HlmsPbsDatablock::Refractive )
+                {
+                    const float a = std::min( 1.0f, std::max( 0.0f, pbsDatablock->getTransparency() ) );
+                    for( size_t i = 0; i < 3; ++i )
+                        shaderMaterial.diffuse[i] *= a;
+                }
+            }
             // THE SPECULAR LOBE OF EVERY WORKFLOW (VOXEL-METAL-ALBEDO-1, METAL-BOUNCE-1, PHOTON-4): HlmsPbs's lobe
             // is kS ( F0 ( 1 - Fc ) + Fc ) D Vis (Rs = F x D x G x kS, 800.PixelShader / 200.BRDFs), so the row
             // carries what the lobes take: F0 x kS and the Fresnel-90 weight kS - kS's MEAN (a tinted kS is not

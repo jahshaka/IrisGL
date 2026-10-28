@@ -64,6 +64,7 @@
 // (probe cell, ray, frame); each ray writes its own texel and nothing is summed
 // here (the filter's reduction is a fixed-order shared-memory tree).
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_control_flow_attributes : require
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -147,6 +148,7 @@ layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
 // a few stochastic rays cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL
 #include "jah_rq_hit_radiance.glsl"
+#include "jah_rq_panes.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl, ENGINE-POLISH-PHOTON-1): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
 {
@@ -330,10 +332,14 @@ void main()
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );
-		JAH_RQ_PROCEED( rq )
+		JahPanes panes = jahPanesNone();
+		JAH_RQ_PROCEED_PANES( rq, panes )
 		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
 				   gl_RayQueryCommittedIntersectionTriangleEXT;
 		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
+		// THE PANES IN FRONT (PHOTON-7 10-4 R7): the near query's, before its hit or its end; the far query's past it
+		jahPanesInFront( panes, hit ? tHit : maxT );
+		JahPanes panesFar = jahPanesNone();
 		// A NEAR hit names its instance (the item slot the card tables are indexed
 		// by) and its triangle's geometric normal (the card pick's facing); a far
 		// hit names neither (the header: its triangle is the coarse level's).
@@ -366,7 +372,7 @@ void main()
 			rayQueryEXT rqFar;
 			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin,
 								   p.plane.z, dir, farT );
-			JAH_RQ_PROCEED( rqFar )
+			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) ==
 				gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
@@ -377,6 +383,8 @@ void main()
 				hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
 				hitBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
 			}
+			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
+			jahPanesBetween( panesFar, maxT, hit ? tHit : farT );
 		}
 
 		// THE RAY'S FOOTPRINT AT ITS HIT. One of `rays` directions covers a
@@ -385,6 +393,19 @@ void main()
 		// wide at distance t. A gather ray reading the FINEST mip would alias
 		// exactly as a cone march with no cone does.
 		const float spread = sqrt( 2.0 / float( rays ) );
+		float through = 1.0;
+		vec3 paneLight = vec3( 0.0 );
+		if( panes.n + panesFar.n > 0 )
+		{
+			// the near list, then the far one, through ONE call of the fold
+			[[dont_unroll]] for( int list = 0; list < 2; ++list )
+			{
+				float th = 1.0;
+				const vec3 own = jahPanesOwnLight( list == 0 ? panes : panesFar, origin, dir, th );
+				paneLight += through * own;
+				through *= th;
+			}
+		}
 		vec3 radiance = vec3( 0.0 );
 		uint source = 0u;		// the instrument's (FAR-SUN-1): what answered this ray
 		float hitSun = 0.0;
@@ -413,7 +434,7 @@ void main()
 										!far && hitNormalKnown );
 			jahHitAreaSeq = jahHitSeed;   // an area light's stratum there (jah_rq_hit_direct.glsl, 7-H)
 			if( !decodeAlways )
-				radiance = jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
+				radiance = paneLight + through * jahHitRadianceSourced( far ? 0xFFFFFFFFu : hitSlot, origin + dir * tHit, hitN, dir,
 													  max( tHit * spread, 1e-4 ), false, ok, cacheSource );
 			source = cacheSource == 1u ? kGatherSrcCard : kGatherSrcVoxel;
 			if( decodeAlways || !ok || !finite3( radiance ) )
@@ -422,13 +443,15 @@ void main()
 				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
 				const ivec2 dest = block + texel;
 				recorded = jahHitAppend( hitSlot, far, hitPrim,
-										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight,
-										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0, vec3( 0.0 ), 1.0 );
-				// THE COMPOSITE writes the radiance; a DROPPED record (the list was
-				// full — counted) is NO SAMPLE (PHOTON-2 stage 2's tail, 1.6 A2): its
+										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight * through,
+										 jahHitDestPack( dest, true, 0 ), origin.y, tHit, 0.0, vec3( 0.0 ), 1.0,
+										 vec4( 0.0, 0.0, 0.0, 1.0 ) );
+				// THE COMPOSITE ADDS the hit's radiance x the record's weight (the re-weight x the panes' throughput) to
+				// what this trace wrote - the panes' own light (PHOTON-7 10-4 R7; 0 where no pane is crossed); a DROPPED
+				// record (the list was full — counted) is NO SAMPLE (PHOTON-2 stage 2's tail, 1.6 A2): its
 				// texel's distance kAtlasNoSample keeps it out of the filter and the SH
 				// sums (rq_probe_filter.comp) - never a black ray that darkens the probe.
-				radiance = vec3( 0.0 );
+				radiance = paneLight;
 				if( !recorded )
 					distance = kAtlasNoSample;
 				source = !recorded ? kGatherSrcDropped : far ? kGatherSrcDecodeFar : kGatherSrcDecode;
@@ -442,7 +465,7 @@ void main()
 		{
 			// ---- THE SKY. Nothing near and nothing far (or the far query off):
 			// the ray escaped the world.
-			radiance = jahSkyRadiance( dir, spread );	// at the ray's own footprint (GA-SKY)
+			radiance = paneLight + through * jahSkyRadiance( dir, spread );	// at the ray's own footprint (GA-SKY)
 			source = kGatherSrcSky;
 		}
 		if( !finite3( radiance ) )

@@ -228,8 +228,8 @@ void jahCardLobeHemi( float r, out float a, out float b );
 /// the lights the relight shades, the sun weighted by the texel's stored visibility `sunVis`, each lamp by its own bit
 /// of the texel's lamp mask (`lampBits`: the SunVis texel; `lampIds` the card's lamp table - PHOTON-7 stage 5, 5-3).
 /// The INCLUDER defines it (jah_rq_card_lights.glsl, from the ray tier's light table).
-vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, vec4 lampBits,
-						uvec4 lampIds[4] );
+vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, uvec4 lampBits,
+						uvec4 lampIds[12] );
 
 /// THE CARD THE LAST READ ANSWERED FROM (its record in the card table; 0xFFFFFFFF none): the cards' TLAS gather records
 /// which cards each texel's rays read (rq_card_gather.comp: the card-to-card re-listing, PHOTON-7 stage 10).

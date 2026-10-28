@@ -213,7 +213,10 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     // The atlas: one depth texture with an explicit RTV, exactly as the helper
     // declares it (a depth format + NO_POOL_EXPLICIT_RTV is what makes the
     // shadow maps SAMPLEABLE depth rather than a pooled depth buffer).
-    def->setNumLocalTextureDefinitions(N ? 2u : 1u);   // atlas0 (+ tmpCubemap)
+    // THE TRANSMITTANCE LAYER (PHOTON-7 10-4 R8; mShadowPanes: built only once a drawn scene holds a pane): atlasT, R8,
+    // the depth atlas's layout, and the point maps' scratch cube's R8 twin.
+    const bool panes = mShadowPanes;
+    def->setNumLocalTextureDefinitions((N ? 2u : 1u) * (panes ? 2u : 1u));   // atlas0 (+ tmpCubemap) (+ their twins)
     const Ogre::String atlasName = "atlas0";
     {
         Ogre::TextureDefinitionBase::TextureDefinition *texDef = def->addTextureDefinition(atlasName);
@@ -264,6 +267,80 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         texDef->preferDepthTexture = false;
         Ogre::RenderTargetViewDef *rtv = def->addRenderTextureView(cubeName);
         rtv->setForTextureDefinition(cubeName, texDef);
+    }
+
+    // THE TRANSMITTANCE LAYER's textures (PHOTON-7 10-4 R8; L9: the sun and the lamps follow the ray through glass). A
+    // PANE (paneTransmittance: a surface that blends with what lies behind it) occludes no light - it is in no depth map
+    // (its caster leaves the stock pair and the caster cut: placeAtomCaster) - and casts into atlasT instead: R8, the
+    // depth atlas's exact layout, 1 where no pane stands between a map's light and its nearest opaque caster, the
+    // product of the panes' 1 - alpha where they do (NEUTRAL, Ogre's own glass model). Its passes draw into the RTV
+    // atlasTRtv, the layer with the depth atlas bound READ-ONLY: a pane behind the nearest opaque caster fails the
+    // depth test and is not between the light and its receiver. The receivers read it at every shadow lookup
+    // (JahShadowTransmit_piece_ps.any through the fork's custom_shadow_transmit hooks; the listener binds it).
+    // ...AND THE NEAREST PANE's DEPTH (the one read's F1; the lead's two-pass form - one pass cannot both test the panes
+    // against the OPAQUE atlas, which keeps a pane behind the nearest opaque caster out of T, and write their own depth):
+    // atlasTD (D32, the atlas's format and layout, its own depth-only view atlasTDRtv). After a map's pane pass, a quad
+    // copies the map's opaque depth into it (Jahshaka/ShadowDepthCopy: gl_FragDepth from the atlas) and the panes are
+    // drawn into it depth-only with the test on: it holds min(the opaque caster, the nearest pane IN FRONT of it), and
+    // a receiver applies T only PAST it - a pane's own lit face, a pane over a pane (the nearest-pane rule for stacks),
+    // the medium between the light and the pane read the light whole. A point light's rectangle holds the NEAR depth
+    // (its panes are drawn into a cube and copied as colour): every receiver is past it, T applies to all (a named limit).
+    // A process that never drew a pane builds none of it: no memory, no pass (the lead's condition).
+    const Ogre::String transName = "atlasT", transRtv = "atlasTRtv", cubeTName = "tmpCubemapT", transDepth = "atlasTD",
+                       transRelease = "atlasTRelease";
+    if (panes) {
+        Ogre::TextureDefinitionBase::TextureDefinition *texDef = def->addTextureDefinition(transName);
+        texDef->width  = std::max(1u, plan.width);
+        texDef->height = std::max(1u, plan.height);
+        texDef->format = Ogre::PFG_R8_UNORM;
+        texDef->depthBufferId = Ogre::DepthBuffer::POOL_NO_DEPTH;
+        texDef->preferDepthTexture = false;
+        texDef->fsaa = "1";
+        // KEEP CONTENT ALWAYS (the fix round's F1): cached lamp maps keep their layer with their depth (the atlas's
+        // keep_content rule), and the node's release quad ((d) below) READS the layer every frame - a discardable texture's
+        // first transition being a read throws ("from Undefined to a read-only layout") and aborts the pass
+        texDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+        // the layer's own view, no depth (its whole clear: (a1) below)
+        def->addRenderTextureView(transName)->setForTextureDefinition(transName, texDef);
+        Ogre::RenderTargetViewDef *rtv = def->addRenderTextureView(transRtv);
+        Ogre::RenderTargetViewEntry colour;
+        colour.textureName = transName;
+        rtv->colourAttachments.push_back(colour);
+        rtv->depthAttachment.textureName = atlasName;
+        rtv->depthReadOnly = true;
+        // ...the nearest pane's depth (the head): the atlas's format and layout, its own depth-only view
+        Ogre::TextureDefinitionBase::TextureDefinition *depthDef = def->addTextureDefinition(transDepth);
+        depthDef->width  = std::max(1u, plan.width);
+        depthDef->height = std::max(1u, plan.height);
+        depthDef->format = Ogre::PFG_D32_FLOAT;
+        depthDef->depthBufferId = Ogre::DepthBuffer::NO_POOL_EXPLICIT_RTV;
+        depthDef->depthBufferFormat = Ogre::PFG_D32_FLOAT;
+        depthDef->preferDepthTexture = false;
+        depthDef->fsaa = "1";
+        depthDef->textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);   // (keep content: the layer's rule)
+        def->addRenderTextureView(transDepth)->setForTextureDefinition(transDepth, depthDef);
+        // ...and the 1 x 1 target of the node's last pass, the one that hands both to the readers ((d) below)
+        Ogre::TextureDefinitionBase::TextureDefinition *relDef = def->addTextureDefinition(transRelease);
+        relDef->width = relDef->height = 1u;
+        relDef->format = Ogre::PFG_R8_UNORM;
+        relDef->depthBufferId = Ogre::DepthBuffer::POOL_NO_DEPTH;
+        relDef->preferDepthTexture = false;
+        relDef->fsaa = "1";
+        def->addRenderTextureView(transRelease)->setForTextureDefinition(transRelease, relDef);
+        if (N) {
+            Ogre::TextureDefinitionBase::TextureDefinition *cubeDef = def->addTextureDefinition(cubeTName);
+            cubeDef->width  = std::max(64u, cubeResolution);
+            cubeDef->height = std::max(64u, cubeResolution);
+            cubeDef->depthOrSlices = 6u;
+            cubeDef->textureType = Ogre::TextureTypes::TypeCube;
+            cubeDef->format = Ogre::PFG_R8_UNORM;
+            cubeDef->depthBufferId = 1u;   // the scratch cube's own depth pool: its faces' opaque depth
+            cubeDef->depthBufferFormat = Ogre::PFG_D32_FLOAT;
+            cubeDef->preferDepthTexture = false;
+            Ogre::RenderTargetViewDef *crtv = def->addRenderTextureView(cubeTName);
+            crtv->setForTextureDefinition(cubeTName, cubeDef);
+            crtv->depthReadOnly = true;
+        }
     }
 
     // ---- the shadow maps ----------------------------------------------
@@ -317,7 +394,12 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     //   the clears: ONE whole-atlas clear, or one quad per map     (1 or 3 + N)
     //   PSSM:    one scene pass per split                         (3)
     //   focused: one scene pass (spot) + 6 cube faces + 1 copy     (N * 8)
-    def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u);
+    // (+ the transmittance layer's: its clears, one scene pass per PSSM split and spot map, six cube faces + a copy per
+    // point map; + its nearest pane's depth: one target a PSSM split and spot map, its copy and its panes, and one a
+    // point map, its NEAR quad - 3 + 2N; + the release quad, 1. A count short of the passes is no error in a build without asserts: the
+    // vector reallocates under the pointers addTargetPass returned - the heap corrupted, every map black)
+    def->setNumTargetPass((perMapClears ? numMaps : 1u) + 3u + N * 8u +
+                          (panes ? (perMapClears ? numMaps : 1u) + 3u + N * 8u + 3u + 2u * N + 1u : 0u));
 
     // THE ATOM CASTERS (ATOM-SHADOWS-1; OgreAtomCasterPass.cpp): where this device
     // runs the visibility buffer, every caster scene pass SKIPS the Atom queue and is
@@ -351,7 +433,75 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     const Ogre::uint8 directionalMask = Ogre::uint8(1u << Ogre::Light::LT_DIRECTIONAL);
     const Ogre::uint8 pointMask       = Ogre::uint8(1u << Ogre::Light::LT_POINT);
     const Ogre::uint8 spotMask        = Ogre::uint8(1u << Ogre::Light::LT_SPOTLIGHT);
+    // A FOCUSED MAP's single-map pass serves a spot OR A SECOND DIRECTIONAL (PHOTON-7 10-4 R8; upstream's path: HlmsPbs
+    // shades every casting directional after the first from one map, DarkenWithShadow, and Ogre's light list hands the
+    // directionals out first, to the first free slots that accept one). The point maps' cube faces stay point-only.
+    const Ogre::uint8 focusedMask     = Ogre::uint8(spotMask | directionalMask);
     const char *clearMaterial = shadowClearMaterialName();
+    const char *transmitNearMaterial = (mRoot && mRoot->getRenderSystem() && mRoot->getRenderSystem()->isReverseDepth())
+                                           ? "Jahshaka/ShadowTransmitNearRev" : "Jahshaka/ShadowTransmitNear";
+    // THE TRANSMITTANCE LAYER's passes (PHOTON-7 10-4 R8): each map's rectangle of atlasT, set by hand - Ogre forces a
+    // shadow map's viewport only on a pass that draws into the map's own texture.
+    const Ogre::uint32 paneMask = paneShadowPassMask(kind);
+    const auto mapRect = [&](unsigned m) -> ShadowMapRect {
+        return m < 3u ? plan.pssm[m] : plan.focused[m - 3u];
+    };
+    const auto setRect = [&](Ogre::CompositorPassDef *p, unsigned m) {
+        const ShadowMapRect r = mapRect(m);
+        p->mVpRect[0].mVpLeft = float(r.x) / float(plan.width);
+        p->mVpRect[0].mVpTop = float(r.y) / float(plan.height);
+        p->mVpRect[0].mVpWidth = float(r.w) / float(plan.width);
+        p->mVpRect[0].mVpHeight = float(r.h) / float(plan.height);
+        p->mVpRect[0].mVpScissorLeft = p->mVpRect[0].mVpLeft;
+        p->mVpRect[0].mVpScissorTop = p->mVpRect[0].mVpTop;
+        p->mVpRect[0].mVpScissorWidth = p->mVpRect[0].mVpWidth;
+        p->mVpRect[0].mVpScissorHeight = p->mVpRect[0].mVpHeight;
+    };
+    // one map's pane pass into atlasT (a PSSM split or a spot map): the panes alone, the map's depth read-only
+    const auto addPanePass = [&](unsigned m, Ogre::uint8 lightTypes) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transRtv);
+        target->setShadowMapSupportedLightTypes(lightTypes);
+        target->setNumPasses(1u);
+        Ogre::CompositorPassSceneDef *scene =
+            static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
+        scene->mShadowMapIdx = m;
+        scene->mFirstRQ = 0u;
+        scene->mLastRQ = 255u;
+        scene->mIncludeOverlays = false;
+        scene->mVisibilityMask = paneMask;
+        scene->setAllLoadActions(Ogre::LoadAction::Load);
+        scene->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        scene->mStoreActionDepth = Ogre::StoreAction::Store;
+        scene->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        scene->mReadOnlyDepth = true;
+        scene->mReadOnlyStencil = true;
+        scene->mProfilingId = "Jahshaka shadow transmittance";
+        setRect(scene, m);
+        // ...THE NEAREST PANE's DEPTH (the head): the map's opaque depth copied, then the panes depth-only, tested
+        Ogre::CompositorTargetDef *dt = def->addTargetPass(transDepth);
+        dt->setShadowMapSupportedLightTypes(lightTypes);
+        dt->setNumPasses(2u);
+        Ogre::CompositorPassQuadDef *copy = static_cast<Ogre::CompositorPassQuadDef *>(dt->addPass(Ogre::PASS_QUAD));
+        copy->mMaterialIsHlms = false;
+        copy->mMaterialName = "Jahshaka/ShadowDepthCopy";
+        copy->addQuadTextureSource(0, atlasName);
+        copy->mShadowMapIdx = m;
+        copy->setAllLoadActions(Ogre::LoadAction::Load);
+        copy->mStoreActionDepth = Ogre::StoreAction::Store;
+        setRect(copy, m);
+        Ogre::CompositorPassSceneDef *depth = static_cast<Ogre::CompositorPassSceneDef *>(dt->addPass(Ogre::PASS_SCENE));
+        depth->mShadowMapIdx = m;
+        depth->mFirstRQ = 0u;
+        depth->mLastRQ = 255u;
+        depth->mIncludeOverlays = false;
+        depth->mVisibilityMask = paneMask;
+        depth->setAllLoadActions(Ogre::LoadAction::Load);
+        depth->mStoreActionDepth = Ogre::StoreAction::Store;
+        depth->mStoreActionStencil = Ogre::StoreAction::DontCare;
+        depth->mReadOnlyDepth = false;
+        depth->mProfilingId = "Jahshaka shadow transmittance depth";
+        setRect(depth, m);
+    };
 
     // (a) THE CLEAR. Upstream's ONE whole-atlas clear while no drawn scene in
     //     this process holds a cacheable (point/spot, shadowed) lamp, and one
@@ -379,6 +529,36 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         clr->setAllClearColours(shadowClearColour());
         clr->mClearDepth = 1.0f;
     }
+    // (a1) THE TRANSMITTANCE LAYER's CLEAR to 1 (nothing between a light and its casters): the whole layer with the
+    //     whole-atlas clear, one quad per map with the per-map clears (gated on its map like the depth quads).
+    //     (the whole-layer clear targets the LAYER alone, its own view with no depth: Ogre's clear pass moves every
+    //     attachment of its target to the clear layout - CompositorPassClear::analyzeBarriers has no read-only depth -
+    //     so on atlasTRtv it left the depth atlas in the attachment layout while the render pass, read-only, expected
+    //     the read-only one: VUID-vkCmdBeginRenderPass-initialLayout-00900 under the validation layer)
+    if (panes && !perMapClears) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transName);
+        target->setNumPasses(1u);
+        Ogre::CompositorPassClearDef *clr =
+            static_cast<Ogre::CompositorPassClearDef *>(target->addPass(Ogre::PASS_CLEAR));
+        clr->setAllClearColours(Ogre::ColourValue::White);
+        clr->setAllLoadActions(Ogre::LoadAction::Load);
+        clr->mLoadActionColour[0] = Ogre::LoadAction::Clear;
+        clr->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        clr->mStoreActionDepth = Ogre::StoreAction::Store;
+    }
+    for (unsigned m = 0u; panes && perMapClears && m < numMaps; ++m) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transRtv);
+        target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask : Ogre::uint8(pointMask | focusedMask));
+        target->setNumPasses(1u);
+        Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(target->addPass(Ogre::PASS_QUAD));
+        quad->mMaterialIsHlms = false;
+        quad->mMaterialName = "Jahshaka/ShadowTransmitClear";
+        quad->mShadowMapIdx = m;
+        quad->setAllLoadActions(Ogre::LoadAction::Load);
+        quad->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        quad->mStoreActionDepth = Ogre::StoreAction::Store;
+        setRect(quad, m);
+    }
     // (a2) THE PER-MAP CLEARS, in map order. Each one is gated by
     //     CompositorNode::_update on ITS OWN map index: it runs when the map
     //     holds a light and that light is dynamic or a dirty static
@@ -388,7 +568,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
     for (unsigned m = 0u; perMapClears && m < numMaps; ++m) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(m < 3u ? directionalMask
-                                                       : Ogre::uint8(pointMask | spotMask));
+                                                       : Ogre::uint8(pointMask | focusedMask));
         target->setNumPasses(1u);
         Ogre::CompositorPassDef *passDef = target->addPass(Ogre::PASS_QUAD);
         Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(passDef);
@@ -410,15 +590,16 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mIncludeOverlays = false;
         scene->mVisibilityMask = casterMask;
         addAtomCaster(target, scene);
+        if (panes) addPanePass(j, directionalMask);
     }
 
-    // (c) The focused maps: a spot pass, then the point-light cubemap + copy.
+    // (c) The focused maps: a spot (or second directional) pass, then the point-light cubemap + copy.
     //     Upstream renders every directional/spot pass before every point pass;
     //     the order between maps does not matter here because each map clears
     //     itself, but keeping it makes the two definitions comparable.
     for (unsigned i = 0u; i < N; ++i) {
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
-        target->setShadowMapSupportedLightTypes(spotMask);
+        target->setShadowMapSupportedLightTypes(focusedMask);
         target->setNumPasses(atomCasters ? 2u : 1u);
         Ogre::CompositorPassSceneDef *scene =
             static_cast<Ogre::CompositorPassSceneDef *>(target->addPass(Ogre::PASS_SCENE));
@@ -428,6 +609,7 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         scene->mIncludeOverlays = false;
         scene->mVisibilityMask = casterMask;
         addAtomCaster(target, scene);
+        if (panes) addPanePass(3u + i, focusedMask);
     }
     for (unsigned i = 0u; i < N; ++i) {
         for (Ogre::uint32 face = 0u; face < 6u; ++face) {
@@ -446,6 +628,29 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
             scene->mIncludeOverlays = false;
             scene->mVisibilityMask = casterMask;
             addAtomCaster(target, scene);
+            if (panes) {
+                // the face's opaque depth stays for its pane pass
+                scene->mStoreActionDepth = Ogre::StoreAction::Store;
+                Ogre::CompositorTargetDef *tt = def->addTargetPass(cubeTName, face);
+                tt->setShadowMapSupportedLightTypes(pointMask);
+                tt->setNumPasses(1u);
+                Ogre::CompositorPassSceneDef *ps =
+                    static_cast<Ogre::CompositorPassSceneDef *>(tt->addPass(Ogre::PASS_SCENE));
+                ps->setAllLoadActions(Ogre::LoadAction::Load);
+                ps->mLoadActionColour[0] = Ogre::LoadAction::Clear;
+                ps->setAllClearColours(Ogre::ColourValue::White);
+                ps->mStoreActionColour[0] = Ogre::StoreAction::Store;
+                ps->mStoreActionDepth = Ogre::StoreAction::DontCare;
+                ps->mReadOnlyDepth = true;
+                ps->mReadOnlyStencil = true;
+                ps->mCameraCubemapReorient = true;
+                ps->mShadowMapIdx = 3u + i;
+                ps->mFirstRQ = 0u;
+                ps->mLastRQ = 255u;
+                ps->mIncludeOverlays = false;
+                ps->mVisibilityMask = paneMask;
+                ps->mProfilingId = "Jahshaka shadow transmittance";
+            }
         }
         Ogre::CompositorTargetDef *target = def->addTargetPass(atlasName);
         target->setShadowMapSupportedLightTypes(pointMask);
@@ -456,6 +661,52 @@ void OgreEngine::buildShadowNode(const char *name, unsigned baseResolution, unsi
         quad->mMaterialName = "Ogre/DPSM/CubeToDpsm";
         quad->addQuadTextureSource(0, cubeName);
         quad->mShadowMapIdx = 3u + i;
+        if (panes) {
+            // ...and the faces' transmittance into the layer's rectangle (the colour copy: no depth written)
+            Ogre::CompositorTargetDef *tt = def->addTargetPass(transRtv);
+            tt->setShadowMapSupportedLightTypes(pointMask);
+            tt->setNumPasses(1u);
+            Ogre::CompositorPassQuadDef *tq = static_cast<Ogre::CompositorPassQuadDef *>(tt->addPass(Ogre::PASS_QUAD));
+            tq->mMaterialIsHlms = false;
+            tq->mMaterialName = "Ogre/DPSM/CubeToDpsmColour";
+            tq->addQuadTextureSource(0, cubeTName);
+            tq->mShadowMapIdx = 3u + i;
+            tq->setAllLoadActions(Ogre::LoadAction::Load);
+            tq->mStoreActionColour[0] = Ogre::StoreAction::Store;
+            tq->mStoreActionDepth = Ogre::StoreAction::Store;
+            setRect(tq, 3u + i);
+            // ...and its rectangle of atlasTD the NEAR depth: every receiver past it (the head's named limit)
+            Ogre::CompositorTargetDef *td = def->addTargetPass(transDepth);
+            td->setShadowMapSupportedLightTypes(pointMask);
+            td->setNumPasses(1u);
+            Ogre::CompositorPassQuadDef *nq = static_cast<Ogre::CompositorPassQuadDef *>(td->addPass(Ogre::PASS_QUAD));
+            nq->mMaterialIsHlms = false;
+            nq->mMaterialName = transmitNearMaterial;
+            nq->mShadowMapIdx = 3u + i;
+            nq->setAllLoadActions(Ogre::LoadAction::Load);
+            nq->mStoreActionDepth = Ogre::StoreAction::Store;
+            setRect(nq, 3u + i);
+        }
+    }
+    // (d) THE LAYER AND ITS DEPTH READY TO BE READ (the fix round's F1): Ogre's own `expose` (mExposedTextures - a
+    //     pass's texture dependencies, moved to the texture layout by CompositorPass::analyzeBarriers) on a 1 x 1 quad at
+    //     the node's end, every frame, so every colour pass that samples them (JahShadowTransmit_piece_ps.any, the fog's
+    //     march) finds them there whatever the node's last pass into them was (app.engine_selftest_validation:
+    //     VUID-vkCmdDrawIndexed-imageLayout-00344 on jahShadowTransmitDepth). A QUAD, because no drawless pass can carry
+    //     it here: every pass after the node's last writes into them is gated on its own map (skipped with its barriers
+    //     when the map holds no light), and a clear pass does not run the base barrier analysis
+    //     (CompositorPassClear::analyzeBarriers, OgreCompositorPassClear.cpp:138, the base call commented out).
+    if (panes) {
+        Ogre::CompositorTargetDef *target = def->addTargetPass(transRelease);
+        target->setNumPasses(1u);
+        Ogre::CompositorPassQuadDef *quad = static_cast<Ogre::CompositorPassQuadDef *>(target->addPass(Ogre::PASS_QUAD));
+        quad->mMaterialIsHlms = false;
+        quad->mMaterialName = "Jahshaka/ShadowTransmitRelease";
+        quad->mExposedTextures.push_back(Ogre::IdString(transName));
+        quad->mExposedTextures.push_back(Ogre::IdString(transDepth));
+        quad->setAllLoadActions(Ogre::LoadAction::DontCare);
+        quad->mStoreActionColour[0] = Ogre::StoreAction::DontCare;
+        quad->mProfilingId = "Jahshaka shadow transmittance release";
     }
 }
 
@@ -517,11 +768,12 @@ void OgreEngine::setShadowResolution(unsigned pixels) {
 ///
 /// Returns false when nothing was done (values unchanged, or no Hlms yet — in
 /// which case the first createShadowNode() will pick the new values up).
-bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool clears) {
+bool OgreEngine::rebuildShadowAtlas(unsigned resolution, unsigned focusedMaps, bool clears, bool force) {
     if (mHeadless) return false;   // no pixels, no atlases (the siblings gate the same way)
     const unsigned res = std::min(8192u, std::max(256u, resolution));
     const unsigned maps = std::min(kMaxShadowMaps, std::max(2u, focusedMaps));
-    if (res == mShadowResolution && maps == mShadowMapCount && clears == mShadowPerMapClears &&
+    // (`force`: the definitions change with the same values - the transmittance layer's flip, applyShadowCache)
+    if (!force && res == mShadowResolution && maps == mShadowMapCount && clears == mShadowPerMapClears &&
         mHlmsRegistered)
         return false;
     mShadowResolution = res;
@@ -602,6 +854,21 @@ unsigned OgreEngine::effectiveShadowMapBudget() const {
     return std::max(2u, std::min(std::min(mShadowMapBudget, cap), kMaxShadowMaps));
 }
 
+Ogre::TextureGpu *shadowTransmitLayer(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    static const Ogre::IdString kAtlasT("atlasT");
+    for (const auto &td : node->getDefinition()->getLocalTextureDefinitions())
+        if (td.getName() == kAtlasT) return node->getDefinedTexture(kAtlasT);
+    return nullptr;
+}
+Ogre::TextureGpu *shadowTransmitDepthLayer(const Ogre::CompositorShadowNode *node) {
+    if (!node) return nullptr;
+    static const Ogre::IdString kAtlasTD("atlasTD");
+    for (const auto &td : node->getDefinition()->getLocalTextureDefinitions())
+        if (td.getName() == kAtlasTD) return node->getDefinedTexture(kAtlasTD);
+    return nullptr;
+}
+
 namespace {
 /// {2, 4, 8, 16}: the step allocation. Head-room is free in shader terms (Ogre
 /// keys its permutations on ACTIVE casters, OgreHlms.cpp:3268-3300), and each
@@ -637,7 +904,7 @@ unsigned OgreEngine::shadowMapDemand(unsigned *castersOut) {
         mWarnedShadowCasters = casters;
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka shadows: " + Ogre::StringConverter::toString(casters) +
-            " shadow-casting point/spot lights but only " +
+            " focused-map shadow casters (point/spot lights, directionals after the sun) but only " +
             Ogre::StringConverter::toString(budget) +
             " shadow maps are budgeted; the farthest lights render no shadow. "
             "Raise the Shadow Map Budget or turn off Cast Shadows on distant lights.");
@@ -879,8 +1146,9 @@ ShadowStatus OgreEngine::shadowStatus() const {
 // planar mirror reuse its lamp maps at rest. Marking is lazy by construction:
 // a probe that does not capture this frame keeps the dirty flag until it does.
 //
-// THE SLOT RULE (planCachedSlots). Every point before every spot (HlmsPbs's
-// type order); a lamp keeps the slot it has whenever that order allows, so an
+// THE SLOT RULE (planCachedSlots). The second directionals' slots first (left
+// free: Ogre fills them, a directional's map is not cached), then every point
+// before every spot (HlmsPbs's type order); a lamp keeps the slot it has whenever that order allows, so an
 // added or hidden lamp re-renders nothing but itself; otherwise the canonical
 // layout, start-aligned (points by id, then spots by id).
 //
@@ -1028,7 +1296,9 @@ std::vector<hud::AtlasTileDesc> OgreEngine::collectAtlasTiles() const {
             if (lightIdx < lights.size() && lights[lightIdx].light) {
                 const Ogre::Light *l = lights[lightIdx].light;
                 switch (l->getType()) {
-                case Ogre::Light::LT_DIRECTIONAL: label += " sun s" + std::to_string(td->split); break;
+                case Ogre::Light::LT_DIRECTIONAL:
+                    label += lightIdx == 0u ? " sun s" + std::to_string(td->split) : std::string(" directional");
+                    break;
                 case Ogre::Light::LT_POINT:       label += " point"; break;
                 case Ogre::Light::LT_SPOTLIGHT:   label += " spot"; break;
                 default:                          label += " ?"; break;
@@ -1184,6 +1454,34 @@ void OgreEngine::applyShadowCache() {
             }
         }
 
+        // THE TRANSMITTANCE LAYER'S FLIP (PHOTON-7 10-4 R8), the clear strategy's shape exactly: ONE WAY, debounced on
+        // presented frames, once a drawn scene with a shadow-node instance holds a pane (OgreScene::hasPanes) - the
+        // shadow nodes gain atlasT and its passes in one rebuild of every shadow-node workspace. A process that never
+        // drew glass never builds them (no memory, no pass); a scene's last pane leaves them (a two-way switch would
+        // turn a toggled pane into a rebuild per toggle - the clear flip's reason).
+        if (!mShadowPanes) {
+            std::vector<OgreScene *> &scenes = mShadowSceneScratch;
+            scenes.clear();
+            scenesFeedingEnabledViews(scenes);
+            bool want = false;
+            for (OgreScene *s : scenes) {
+                if (!s->hasPanes()) continue;
+                for (auto &v : mViews)
+                    if (v->ogreScene() == s && v->shadowNodeInstance() && v->framesPresented() > 0u) want = true;
+                if (want) break;
+            }
+            if (!want) {
+                mShadowPaneFlipFrames = 0;
+            } else if (++mShadowPaneFlipFrames >= kShadowClearFlipDebounceFrames) {
+                mShadowPaneFlipFrames = 0;
+                mShadowPanes = true;
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Jahshaka shadows: the shadow nodes carry the transmittance layer from now on (a pane is drawn); "
+                    "one rebuild of every shadow-node workspace");
+                rebuildShadowAtlas(mShadowResolution, mShadowMapCount, mShadowPerMapClears, true);
+            }
+        }
+
         // THE SUBSCRIPTION ENDED (U3 stage 3; P8's expiry): the per-pass callbacks come off the render path and the
         // readings go to 0 — the counters run for exactly the subscribed span.
         if (!shadowLeased()) {
@@ -1249,7 +1547,12 @@ namespace {
 /// map alone in the common case, and hiding one re-fixes nothing.
 // (`plan` and `placed` are the caller's scratch — this runs per instance per
 // frame for ever, so neither is built here; clean-2 lane, 2026-09-13.)
-void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
+// THE LAMPS' SLOTS START AFTER THE SECOND DIRECTIONALS (PHOTON-7 10-4 R8):
+// HlmsPbs reads directionals before points before spots, and Ogre hands a
+// casting directional the first FREE slot that accepts one, so the first `dirs`
+// focused slots are left free for them: plan[j] is focused slot dirs + j, and
+// `maps` counts the lamps' slots only.
+void planCachedSlots(const Ogre::LightClosestArray &held, size_t dirs, size_t maps,
                      const std::vector<Ogre::Light *> &want, size_t fixed,
                      std::vector<Ogre::Light *> &plan, std::vector<char> &placed) {
     plan.assign(maps, nullptr);
@@ -1258,7 +1561,7 @@ void planCachedSlots(const Ogre::LightClosestArray &held, size_t maps,
     // 1. Keep every lamp that is still wanted where it is.
     placed.assign(want.size(), 0);
     for (size_t j = 0; j < maps; ++j) {
-        const Ogre::LightClosest &e = held[j + 1u];
+        const Ogre::LightClosest &e = held[dirs + j + 1u];
         if (!e.isStatic || !e.light) continue;
         const auto it = std::find(want.begin(), want.end(), e.light);
         if (it == want.end()) continue;
@@ -1454,11 +1757,15 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
             if (instances.empty()) continue;
             OgreScene::ShadowCacheFrame &f = mShadowFrameScratch;
             s->collectShadowCacheFrame(f);
+            const unsigned secondaryDirs = s->countSecondaryShadowDirectionals();
             for (const ShadowInstance &in : instances) {
                 const unsigned k = unsigned(in.kind);
                 const Ogre::LightClosestArray &held = in.node->getShadowCastingLights();
                 if (held.size() < 2u) continue;                  // a PSSM-only node
-                const size_t maps = held.size() - 1u;            // light slots 1..maps
+                const size_t slots = held.size() - 1u;           // light slots 1..slots
+                // the first `dirs` of them are the second directionals' (planCachedSlots' note)
+                const size_t dirs = std::min<size_t>(secondaryDirs, slots);
+                const size_t maps = slots - dirs;                // the lamps' slots
                 std::vector<Ogre::Light *> &want = mShadowWantScratch;
                 want.clear();
                 want.reserve(f.lights.size());
@@ -1505,7 +1812,7 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                 // dynamic entry is free — the next update refills the dynamic
                 // slots from lamps the cache does not hold.
                 if (cache)
-                    for (size_t j = 0; j < maps; ++j) {
+                    for (size_t j = 0; j < slots; ++j) {
                         const Ogre::LightClosest &e = held[j + 1u];
                         if (e.light && !e.isStatic &&
                             std::find(want.begin(), want.end(), e.light) != want.end()) {
@@ -1514,11 +1821,11 @@ void OgreEngine::applyShadowCacheDirties(const std::vector<OgreScene *> &drawn) 
                         }
                     }
                 std::vector<Ogre::Light *> &plan = mShadowPlanScratch;
-                planCachedSlots(held, maps, want, fixed, plan, mShadowPlacedScratch);
-                for (size_t j = 0; j < maps; ++j) {
+                planCachedSlots(held, dirs, maps, want, fixed, plan, mShadowPlacedScratch);
+                for (size_t j = 0; j < slots; ++j) {
                     const size_t slot = j + 1u;
                     const size_t mapIdx = slot + 2u;             // 3 PSSM maps first
-                    Ogre::Light *w = plan[j];
+                    Ogre::Light *w = j < dirs ? nullptr : plan[j - dirs];   // a directional's slot: Ogre's to fill
                     Ogre::Light *have = held[slot].isStatic ? held[slot].light : nullptr;
                     if (w != have) {
                         // A NEW assignment (or a release). setLightFixedToShadowMap

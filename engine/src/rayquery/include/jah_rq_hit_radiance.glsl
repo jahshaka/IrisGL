@@ -102,9 +102,11 @@ float jahMoverSkyVisibility( vec3 hitP, vec3 n )
 		rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), 0x02u,
 							   jahRayOrigin( hitP, n, jahHitSurf.valid ? jahHitSurf.t : 0.0, 0.0 ), 0.0, d,
 							   JAH_MOVER_SKY_LENGTH );
-		JAH_RQ_PROCEED( q )
+		// THROUGH THE PANES (PHOTON-7 10-4 R8): a mover pane passes its transmittance of the sky
+		float T = 1.0;
+		JAH_RQ_PROCEED_TRANSMIT( q, T )
 		if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
-			open += 0.25;
+			open += 0.25 * T;
 	}
 	return open;
 }

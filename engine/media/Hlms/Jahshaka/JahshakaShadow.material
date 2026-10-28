@@ -131,3 +131,177 @@ material Jahshaka/DepthSeedRev
 		}
 	}
 }
+
+// THE TRANSMITTANCE LAYER's PER-MAP CLEAR (PHOTON-7 10-4 R8): atlasT's map rectangle to 1, colour only - the depth atlas
+// is bound read-only beside it (OgreShadow.cpp's atlasTRtv).
+fragment_program Jahshaka/ShadowTransmitClear_ps_GLSL glsl
+{
+	source JahShadowTransmitClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitClear_ps_VK glslvk
+{
+	source JahShadowTransmitClear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitClear_ps unified
+{
+	delegate Jahshaka/ShadowTransmitClear_ps_GLSL
+	delegate Jahshaka/ShadowTransmitClear_ps_VK
+}
+material Jahshaka/ShadowTransmitClear
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitClear_ps
+			{
+			}
+		}
+	}
+}
+
+// THE NEAREST PANE's DEPTH (PHOTON-7 10-4 fix round, the one read's F1; OgreShadow.cpp): the opaque depth copied into
+// atlasTD per map rectangle (the panes are then drawn into it depth-only), and a point light's rectangle set NEAR.
+fragment_program Jahshaka/ShadowDepthCopy_ps_GLSL glsl
+{
+	source JahShadowDepthCopy_ps.glsl
+}
+fragment_program Jahshaka/ShadowDepthCopy_ps_VK glslvk
+{
+	source JahShadowDepthCopy_ps.glsl
+}
+fragment_program Jahshaka/ShadowDepthCopy_ps unified
+{
+	delegate Jahshaka/ShadowDepthCopy_ps_GLSL
+	delegate Jahshaka/ShadowDepthCopy_ps_VK
+}
+material Jahshaka/ShadowDepthCopy
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowDepthCopy_ps
+			{
+			}
+
+			texture_unit
+			{
+				filtering none
+				tex_address_mode clamp
+			}
+		}
+	}
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps_GLSL glsl
+{
+	source JahShadowTransmitNear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps_VK glslvk
+{
+	source JahShadowTransmitNear_ps.glsl
+}
+fragment_program Jahshaka/ShadowTransmitNear_ps unified
+{
+	delegate Jahshaka/ShadowTransmitNear_ps_GLSL
+	delegate Jahshaka/ShadowTransmitNear_ps_VK
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps_GLSL glsl : Jahshaka/ShadowTransmitNear_ps_GLSL
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps_VK glslvk : Jahshaka/ShadowTransmitNear_ps_VK
+{
+	preprocessor_defines REVERSE_DEPTH=1
+}
+fragment_program Jahshaka/ShadowTransmitNearRev_ps unified
+{
+	delegate Jahshaka/ShadowTransmitNearRev_ps_GLSL
+	delegate Jahshaka/ShadowTransmitNearRev_ps_VK
+}
+material Jahshaka/ShadowTransmitNear
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitNear_ps
+			{
+			}
+		}
+	}
+}
+material Jahshaka/ShadowTransmitNearRev
+{
+	technique
+	{
+		pass
+		{
+			depth_check on
+			depth_write on
+			depth_func always_pass
+			cull_hardware none
+			colour_write off
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitNearRev_ps
+			{
+			}
+		}
+	}
+}
+
+// THE LAYER'S RELEASE (PHOTON-7 10-4 fix round, F1; OgreShadow.cpp (d)): the 1 x 1 quad that EXPOSES atlasT and atlasTD at
+// the shadow node's end, so Ogre moves both to the texture layout for the colour passes that read them; it writes 1 into
+// its own 1 x 1 target and reads nothing.
+material Jahshaka/ShadowTransmitRelease
+{
+	technique
+	{
+		pass
+		{
+			depth_check off
+			depth_write off
+			cull_hardware none
+
+			vertex_program_ref Ogre/Compositor/Quad_vs
+			{
+			}
+
+			fragment_program_ref Jahshaka/ShadowTransmitClear_ps
+			{
+			}
+		}
+	}
+}

@@ -89,10 +89,10 @@ struct GpuInstance {
     float    prevWorld[12] = {};
     float    boundsMin[4] = {};  ///< xyz world AABB min; [3] = mesh table index (bit-cast uint)
     float    boundsMax[4] = {};  ///< xyz world AABB max; [3] = the flags word (bit-cast uint)
-    /// x = the engine NodeId, y = THE MATERIAL WORD, z = light mask, w = SPARE (0): it
-    /// held the ray level a per-view 2x distance band chose for the near copy until
-    /// PHOTON-7 stage 6 - ONE RAY LEVEL PER MESH, level 0 (the near copy traces the
-    /// authored triangles: exact contacts, camera-free), the far copy the coarsest.
+    /// x = the engine NodeId, y = THE MATERIAL WORD, z = light mask, w = THE PANE WORD (PHOTON-7 10-4 R7,
+    /// OgreScene::gpuPaneWordFor): 0 for a surface that occludes; for a blended one its transmittance and its own
+    /// light's share (kGpuPaneOn above) - rq_tlas_write.comp makes such an instance FORCE_NO_OPAQUE and puts the word
+    /// in its shader-binding-table offset, where every ray query's pane branch reads it.
     ///
     /// y = THE MATERIAL WORD (ATOM P4b): {pool : 16 | slot : 16} in the chain's ONE
     /// shared `PhotonVoxelMaterial` store — the bucket whose const buffer holds this item's
@@ -250,6 +250,11 @@ enum GpuInstanceFlag : uint32_t {
     /// cut writes its command into the two-sided range (JahCullCut_cs picks the bit by the request's pass).
     kGpuCasterTwoSided = 1u << 14,
 };
+/// THE PANE WORD's fields (GpuInstance::ids.w, PHOTON-7 10-4 R7): the 24 bits the TLAS instance carries in its
+/// shader-binding-table offset, so every ray query reads them from the candidate (jah_rq_alpha.glsl, the pane branch).
+constexpr uint32_t kGpuPaneOn = 1u << 23;
+constexpr uint32_t kGpuPaneTwoSided = 1u << 22;
+constexpr uint32_t kGpuPaneSteps = 2047u;
 /// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
 /// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,
 /// test_reflect_uncover --metal-measure; spikes/reflect-fix-1/round2/metal-measure.log):

@@ -13,6 +13,7 @@
 
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsAsyncCompiler.h>
+#include <OgreGpuProgram.h>
 #include "AtomPass.h"
 #include "HlmsAtom.h"
 
@@ -3540,6 +3541,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.compiledInForeground = foreground;
     if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
         out.paramsMisfits = hc->getJahParamsMisfits();
+    out.compileErrors = Ogre::GpuProgram::getJahCompileErrors();
     return out;
 }
 
@@ -4058,6 +4060,10 @@ void OgreEngine::teardown() {
     // The pass listener's samplerblock references go back to the manager that
     // gave them (PHOTON-ENV-1 audit F10) — it dies with Root.
     try { FogHlmsListener::releaseSamplers(); } catch (...) {}
+    try {
+        if (mRoot && mRoot->getRenderSystem())
+            FogHlmsListener::releaseShadowTransmitNone(mRoot->getRenderSystem()->getTextureGpuManager());
+    } catch (...) {}
     // ...and the specular albedo table's buffer goes back to the VaoManager that made it (PHOTON-3).
     try { Ogre::PhotonSpecularAlbedo::releaseConstBuffer(); } catch (...) {}
     // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
@@ -4242,6 +4248,8 @@ void OgreEngine::ensureHlms() {
     // the scene's atmosphere component — OgreFog.cpp, Atmosphere.h). Unlit gets
     // no listener: gizmos, wires and billboards stay unfogged.
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
+    // ...and the shadows' transmittance layer's white stand-in it binds where a node has no layer (PHOTON-7 10-4 R8)
+    FogHlmsListener::createShadowTransmitNone(mRoot->getRenderSystem()->getTextureGpuManager());
     // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3): the one immutable constant buffer every
     // colour pass's environment term (bound by that listener) and the Photon jobs read, made
     // HERE - an immutable upload is a copy on the device queue, never one inside a pass.
@@ -4639,6 +4647,7 @@ ValidationStatus OgreEngine::validation() const {
 }  // namespace detail
 
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
+unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }
 
 std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &error) {
     if (isAlive()) {

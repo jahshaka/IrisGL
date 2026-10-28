@@ -1913,6 +1913,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     const bool floatScene = desc.hdr || desc.hdrReadback || desc.displayEncode;
     {
         auto *td = addTex(n, kRt0, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        // (THE BLENDED PASSES' ESCAPES, PHOTON-7 10-4 R4: the ray tier's add writes the blended pass's target)
+        if (chainGlassEscape(desc.rayReflect, desc.probeGather, floatScene)) td->textureFlags |= Ogre::TextureFlags::Uav;
         td->depthBufferId = 1u;                      // the scene needs depth
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
@@ -2042,7 +2044,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     if (desc.screenIntegrate) {
         for (const auto &t : { std::make_pair(kScreenGiIrradiance, Ogre::PFG_RGBA16_FLOAT),
                                std::make_pair(kScreenGiSpecular, Ogre::PFG_RGBA16_FLOAT),
-                               std::make_pair(kScreenGiConeHit, Ogre::PFG_R16_FLOAT) }) {
+                               std::make_pair(kScreenGiConeHit, Ogre::PFG_R16_FLOAT),
+                               std::make_pair(kScreenGiSkyVis, Ogre::PFG_R8_UNORM) }) {
             auto *td = addTex(n, t.first, t.second);
             td->textureFlags = Ogre::TextureFlags::Uav | Ogre::TextureFlags::RenderToTexture;
         }
@@ -2291,6 +2294,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         {
             auto *td = addTex(n, kRefractOut,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+            // (THE BLENDED PASSES' ESCAPES, PHOTON-7 10-4 R4: the ray tier's add writes the refractives' target)
+            if (chainGlassEscape(desc.rayReflect, desc.probeGather, floatScene))
+                td->textureFlags |= Ogre::TextureFlags::Uav;
         }
         {
             Ogre::RenderTargetViewDef *rtv = n->addRenderTextureView(kRefractRtv);
@@ -2573,7 +2579,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // while the integrate's permutation builds in the background writes nothing, and the opaque passes read its
             // targets as they are - no indirect light for those frames, never undefined VRAM (a NaN there poisons the
             // exposure meter, trap 5)
-            for (const char *seed : { kScreenGiIrradiance, kScreenGiSpecular, kScreenGiConeHit }) {
+            for (const char *seed : { kScreenGiIrradiance, kScreenGiSpecular, kScreenGiConeHit, kScreenGiSkyVis }) {
                 Ogre::CompositorTargetDef *st = n->addTargetPass(seed);
                 st->setNumPasses(1);
                 auto *c = static_cast<Ogre::CompositorPassClearDef *>(st->addPass(Ogre::PASS_CLEAR));
@@ -2593,6 +2599,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             c->addUavSource(0, kScreenGiIrradiance, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(1, kScreenGiSpecular, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
             c->addUavSource(2, kScreenGiConeHit, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);
+            c->addUavSource(3, kScreenGiSkyVis, Ogre::ResourceAccess::Write, 0, 0, Ogre::PFG_UNKNOWN, false);   // (4: the parameters)
             // ...AND THE ROUTE'S AREA LIGHT VISIBILITY (7-6; OgreAreaVis.cpp): the trace and the resolve, their jobs
             // bound whole by the listener (the images its own, made only while an LTC light is in the forward set)
             Ogre::CompositorTargetDef *at = n->addTargetPass("");
@@ -2618,6 +2625,11 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // opaque surfaces only), so the blended queues leave the opaque pass for their OWN pass right after it,
         // "Jahshaka blended", which reads the world caches as the refractives pass does (the field's irradiance and
         // the cone, Lumen's translucency reading its own volume) - the spec's "blended and refractive fragments" rule.
+        // L4's ONE EXCEPTION (PHOTON-7 10-4 R9, the lead's ruling 2026-10-27): L4's reason is the LIGHT - the opaque
+        // pixel never reads the chain's radiance, so the picture stays the screen products' - and a lamp's visibility
+        // reads the chain's GEOMETRY alone. In a scene that does not trace, the opaque pass and the screen decode bind
+        // the chain's coverage and surface position per half (`jah_lamp_chain`: PhotonPassBinding::lampChainOf; never
+        // a lighting volume) and see each Forward+ lamp through the voxels' own shadow march (jah_inject_visibility.glsl).
         const bool screenGi = desc.screenGi();
         // THE SCREEN DECODE PASS (ATOM-DECODE-CLASS-1) in front: it classifies unless
         // the prepass's decode pass already did this frame.
@@ -2717,6 +2729,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             b->mLastRQ = sceneLastRq;
             b->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             b->mProfilingId = "Jahshaka blended";
+            b->mIdentifier = kBlendedPassIdentifier;   // (its fog's sky visibility is registered for it: PHOTON-7 10-4 R11)
         }
     }
 
@@ -2774,6 +2787,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mLastRQ  = kOverlayRenderQueue;
             p->mIncludeOverlays = false;   // see kIncludeOverlaysNote
             p->mProfilingId = "Jahshaka refractives";
+            p->mIdentifier = kRefractivesPassIdentifier;   // (its escape list: PHOTON-7 10-4 R4)
         }
         sceneResult = kRefractOut;
     }

@@ -39,7 +39,7 @@ struct GpuInstance
 	vec4 prevWorld[3];
 	vec4 boundsMin;		// w = the mesh table index (bit-cast)
 	vec4 boundsMax;		// w = the flags word (bit-cast)
-	uvec4 ids;			// w = spare
+	uvec4 ids;			// w = the pane word (GpuScene.h)
 	uvec4 raster;
 };
 
@@ -86,15 +86,20 @@ layout( std430, set = 0, binding = 2 ) writeonly buffer Out { AsInstance outInst
 // jah_rq_alpha.glsl tests against the material's mask.
 #define INSTANCE_FORCE_NO_OPAQUE	8u
 
+// ...and for a PANE (PHOTON-7 10-4 R7: GpuInstance ids.w, OgreScene::gpuPaneWordFor) the same bit: a ray CROSSES it,
+// attenuated by its transmittance, and the 24-bit pane word rides in the instance's shader-binding-table offset (no
+// pipeline reads one: the ray queries' pane branch does, jah_rq_alpha.glsl)
 void writeInstance( uint at, uint slot, uint mask, uvec2 address )
 {
+	const uint pane = instances[slot].ids.w & 0xFFFFFFu;
 	const uint iflags = INSTANCE_FLAGS |
-		( ( floatBitsToUint( instances[slot].boundsMax.w ) & words[HDR_FLAG_ALPHA] ) != 0u ? INSTANCE_FORCE_NO_OPAQUE : 0u );
+		( ( floatBitsToUint( instances[slot].boundsMax.w ) & words[HDR_FLAG_ALPHA] ) != 0u || pane != 0u
+			  ? INSTANCE_FORCE_NO_OPAQUE : 0u );
 	AsInstance o;
 	o.transform[0] = instances[slot].world[0];
 	o.transform[1] = instances[slot].world[1];
 	o.transform[2] = instances[slot].world[2];
-	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ), iflags << 24u, address.x,
+	o.tail = uvec4( ( slot & 0xFFFFFFu ) | ( ( mask & 0xFFu ) << 24u ), pane | ( iflags << 24u ), address.x,
 					address.y );
 	outInstances[at] = o;
 }

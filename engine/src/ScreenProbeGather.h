@@ -167,6 +167,9 @@ public:
     /// the flat stand-in as a one-layer 2D array (the texture pool's binding when none).
     virtual VkSampler gatherWrapSampler() const = 0;
     virtual VkImageView gatherDummyFlatArray() const = 0;
+    /// ...and an UNSIGNED 2D stand-in, for a usampler (the cards' SunVis layer, RGBA32_UINT: the one read's F3); valid
+    /// after gatherDummies.
+    virtual VkImageView gatherDummyUint() const = 0;
 };
 
 /// EVERYTHING ONE FRAME OF ONE VIEW NEEDS, gathered by the tier from the scene
@@ -271,6 +274,9 @@ struct HitSetSources {
     float cloudSun[4] = {};
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): a cut-out's candidates; 0 = none.
     uint64_t alphaTable = 0u;
+    /// THE TIER'S COUNTERS' device address (jah_rq_alpha.glsl's JahTierCounters: [0] the reading rays' pane-list
+    /// overflows - the one read's F4); 0 = none.
+    uint64_t tierCounters = 0u;
     /// MOVER-OCCLUSION-1: a ray-traced mover exists (the hit's mover gate runs where a job asks for it).
     bool movers = false;
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
@@ -291,7 +297,7 @@ struct HitSetParams {
     float hitSun[4] = {};      ///< toward the sun, a sun
     float hitSun2[4] = {};     ///< the hit's sun-ray mask, 0, its length, a far copy's lift
     float tables[4] = {};      ///< the alpha table's address, the hit table's (float bits)
-    float surface[4] = {};     ///< the texture pool bound, the cloud field bound
+    float surface[4] = {};     ///< the texture pool bound, the cloud field bound, the tier's counters' address (zw bits)
     float cloudMap[4] = {};
     float cloudSun[4] = {};
     float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule (w: HitReader's code)
@@ -511,6 +517,9 @@ public:
     /// frame already produced — re-registered, nothing recorded, no history stepped.
     /// False when the view recorded nothing this frame.
     bool rebindThisFrame(const void *key);
+    /// THE SKY VISIBILITY the blended pass reads (PHOTON-7 10-4 R11): the view's, once the integrate has written it
+    /// (null before, or with no view under `key`).
+    Ogre::TextureGpu *skyVisOf(const void *key) const;
     /// A FRAME THE VIEW'S GATHER DECLINED (PHOTON-7 stage 7's read, F3: no TLAS, a missing prepass texture, the
     /// pipelines failed): the LAST irradiance and rough specular it produced are registered for the pass - the
     /// target's size and layers, nothing recorded, no history stepped. False when it has none of that shape or
@@ -686,6 +695,8 @@ private:
         Ogre::TextureGpu *irradiance = nullptr;
         /// THE ROUGH SPECULAR (7-3), `jahRoughSpec`: an Ogre texture for the same reason as the irradiance.
         Ogre::TextureGpu *roughSpec = nullptr;
+        /// THE SKY VISIBILITY (PHOTON-7 10-4 R11), `jahSkyVis`: R8, the integrate's (rq_probe_integrate.comp binding 18).
+        Ogre::TextureGpu *skyVis = nullptr;
         /// The prefiltered image's layers as made: the levels, and one more under the quadrature door (the filtered
         /// map itself).
         unsigned prefilteredLayers = 0u;
