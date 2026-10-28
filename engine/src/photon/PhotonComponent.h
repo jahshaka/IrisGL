@@ -1316,6 +1316,11 @@ private:
     /// then each cascade's direct term re-marched over what they changed - its own cells and every voxel whose march
     /// reads them - as one delta injection where the latch allows.
     void serviceRegions();
+public:
+    /// THE FRAME'S LATE GI WORK (stage 8A): after the GPU scene's commit of this frame, before the region list closes
+    /// (OgreEngine): the region rebuilds, the light changes and the feedback, the drag's photographs.
+    void recordLate();
+private:
     /// Cascade `idx`'s cells [lo, hi) of each box (at most eight, 4-aligned) cleared and voxelised from the table, the
     /// mip chains regenerated.
     void voxeliseRegion(size_t idx, const std::vector<std::array<int, 6>> &cells);
@@ -1456,10 +1461,12 @@ private:
     bool mFbEpisodeStill = false;
     /// The injection in progress is a mover's region re-march (its activation is the movers').
     bool mInjectingMover = false;
-    /// THE MOVERS' REGION LIST (stage 8A): the frame's voxel movers' swept boxes (listMover with `voxel`), closed with
-    /// the region list - what the next frame's serviceRegions re-voxelises - and the close it was last taken from.
-    std::vector<Ogre::Aabb> mMoverVoxelOpen, mMoverVoxelClosed;
-    unsigned long long mMoverVoxelClosedFrame = 0, mMoverVoxelTaken = 0;
+    /// THE MOVERS' REGION LIST (stage 8A): the frame's voxel movers' swept boxes (listMover with `voxel`), what the
+    /// frame's late GI work re-voxelises (recordLate: after the GPU scene's commit).
+    std::vector<Ogre::Aabb> mMoverVoxelOpen;
+    /// THE LATE WORK OWED (stage 8A, ruling (a)): the GI step ran this frame (recordCascades) and its region rebuilds,
+    /// light changes and feedback wait for the frame's table (recordLate); whether the step spent its general slot.
+    bool mLateOwed = false, mLateSpent = false;
     unsigned long long mGiFeedbackRests = 0;
     unsigned long long mInnerMarchesSkipped = 0;
     /// ...and those an inner cascade latched in its outer's commit frame OWES to the relight path (stage 4's read R1).

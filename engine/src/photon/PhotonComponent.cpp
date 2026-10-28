@@ -512,10 +512,8 @@ void PhotonComponent::closeRegions() {
     }
     ++mRegionCloses;
     if (!c.regions.empty() || c.overflow || c.restart) ++mRegionClosesListing;
-    // ...AND THE MOVERS' REGION LIST closes with it (stage 8A: the next writer point's region rebuilds).
-    mMoverVoxelClosed.swap(mMoverVoxelOpen);
-    mMoverVoxelOpen.clear();
-    mMoverVoxelClosedFrame = frame;
+    // (THE MOVERS' REGION LIST is the late GI work's, spent in its frame: PhotonComponent::recordLate - a frame with no GI
+    // step keeps it for the next.)
     // ...AND THE NEXT FRAME'S LIST STARTS EMPTY.
     mRegionsOpen.clear();
     mRegionOverflowOpen = 0u;

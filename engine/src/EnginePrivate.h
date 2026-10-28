@@ -4682,6 +4682,8 @@ public:
     /// THE CHANGED-REGION LIST'S CLOSE (PHOTON-7 stage 3): once a frame per drawn scene, before the frame's submit
     /// (renderOneFrame) - every producer of the frame has appended by then.
     void closeGiRegions() { mPhoton.closeRegions(); }
+    /// THE FRAME'S LATE GI WORK (PHOTON-7 stage 8A): after the GPU scene's commit, before the list closes.
+    void runLateGi() { mPhoton.recordLate(); }
     /// ...and the ray tier's producer (OgreEngine::listRayMovers, after the GPU scene's commit and the skin pass): one
     /// moved or posed slot's swept box, and whether it casts shadows.
     /// (`flags`: the slot's GpuInstanceFlag word - a kGpuMover slot that is GI-visible, or hidden, is a VOXEL mover:

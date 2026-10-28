@@ -1586,6 +1586,12 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 // frame has appended - the drain's lamps, the GI step's slabs and edits, the cards' plan, the GPU scene's
                 // commit and the skin pass (applyShadowCacheDirties, above) - and nothing has been submitted. A scene
                 // this frame did not draw keeps its list open for the frame that draws it.
+                // THE FRAME'S LATE GI WORK (PHOTON-7 stage 8A, the lead's ruling (a)): the region rebuilds, the light changes and
+                // the feedback, after the GPU scene's commit of THIS frame (applyShadowCacheDirties: the compose, the
+                // commit, the skin pass, the movers listed) - the store holds this frame's geometry - and the sky's capture,
+                // before the list closes (their Edits and slabs are this frame's). A scene whose GI step did not run this
+                // frame owes none.
+                for (OgreScene *s : updated) s->runLateGi();
                 for (OgreScene *s : updated) s->closeGiRegions();
                 // THE RECORD/SWAP SPLIT. One call does both; the frame listener
                 // marks the instant between them (see FrameSplitListener).

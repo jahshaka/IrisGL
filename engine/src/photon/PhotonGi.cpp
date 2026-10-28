@@ -5749,16 +5749,16 @@ static const char *const kRegionRowNames[8] = { "vct.region0", "vct.region1", "v
 void PhotonComponent::serviceRegions() {
     if (mVctCascades.empty() || !mVctCascades[0].built) return;
     const unsigned long long frame = giWriterFrame();
-    // THE MOVERS OF THE LAST CLOSED LIST, ONCE: each swept box owed to every cascade it meets (served now: the table this
-    // writer point reads was committed after the list's frame), and remembered by a scroll in flight whose TARGET it
-    // meets (its chunks hold the poses of their frames: re-voxelised once more after its commit).
-    if (mMoverVoxelClosedFrame != mMoverVoxelTaken) {
-        mMoverVoxelTaken = mMoverVoxelClosedFrame;
-        for (const Ogre::Aabb &f : mMoverVoxelClosed) {
+    // THE MOVERS OF THIS FRAME (listed by the GPU scene's commit and the skin pass a moment ago: OgreEngine::listRayMovers),
+    // ONCE: each swept box owed to every cascade it meets (served now: the table this point reads is the one committed
+    // with them), and remembered by a scroll in flight whose TARGET it meets (its chunks hold the poses of their frames:
+    // re-voxelised once more after its commit).
+    if (!mMoverVoxelOpen.empty()) {
+        for (const Ogre::Aabb &f : mMoverVoxelOpen) {
             for (VctCascade &c : mVctCascades) {
                 if (!c.built) continue;
                 if (Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)).intersects(f))
-                    c.regionOwed.push_back(VctCascade::RegionOwed{ f, true, mMoverVoxelClosedFrame });
+                    c.regionOwed.push_back(VctCascade::RegionOwed{ f, true, frame });
                 if (c.scroll.active) {
                     const float cell = c.cell();
                     const Ogre::Vector3 tc(float(double(c.scroll.lattice[0]) * double(cell)),
@@ -5768,6 +5768,7 @@ void PhotonComponent::serviceRegions() {
                 }
             }
         }
+        mMoverVoxelOpen.clear();
     }
     if (!mVctPendingMaterialSlots.empty() || mVctMaterialRefreshOwed) return;
     const size_t n = mVctCascades.size();
@@ -5795,7 +5796,7 @@ void PhotonComponent::serviceRegions() {
         std::vector<VctCascade::RegionOwed> keep;
         std::vector<RegionActivation> changed;
         for (const VctCascade::RegionOwed &r : c.regionOwed) {
-            if (r.frame >= frame) { keep.push_back(r); continue; }   // (its table comes at the next writer point)
+            if (r.frame > frame) { keep.push_back(r); continue; }   // (a later frame's: none is - a guard)
             // (ONE CELL PAST THE BOX on every side: the voxeliser's triangle-box test is conservative, so a face on a cell
             // boundary is written into the cell beyond it too - measured: a bus's leading face at x = 5.0 left 1,776
             // texels of cascade 1 in the cells past it when the box stopped at the boundary)
@@ -6939,26 +6940,45 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
         mGiLitVolume = Ogre::Aabb(mVctCascades.back().centre,
                                   Ogre::Vector3(mVctCascades.back().halfSize));
 
-    // ---- 2'. THE REGION REBUILDS (PHOTON-7 stage 8A): every mover's and every edit's box, in every cascade it meets,
-    // after the slots' work (a cascade the slots injected this frame keeps its debt) and before the frame's light work.
-    serviceRegions();
-
     // ---- 3. THE READINGS THAT LANDED, BEFORE THIS FRAME'S LIGHT WORK --------------------------------------------
     harvestCommitCounts();
 
-    // ---- 4. THE FRAME'S LIGHT CHANGES AND THE FEEDBACK (PHOTON-7 stage 4) ------------------------------------------
-    // After the rebuilds and the commits (their injections are this frame's), so a lamp's delta never lights voxels a
-    // rebuild replaces and the feedback's pass sees every direct term the frame changed. (THE CHAIN'S SETTLE, the light
-    // tick and the drag's closing whole tick are deleted with the Jacobi restart they existed for: no cascade is ever
-    // off a fixed point the feedback does not converge - a rebuild's bricks resume, a commit's slab and band resume, a
-    // lamp's spheres resume.)
-    relightAndFeedback();
+    // ---- 4. THE REST IS THE FRAME'S LATE WORK (PHOTON-7 stage 8A, the lead's ruling (a)): the region rebuilds, the light
+    // changes and the feedback run after the GPU scene's commit of THIS frame (recordLate) - the store holds this
+    // frame's geometry.
+    mLateOwed = true;
+    mLateSpent = spent;
+}
 
+// THE FRAME'S LATE GI WORK (PHOTON-7 stage 8A, A2's ruling (a): physics - the store holds THIS frame's geometry). The GI
+// step (engine.plan) records the slots' work against the instance table the LAST frame committed; the frame's own
+// table - its transforms, its flags, the skin pass's poses - is committed after it (OgreEngine::applyShadowCacheDirties:
+// the compose, the commit, the ray tier, the movers listed), and THIS runs after that, before the region list closes
+// (OgreEngine, closeGiRegions): the region rebuilds (every mover listed this frame, every edit marked this frame - their
+// table is this one), then the frame's light changes and the feedback (after the rebuilds: a lamp's delta never lights
+// voxels a rebuild replaces, and the feedback's pass sees every direct term the frame changed), then the drag's
+// photographs. Only on a frame whose GI step ran (mLateOwed).
+void PhotonComponent::recordLate() {
+    if (!mLateOwed) return;
+    mLateOwed = false;
+    GiRegion region(RegionKind::Compute);
+    monitor::CacheScope lateRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.late", mRoot->getRenderSystem(), this);
+    lateRow.markAggregate();   // its dispatches no child row names file their own (photonDispatch)
+    {
+        monitor::PhaseScope phase("gi.regions", mRoot->getRenderSystem());
+        serviceRegions();
+    }
+    {
+        monitor::PhaseScope phase("gi.light", mRoot->getRenderSystem());
+        // (THE CHAIN'S SETTLE, the light tick and the drag's closing whole tick are deleted with the Jacobi restart they
+        // existed for: no cascade is ever off a fixed point the feedback does not converge - a rebuild's bricks resume, a
+        // commit's slab and band resume, a lamp's spheres resume.)
+        relightAndFeedback();
+    }
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once the re-voxelisations have drained and the
-    // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain that has
-    // been re-voxelised and whose light has converged; this is the first frame a capture can hold the room as it actually
-    // is. The sweep drains at the tier's own budget like every other staleness - a rate, not a hitch. One per gesture.
-    if (mDragSettleOwed && !spent) {
+    // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain whose light
+    // has converged; this is the first frame a capture can hold the room as it actually is. One per gesture.
+    if (mDragSettleOwed && !mLateSpent) {
         bool pending = feedbackOwed();
         for (size_t i = 0; i < mVctCascades.size() && !pending; ++i) pending = mVctCascades[i].pending != 0;
         if (!pending) {
@@ -6966,6 +6986,7 @@ void PhotonComponent::recordCascades(const FrameWork &w) {
             staleProbeGrid(GiStaleReason::Mobility);
         }
     }
+    if (!computeRegionDispatched() && !lateRow.submittedInside()) lateRow.cancel();
 }
 
 // THE FRAME'S LIGHT CHANGES, RELIT; THE FEEDBACK'S PASS (PHOTON-7 stage 4; SPECS/PHOTON_7_SPEC.md stage 4, L2, L3).
