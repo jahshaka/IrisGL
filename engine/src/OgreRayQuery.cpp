@@ -6603,6 +6603,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                    : (posedOn && rv.framesSincePoseMoved <= 2u) ? 3.0f
                    : rv.framesSinceMoverMoved <= 2u ? 2.0f
                                                     : 1.0f;
+    pp.alpha[1] = mArms ? float(mArms->value(ArmId::ReflectC2)) : 0.0f;   // MEASURING ARM (reverted)
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait

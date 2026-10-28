@@ -2149,6 +2149,7 @@ private:
     X(FieldEnterInline, "gi.fieldEnterInline") /* a scroll's entered planes integrated inline, 4 deep (the H3 arm) */ \
     X(GiFreeze, "gi.freeze") /* the GI frozen: no cache work, every history kept (M1's measuring arm); 2 = the world held, the reflections live */ \
     X(HitListCap, "rq.hitListCap") /* the hit list holds at most N records (0: its demand-sized capacity) - the overflow arm */ \
+    X(ReflectC2, "reflect.c2") /* MEASURING ARM (11-2 (3), reverted): 0 shipped, 1 always traced, 2 off */ \
     X(ReflectRestReference, "reflect.restReference") /* the reflection's 4,096-sample reference at rest, no stop, no filter (R1 (f)'s measuring arm) */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
     X(GatherOctRes, "gather.octRes") /* the probe map's resolution (rays = octRes^2; 0 = the tier's) */ \

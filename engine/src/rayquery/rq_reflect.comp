@@ -548,6 +548,7 @@ layout( set = 0, binding = 44 ) uniform sampler2D jahHitCloud;
 // C2's escape (jah_rq_hit_radiance.glsl jahHitSpecularLobeTraced): the sky this trace reads, at the secondary lobe's
 vec3 skyRadiance( vec3 dir, float lobeAlpha, bool centreRay );
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) skyRadiance( d, alpha, centre )
+#define JAH_HIT_LOBE_ALWAYS ( p.alpha.y > 0.5 && p.alpha.y < 1.5 )   // MEASURING ARM (reverted)
 #include "jah_rq_hit_radiance.glsl"
 #include "jah_rq_emitters.glsl"
 /// THE EMISSION OF THE HIT `jahHitSurf` describes (PHOTON-7 11-1b): the row's emissive and its map at the hit - the ONE
@@ -897,7 +898,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// ...per texel only under the mirror cut (PHOTON-2 1c, above).
 			jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
 						 ( centre ? 0u : frame * 2654435761u );
-			const bool c2 = p.denoiser.w < 0.5;   // (the flat-hits arm answers the hit by a constant: no lobe)
+			const bool c2 = p.denoiser.w < 0.5 && p.alpha.y < 1.5;   // (the flat-hits arm: no lobe) (MEASURING ARM)
 			// (the C2 draw's three uniforms: this sample's)
 			const uint c2h0 = jahReflectPcg( uint( seedPix.x ) * 2246822519u ^ uint( seedPix.y ) * 3266489917u ^
 											 ( frame + uint( p.denoiser.z ) ) * 668265263u ^ 0xC2C2C2C2u );

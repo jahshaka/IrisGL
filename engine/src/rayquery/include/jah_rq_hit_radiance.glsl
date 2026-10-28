@@ -178,6 +178,9 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #ifndef JAH_HIT_LOBE_SKY
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) vec3( 0.0 )
 #endif
+#ifndef JAH_HIT_LOBE_ALWAYS
+#define JAH_HIT_LOBE_ALWAYS false
+#endif
 #ifndef JAH_HIT_LOBE_MASK
 #define JAH_HIT_LOBE_MASK 0x0Fu   // (the near copies, kRayMaskNearField; a cache's gather passes its still mask)
 #endif
@@ -195,7 +198,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	const float wMax = max( w.x, max( w.y, w.z ) );
 	if( !( wMax > 0.0 ) )
 		return vec3( 0.0 );
-	const float pTrace = always ? 1.0 : clamp( wMax, 0.05, 1.0 );
+	const float pTrace = ( always || JAH_HIT_LOBE_ALWAYS ) ? 1.0 : clamp( wMax, 0.05, 1.0 );
 	if( cycle >= 0 && pTrace < 1.0 )
 	{
 		const float phi = float( jahAreaPcg( cycleKey ^ 0x2545F491u ) ) * 2.3283064e-10;
