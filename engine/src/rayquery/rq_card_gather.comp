@@ -230,7 +230,7 @@ void main()
 			// THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): the store leaves out its lobe's integral and one
 			// secondary ray of the hit's lobe answers it - a cache's FIXED draw (the texel and the ray keyed: a store
 			// takes no frame noise)
-			jahHitTracedLobe = p.knobs.z < 0.5;   // (MEASURING ARM cards.c2Off, reverted)
+			jahHitTracedLobe = true;
 			vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
 												 ok, source );
 			jahHitTracedLobe = false;
@@ -238,7 +238,7 @@ void main()
 				vec3 hAlbedo, hEmissive;
 				float hRough;
 				vec4 hMetal;
-				if( ok && finite3( radiance ) && p.knobs.z < 0.5 &&   // (MEASURING ARM cards.c2Off, reverted)
+				if( ok && finite3( radiance ) &&
 					jahHitMaterial( max( tHit * spread, 1e-4 ), hAlbedo, hEmissive, hRough, hMetal ) )
 				{
 					const uint h0 = jahAreaPcg( ( uint( at.x ) * 2246822519u ) ^ ( uint( at.y ) * 3266489917u ) ^
