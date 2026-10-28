@@ -1298,6 +1298,7 @@ constexpr ArmDef kArms[] = {
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
       "gi.reflect_mover --cost-posed. Was JAH_R7_NO_POSED (two per-frame reads)." },
+    { ArmId::ReflectC2Arm, 0.0, 0.0, 2.0, "MEASURING ARM (PHOTON-7 11-2, reverted): C2 secondary, 1 = emitters 0, 2 = sky 0." },
     { ArmId::ReflectAlphaTested, 1.0, 0.0, 1.0,
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "
