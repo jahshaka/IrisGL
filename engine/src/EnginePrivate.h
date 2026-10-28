@@ -2182,6 +2182,8 @@ private:
     X(ReflectFlatHits, "reflect.flatHits") /* every reflection ray's hit answered by a constant of its instance (the estimator and denoiser measured alone) */ \
     X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
+    X(ReflectPortalsOff, "reflect.portalsOff") /* MEASURING ARM (11-2 (6), reverted): 1 = no portal in the table (the price ABBA) */ \
+    X(ReflectC2Arm, "reflect.c2Arm") /* MEASURING ARM (11-2 (6), reverted): 3 = a C2 geometry hit brighter than 8 x the primary hit's answer reads 0 */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
