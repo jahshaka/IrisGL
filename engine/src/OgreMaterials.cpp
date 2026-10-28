@@ -733,7 +733,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         // it — which is also how gi.probe_gate proves the other half, that a
         // NON-crossing edit flushes nothing at all.
         const bool wasGated = db->hasZeroSpecularResponse();
-        const bool wasMetal = gpuIsMetal(db);
         // THE RAY TIER'S TRACED SET READS THE ALPHA TEST (PHOTON_SPEC §7 R1).
         // An alpha-tested datablock is kept OUT of the acceleration structure —
         // every BLAS is opaque and there is no any-hit shader, so a cut-out
@@ -753,13 +752,6 @@ bool OgreScene::setPbrMaterial(MaterialId id, const PbrParams &p) {
         const Ogre::CompareFunction wasAlphaTest = db->getAlphaTest();
         applyPbr(db, p, mRefractionsActive);
         if (wasGated != db->hasZeroSpecularResponse()) mPhoton.countProbeGateCrossing();
-        // THE METAL ANSWER FLIPPED (REFLECT-FIX-1): the edit is in place — no slot is
-        // marked and no epoch moves — so a still scene would keep tracing its wearers
-        // with the old kGpuMetal (a crate dragged to metalness 1 stayed black in a
-        // reflection until something moved). Mark them, refileItems' shape.
-        if (wasMetal != gpuIsMetal(db))
-            for (auto &kv : mNodes)
-                if (kv.second.materialRef == id && kv.second.item) markGpuSlotDirty(kv.second);
         if (wasAlphaTest != db->getAlphaTest()) noteShadowScanInput();
         // An alpha-mode change moves the item between render queues, and the
         // items already exist: re-file them or a material turned refractive

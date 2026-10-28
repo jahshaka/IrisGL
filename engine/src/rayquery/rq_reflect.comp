@@ -545,6 +545,9 @@ bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec
 // texture pool (binding 42) and the cloud layer's field (43).
 layout( set = 0, binding = 43 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 44 ) uniform sampler2D jahHitCloud;
+// C2's escape (jah_rq_hit_radiance.glsl jahHitSpecularLobeTraced): the sky this trace reads, at the secondary lobe's
+vec3 skyRadiance( vec3 dir, float lobeAlpha, bool centreRay );
+#define JAH_HIT_LOBE_SKY( d, alpha, centre ) skyRadiance( d, alpha, centre )
 #include "jah_rq_hit_radiance.glsl"
 #include "jah_rq_emitters.glsl"
 /// THE EMISSION OF THE HIT `jahHitSurf` describes (PHOTON-7 11-1b): the row's emissive and its map at the hit - the ONE
@@ -639,6 +642,7 @@ struct JahReflectSample
 	float hitT, sampleT, screenT, blendVouch;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
+	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -658,6 +662,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
 	o.recGain = 1.0;
+	o.recTraced = false;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -686,6 +691,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	float hitT = maxT * 2.0;
 	bool record = false;
 	bool recFar = false;
+	vec3 recLobe = vec3( 0.0 );   // a record's traced environment specular (C2), fogged by transmittance
+	bool recTraced = false;
 	bool slotHit = false;
 	uint recSlot = 0u, recPrim = 0u, recGeom = 0u;
 	vec2 recBary = vec2( 0.0 );
@@ -880,21 +887,55 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// texel's offset keyed on its seed pixel (11-2 (2))
 			jahHitAreaCycle = atRest ? int( frame - uint( p.knobs.z ) ) : -1;
 			jahHitAreaCycleKey = uint( seedPix.x ) * 2654435761u ^ uint( seedPix.y ) * 40503u;
-			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
-			// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
-			// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit
-			// is decoded (REFLECT-FIX-1): it shows the metal's own reflection (its specular
-			// lobe, the pass' second-bounce cone), which no cache holds.
-			const bool metalHit = jahHitIsMetal( recSlot );
-			const bool decodeAlways = jahHitAlwaysDecodes( recSlot ) || ( metalHit && sqrt( lobeAlpha ) < p.metal.x );
+			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct light at the hit
+			// (jahHitRadianceSourced), AND THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): one secondary ray of the
+			// hit's lobe in place of the store's integral of it - every material alike (the metal switch, a sharp
+			// reflector's metal hit sent to the decode from metalness 0.5, is deleted: a step on the alpha -> F0 continuum).
+			// Only a hit the caches cannot hold decodes: a mover, a rigged item.
+			const bool decodeAlways = jahHitAlwaysDecodes( recSlot );
 			// The mover gate's rotation: this pixel, this frame (hashed into the set's turn).
 			// ...per texel only under the mirror cut (PHOTON-2 1c, above).
 			jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
 						 ( centre ? 0u : frame * 2654435761u );
+			const bool c2 = p.denoiser.w < 0.5;   // (the flat-hits arm answers the hit by a constant: no lobe)
+			// (the C2 draw's three uniforms: this sample's)
+			const uint c2h0 = jahReflectPcg( uint( seedPix.x ) * 2246822519u ^ uint( seedPix.y ) * 3266489917u ^
+											 ( frame + uint( p.denoiser.z ) ) * 668265263u ^ 0xC2C2C2C2u );
+			const uint c2h1 = jahReflectPcg( c2h0 ^ 0x9E3779B9u ), c2h2 = jahReflectPcg( c2h1 ^ 0x85EBCA6Bu );
+			const vec3 c2u = vec3( c2h0, c2h1, c2h2 ) * ( 1.0 / 4294967296.0 );
 			if( !decodeAlways )
+			{
+				jahHitTracedLobe = c2;
 				traced = jahHitRadianceSourced( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
 												reflectFootprint( lobeAlpha, t ), centre, ok, photonSource );
+				jahHitTracedLobe = false;
+				vec3 hAlbedo, hEmissive;
+				float hRough;
+				vec4 hMetal;
+				if( c2 && ok && finite3( traced ) &&
+					jahHitMaterial( reflectFootprint( lobeAlpha, t ), hAlbedo, hEmissive, hRough, hMetal ) )
+					traced += jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, hRough, hMetal, c2u,
+														centre, jahHitAreaCycle, jahHitAreaCycleKey );
+			}
 			record = decodeAlways || !ok || !finite3( traced );
+			// ...AND A RECORD's (the lead's ruling on D5): the decode keeps the lights' lobe, its ENVIRONMENT specular is
+			// this traced ray's - fogged along the leg by its transmittance alone (the decoded part takes the leg's
+			// in-scatter at the write-back), riding the record's delta; the record's bit tells the decode to drop its own
+			if( record && c2 )
+			{
+				vec3 rAlbedo, rEmissive;
+				float rRough;
+				vec4 rMetal;
+				if( jahHitMaterial( reflectFootprint( lobeAlpha, t ), rAlbedo, rEmissive, rRough, rMetal ) )
+				{
+					const vec3 lobeR = jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, rRough, rMetal,
+																 c2u, centre, jahHitAreaCycle, jahHitAreaCycleKey );
+					const float lenR = length( origin + L * t - world ), eyeR = length( world - thisEye.camPos );
+					recLobe = max( jahFogAlong( lobeR, world.y, L, lenR, eyeR ) - jahFogAlong( vec3( 0.0 ), world.y, L, lenR, eyeR ),
+								   vec3( 0.0 ) );
+					recTraced = true;
+				}
+			}
 			// THE EMISSION THE BRDF's HIT FOUND (11-1b), where the NEE covers its direction (p_l( L ) > 0): read from
 			// the hit as the NEE reads its own (jahHitSurf is this hit's).
 			if( neeActive && nee.pdfB > 0.0 && !recFar && p.denoiser.w < 0.5 )
@@ -1040,6 +1081,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		else if( finite3( traced ) )
 			traced = max( traced + corrB + neePart, vec3( 0.0 ) );
 	}
+	// THE RECORD's TRACED LOBE (C2) at the sample's gain and its ray share (the screen's share is the trace's own)
+	if( record && recTraced )
+		recDelta += gainB * ( blend ? 1.0 - blendVouch : 1.0 ) * recLobe;
 	// THE REST'S RESUME TEST (G6), the ray just traced: its segment, the lobe's mean segment (the throw), the hit's sun
 	// leg - a moved instance's swept box across any of them, or the hit itself on a moving slot, resumes the texel (and
 	// the NEE's segment and its hit the same: PHOTON-7 11-1b).
@@ -1067,6 +1111,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	// A RECORD'S SUN (the list's word, the write-back's direct light at the hit): a FAR copy's hit is recorded as one
 	// (READ_B finding 1, the gather's rule) and its sun leg lifts by the far copy's hand-over.
 	o.recGain = gainB;
+	o.recTraced = record && recTraced;
 	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
 }
 
@@ -1163,7 +1208,8 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const float sunVis = s.sunVis;   // (reflectSampleAt's: the sun leg at the hit)
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
-											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain );
+											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain,
+											s.recTraced );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
 			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
@@ -1659,7 +1705,7 @@ void main()
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
 										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
-										 s.recGain );
+										 s.recGain, s.recTraced );
 							fit = 1u;
 						}
 						else

@@ -412,6 +412,11 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 /// toward V by the lobe's directional albedo at N.V over its hemispherical mean (the card's environment half,
 /// jah_card_view.glsl; its lobe split, jah_rq_card.glsl), the specular share kept as its integral (a gathered
 /// field's lobe, the PHOTON-3 ruling): bounce x ( rho Dd( N.V ) + S-bar ) / ( rho Dd-bar + S-bar ).
+#ifndef JAH_HIT_GATE_DECLARED
+#define JAH_HIT_GATE_DECLARED
+float jahHitIndirectGate = 1.0;
+bool jahHitTracedLobe = false;   // (jah_rq_card.glsl states it)
+#endif
 vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, float NdotV )
 {
 	float sa = 0.0, sb = 0.0;
@@ -419,7 +424,8 @@ vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, 
 		jahSpecularAlbedoHemi( roughness, sa, sb );
 	const vec3 specLobe = metal.xyz * sa + metal.w * sb;
 	const vec3 whole = albedo * jahDiffuseAlbedoHemi( roughness ) + specLobe;
-	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) + specLobe;
+	// (C2: where the reader traces the lobe itself the bounce's specular share is left out - the traced lobe replaces it)
+	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) + ( jahHitTracedLobe ? vec3( 0.0 ) : specLobe );
 	return mix( bounce, bounce * toward / max( whole, vec3( 1e-12 ) ), greaterThan( whole, vec3( 0.0 ) ) );
 }
 

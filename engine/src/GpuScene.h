@@ -233,13 +233,7 @@ enum GpuInstanceFlag : uint32_t {
     /// stage 3 — the caster's are kGpuCasterTwoSided (a cut-out's caster draws both faces while
     /// its colour pass culls the back ones, OgreMaterials.cpp's caster macroblock).
     kGpuTwoSided = 1u << 11,
-    /// REFLECT-FIX-1: a METAL (OgreScene::gpuIsMetal: metalness from kGpuMetalFloor, or
-    /// F0 above kGpuMetalF0 in a specular workflow). The caches hold a surface's DIFFUSE
-    /// response and a metal's is ~0, so a REFLECTION ray never reads a metal's card:
-    /// from a sharp reflector it is decoded, from a glossy one it reads the voxel store
-    /// (jahHitIsMetal and rq_reflect.comp's routing). The gather's rays ignore it: their
-    /// records stay diffuse-only (SPECKLE-FIX-1).
-    kGpuMetal = 1u << 12,
+    // (bit 12 was kGpuMetal, REFLECT-FIX-1's metal switch: deleted with C2, PHOTON-7 11-2 (3))
     /// ENGINE-POLISH-ATOM-1 stage 2: the CASTER CUT draws its caster (OgreScene::atomCasterThroughCut) — every
     /// Atom item, and an item whose MAIN pass stays on PBS but whose caster the cut can draw (a blended item: its
     /// stock caster is the opaque silhouette, HlmsPbs::calculateHashForPreCaster). The caster cut asks for it
@@ -250,30 +244,6 @@ enum GpuInstanceFlag : uint32_t {
     /// cut writes its command into the two-sided range (JahCullCut_cs picks the bit by the request's pass).
     kGpuCasterTwoSided = 1u << 14,
 };
-/// The metalness from which a hit is a metal's (kGpuMetal). Below it the CARD answers,
-/// from it the metal routes, and the switch is a STEP (REFLECT-FIX-1 fix round,
-/// test_reflect_uncover --metal-measure; spikes/reflect-fix-1/round2/metal-measure.log):
-/// a gold crate of metalness 0.5 in a SHARP (r 0.02) chrome sphere reads 134.2 through
-/// its card against 154.4 decoded — ~20 codes at the floor — and the two routes stay
-/// within ~5 codes of each other from a reflector roughness of 0.30 up. Two truths meet
-/// here and neither is exact: the card holds (1 - m) x the base colour, the voxel store
-/// the base colour with no metalness at all. FILED to ONE_PICTURE_SPEC C2 (a specular
-/// term at every hit, F0 and roughness from a card layer, read per texel), where the
-/// switch becomes a continuum. (A scalar flag: a glTF whose metallicFactor is omitted —
-/// 1 — and whose metalness is a texture is a metal everywhere here; C2 reads per texel.)
-constexpr float kGpuMetalFloor = 0.5f;
-/// ...and, under a SPECULAR workflow, the F0 above which it is one (a dielectric's F0
-/// is 0.02-0.08 — water to gemstone — and a metal's is its colour, 0.5 and up).
-constexpr float kGpuMetalF0 = 0.2f;
-/// ...and the REFLECTOR's perceptual roughness below which a METAL hit is decoded (the
-/// arm "reflect.metalDecode"'s default; rq_reflect.comp's p.metal.x); from it up the one rule
-/// answers (the card, else the store + the hit's direct light — BUGS-1 item 2 retired the
-/// metal-only voxel route). MEASURED then (REFLECT-FIX-1): the VOXEL route against the full decode, gold
-/// crate in a chrome sphere, by the sphere's roughness 0.02 / 0.10 / 0.15 / 0.20 / 0.25 /
-/// 0.30 / 0.39: 23.9 / 17.7 / 12.5 / 10.9 / 8.4 / 6.3 / 2.2 codes (of ~165). At 0.30 the
-/// reflector's lobe has blurred the difference to the card route's own error for a
-/// half-metal (~5 codes): there the decode buys nothing a viewer sees.
-constexpr double kReflectMetalDecodeRoughness = 0.30;
 
 /// The per-(mesh, level) row Atom P3's selection and P4's voxeliser read: the
 /// index range of that level (of submesh 0) AND THE LEVEL'S MEASURED BOUND,

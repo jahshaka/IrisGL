@@ -154,6 +154,118 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	return voxel;
 }
 
+// ---- C2: THE HIT's OWN SPECULAR (PHOTON-7 11-2 (3); ONE_PICTURE C2; the lead's rulings D1-D6) ---------------------------
+// The store holds a surface's INDIRECT specular only as its lobe's INTEGRAL, re-emitted alike in every direction: a
+// polished hit seen in a reflection showed none of what it reflects (a glossy slab under an emitter, a lacquered mover
+// against the same object still, the crease where a block meets a mirror floor). A reader that traces the hit's lobe
+// itself sets jahHitTracedLobe around its store read (the store then leaves the integral out) and adds this:
+// ONE SECONDARY RAY - the hit's own VNDF draw at its alpha (the centre ray at the packing floor: a sharp metal),
+// weighed by the hit's split DFG ( F0 A( mu, r ) + w B( mu, r ) ) from its material row and the draw's gain (G2/G1 over
+// the F-free A + B, jahReflectGain), the hit at its end read by the STORE - the card, the cascades, the direct - whose
+// own specular is its lobe's integral: NO RECURSION (the store IS the environment lobe; a sky with no visibility would
+// be light through a wall, L9). An escape past the world's exit is the sky (JAH_HIT_LOBE_SKY, the includer's), a back
+// face of a one-sided surface none, a hit only a record could shade (a mover, a rigged item) none (the store does not
+// hold it). RUSSIAN ROULETTE (D6): traced with p = clamp( the weight's largest channel, 0.05, 1 ), weighed 1 / p -
+// unbiased, continuous in every material parameter, and bounded (weight / p <= 1 wherever p is that channel, <= 20 x
+// the weight under the floor). The lights' direct lobe stays the store's (a light is not geometry).
+// `P` the hit, `N` its geometric normal facing the ray's origin, `V` toward that origin, `carried` the distance P was
+// carried along (its float bound), `roughness` and `metal` the hit's (jahHitMaterial), `u` three uniforms, `always`
+// the reader's estimator keeps no memory to average a roulette's noise (a mirror's centre ray: traced at p = 1).
+// AT REST THE ROULETTE IS STRATIFIED IN TIME (11-2 (2)'s law for any thinned stream): `cycle` = the rest sequence index
+// (-1 moving: the uniform u.x) traces exactly when floor( ( s + 1 ) p + phi ) > floor( s p + phi ) - p of the samples,
+// evenly spaced, phi the texel's offset (`cycleKey`) - so no run of 1 / p rest samples lacks its traced one, and the
+// rest's stop (ReflectParams alpha.w: one full window, 1 / 0.05 = 20 samples) never judges a stream of zeros.
+#ifndef JAH_HIT_LOBE_SKY
+#define JAH_HIT_LOBE_SKY( d, alpha, centre ) vec3( 0.0 )
+#endif
+#ifndef JAH_HIT_LOBE_MASK
+#define JAH_HIT_LOBE_MASK 0x0Fu   // (the near copies, kRayMaskNearField; a cache's gather passes its still mask)
+#endif
+#include "jah_world_exit.glsl"
+#include "jah_reflect_draw.glsl"
+vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec3 u, bool always,
+							   int cycle, uint cycleKey )
+{
+	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
+	if( !( mu > 0.0 ) || !( metal.w > 0.0 || any( greaterThan( metal.xyz, vec3( 0.0 ) ) ) ) )
+		return vec3( 0.0 );
+	float sa, sb;
+	jahSpecularAlbedo( mu, roughness, sa, sb );
+	const vec3 w = metal.xyz * sa + metal.w * sb;
+	const float wMax = max( w.x, max( w.y, w.z ) );
+	if( !( wMax > 0.0 ) )
+		return vec3( 0.0 );
+	const float pTrace = always ? 1.0 : clamp( wMax, 0.05, 1.0 );
+	if( cycle >= 0 && pTrace < 1.0 )
+	{
+		const float phi = float( jahAreaPcg( cycleKey ^ 0x2545F491u ) ) * 2.3283064e-10;
+		if( !( floor( ( float( cycle ) + 1.0 ) * pTrace + phi ) > floor( float( cycle ) * pTrace + phi ) ) )
+			return vec3( 0.0 );
+	}
+	else if( u.x >= pTrace )
+		return vec3( 0.0 );
+	// THE DRAW: the hit's lobe toward V (its geometric normal: the store's own frame)
+	const float alpha = max( roughness * roughness, 1e-6 );
+	const bool centre = alpha <= kMirrorPackAlpha;
+	vec3 L2;
+	float gain = 1.0;
+	if( centre )
+		L2 = reflect( -V, N );
+	else
+	{
+		vec3 T, B;
+		jahReflectFrame( N, T, B );
+		const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, N ) );
+		const vec3 Ht = jahGgxVndf( Ve, alpha, u.yz );
+		L2 = reflect( -V, normalize( Ht.x * T + Ht.y * B + Ht.z * N ) );
+		if( !( dot( L2, N ) > 0.0 ) )
+			return vec3( 0.0 );   // a draw that left the surface: no light (G2 is 0)
+		gain = jahReflectGain( N, N, V, L2, alpha, sa + sb );
+	}
+	// THE RAY: the one origin law off a hit on level 0 (no drawn surface's bound), to the world's exit
+	const vec3 o = jahRayOrigin( P, N, carried, 0.0 );
+	rayQueryEXT q;
+	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, L2,
+						   jahWorldExitT( o, L2, 1.0e4 ) );
+	JAH_RQ_PROCEED( q )
+	vec3 rad = vec3( 0.0 );
+	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre );   // an exit: the sky
+	else
+	{
+		const float t2 = rayQueryGetIntersectionTEXT( q, true );
+		const uint slot2 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) );
+		const uint prim2 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) );
+		const uint geom2 = uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) );
+		const vec2 bary2 = rayQueryGetIntersectionBarycentricsEXT( q, true );
+		const mat4x3 toWorld2 = rayQueryGetIntersectionObjectToWorldEXT( q, true );
+		vec3 wound;
+		const bool known = jahHitWoundNormal( slot2, geom2, prim2, toWorld2, wound );
+		const bool backFace = known && dot( wound, L2 ) > 0.0 && ( jahHitFlags( slot2 ) & kJahHitGpuTwoSided ) == 0u;
+		if( !backFace && !jahHitAlwaysDecodes( slot2 ) )
+		{
+			const vec3 n2 = known ? ( dot( wound, L2 ) > 0.0 ? -wound : wound ) : -L2;
+			// (the second hit's read: its own store answer whole - its lobe's integral is the environment lobe)
+			const JahHitSurface first = jahHitSurf;
+			const bool tracedWas = jahHitTracedLobe;
+			const float gateWas = jahHitIndirectGate;
+			jahHitTracedLobe = false;
+			jahHitIndirectGate = 1.0;
+			jahHitSurf = JahHitSurface( slot2, geom2, prim2, bary2, toWorld2, t2, false, known );
+			bool ok2 = false;
+			uint src2 = 0u;
+			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
+												 centre, ok2, src2 );
+			jahHitSurf = first;
+			jahHitTracedLobe = tracedWas;
+			jahHitIndirectGate = gateWas;
+			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
+		}
+	}
+	const vec3 c = w * rad * ( gain / pTrace );
+	return finite3( c ) ? clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+}
+
 vec3 jahHitRadiance( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
 					 bool mirror, out bool ok )
 {

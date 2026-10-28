@@ -925,24 +925,6 @@ static_assert(sizeof(Ogre::Real) == sizeof(float),
               "the GPU scene copies Ogre's Matrix4 rows verbatim; a double-precision build "
               "would need a conversion here");
 
-/// THE METAL ANSWER (kGpuMetal), from a datablock: the metallic workflow says it
-/// outright, the two specular workflows through F0 — getFresnel(), never the specular
-/// colour kS — (a dielectric's is 0.02-0.08, a metal's its colour). One function, two callers: gpuFlagsFor, and setPbrMaterial's
-/// in-place edit, which marks the wearers' slots when the answer flips.
-bool OgreScene::gpuIsMetal(const Ogre::HlmsDatablock *db) {
-    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) return false;
-    const auto *pbs = static_cast<const Ogre::HlmsPbsDatablock *>(db);
-    if (pbs->getWorkflow() == Ogre::HlmsPbsDatablock::MetallicWorkflow)
-        return pbs->getMetalness() >= kGpuMetalFloor;
-    // F0 is the FRESNEL term in both specular workflows (applyPbr: setFresnel); the
-    // specular COLOUR, kS, is a tint every workflow carries (white by default) and says
-    // nothing about metal — reading it flagged every spec-gloss import a metal.
-    // ...and a SCALAR F0 lives in x alone (setFresnel(f0, separate = false); y and z then
-    // hold whatever an earlier value left — measured 0.818 behind a 0.04 F0).
-    const Ogre::Vector3 f0 = pbs->getFresnel();
-    const float f0Max = pbs->hasSeparateFresnel() ? std::max(f0.x, std::max(f0.y, f0.z)) : f0.x;
-    return f0Max > kGpuMetalF0;
-}
 
 /// THE ONE PLACE THE PREDICATES ARE COMPUTED (design §3: every duplicate "is
 /// this item ray-visible" test outside this word goes).
@@ -982,9 +964,6 @@ Ogre::uint32 OgreScene::gpuFlagsFor(const Node &n, bool atomDraw) const {
         }
     }
     if (n.dragMover && n.shown) f |= kGpuDragMover;
-    // A METAL (REFLECT-FIX-1, kGpuMetal): sub-item 0's datablock, the material word's
-    // rule (every mesh this engine builds has one submesh).
-    if (item->getNumSubItems() && gpuIsMetal(item->getSubItem(0)->getDatablock())) f |= kGpuMetal;
     // A PLANAR MIRROR (D3-HIT-SHADE-2): its picture is a reflection, and the caches
     // are a DIFFUSE store (a metal mirror's card and voxels hold its kD = 0: black) —
     // a ray that hits it is the decode's, which shades the mirror's own material with
@@ -1041,8 +1020,9 @@ uint32_t OgreScene::gpuMaterialWordFor(const Node &n, Ogre::uint32 flags, bool &
     if (!db) return detail::GpuScene::kNoMaterialWord;
     const Ogre::PhotonVoxelMaterial::DatablockConversionResult *r = mPhoton.materials()->lookupDatablock(db);
     if (!r) {
-        // Only a GI-visible item is worth converting: nothing else is ever gathered.
-        queue = (flags & detail::kGpuGiVisible) && n.itemSlot != size_t(-1);
+        // A GI-visible item (the store gathers it) or a RAY-TRACED one (a reflection's hit reads its row: C2, the hit's
+        // own specular, weighs the traced lobe by the hit's split DFG - a mover's record too, PHOTON-7 11-2 (3)).
+        queue = (flags & (detail::kGpuGiVisible | detail::kGpuRayTraced)) && n.itemSlot != size_t(-1);
         return detail::GpuScene::kNoMaterialWord;
     }
     // Sixteen bits each: a pool holds 1,024 rows (PhotonVoxelMaterial's const-buffer size), and

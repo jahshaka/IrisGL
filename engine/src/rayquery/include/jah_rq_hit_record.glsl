@@ -110,6 +110,10 @@ const uint kJahHitFarBit = 1u << 27u;
 /// lights', the environment's, the clear coat's). The REFLECTION's records keep
 /// the full lobe: a mirror shows the highlight.
 const uint kJahHitDiffuseOnlyBit = 1u << 28u;
+/// A REFLECTION RECORD WHOSE LOBE THE TRACE TRACED (C2, PHOTON-7 11-2 (3)): the record's environment specular is the
+/// traced secondary ray's, riding its delta; the decode zeroes its own (HlmsAtom custom_ps_preEnvBrdf) and keeps the
+/// lights' lobe.
+const uint kJahHitTracedLobeBit = 1u << 29u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 12u;
@@ -118,8 +122,6 @@ const uint kJahHitAuxWords = 8u;
 const uint kJahHitGpuMover = 1u << 2u;
 const uint kJahHitGpuSkinned = 1u << 5u;
 const uint kJahHitGpuPlanar = 1u << 10u;
-/// GpuScene.h kGpuMetal (REFLECT-FIX-1).
-const uint kJahHitGpuMetal = 1u << 12u;
 /// GpuScene.h kGpuTwoSided (a CULL_NONE macroblock: both faces are the surface) - a cache ray's back-face rule
 /// (rq_card_gather.comp).
 const uint kJahHitGpuTwoSided = 1u << 11u;
@@ -141,16 +143,6 @@ bool jahHitAlwaysDecodes( uint slot )
 	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
 }
 
-/// ...AND A METAL (REFLECT-FIX-1, GpuScene.h kGpuMetal). The caches hold a surface's
-/// DIFFUSE response and a metal's is ~0, so a REFLECTION ray never reads a metal's card:
-/// from a sharp reflector the hit is decoded (its specular lobe, the pass' second-bounce
-/// cone — the planar mirror's rule above), from a glossy one it reads the voxel store,
-/// which carries the metal's colour (rq_reflect.comp, p.metal). Gather records stay
-/// diffuse-only (SPECKLE-FIX-1) and never ask.
-bool jahHitIsMetal( uint slot )
-{
-	return ( jahHitFlags( slot ) & kJahHitGpuMetal ) != 0u;
-}
 
 vec2 jahOctEncode( vec3 n )
 {
@@ -191,11 +183,12 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// other record).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare, vec3 delta, float gain )
+				  vec4 screenShare, vec3 delta, float gain, bool tracedLobe )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
-						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u );
+						   ( ( dest & kJahHitDestGather ) != 0u ? kJahHitDiffuseOnlyBit : 0u ) |
+						   ( tracedLobe ? kJahHitTracedLobeBit : 0u );
 	imageStore( jahHitIds, at,
 				uvec4( slotLevel, prim, packUnorm2x16( clamp( bary, vec2( 0.0 ), vec2( 1.0 ) ) ),
 					   packSnorm2x16( jahOctEncode( dir ) ) ) );
@@ -216,7 +209,7 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				   vec3 delta, float gain )
+				   vec3 delta, float gain, bool tracedLobe )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -227,7 +220,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ), delta, gain );
+				 vec4( 0.0 ), delta, gain, tracedLobe );
 	return true;
 }
 

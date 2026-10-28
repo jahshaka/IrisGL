@@ -449,6 +449,9 @@
 		// THE GATHER'S RECORD (the record's bit 28, jah_rq_hit_record.glsl): the
 		// diffuse response only (the piece custom_ps_preLights below).
 		bool atomHitDiffuseOnly = false;
+		// A REFLECTION RECORD WHOSE LOBE THE TRACE TRACED (the record's bit 29: C2, PHOTON-7 11-2 (3)): its environment
+		// specular is the traced secondary ray's (the record's delta), the piece custom_ps_preEnvBrdf below.
+		bool atomHitTracedLobe = false;
 		float2 fwdCustomFragCoord = float2( 0.0, 0.0 );
 		bool fwdCustomHasCell = false;
 	@end
@@ -665,6 +668,7 @@
 			}
 			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
 			atomHitDiffuseOnly = ( atomIds.x & 0x10000000u ) != 0u;
+			atomHitTracedLobe = ( atomIds.x & 0x20000000u ) != 0u;
 			if( !atomOk )
 			{
 				b.w = float3( 1.0, 0.0, 0.0 );
@@ -943,6 +947,14 @@
 			}
 		@end
 		outPs_colour0.w = midf_c( 1.0 );
+	@end
+	// C2 (PHOTON-7 11-2 (3), the lead's ruling on D5): a reflection record whose lobe the trace traced takes its
+	// ENVIRONMENT specular from that secondary ray (rq_reflect.comp adds it to the record's delta); the decode's own
+	// environment specular - the cube, the VCT cone, the probes, gathered into envColourS - is zeroed before the split
+	// DFG weighs it (the fork's hook custom_ps_preEnvBrdf, just before BRDF_EnvMap). The lights' lobe stays the decode's.
+	@piece( custom_ps_preEnvBrdf )
+		if( atomHitTracedLobe )
+			pixelData.envColourS = midf3_c( 0.0, 0.0, 0.0 );
 	@end
 	// THE EYE VECTOR IS THE REVERSED RAY. Upstream's LightingHeader computes it from
 	// the view-space position (the camera's pinhole); the hook right after it is

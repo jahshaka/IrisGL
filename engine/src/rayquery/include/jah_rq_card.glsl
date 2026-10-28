@@ -219,6 +219,11 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 /// the fraction of the hit's hemisphere no mover blocks, set by jahHitRadianceSourced
 /// (jah_rq_hit_radiance.glsl) around the card or voxel read it makes; 1 everywhere else.
 float jahHitIndirectGate = 1.0;
+/// C2, THE HIT's OWN SPECULAR TRACED (PHOTON-7 11-2 (3)): set by a reader that traces the hit's lobe itself
+/// (jahHitSpecularLobeTraced, jah_rq_hit_radiance.glsl) around the store's read - the store then leaves out the INDIRECT
+/// specular it holds only as the lobe's integral (the card's lobe share, the voxels' bounce share); the lights' direct
+/// lobe stays (a light is not geometry: no ray meets it). False everywhere else.
+bool jahHitTracedLobe = false;
 #endif
 
 /// THE LOBE'S HEMISPHERICAL INTEGRALS ( A-bar, B-bar ) at roughness r - the store's table. The
@@ -279,7 +284,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	// cached diffuse half times the lobes' ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's
 	// own recovery. Cut from the radiance and the flat term alike, so the direct half is untouched.
 	vec3 cutLobe = vec3( 0.0 );
-	if( jahHitIndirectGate < 1.0 )
+	if( jahHitIndirectGate < 1.0 || jahHitTracedLobe )
 	{
 		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
 		if( spec.w > 0.0 )
@@ -289,7 +294,8 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 			const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
 			const vec3 diffuseLobe = albedo.xyz * 3.141592654 * jahDiffuseAlbedoHemi( r );
 			const vec3 lobeShare = mix( stored, stored * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
-			cutLobe = ( 1.0 - jahHitIndirectGate ) * lobeShare;
+			// (all of it where the reader traces the lobe itself - C2: the traced lobe replaces the integral)
+			cutLobe = ( jahHitTracedLobe ? 1.0 : 1.0 - jahHitIndirectGate ) * lobeShare;
 		}
 	}
 	// THE LIGHTS' SPECULAR LOBE TOWARD THIS RAY (PHOTON-3 stage 2): where the relight re-emitted the lobe's

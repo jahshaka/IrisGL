@@ -2192,7 +2192,6 @@ private:
     X(AtomHitVctSpecular, "atom.hitVctSpecular") /* the hit decode's voxel specular, the roughness split (0: compiled out) */ \
     X(AtomMaskPyramid, "atom.maskPyramid") /* the cut-outs' masks sampled at the fragment's level (0: level 0 only, the silhouette rows' reference) */ \
     X(GatherHitsReadback, "gather.hitsReadback") /* every uniform probe's per-ray record read back (FAR-SUN-1) */ \
-    X(ReflectMetalDecode, "reflect.metalDecode") /* the reflector roughness below which a metal hit decodes */ \
     X(ReflectNee, "reflect.nee") /* the reflection's next-event estimation toward the emitter table (0: the BRDF-only estimator) */ \
     X(GiHitDirect, "gi.hitDirect") /* a voxel-answered hit's direct light at the hit (FAR-SUN-2; 0: the store whole) */ \
     X(GpuWalkWhole, "gpuscene.wholeWalk") /* the dirty scan walks every slot (the measuring arm; 0: the named slots) */ \
@@ -7019,8 +7018,6 @@ private:
 public:   // (a seam PhotonComponent calls)
     void markGpuSlotDirty(const Node &n);
 private:
-    /// REFLECT-FIX-1: the kGpuMetal answer for a datablock (OgreGpuScene.cpp).
-    static bool gpuIsMetal(const Ogre::HlmsDatablock *db);
     /// THE ITEM'S NODE (ATOM-CPU-WALKS-1): every indexed Item and the node that holds
     /// it, maintained where the item index is (indexItemNode / unindexItemNode) — the
     /// PBS change log names Items, and this is how a note becomes a slot.

@@ -1533,12 +1533,6 @@ constexpr ArmDef kArms[] = {
       "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
       "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
       "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
-    { ArmId::ReflectMetalDecode, kReflectMetalDecodeRoughness, 0.0, 1.0,
-      "THE METAL HIT'S ROUTE (REFLECT-FIX-1): a reflection ray from a reflector of perceptual "
-      "roughness BELOW this value that hits a metal is decoded (its specular lobe, the pass' second-"
-      "bounce cone); a glossier reflector takes the metal hit like any other hit - its card, else the "
-      "store with the hit's direct light (it blurs the reflection anyway). 0 = never decoded, 1 = always "
-      "(the full-decode reference)." },
     { ArmId::ReflectNee, 1.0, 0.0, 1.0,
       "THE REFLECTION'S NEXT-EVENT ESTIMATION (PHOTON-7 stage 11, 11-1b): 1 = every VNDF draw of a texel an emitter of "
       "the table reaches is paired with ONE ray drawn in an emitter's bounding-sphere cone, the two combined by the "

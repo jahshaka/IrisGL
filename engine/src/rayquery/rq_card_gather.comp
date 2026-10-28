@@ -135,6 +135,11 @@ layout( set = 0, binding = 36 ) uniform sampler2D jahHitCloud;
 // AN IRRADIANCE ESTIMATOR READS A HIT'S SPECULAR LOBE BY ITS INTEGRAL (the gather's rule, PHOTON-3: a few stochastic rays
 // cannot sample a polished hit's near-delta lobe; jah_rq_hit_direct.glsl's header).
 #define JAH_HIT_LOBE_INTEGRAL
+// C2 (PHOTON-7 11-2 (3)): the hit's own specular traced (jahHitSpecularLobeTraced) on the cache's own still mask, its
+// escape the sky over the lobe's cone
+vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle );
+#define JAH_HIT_LOBE_SKY( d, alpha, centre ) jahEnvCone( d, max( alpha, 1e-3 ) )
+#define JAH_HIT_LOBE_MASK uint( p.knobs.w )
 #include "jah_rq_hit_radiance.glsl"
 // THE CARD READ'S LOBE INTEGRALS (jah_rq_card.glsl): the store's table, through the hit table.
 void jahCardLobeHemi( float r, out float a, out float b )
@@ -257,8 +262,27 @@ void main()
 			jahHitAreaSeq = ( uint( at.x ) * 73856093u ) ^ ( uint( at.y ) * 19349663u ) ^ ( uint( i ) * 83492791u );
 			bool ok = false;
 			uint source = 0u;
-			const vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ),
-													   false, ok, source );
+			// THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): the store leaves out its lobe's integral and one
+			// secondary ray of the hit's lobe answers it - a cache's FIXED draw (the texel and the ray keyed: a store
+			// takes no frame noise), Russian roulette on its split DFG
+			jahHitTracedLobe = true;
+			vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
+												 ok, source );
+			jahHitTracedLobe = false;
+			{
+				vec3 hAlbedo, hEmissive;
+				float hRough;
+				vec4 hMetal;
+				if( ok && finite3( radiance ) &&
+					jahHitMaterial( max( tHit * spread, 1e-4 ), hAlbedo, hEmissive, hRough, hMetal ) )
+				{
+					const uint h0 = jahAreaPcg( ( uint( at.x ) * 2246822519u ) ^ ( uint( at.y ) * 3266489917u ) ^
+												( uint( i ) * 668265263u ) ^ 0xC2C2C2C2u );
+					const uint h1 = jahAreaPcg( h0 ^ 0x9E3779B9u ), h2 = jahAreaPcg( h1 ^ 0x85EBCA6Bu );
+					radiance += jahHitSpecularLobeTraced( origin + dir * tHit, normalize( hitN ), -dir, tHit, hRough,
+														  hMetal, vec3( h0, h1, h2 ) * ( 1.0 / 4294967296.0 ), false, -1, 0u );
+				}
+			}
 			if( !ok || !finite3( radiance ) )
 			{
 				++c[kCountNoSample];

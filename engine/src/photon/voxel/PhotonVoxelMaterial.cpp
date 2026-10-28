@@ -175,7 +175,7 @@ namespace Ogre
             //   (ENGINE-POLISH-PHOTON-1 stage 2).
             //   THE SPECULAR WORKFLOWS (SpecularWorkflow, SpecularAsFresnelWorkflow): pixelData.F0 is the
             //   datablock's Fresnel (a scalar F0 is held in x alone unless hasSeparateFresnel - y and z then hold
-            //   whatever an earlier value left, OgreGpuScene.cpp gpuIsMetal), untinted by the albedo map, and the
+            //   whatever an earlier value left), untinted by the albedo map, and the
             //   diffuse lobe the diffuse colour whole: m = 0 and the Fresnel rides f0Packed, above the dielectric's
             //   so a 0.04 dielectric is exact (0) and a white F0 exact (1023). STATED: an F0 below 0.04 clamps at
             //   the dielectric's (the store's encoding is relative to it), and the lane is 10 bits (1 / 2046 of F0).
