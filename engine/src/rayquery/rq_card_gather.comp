@@ -139,6 +139,15 @@ void main()
 	const uvec2 t = gl_GlobalInvocationID.xy;
 	const bool inCard = t.x < size && t.y < size;
 	const ivec2 at = ivec2( uint( r.rect.x ) + t.x, uint( r.rect.y ) + t.y );
+	// THE TEXEL'S DRAW KEY IS ITS SURFACE (PHOTON-7 11-2 (3), gi.card_residency (3)): the card's own frame (where it looks
+	// from, along what, over which window) and the card-local texel - never the atlas coordinate, which is only where
+	// the store keeps it (two paths place one card at two addresses: the walk and the teleport baked two noises).
+	const float frameWords[11] = float[11]( r.camPos.x, r.camPos.y, r.camPos.z, r.axisD.x, r.axisD.y, r.axisD.z,
+											r.axisU.x, r.axisU.y, r.axisU.z, r.axisU.w, r.axisV.w );
+	uint surfKey = size;
+	for( int k = 0; k < 11; ++k )
+		surfKey = jahAreaPcg( surfKey ^ floatBitsToUint( frameWords[k] ) );
+	const uvec2 keyT = uvec2( t.x ^ surfKey, t.y ^ jahAreaPcg( surfKey ) );
 	const float depth = inCard ? texelFetch( jahCardDepthLayer, at, 0 ).x : 0.0;
 	const int n = max( int( p.knobs.x ), 1 );
 
@@ -224,7 +233,7 @@ void main()
 			const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
 			jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
 			jahHitSeed = 0u;
-			jahHitAreaSeq = ( uint( at.x ) * 73856093u ) ^ ( uint( at.y ) * 19349663u ) ^ ( uint( i ) * 83492791u );
+			jahHitAreaSeq = ( keyT.x * 73856093u ) ^ ( keyT.y * 19349663u ) ^ ( uint( i ) * 83492791u );
 			bool ok = false;
 			uint source = 0u;
 			// THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): the store leaves out its lobe's integral and one
@@ -241,7 +250,7 @@ void main()
 				if( ok && finite3( radiance ) &&
 					jahHitMaterial( max( tHit * spread, 1e-4 ), hAlbedo, hEmissive, hRough, hMetal ) )
 				{
-					const uint h0 = jahAreaPcg( ( uint( at.x ) * 2246822519u ) ^ ( uint( at.y ) * 3266489917u ) ^
+					const uint h0 = jahAreaPcg( ( keyT.x * 2246822519u ) ^ ( keyT.y * 3266489917u ) ^
 												( uint( i ) * 668265263u ) ^ 0xC2C2C2C2u );
 					const uint h1 = jahAreaPcg( h0 ^ 0x9E3779B9u );
 					radiance += jahHitSpecularLobeTraced( origin + dir * tHit, normalize( hitN ), -dir, tHit, hRough,
