@@ -112,9 +112,6 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
 #include "jah_rq_emitters.glsl"
-#ifndef JAH_HIT_LOBE_ARM
-#define JAH_HIT_LOBE_ARM 0.0
-#endif
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -194,10 +191,8 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			jahHitSurf = JahHitSurface( slot2, geom2, prim2, bary2, toWorld2, t2, false, known );
 			bool ok2 = false;
 			uint src2 = 0u;
-			jahHitLampSpecOff = JAH_HIT_LOBE_ARM > 0.5;   // (MEASURING ARM, reverted)
 			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
 												 centre, ok2, src2 );
-			jahHitLampSpecOff = false;
 			jahHitSurf = first;
 			jahHitTracedLobe = tracedWas;
 			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
