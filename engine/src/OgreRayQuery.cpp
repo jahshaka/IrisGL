@@ -11718,6 +11718,7 @@ struct GlassEscapeParams {
     float knobs2[4] = {};   ///< one eye's width, its height, the eyes, the fixed-point scale
     float knobs3[4] = {};   ///< the frame, the pixel's angle, the ray mask
     float fog[8][4] = {};   ///< OgreScene::fogAlong
+    float eye[2][4] = {};   ///< each eye's position (world): the panes in front of a record's fragment (F5)
 };
 struct GlassEscapeAddParams {
     float knobs[4] = {};    ///< one eye's width, its height, the eyes, 1 / the fixed-point scale
@@ -12067,6 +12068,17 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
     pp.knobs3[2] = float(kRayMaskNearField | kRayMaskFar);
     Ogre::TextureGpu *fogAerial = nullptr;
     scene->fogAlong(pp.fog, fogAerial);
+    // THE EYES (the panes in front of a record's fragment, F5): a stereo view's located eyes, else the camera
+    {
+        const StereoEyeBasis *eyes = view->stereo() ? view->stereoEyes() : nullptr;
+        const Ogre::Vector3 c = cam->getDerivedPosition();
+        for (int e = 0; e < 2; ++e) {
+            const Ogre::Vector3 at = eyes ? Ogre::Vector3(eyes[e].position) : c;
+            pp.eye[e][0] = float(at.x);
+            pp.eye[e][1] = float(at.y);
+            pp.eye[e][2] = float(at.z);
+        }
+    }
     std::memcpy(l.params[ring].mapped, &pp, sizeof(pp));
     GlassEscapeAddParams ap{};
     ap.knobs[0] = float(ev.width);

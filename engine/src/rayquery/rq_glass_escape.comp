@@ -22,7 +22,13 @@
 //   * a MISS reads the environment along the lobe (jahEnvLobe, the record's roughness) - the light the fragment would
 //     have taken;
 //   * the panes the ray crosses pass their transmittance and add their own light (jah_rq_panes.glsl);
-//   * the leg's media are the reflection's law (jah_fog_along.glsl: jahFogAlong to a hit, jahFogAlongSky past one).
+//   * the leg's media are the reflection's law (jah_fog_along.glsl: jahFogAlong to a hit, jahFogAlongSky past one);
+//   * THE PANES IN FRONT OF THE FRAGMENT (the one read's F5: the add lands on top of every blended layer drawn after
+//     the fragment, so a pane in front of it passed its light whole - stacked glass over-counted by the front pane's
+//     coverage): one light-style ray from the record's eye to the record's point multiplies the answer by the panes'
+//     product along it (JAH_RQ_PROCEED_TRANSMIT: every pane, no cap) - what the layers drawn over the fragment pass of
+//     it. Named limits: a blended surface the TLAS does not hold (particles, an unlit blend) is not counted; Modulate
+//     is an occluder there and its colour is not a scalar; a pane's T is its word's, on 2047 steps.
 // The answer, times the record's weight, is ADDED in fixed point to the record's pixel (three uint words a pixel, one
 // atomic a channel; a word that would pass its 32 bits SATURATES, counted - the one read's F11: it wrapped silently at 64
 // brightest terms); rq_glass_escape_add.comp adds the pixel's sum to the pass's colour target. A hit's answer is bounded as
@@ -56,6 +62,7 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 	vec4 knobs2;		// x = one eye's width, y = its height, z = the eyes, w = the fixed-point scale
 	vec4 knobs3;		// x = the frame (an area light's stratum draw), y = the pixel's angle (radians), z = the ray mask
 	vec4 fog[8];		// THE MEDIA ALONG THE RAY (OgreScene::fogAlong)
+	vec4 eye[2];		// each eye's position (world; xyz): the panes in front of a record's fragment (the one read's F5)
 } p;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
@@ -256,6 +263,26 @@ void main()
 						answer = paneLight + through * jahFogAlong( radiance, origin.y, dir, t, eyeDist );
 				}
 			}
+		}
+	}
+	// THE PANES IN FRONT OF THE FRAGMENT (the head): the eye's ray to the record's point, stopped a hair short of it
+	if( at != 0xFFFFFFFFu )
+	{
+		const uvec4 r0 = rec[2u * i];
+		const vec3 point = uintBitsToFloat( r0.xyz );
+		const vec3 eyeP = p.eye[( rec[2u * i + 1u].y >> 30u ) & 1u].xyz;
+		const vec3 toPoint = point - eyeP;
+		const float dist = length( toPoint );
+		if( dist > 1e-3 && finite3( toPoint ) )
+		{
+			rayQueryEXT rqEye;
+			rayQueryInitializeEXT( rqEye, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
+								   0.0, toPoint * ( 1.0 / dist ), dist * ( 1.0 - 1e-4 ) );
+			float front = 1.0;
+			JAH_RQ_PROCEED_TRANSMIT( rqEye, front )
+			// (an opaque commit before the point: the fragment passed its depth test, so a coarser copy or a float
+			// edge - the panes' product counts, the commit does not)
+			answer *= front;
 		}
 	}
 	// THE PIXEL'S SUM, in fixed point (one atomic a channel, saturating; a hit's term bounded as every reflection's, a miss
