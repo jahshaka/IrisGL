@@ -1748,7 +1748,7 @@ private:
     bool mHitDummiesNeedInit = false;
     /// THE TIER'S COUNTERS (jah_rq_alpha.glsl's JahTierCounters; host-visible, coherent; the shaders' atomics, read with
     /// no wait - a few frames late): [0] the reading rays whose pane list filled (the one read's F4), cumulative over
-    /// the tier's life. Created at the first hit set, dropped at close().
+    /// the tier's life. Created at open() (the hit set's reads find it made), dropped at close().
     RawBuffer mTierCounters;
     uint64_t tierCountersAddress();
     // ---- THE MOVERS' SHADOW ON THE CARDS (PHOTON-CARDS-4) ----------------
@@ -2602,6 +2602,9 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     }
     Ogre::LogManager::getSingleton().logMessage(
         "Jahshaka: hardware ray-query tier open (PHOTON R1)");
+    // THE TIER'S COUNTERS made here, never in a frame (lab.monitor (4): a host-visible allocation inside the first
+    // frames' hit-set fill was time no monitor row names)
+    tierCountersAddress();
     startAhead();
     return true;
 }
