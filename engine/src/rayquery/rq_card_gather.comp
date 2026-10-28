@@ -176,7 +176,7 @@ void main()
 		gnCard = r;
 		Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
 		// THE TEXEL AT ITS OPEN CENTROID (jah_card_open.glsl): a straddling texel gathers from its open part
-		const vec3 open = jahCardOpenRead( imageLoad( cardOpen, at ) );
+		const vec3 open = r.camPos.w > 0.5 ? jahCardOpenRead( imageLoad( cardOpen, at ) ) : vec3( 1.0, 0.0, 0.0 );   // (camPos.w: SurfaceCache openValid)
 		P = cardPointF( r, vec2( t ) + 0.5 + open.yz, depth );
 		origin = jahRayOrigin( P, Ng, depth, r.rect.w );
 		buried = jahRayOriginBuried( P, Ng, origin, exp2( floor( log2( max( depth, 6.1035156e-5 ) ) ) - 11.0 ),

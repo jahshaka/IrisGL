@@ -204,7 +204,8 @@ void main()
 			const float alpha = imageLoad( shadowRough, at ).y / 1.001001 + 0.001;
 			const float roughness = sqrt( max( alpha, 0.0 ) );
 			// THE TEXEL AT ITS OPEN CENTROID (jah_card_open.glsl; the still mode wrote it at the capture)
-			const vec3 open = jahCardOpenRead( imageLoad( cardOpen, at ) );
+			// (camPos.w: the open layer holds this capture's - else the texel reads open, SurfaceCache openValid)
+			const vec3 open = r.camPos.w > 0.5 ? jahCardOpenRead( imageLoad( cardOpen, at ) ) : vec3( 1.0, 0.0, 0.0 );
 			const vec3 P = cardPointF( r, vec2( t ) + 0.5 + open.yz, depth );
 			// THE CLEARANCE AND ITS NORMAL (the ray origin's one law, the still mode's - the head of this file): the
 			// captured surface's GEOMETRIC normal, the lift the point's float bound plus the record's (rect.w); every
@@ -348,7 +349,7 @@ void main()
 			open = vec3( nOpen * 0.25, nOpen > 0.0 ? sumOff / nOpen : vec2( 0.0 ) );
 			imageStore( cardOpen, at, jahCardOpenPack( open.x, open.yz ) );
 		}
-		else
+		else if( r.camPos.w > 0.5 )   // (the open layer holds this capture's: SurfaceCache openValid)
 			open = jahCardOpenRead( imageLoad( cardOpen, at ) );
 		if( !( open.x > 0.0 ) )
 			vis = 0.0;   // wholly covered: no light reaches it

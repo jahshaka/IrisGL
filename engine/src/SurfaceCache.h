@@ -246,6 +246,9 @@ struct CardRec {
     /// trace past the frame's budget (since `stillPendingSince`), and the lift
     /// its last trace started at (CardSample::sunLift).
     bool stillPending = false;
+    /// THE OPEN LAYER HOLDS THIS CAPTURE'S (PHOTON-7 11-2 (5)): false from the capture until its still trace lands - every
+    /// reader then reads the texel open (f 1, no offset), never the atlas slot's previous occupant's
+    bool openValid = false;
     unsigned long long stillPendingSince = 0ull;
     float sunLift = 0.0f;
     /// THE ROOTS OF ITS PENDING WORK (PHOTON-7 stage 10, R3 (c), the lead's ruling: each round names its parent move):

@@ -457,7 +457,7 @@ void main()
 		// (at its open centroid: the open fraction's offset, in texels)
 		{
 			const vec4 o = imageLoad( cardOpen, at );
-			if( o.a > 0.5 )
+			if( o.a > 0.5 && ( mode & 16u ) != 0u )   // (mode bit 16: the open layer holds this capture's)
 			{
 				openF = 1.0 - o.r;
 				openOff = o.gb - 0.5;

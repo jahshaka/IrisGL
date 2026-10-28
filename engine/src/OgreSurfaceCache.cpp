@@ -1931,6 +1931,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         card.queued = false;
         if (!card.lastUpdated) mTableDirty = true;   // its first capture: readable now
         card.lastUpdated = mFrame;
+        card.openValid = false;   // (its still trace writes the open layer: until then it reads open)
         ++mPhotonGeneration;
         ++mCaptures;
         ++mCapturesLastFrame;
@@ -2224,7 +2225,8 @@ void SurfaceCache::relightCards() {
         r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size);
         // (mode bit 8: captured this frame - the card-to-card re-listing's arrival, 10-2c)
         const bool captured = std::find(mFreshCards.begin(), mFreshCards.end(), mRelight[i]) != mFreshCards.end();
-        r[3] = float(mRelightMode[i] | (captured ? 8u : 0u));
+        // (mode bit 16: the open layer holds this capture's - PHOTON-7 11-2 (5); else the relight reads the texel open)
+        r[3] = float(mRelightMode[i] | (captured ? 8u : 0u) | (c.openValid ? 16u : 0u));
         r[4] = cam.x; r[5] = cam.y; r[6] = cam.z;
         // THE MOVERS' TERM IS MULTIPLIED IN where the card carries a trace.
         r[7] = c.moverTraced ? 1.0f : 0.0f;
@@ -2439,6 +2441,7 @@ void SurfaceCache::relightCards() {
             for (size_t i = 0; i < mRelight.size(); ++i) {
                 std::memcpy(&mLampCpu[i * kRelightFloats], &mRelightCpu[i * kRelightFloats], kRelightFloats * sizeof(float));
                 mLampCpu[i * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[i]]);   // the lift, as the still mode's
+                mLampCpu[i * kRelightFloats + 7u] = mCards[mRelight[i]].openValid ? 1.0f : 0.0f;   // (the open layer's, 11-2 (5))
             }
             CardMoverTrace job;
             job.records = mLampCpu.data();
@@ -2547,6 +2550,7 @@ void SurfaceCache::relightCards() {
                 std::memcpy(&mGatherCpu[k * kRelightFloats], &mRelightCpu[marched[k] * kRelightFloats],
                             kRelightFloats * sizeof(float));
                 mGatherCpu[k * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[marched[k]]]);   // the still trace's lift
+                mGatherCpu[k * kRelightFloats + 7u] = mCards[mRelight[marched[k]]].openValid ? 1.0f : 0.0f;   // (11-2 (5))
             }
             CardGatherTrace job;
             job.records = mGatherCpu.data();
@@ -3764,6 +3768,7 @@ void SurfaceCache::traceSun() {
                 for (unsigned idx : still) {
                     CardRec &c = mCards[idx];
                     c.stillPending = false;
+                    c.openValid = true;   // (the still trace wrote this capture's open layer)
                     ++mStillTraces;
                     ++mStillTracedLastFrame;
                     mStillTexelsLastFrame += c.size * c.size;
@@ -3971,6 +3976,7 @@ void SurfaceCache::traceSun() {
         r[8] = c.u.x; r[9] = c.u.y; r[10] = c.u.z; r[11] = std::max(2.0f * c.halfU, 1e-4f);
         r[12] = c.v.x; r[13] = c.v.y; r[14] = c.v.z; r[15] = std::max(2.0f * c.halfV, 1e-4f);
         r[16] = c.d.x; r[17] = c.d.y; r[18] = c.d.z;
+        r[7] = c.openValid ? 1.0f : 0.0f;   // (the open layer holds this capture's: 11-2 (5))
     }
     CardMoverTrace job;
     job.records = mMoverCpu.data();
