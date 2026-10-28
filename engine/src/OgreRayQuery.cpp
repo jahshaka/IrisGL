@@ -6829,7 +6829,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
-    pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
+    pp.alpha[3] = (sa.hitAreaLights > 0u && !(mArms && mArms->value(ArmId::ReflectAreaWaitOff) > 0.5)) ? float(kHitAreaStrataPerHit) : 0.0f;   // (MEASURING ARM, reverted)
+    pp.alpha[1] = mArms ? float(mArms->value(ArmId::ReflectC2Off)) : 0.0f;   // MEASURING ARM (reverted)
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------

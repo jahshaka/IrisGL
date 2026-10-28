@@ -1284,6 +1284,8 @@ constexpr ArmDef kArms[] = {
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
       "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
+    { ArmId::ReflectC2Off, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2, reverted): 1 = C2 off." },
+    { ArmId::ReflectAreaWaitOff, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2, reverted): 1 = no area cycle at the stop." },
     { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
       "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
       "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "
