@@ -476,7 +476,6 @@ Scene::Scene()
     // render before there is something to reflect.
     planarReflectionBudget = -1;
     planarReflectionResolution = 0;
-    planarReflectionShadows = -1;
 
     // World Mode: -1 = Custom. A new scene starts with the field values above
     // and no tier applied; picking a mode (World panel or world.mode) is what

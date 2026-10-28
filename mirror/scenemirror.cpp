@@ -7861,7 +7861,7 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // see the mode table, which is exactly why the invariant exists.
         pr.budget = mSource->planarReflectionBudget < 0 ? 0
                                                         : qBound(0, mSource->planarReflectionBudget, 8);
-        // Resolution and shadows follow the budget unless the scene pins them.
+        // Resolution follows the budget unless the scene pins it.
         // This IS the mode table's reflection row, expressed where the mirror
         // can reach it: Epic's budget of 2 gets 1024 + shadows, High's 1 gets
         // 512 and no shadows. Two extra world-mode rows would say the same
@@ -7870,9 +7870,9 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         pr.resolution = mSource->planarReflectionResolution > 0
                             ? unsigned(qBound(256, mSource->planarReflectionResolution, 2048))
                             : unsigned(autoRes);
-        pr.shadows = mSource->planarReflectionShadows >= 0
-                         ? mSource->planarReflectionShadows != 0
-                         : pr.budget >= 2;
+        // A MIRROR'S SHADOWS FOLLOW THE SCENE'S - always on (PHOTON-7 10-4 fix round: a mirror without its shadow
+        // maps showed every light through every wall; the option is deleted)
+        pr.shadows = true;
         // Glossy floors need the mip chain (the shader samples at
         // roughness * numMips); without it every reflector is a perfect mirror.
         pr.mipmaps = true;

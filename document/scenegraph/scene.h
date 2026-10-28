@@ -921,10 +921,6 @@ public:
     // without needing rows of their own: budget >= 2 (Epic) means 1024, budget
     // 1 (High) means 512. SceneMirror owns that derivation.
     int planarReflectionResolution;
-    // Shadows INSIDE the reflections, which cost a private half-resolution
-    // shadow atlas per plane. 0 = off, 1 = on, -1 = derive from the budget the
-    // same way (Epic's 2 planes get shadows, High's 1 does not).
-    int planarReflectionShadows;
 
     // ---- World Modes (POST_CHAIN_SPEC.md §9) --------------------------------
     // A scalability tier for the whole scene. -1 = Custom (no tier: the fields
