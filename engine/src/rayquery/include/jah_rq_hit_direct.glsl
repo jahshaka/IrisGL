@@ -260,6 +260,7 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 /// estimates an irradiance integral with a few stochastic rays, which cannot sample a polished hit's near-delta
 /// lobe (a mirror floor's sun glint, gi.id_depth), so it takes the lobe's integral mu ( F0 A( mu, r ) + w B( mu, r ) )
 /// - the store's own re-emission, energy-exact in expectation (Lumen's choice for the same reason).
+bool jahHitLampSpecOff = false;   // MEASURING ARM (11-2 (b), reverted): C2's secondary hit without its lamps' glint
 vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
@@ -398,7 +399,8 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 											 aW );
 				rS = sqrt( aW );
 			}
-			spec += ( cosL * atten * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, L, V, rS, metal.xyz, metal.w );
+			if( !jahHitLampSpecOff )   // (MEASURING ARM, reverted)
+				spec += ( cosL * atten * vis * sNorm ) * v1.xyz * jahSpecularLobe( N, L, V, rS, metal.xyz, metal.w );
 #endif
 		}
 	}
