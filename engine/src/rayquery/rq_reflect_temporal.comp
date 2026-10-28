@@ -418,7 +418,9 @@ void main()
 									? uintBitsToFloat( gShareRaw )
 									: 1.0 / max( jahDisplayCodes( jahDenoiseLuma( answer ), jahDenoiseSlopeAt( LD ) ), 1e-12 );
 			const float e = jahRestErrorD( rs, v );
-			const bool settled = v >= ( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ) );
+			// (and never before ONE FULL CYCLE of the hits' time-stratified area draw where the hit table holds an area
+			// light: p.alpha.w = its S samples, 0 without - 11-2 (2): a stop never judges a stream it has not seen whole)
+			const bool settled = v >= max( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ), p.alpha.w );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;
 			st.stop = capped ? kReflectStopFrames

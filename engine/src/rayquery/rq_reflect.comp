@@ -876,6 +876,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 										!recFar && hitNormalKnown );
 			// ...and the sample's draw for an area light's stratum there (jah_rq_hit_direct.glsl, 7-H)
 			jahHitAreaSeq = jahAreaPcg( frame + uint( p.denoiser.z ) ) ^ seedPix.x * 73856093u ^ seedPix.y * 19349663u;
+			// ...and AT REST its time-stratified cycle: the rest sequence index (frame = the sequence's base + v), the
+			// texel's offset keyed on its seed pixel (11-2 (2))
+			jahHitAreaCycle = atRest ? int( frame - uint( p.knobs.z ) ) : -1;
+			jahHitAreaCycleKey = uint( seedPix.x ) * 2654435761u ^ uint( seedPix.y ) * 40503u;
 			// ONE RULE FOR EVERY HIT (BUGS-1 item 2): the card, else the store with the direct
 			// light at the hit (jahHitRadianceSourced) — a metal's card holds its lobe since
 			// PHOTON-1 stage 3, so a metal is no exception. Only a SHARP reflector's metal hit

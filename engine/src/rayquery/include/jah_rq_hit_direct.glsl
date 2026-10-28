@@ -60,9 +60,18 @@
 // reflection's draw index, the gather's ray seed), its visibility V_k taken whole - so its expectation is the ratio
 // sum( V f ) / sum( f ) the other readers converge to, and an UNOCCLUDED light reads exactly 1 (no noise where nothing
 // shadows). The centre ray it replaces saw a light through any gap at its centre and lost it behind anything there.
+// AT REST THE DRAW IS STRATIFIED IN TIME (PHOTON-7 11-2 (2), the lead's ruling (B)): a rest sequence index s
+// (jahHitAreaCycle >= 0, the includer's) takes stratum ( s + its texel's offset ) mod S, S = kHitAreaStrata^2, at the
+// weight f_k S / sum f - so every S consecutive rest samples visit each stratum exactly once, their mean is the ratio
+// exactly, and a sparse stratum (the light through a small gap) is never left out of a rest mean (the importance draw
+// picked a 1 % stratum about once in 100 samples, and the per-texel stop judged the stream before it came: -32 % on
+// rtreflect.hit_area_shadow). The texel's offset (jahHitAreaCycleKey) keeps neighbours off lockstep. Moving (-1): the
+// importance draw above, an unoccluded light exactly 1 a sample.
 #include "jah_area_strata.glsl"
 const uint kHitAreaStrata = 4u;
 uint jahHitAreaSeq = 0u;
+int jahHitAreaCycle = -1;
+uint jahHitAreaCycleKey = 0u;
 
 #include "jah_fork_brdf.glsl"
 
@@ -326,7 +335,20 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 				sumF += f[k];
 			}
 			vis = 0.0;
-			if( sumF > 0.0 )
+			if( sumF > 0.0 && jahHitAreaCycle >= 0 )
+			{
+				// (the rest's time-stratified draw: the cycle's stratum at its weight f_k S / sum f)
+				const uint S = n * n;
+				const uint pick = ( uint( jahHitAreaCycle ) + jahAreaPcg( jahHitAreaCycleKey ^ 0x51ED270Bu ) ) % S;
+				if( f[pick] > 0.0 )
+				{
+					jahAreaStratumAt( P, N, N, lift, c0, eu, ev, v2.xyz, twoSided, n, pick, key, kAreaLampEnd, dq, clr2,
+									  oq, rq, reach );
+					vis = ( reach > 0.0 ? jahSunRay( oq, rq, JAH_HIT_SUN_MASK, reach, reach ) : 1.0 ) * f[pick] *
+						  float( S ) / sumF;
+				}
+			}
+			else if( sumF > 0.0 )
 			{
 				float u = float( jahAreaPcg( jahHitAreaSeq ^ jahAreaPcg( key ) ) ) * 2.3283064e-10 * sumF;
 				uint pick = 0u;

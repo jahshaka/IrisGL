@@ -365,6 +365,9 @@ constexpr unsigned kReflectCompactTexels = 16384u;
 constexpr uint32_t kHitCounterWords = 12u;
 constexpr uint32_t kHitCounterBytes = kHitCounterWords * 4u;
 constexpr uint32_t kHitAuxWords = 8u;
+/// THE HIT's AREA STRATA (jah_rq_hit_direct.glsl kHitAreaStrata = 4 a side): one full cycle of the rest's time-stratified
+/// area draw, the samples a rest texel's stop waits for where the hit table holds an area light (PHOTON-7 11-2 (2)).
+constexpr uint32_t kHitAreaStrataPerHit = 4u * 4u;
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
@@ -615,6 +618,9 @@ private:
         unsigned long long emitterWrites = ~0ull, emitterRows = ~0ull, emitterEdits = ~0ull, emitterMeshes = ~0ull;
         uint32_t emitterSlotCount = ~0u, emitterCap = ~0u;
         bool emitterDirty = true;   ///< the section changed since the hit table last took it
+        /// THE HIT TABLE's AREA LIGHTS (PHOTON-7 11-2 (2)): how many it holds - a rest texel's stop then waits for one
+        /// full cycle of the hit's time-stratified area draw (kHitAreaStrataPerHit samples).
+        uint32_t hitAreaLights = 0u;
         /// THE HIT DECODE'S DRAWS (PHOTON-HIT-SHADE-1): the material words they were
         /// last synced for and HlmsAtom's twin epoch at that sync (updateScene).
         std::vector<uint32_t> decodeWords;
@@ -6598,6 +6604,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                                     : 1.0f;
     pp.metal[0] = mArms ? float(mArms->value(ArmId::ReflectMetalDecode)) : float(kReflectMetalDecodeRoughness);
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
+    // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
+    // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
+    pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
@@ -7463,8 +7472,10 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         consumer.budget = 0u;             // unbounded: the union of every cascade's selection
         SceneLightList::Selection sel;
         sceneLightListOf(sm).select(sm, consumer, sel);
+        sa.hitAreaLights = 0u;
         for (Ogre::Light *light : sel.lights) {
             if (!light || !light->getParentNode()) continue;
+            if (light->getType() == Ogre::Light::LT_AREA_LTC) ++sa.hitAreaLights;
             float L[kHitLightWords] = {};
             const Ogre::Light::LightTypes srcType = light->getType();
             const bool punctual = srcType == Ogre::Light::LT_POINT || srcType == Ogre::Light::LT_SPOTLIGHT;
