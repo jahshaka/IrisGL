@@ -956,7 +956,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			}
 			// THE EMISSION THE BRDF's HIT FOUND (11-1b), where the NEE covers its direction (p_l( L ) > 0): read from
 			// the hit as the NEE reads its own (jahHitSurf is this hit's).
-			if( neeActive && nee.pdfB > 0.0 && !recFar && p.denoiser.w < 0.5 )
+			if( neeActive && nee.pdfB > 0.0 && ( !recFar || p.alpha.y > 0.5 ) && p.denoiser.w < 0.5 )   // (MEASURING ARM reflect.neeFar, reverted)
 				neeEb = jahNeeEmission( reflectFootprint( lobeAlpha, t ) );
 			// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1, the one law jah_fog_along.glsl):
 			// the hit's light crossed the leg from the hit to the REFLECTING SURFACE — not
