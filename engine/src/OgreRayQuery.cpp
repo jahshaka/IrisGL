@@ -10418,6 +10418,7 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
     pp.knobs[3] = float(kRayMaskStill);   // the still world (rq_card_gather.comp's mask law)
+    pp.knobs[2] = mArms ? float(mArms->value(ArmId::CardsC2Diag)) : 0.0f;   // MEASURING ARM (reverted)
     pp.knobs2[1] = float(count);
     std::memcpy(v.params[ring].mapped, &pp, sizeof(pp));
     std::memcpy(v.records[ring].mapped, job.records, size_t(count) * kCardGatherRecordFloats * sizeof(float));

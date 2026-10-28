@@ -181,8 +181,12 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #endif
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
+float jahHitLobeDiagT = -1.0;      // MEASURING ARM (11-2 (5), reverted): the last secondary ray's hit distance (-1 none)
+bool jahHitLobeDiagBack = false;   // ...whether it hit a one-sided back face
+uint jahHitLobeDiagSlot = 0xFFFFFFFFu;
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
+	jahHitLobeDiagT = -1.0; jahHitLobeDiagBack = false; jahHitLobeDiagSlot = 0xFFFFFFFFu;
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
 	if( !( mu > 0.0 ) || !( metal.w > 0.0 || any( greaterThan( metal.xyz, vec3( 0.0 ) ) ) ) )
 		return vec3( 0.0 );
@@ -229,6 +233,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		vec3 wound;
 		const bool known = jahHitWoundNormal( slot2, geom2, prim2, toWorld2, wound );
 		const bool backFace = known && dot( wound, L2 ) > 0.0 && ( jahHitFlags( slot2 ) & kJahHitGpuTwoSided ) == 0u;
+		jahHitLobeDiagT = t2; jahHitLobeDiagBack = backFace; jahHitLobeDiagSlot = slot2;
 		if( !backFace && !jahHitAlwaysDecodes( slot2 ) )
 		{
 			const vec3 n2 = known ? ( dot( wound, L2 ) > 0.0 ? -wound : wound ) : -L2;
