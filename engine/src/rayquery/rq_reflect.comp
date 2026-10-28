@@ -898,11 +898,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			jahHitSeed = uint( seedPix.x ) * 73856093u ^ uint( seedPix.y ) * 19349663u ^
 						 ( centre ? 0u : frame * 2654435761u );
 			const bool c2 = p.denoiser.w < 0.5;   // (the flat-hits arm answers the hit by a constant: no lobe)
-			// (the C2 draw's three uniforms: this sample's)
+			// (the C2 draw's two uniforms: this sample's)
 			const uint c2h0 = jahReflectPcg( uint( seedPix.x ) * 2246822519u ^ uint( seedPix.y ) * 3266489917u ^
 											 ( frame + uint( p.denoiser.z ) ) * 668265263u ^ 0xC2C2C2C2u );
-			const uint c2h1 = jahReflectPcg( c2h0 ^ 0x9E3779B9u ), c2h2 = jahReflectPcg( c2h1 ^ 0x85EBCA6Bu );
-			const vec3 c2u = vec3( c2h0, c2h1, c2h2 ) * ( 1.0 / 4294967296.0 );
+			const vec2 c2u = vec2( c2h0, jahReflectPcg( c2h0 ^ 0x9E3779B9u ) ) * ( 1.0 / 4294967296.0 );
 			if( !decodeAlways )
 			{
 				jahHitTracedLobe = c2;
@@ -914,8 +913,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				vec4 hMetal;
 				if( c2 && ok && finite3( traced ) &&
 					jahHitMaterial( reflectFootprint( lobeAlpha, t ), hAlbedo, hEmissive, hRough, hMetal ) )
-					traced += jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, hRough, hMetal, c2u,
-														centre, jahHitAreaCycle, jahHitAreaCycleKey );
+					traced += jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, hRough, hMetal, c2u );
 			}
 			record = decodeAlways || !ok || !finite3( traced );
 			// ...AND A RECORD's (the lead's ruling on D5): the decode keeps the lights' lobe, its ENVIRONMENT specular is
@@ -929,7 +927,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				if( jahHitMaterial( reflectFootprint( lobeAlpha, t ), rAlbedo, rEmissive, rRough, rMetal ) )
 				{
 					const vec3 lobeR = jahHitSpecularLobeTraced( origin + L * t, normalize( hitN ), -L, t, rRough, rMetal,
-																 c2u, centre, jahHitAreaCycle, jahHitAreaCycleKey );
+																 c2u );
 					const float lenR = length( origin + L * t - world ), eyeR = length( world - thisEye.camPos );
 					recLobe = max( jahFogAlong( lobeR, world.y, L, lenR, eyeR ) - jahFogAlong( vec3( 0.0 ), world.y, L, lenR, eyeR ),
 								   vec3( 0.0 ) );

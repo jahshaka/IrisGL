@@ -165,16 +165,12 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 // own specular is its lobe's integral: NO RECURSION (the store IS the environment lobe; a sky with no visibility would
 // be light through a wall, L9). An escape past the world's exit is the sky (JAH_HIT_LOBE_SKY, the includer's), a back
 // face of a one-sided surface none, a hit only a record could shade (a mover, a rigged item) none (the store does not
-// hold it). RUSSIAN ROULETTE (D6): traced with p = clamp( the weight's largest channel, 0.05, 1 ), weighed 1 / p -
-// unbiased, continuous in every material parameter, and bounded (weight / p <= 1 wherever p is that channel, <= 20 x
-// the weight under the floor). The lights' direct lobe stays the store's (a light is not geometry).
+// hold it). ALWAYS TRACED (the lead's ruling (3b)): a Russian roulette on the weight was unbiased in linear radiance but
+// the reflection's denoiser averages in Lumen's compressive space, where the mean of a 1 / p-spiky sample is biased low
+// (Jensen; measured: a roughness-0.12 mirror's slab 20 % dark) - REFUSED. The lights' direct lobe stays the store's (a
+// light is not geometry).
 // `P` the hit, `N` its geometric normal facing the ray's origin, `V` toward that origin, `carried` the distance P was
-// carried along (its float bound), `roughness` and `metal` the hit's (jahHitMaterial), `u` three uniforms, `always`
-// the reader's estimator keeps no memory to average a roulette's noise (a mirror's centre ray: traced at p = 1).
-// AT REST THE ROULETTE IS STRATIFIED IN TIME (11-2 (2)'s law for any thinned stream): `cycle` = the rest sequence index
-// (-1 moving: the uniform u.x) traces exactly when floor( ( s + 1 ) p + phi ) > floor( s p + phi ) - p of the samples,
-// evenly spaced, phi the texel's offset (`cycleKey`) - so no run of 1 / p rest samples lacks its traced one, and the
-// rest's stop (ReflectParams alpha.w: one full window, 1 / 0.05 = 20 samples) never judges a stream of zeros.
+// carried along (its float bound), `roughness` and `metal` the hit's (jahHitMaterial), `u` two uniforms (the draw).
 #ifndef JAH_HIT_LOBE_SKY
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) vec3( 0.0 )
 #endif
@@ -183,8 +179,7 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #endif
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
-vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec3 u, bool always,
-							   int cycle, uint cycleKey )
+vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
 	if( !( mu > 0.0 ) || !( metal.w > 0.0 || any( greaterThan( metal.xyz, vec3( 0.0 ) ) ) ) )
@@ -192,17 +187,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	float sa, sb;
 	jahSpecularAlbedo( mu, roughness, sa, sb );
 	const vec3 w = metal.xyz * sa + metal.w * sb;
-	const float wMax = max( w.x, max( w.y, w.z ) );
-	if( !( wMax > 0.0 ) )
-		return vec3( 0.0 );
-	const float pTrace = always ? 1.0 : clamp( wMax, 0.05, 1.0 );
-	if( cycle >= 0 && pTrace < 1.0 )
-	{
-		const float phi = float( jahAreaPcg( cycleKey ^ 0x2545F491u ) ) * 2.3283064e-10;
-		if( !( floor( ( float( cycle ) + 1.0 ) * pTrace + phi ) > floor( float( cycle ) * pTrace + phi ) ) )
-			return vec3( 0.0 );
-	}
-	else if( u.x >= pTrace )
+	if( !( max( w.x, max( w.y, w.z ) ) > 0.0 ) )
 		return vec3( 0.0 );
 	// THE DRAW: the hit's lobe toward V (its geometric normal: the store's own frame)
 	const float alpha = max( roughness * roughness, 1e-6 );
@@ -216,7 +201,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		vec3 T, B;
 		jahReflectFrame( N, T, B );
 		const vec3 Ve = vec3( dot( V, T ), dot( V, B ), dot( V, N ) );
-		const vec3 Ht = jahGgxVndf( Ve, alpha, u.yz );
+		const vec3 Ht = jahGgxVndf( Ve, alpha, u );
 		L2 = reflect( -V, normalize( Ht.x * T + Ht.y * B + Ht.z * N ) );
 		if( !( dot( L2, N ) > 0.0 ) )
 			return vec3( 0.0 );   // a draw that left the surface: no light (G2 is 0)
@@ -262,7 +247,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
 		}
 	}
-	const vec3 c = w * rad * ( gain / pTrace );
+	const vec3 c = w * rad * gain;
 	return finite3( c ) ? clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 }
 

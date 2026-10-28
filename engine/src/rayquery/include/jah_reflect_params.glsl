@@ -102,9 +102,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 motion;
 	/// xy unused (the alpha table is the hit set's: JahHitParams), z = THE RAY ORIGIN'S POINT TERM: the rasteriser's
 	/// sub-pixel snap in pixels (jah_ray_origin.glsl jahDepthPointError; 0 = the term off, rays.originPoint 0), w = THE
-	/// HITS' CYCLE (PHOTON-7 11-2 (2), (3)): the rest samples one full cycle of the hits' time-stratified draws takes -
-	/// the area strata (kHitAreaStrata^2, with an area light in the hit table) and C2's roulette window (20) - a rest
-	/// texel's stop waits for it.
+	/// HITS' AREA CYCLE (PHOTON-7 11-2 (2)): the rest samples one full cycle of the hit's time-stratified area draw takes
+	/// (kHitAreaStrata^2) where the hit table holds an area light, 0 without - a rest texel's stop waits for it.
 	vec4 alpha;
 	/// THE MEDIA ALONG THE REFLECTION (PHOTON-I-1 fix 5): OgreScene::fogAlong's eight
 	/// (jah_fog_along.glsl states them).

@@ -368,10 +368,6 @@ constexpr uint32_t kHitAuxWords = 8u;
 /// THE HIT's AREA STRATA (jah_rq_hit_direct.glsl kHitAreaStrata = 4 a side): one full cycle of the rest's time-stratified
 /// area draw, the samples a rest texel's stop waits for where the hit table holds an area light (PHOTON-7 11-2 (2)).
 constexpr uint32_t kHitAreaStrataPerHit = 4u * 4u;
-/// C2's ROULETTE WINDOW (jah_rq_hit_radiance.glsl jahHitSpecularLobeTraced, PHOTON-7 11-2 (3)): the hit's own specular is
-/// traced at p >= 0.05, at rest stratified in time - one traced sample in every 1 / p, so a rest texel's stop waits for
-/// 1 / 0.05 = 20 samples (it judged a stream of zeros: the still slab 11 % dark, gi.hit_specular_mobility).
-constexpr uint32_t kHitLobeRouletteWindow = 20u;
 /// THE HIT WRITE-BACK's bindings (rq_hit_composite.comp): params, the list's
 /// buffer, the destinations, the decoded radiance, the reflection's STATE texel (an unshaded record's distance is
 /// withheld there), the gather's atlas — then (PHOTON-I-1 fix 5) the list's records (the ray's direction) and the
@@ -6606,8 +6602,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
-    // (and one full window of C2's roulette, which every ray-tier hit takes)
-    pp.alpha[3] = float(std::max(sa.hitAreaLights > 0u ? kHitAreaStrataPerHit : 0u, kHitLobeRouletteWindow));
+    pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------

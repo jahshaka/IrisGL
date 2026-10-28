@@ -264,7 +264,7 @@ void main()
 			uint source = 0u;
 			// THE HIT's OWN SPECULAR TRACED (C2, PHOTON-7 11-2 (3)): the store leaves out its lobe's integral and one
 			// secondary ray of the hit's lobe answers it - a cache's FIXED draw (the texel and the ray keyed: a store
-			// takes no frame noise), Russian roulette on its split DFG
+			// takes no frame noise)
 			jahHitTracedLobe = true;
 			vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
 												 ok, source );
@@ -278,9 +278,9 @@ void main()
 				{
 					const uint h0 = jahAreaPcg( ( uint( at.x ) * 2246822519u ) ^ ( uint( at.y ) * 3266489917u ) ^
 												( uint( i ) * 668265263u ) ^ 0xC2C2C2C2u );
-					const uint h1 = jahAreaPcg( h0 ^ 0x9E3779B9u ), h2 = jahAreaPcg( h1 ^ 0x85EBCA6Bu );
+					const uint h1 = jahAreaPcg( h0 ^ 0x9E3779B9u );
 					radiance += jahHitSpecularLobeTraced( origin + dir * tHit, normalize( hitN ), -dir, tHit, hRough,
-														  hMetal, vec3( h0, h1, h2 ) * ( 1.0 / 4294967296.0 ), false, -1, 0u );
+														  hMetal, vec2( h0, h1 ) * ( 1.0 / 4294967296.0 ) );
 				}
 			}
 			if( !ok || !finite3( radiance ) )
