@@ -117,6 +117,9 @@ namespace Ogre
         /// ...and the bricks STOPPED ON THE OPERATOR'S BOUND after it: their r was never measured (PHOTON-7 stage 5's read
         /// A2; PhotonBrickFeedback_cs.glsl's word 2) - a door.
         uint32 onPrior = 0u;
+        /// ...and the passes the frame's region rebuilds ran over their own bricks before their convergence stopped
+        /// them (PHOTON-7 8A, A2: PhotonBrickFeedback_cs.glsl's REGION mode, args [3]).
+        uint32 regionPasses = 0u;
     };
 
     class PhotonVoxelLighting : public IdObject, public TextureGpuListener

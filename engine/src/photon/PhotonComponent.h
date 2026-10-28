@@ -459,7 +459,7 @@ public:
         /// the region rebuilds served (every one; the movers' alone) and the cells they re-voxelised (cumulative), and
         /// the last one's CPU ms (GiStatus::CascadeStatus)
         unsigned long long regionRebuilds = 0, moverRegionRebuilds = 0, regionCells = 0;
-        /// ...and the passes its own bounce took in their frames (cumulative; the last rebuild's k: A2)
+        /// ...and the passes its own bounce took in their frames before its convergence (read back; cumulative and the last)
         unsigned long long regionBouncePasses = 0;
         unsigned regionBounceLast = 0;
         /// THE RELIGHT'S SWEEP (PHOTON-7 stage 4's hitch fix: the voxels a frame relights are the tier's count,
@@ -1324,10 +1324,8 @@ private:
     /// Cascade `idx`'s cells [lo, hi) of each box (at most eight, 4-aligned) cleared and voxelised from the table, the
     /// mip chains regenerated.
     void voxeliseRegion(size_t idx, const std::vector<std::array<int, 6>> &cells);
-    /// THE REGION'S OWN BOUNCE in the frame it was rebuilt (A2): k passes over its bricks, k from its largest albedo.
-    void regionBounce(size_t idx, const std::vector<std::array<int, 6>> &cells, float albedoMax);
-    /// k = ceil( ln(1/255) / ln(a_max) ), at least 1, at most the measured 32.
-    static unsigned regionBouncePasses(float albedoMax);
+    /// THE REGION'S OWN BOUNCE in the frame it was rebuilt (A2): passes over its bricks until their own convergence.
+    void regionBounce(size_t idx, const std::vector<std::array<int, 6>> &cells);
     /// THE CHAIN'S OWN FEEDBACK WORK under the contract (stage 8A): feedbackOwed() while the episode is the chain's
     /// (mFbEpisodeStill), never for an episode every activation of which came from a mover's region.
     bool stillFeedbackOwed() const;

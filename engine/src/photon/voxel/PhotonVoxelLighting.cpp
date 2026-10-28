@@ -1426,7 +1426,10 @@ namespace Ogre
                        : 0u;
         flags[3] = mode == 3u && !outer ? 1u : 0u;
         if( mode == 6u && select )
+        {
             flags[3] = select[0];   // REGION: list the bricks (else the fold alone)
+            flags[2] = select[1];   // ...the frame's first region call (the stop reset)
+        }
         if( mode == 5u && select )
         {
             flags[0] = select[0];   // the frame's first selection: the budget is set first
@@ -1512,10 +1515,12 @@ namespace Ogre
         PhotonVoxelLighting *owner = chain ? chain : this;
         mFeedbackChain = owner;   // the back scratch (and the sides' gather) this frame's passes write
         owner->ensureBrickMask();
-        const uint32 list[4] = { 1u, 0u, 0u, 0u }, fold[4] = { 0u, 0u, 0u, 0u };
+        const uint32 first[4] = { 1u, 1u, 0u, 0u }, list[4] = { 1u, 0u, 0u, 0u }, fold[4] = { 0u, 0u, 0u, 0u };
         for( uint32 p = 0u; p < passes; ++p )
         {
-            dispatchFeedback( 6u, nullptr, &boxes, nullptr, list );   // REGION: the last pass folded, the bricks listed
+            // REGION: the last pass folded, the bricks listed - none once the last pass moved the region by under a
+            // code (its own convergence, on the device: the remaining passes are indirect over no brick)
+            dispatchFeedback( 6u, nullptr, &boxes, nullptr, p == 0u ? first : list );
             runFeedbackPass();
         }
         dispatchFeedback( 6u, nullptr, &boxes, nullptr, fold );   // REGION: the last pass folded
@@ -1603,6 +1608,7 @@ namespace Ogre
         out.saturated = w[15];
         out.onPrior = w[10];
         out.carried = w[9] > w[8] ? w[9] - w[8] : 0u;
+        out.regionPasses = w[3];   // (PHOTON-7 8A: the region rebuilds' own passes this frame, their convergence's count)
         r.ticket->unmap();
         r.ticket.reset();
         mFeedbackNextTake = ( mFeedbackNextTake + 1u ) % kFeedbackReadingSlots;

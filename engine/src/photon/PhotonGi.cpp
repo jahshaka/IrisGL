@@ -40,7 +40,6 @@
 #include <OgreHlmsAsyncCompiler.h>
 #include <OgreBitwise.h>
 #include <OgrePixelFormatGpuUtils.h>
-#include <OgreHlmsPbsDatablock.h>
 #include <OgreMesh2.h>
 #include <OgreSubMesh2.h>
 #include <Vao/OgreAsyncTicket.h>
@@ -5779,9 +5778,8 @@ void PhotonComponent::serviceRegions() {
         if (!graphCurrent) giUpdateSceneGraph(mSceneMgr);
         graphCurrent = true;
     };
-    // (each cascade's re-voxelised cells this frame and the largest albedo in them: its own passes, phase 3)
+    // (each cascade's re-voxelised cells this frame: its own passes, phase 3)
     std::vector<std::vector<std::array<int, 6>>> rebuilt(n);
-    std::vector<float> rebuiltAlbedo(n, 0.0f);
     // ---- 1. THE GEOMETRY ------------------------------------------------------------------------------------------
     for (size_t i = 0; i < n; ++i) {
         VctCascade &c = mVctCascades[i];
@@ -5862,29 +5860,6 @@ void PhotonComponent::serviceRegions() {
         c.lastCpuMs = float(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         mRegionActivations.insert(mRegionActivations.end(), changed.begin(), changed.end());
         rebuilt[i] = cells;
-        {
-            // THE LARGEST ALBEDO THE REGION HOLDS: every GI item whose box meets a changed box, its datablocks' diffuse
-            // colour's largest channel (a map multiplies it by at most 1: a bound) - what the region's own bounce
-            // contracts by per pass, at most (phase 3)
-            std::vector<Ogre::Aabb> boxesW;
-            for (const RegionActivation &a : changed) boxesW.push_back(a.box);
-            float amax = 0.0f;
-            for (const auto *np : mScene.itemNodes()) {
-                const Ogre::Item *item = np->item;
-                if (!item || !(item->getVisibilityFlags() & kGiGeometryBit)) continue;
-                const Ogre::Aabb wa = item->getWorldAabb();
-                bool meets = false;
-                for (const Ogre::Aabb &w : boxesW) meets = meets || w.intersects(wa);
-                if (!meets) continue;
-                for (size_t si = 0; si < item->getNumSubItems(); ++si) {
-                    const Ogre::HlmsDatablock *db = item->getSubItem(si)->getDatablock();
-                    if (!db || !db->getCreator() || db->getCreator()->getType() != Ogre::HLMS_PBS) continue;
-                    const Ogre::Vector3 d = static_cast<const Ogre::HlmsPbsDatablock *>(db)->getDiffuse();
-                    amax = std::max(amax, std::max(d.x, std::max(d.y, d.z)));
-                }
-            }
-            rebuiltAlbedo[i] = amax;
-        }
         ++c.regionRebuilds;
         if (mover) ++c.moverRegionRebuilds;
         else ++c.rebuilds;   // AN EDIT'S counts as the rebuild it replaces (the lighting serial moves: the contract)
@@ -5985,35 +5960,30 @@ void PhotonComponent::serviceRegions() {
             continue;
         }
         // ---- 3. THE REGION'S OWN BOUNCE, in its frame (A2) ---------------------------------------------------------
-        if (mGi.bounces && !rebuilt[j].empty()) regionBounce(j, rebuilt[j], rebuiltAlbedo[j]);
+        if (mGi.bounces && !rebuilt[j].empty()) regionBounce(j, rebuilt[j]);
     }
 }
 
-// THE REGION'S OWN BOUNCE IN THE FRAME OF ITS GEOMETRY (PHOTON-7 stage 8A, A2; the lead's ruling (i)). A re-voxelised
-// region's bounce starts from its direct term (the delta injection kept the old voxels' totals; a new surface has none),
-// and the feedback converges it a pass a frame: a moving object trailed 16-30 frames of stale bounce behind it
-// (gi.cascades_asan case 12: 158-224 codes against its rest). So the region's bricks take k passes in the frame they
-// are rebuilt: the passes their own series needs to fall under one code - each pass contracts the bounce by at most the
-// largest albedo a_max the region holds (a pass gathers at most what reaches the voxel, and re-emits a_max of it), so
-// a_max^k <= 1/255: k = ceil( ln(1/255) / ln(a_max) ), capped at kRegionBouncePassesMax (the measured 32: a_max 0.85
-// needs 35) - never a knob. The passes run on the region's bricks only (the box, never the cascade): the cost is the
-// region's size times k. PRINTED per rebuild: the monitor row vct.regionBounceN (its units k, its GPU ms).
+// THE REGION'S OWN BOUNCE IN THE FRAME OF ITS GEOMETRY (PHOTON-7 stage 8A, A2; the lead's rulings (i) and (b)). A
+// re-voxelised region's bounce starts from its direct term (the delta injection kept the old voxels' totals; a new surface
+// has none), and the feedback converges it a pass a frame: a moving object trailed 16-30 frames of stale bounce behind it
+// (gi.cascades_asan case 12: 158-224 codes against its rest). So the region's bricks take passes IN THE FRAME they are
+// rebuilt, UNTIL THEIR OWN CONVERGENCE: each pass's largest move over the region (the mask's word 1, a voxel's move
+// relative to its radiance) is read on the device before the next, and under one code the remaining passes list no brick
+// (PhotonBrickFeedback_cs.glsl's REGION mode) - the stop IS the one-code criterion, so an open region (whose series decays
+// faster than a closed box's a_max a pass) stops early. Capped at kRegionBouncePassesMax (32: a closed box at albedo 0.85
+// needs 35). The passes run on the region's bricks only (the box, never the cascade). PRINTED: the monitor row
+// vct.regionBounceN (its GPU ms: the passes run; its units the cap recorded) and the passes the convergence took
+// (GiStatus::CascadeStatus regionBounceLast / regionBouncePasses, read back with the feedback's readings).
 static const char *const kRegionBounceRowNames[8] = { "vct.regionBounce0", "vct.regionBounce1", "vct.regionBounce2",
                                                       "vct.regionBounce3", "vct.regionBounce4", "vct.regionBounce5",
                                                       "vct.regionBounce6", "vct.regionBounce7" };
 static constexpr unsigned kRegionBouncePassesMax = 32u;
 
-unsigned PhotonComponent::regionBouncePasses(float albedoMax) {
-    if (!(albedoMax > 1.0f / 255.0f)) return 1u;
-    if (!(albedoMax < 1.0f)) return kRegionBouncePassesMax;
-    const double k = std::ceil(std::log(1.0 / 255.0) / std::log(double(albedoMax)));
-    return unsigned(std::max(1.0, std::min(double(kRegionBouncePassesMax), k)));
-}
-
-void PhotonComponent::regionBounce(size_t j, const std::vector<std::array<int, 6>> &cells, float albedoMax) {
+void PhotonComponent::regionBounce(size_t j, const std::vector<std::array<int, 6>> &cells) {
     VctCascade &c = mVctCascades[j];
     if (!c.lighting || mVctCascades.empty() || !mVctCascades[0].lighting) return;
-    const unsigned k = regionBouncePasses(albedoMax);
+    const unsigned k = kRegionBouncePassesMax;   // (the cap: the device stops the loop at the region's convergence)
     // THE REGION'S BRICKS (8^3 cells each), at most the activation's boxes; their count bounds the passes' rows
     Ogre::PhotonFeedbackActivation act;
     const int dims = (int(c.resolution) + 7) / 8;
@@ -6041,8 +6011,6 @@ void PhotonComponent::regionBounce(size_t j, const std::vector<std::array<int, 6
                                 kRegionBounceRowNames[std::min(j, size_t(7))], mRoot->getRenderSystem());
         row.setUnits(k);   // (a plain row: every pass's dispatch is its own time - the region's price)
         c.lighting->feedbackRegionPasses(act, k, chain);
-        c.regionBouncePasses += k;
-        c.regionBounceLast = k;
     } JAH_CATCH(mError, );
 }
 
@@ -7521,6 +7489,10 @@ void PhotonComponent::harvestFeedback() {
             c.fbResumes += r.resumes;
             c.fbSaturated += r.saturated;
             c.fbCarried += r.carried;
+            if (r.regionPasses) {   // (the passes the frame's region rebuilds took before their convergence stopped them)
+                c.regionBouncePasses += r.regionPasses;
+                c.regionBounceLast = r.regionPasses;
+            }
             ++c.fbReadings;
         }
     }
