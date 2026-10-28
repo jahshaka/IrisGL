@@ -1353,7 +1353,6 @@ constexpr ArmDef kArms[] = {
       "hit records a frame, so a fixture FORCES drops whatever the list's own capacity - a dropped record is NO "
       "SAMPLE for its ray (the gather's filter and SH sums leave it out; the reflection's frame has none), never black. "
       "0 = the list's own capacity (shipped)." },
-    { ArmId::ReflectC2, 0.0, 0.0, 2.0, "MEASURING ARM (PHOTON-7 11-2 (3), reverted): C2's price - 0 shipped, 1 always traced, 2 off." },
     { ArmId::ReflectRestReference, 0.0, 0.0, 2.0,
       "THE REFLECTION'S REFERENCE AT REST (PHOTON-2 round 2, R1 (f)'s measuring arm): from the first rest frame each "
       "texel's raw samples are averaged in a 32-bit image (an fp16 running mean stalls past a few hundred samples) "
