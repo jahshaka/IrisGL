@@ -1296,6 +1296,21 @@ private:
     /// round - a change during a round never restarts it (PHOTON-7 stage 5's read A2). Every site that owes a relight.
     static void oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *part);
     void runFeedback(bool forceAll, unsigned long long frame, size_t forceInner = ~size_t(0));
+    /// THE RELIGHT'S BUDGET LAW, one text for the frame's relights and the region rebuilds that carry a slab: the count,
+    /// each owed cascade's floor, the pool.
+    void relightBudgetNow(unsigned long long floorOf[8], unsigned long long &budget, unsigned long long &left) const;
+    struct RelightSlab {
+        int lo[3] = { 0, 0, 0 }, hi[3] = { 0, 0, 0 };
+        int start = 0, end = 0, cursorPlane = 0, span = 0;
+        unsigned long long area = 0, credit = 0;
+    };
+    enum class RelightTake { Answered, Carry, ShaderWait, Pay };
+    RelightTake takeRelightSlab(size_t i, unsigned long long floorHere, unsigned long long left, bool shaderHold,
+                                RelightSlab &s);
+    unsigned long long paidRelightSlab(size_t i, const RelightSlab &s);
+    static void relightAnswered(VctCascade &c);
+    /// what the frame's region rebuilds paid of the relight's pool (their injections carried the slabs)
+    unsigned long long mRelightRegionFrame = ~0ull, mRelightRegionSpent = 0ull;
     /// THE REGION REBUILDS (PHOTON-7 stage 8A), at the writer point after the slots' work: the last closed list's
     /// movers and the edits whose table has come, re-voxelised in place in every cascade they meet (voxeliseRegion),
     /// then each cascade's direct term re-marched over what they changed - its own cells and every voxel whose march

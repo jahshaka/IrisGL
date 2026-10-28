@@ -5939,6 +5939,23 @@ void PhotonComponent::serviceRegions() {
         }
         c.marchOwed.clear();
         if (boxes.empty()) continue;
+        // ...AND THE LAMP'S RELIGHT THIS CASCADE OWES, ITS SLAB FOR THIS FRAME (the relight's budget law, one text:
+        // takeRelightSlab): the one-writer latch lets a cascade take one injection a frame, so the region's injection pays
+        // it too - else a mover moving every frame in a cascade would hold every lamp change there owed for as long as it
+        // moved (the relights skip a cascade injected this frame).
+        RelightSlab rslab;
+        bool carriesRelight = false;
+        if (c.relightOwed) {
+            unsigned long long floorOf[8] = { 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull }, rBudget = 0ull, rLeft = 0ull;
+            relightBudgetNow(floorOf, rBudget, rLeft);
+            if (mRelightRegionFrame != frame) { mRelightRegionFrame = frame; mRelightRegionSpent = 0ull; }
+            rLeft -= std::min(rLeft, mRelightRegionSpent);
+            const bool shaderHold = mEngine && mEngine->armRegistry().on(ArmId::GiRelightShaderHold);
+            if (takeRelightSlab(j, j < 8u ? floorOf[j] : 0ull, rLeft, shaderHold, rslab) == RelightTake::Pay) {
+                carriesRelight = true;
+                boxes.push_back({ rslab.lo[0], rslab.lo[1], rslab.start, rslab.hi[0], rslab.hi[1], rslab.end });
+            }
+        }
         detail::foldInjectBoxes(boxes, Ogre::PhotonCommitLight::kMaxInjectBoxes);
         Ogre::PhotonCommitLight light;
         light.delta = true;
@@ -5951,10 +5968,11 @@ void PhotonComponent::serviceRegions() {
             }
         }
         ensureGraph();
-        mInjectingMover = mover;
+        mInjectingMover = mover && !carriesRelight;   // (a lamp's relight is the chain's work)
         bool ok = false;
         JAH_TRY { ok = injectCascade(j, &light); } JAH_CATCH(mError, (void)0);
         mInjectingMover = false;
+        if (ok && carriesRelight) mRelightRegionSpent += paidRelightSlab(j, rslab);
         if (!ok) {
             // (a refused injection: the cells are owed to the relight path - the chain's work - by region)
             Ogre::Aabb owed = Ogre::Aabb::BOX_NULL;
@@ -6989,6 +7007,124 @@ void PhotonComponent::oweRelight(VctCascade &c, bool whole, const Ogre::Aabb *pa
     if (part) c.relightNextBox.merge(*part);
 }
 
+// THE RELIGHT'S FRAME COUNT (GiQualityFacts::lightWorkFrames: the chain's voxels over that many frames) and its FLOORS
+// (every owed cascade's credit grows by half its own share of the count on a frame it can PAY - never while its delta
+// shader builds, never on a refused injection: stage 5's read B1, a credit banked over a 40-frame shader wait relit the
+// whole chain in one frame - up to ONE 4-plane slab of its owed box or one floor, the larger); the pool spent outermost
+// first is the count less those floors. One function: the frame's relights and the region rebuilds that carry a slab
+// (serviceRegions) read the same law.
+void PhotonComponent::relightBudgetNow(unsigned long long floorOf[8], unsigned long long &budget,
+                                       unsigned long long &left) const {
+    unsigned long long chainVoxels = 0ull;
+    for (const VctCascade &c : mVctCascades)
+        if (c.lighting && c.built) chainVoxels += (unsigned long long)c.resolution * c.resolution * c.resolution;
+    const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
+                                                                                      : GiViewProfile::Desktop)
+                                                  .lightWorkFrames);
+    budget = (chainVoxels + shareFrames - 1u) / shareFrames;
+    unsigned long long floors = 0ull;
+    for (size_t i = 0; i < mVctCascades.size(); ++i) {
+        const VctCascade &c = mVctCascades[i];
+        if (i < 8u) floorOf[i] = 0ull;
+        if (!c.lighting || !c.built || !c.relightOwed) continue;
+        const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
+        const unsigned long long floor = chainVoxels ? budget * v / (2ull * chainVoxels) : 0ull;
+        if (i < 8u) floorOf[i] = floor;
+        floors += floor;
+    }
+    left = floors < budget ? budget - floors : 0ull;
+}
+
+// (the round is done: the next one begins from what the changes during it touched, or none is owed)
+void PhotonComponent::relightAnswered(VctCascade &c) {
+    const bool next = c.relightNextOwed;
+    c.relightOwed = next;
+    c.relightWhole = next && c.relightNextWhole;
+    c.relightBox = next ? c.relightNextBox : Ogre::Aabb::BOX_NULL;
+    c.relightNextOwed = c.relightNextWhole = false;
+    c.relightNextBox = Ogre::Aabb::BOX_NULL;
+    c.relightCursor = std::numeric_limits<float>::quiet_NaN();
+    c.relightSwept = 0;
+}
+
+// THE SLAB A CASCADE'S OWED RELIGHT PAYS THIS FRAME (the relight's budget law, one text): its owed cells (the box or the
+// whole volume, aligned to the injection's 4^3 groups) from the cursor - a WORLD z (PHOTON-7 stage 5's read A4: a
+// scroll shifts the planes by 2 (mod 4) cells, and the old count took the 4-aligned slab's start for the cursor and
+// closed the round 2 planes short) - in whole planes of 4 (a slab may start up to 2 planes before the cursor, relit
+// again, exact by the delta) up to the box's end, the next frame on from its end; the round counts the planes PAST THE
+// CURSOR only; its credit first, then the pool `left`. A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a
+// scroll's commit does: the delta injection's permutation is the background compiler's while it builds - the relight
+// stays owed a frame, never compiled in the frame (shader.async_after_open: 673 ms on the UI thread); such a frame
+// cannot pay and its floor accrues nothing (the test door gi.relightShaderHold holds every cascade there).
+PhotonComponent::RelightTake PhotonComponent::takeRelightSlab(size_t i, unsigned long long floorHere,
+                                                              unsigned long long left, bool shaderHold, RelightSlab &s) {
+    VctCascade &c = mVctCascades[i];
+    const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
+    const Ogre::Vector3 corner = box.getMinimum();
+    const float cell = c.cell();
+    const int res = c.resolution;
+    for (int a = 0; a < 3; ++a) { s.lo[a] = 0; s.hi[a] = res; }
+    if (!c.relightWhole) {
+        bool empty = false;
+        for (int a = 0; a < 3; ++a) {
+            const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
+            const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
+            if (h <= l) empty = true;
+            s.lo[a] = l / 4 * 4;
+            s.hi[a] = std::min(res, (h + 3) / 4 * 4);
+        }
+        if (empty) { relightAnswered(c); return RelightTake::Answered; }
+    }
+    s.area = (unsigned long long)(s.hi[0] - s.lo[0]) * (unsigned long long)(s.hi[1] - s.lo[1]);
+    s.span = s.hi[2] - s.lo[2];
+    s.cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : s.lo[2];
+    if (s.cursorPlane < s.lo[2] || s.cursorPlane >= s.hi[2]) s.cursorPlane = s.lo[2];
+    s.start = std::max(s.lo[2], s.cursorPlane / 4 * 4);
+    const bool shaderWaits = (commitShaderAsync() && !c.lighting->commitLightReady()) || shaderHold;
+    // THE CREDIT THIS FRAME: the floor added on a frame that can pay, capped at one 4-plane slab of the owed box or one
+    // floor, the larger (a frame always spends its own floor; nothing banks past it)
+    const unsigned long long cap = std::max(4ull * s.area, floorHere);
+    s.credit = shaderWaits ? std::min(c.relightCredit, cap) : std::min(c.relightCredit + floorHere, cap);
+    c.relightSlab = cap;
+    const unsigned long long avail = s.credit + left;
+    int planes = int(std::min<unsigned long long>((unsigned long long)(s.hi[2] - s.start),
+                                                  s.area ? avail / s.area / 4ull * 4ull : 0ull));
+    planes = std::min(planes, (s.span - c.relightSwept + (s.cursorPlane - s.start) + 3) / 4 * 4);
+    if (planes < 4 || !s.area) {   // its credit grows (capped): a later frame pays the slab
+        c.relightCredit = s.credit;
+        ++c.relightCarried;
+        return RelightTake::Carry;
+    }
+    s.end = std::min(s.hi[2], s.start + planes);
+    if (shaderWaits) {
+        if (!shaderHold) ++mCommitShaderWaits;
+        return RelightTake::ShaderWait;
+    }
+    return RelightTake::Pay;
+}
+
+// THE SLAB PAID (its injection landed): the credit spent first, the relit voxels counted, the round's planes swept past the
+// cursor - the round answered at its span, else the cursor moved on. Returns what it took of the POOL.
+unsigned long long PhotonComponent::paidRelightSlab(size_t i, const RelightSlab &s) {
+    VctCascade &c = mVctCascades[i];
+    const float cell = c.cell();
+    const Ogre::Vector3 corner = Ogre::Aabb(c.centre, Ogre::Vector3(c.halfSize)).getMinimum();
+    ++c.relights;
+    const unsigned long long spent = s.area * (unsigned long long)(s.end - s.start);
+    const unsigned long long fromCredit = std::min(spent, s.credit);
+    c.relightCredit = s.credit - fromCredit;
+    c.relightVoxels += spent;
+    c.relightSwept += std::max(0, s.end - s.cursorPlane);
+    if (c.relightSwept >= s.span) {
+        ++c.relightRounds;
+        relightAnswered(c);
+    } else {
+        c.relightCursor = corner.z + float(s.end >= s.hi[2] ? s.lo[2] : s.end) * cell;
+        ++c.relightCarried;
+    }
+    return spent - fromCredit;
+}
+
 void PhotonComponent::relightAndFeedback() {
     if (mVctCascades.empty() || !mVctCascades[0].built) return;
     JAH_TRY {
@@ -7027,114 +7163,33 @@ void PhotonComponent::relightAndFeedback() {
         //     the count left pays for (at least one slab on a frame nothing else spent it), and the rest carried. A
         //     voxel's delta reads its old direct term from the store, so a plane relit twice (a grown box re-swept) is
         //     exact.
-        unsigned long long chainVoxels = 0ull;
-        for (const VctCascade &c : mVctCascades)
-            if (c.lighting && c.built) chainVoxels += (unsigned long long)c.resolution * c.resolution * c.resolution;
-        const unsigned shareFrames = std::max(1u, giQualityFacts(mGi.quality, mGiDriverStereo ? GiViewProfile::Vr
-                                                                                          : GiViewProfile::Desktop)
-                                                      .lightWorkFrames);
-        const unsigned long long relightBudget = (chainVoxels + shareFrames - 1u) / shareFrames;
-        // THE FLOORS (GiQualityFacts::lightWorkFrames' law): every owed cascade's credit grows by half its own share of
-        // the count on a frame it can PAY (below: never while its delta shader builds, never on a refused injection -
-        // stage 5's read B1: a credit banked over a 40-frame shader wait relit the whole chain in one frame), up to ONE
-        // 4-plane slab of its owed box or one floor, the larger; the pool spent outermost first is the count less those
-        // floors
-        unsigned long long floors = 0ull;
         unsigned long long floorOf[8] = { 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull, 0ull };
-        for (size_t i = 0; i < mVctCascades.size(); ++i) {
-            VctCascade &c = mVctCascades[i];
-            if (!c.lighting || !c.built || !c.relightOwed) {
-                c.relightCredit = 0ull;
-                continue;
-            }
-            const unsigned long long v = (unsigned long long)c.resolution * c.resolution * c.resolution;
-            const unsigned long long floor = chainVoxels ? relightBudget * v / (2ull * chainVoxels) : 0ull;
-            if (i < 8u) floorOf[i] = floor;
-            floors += floor;
-        }
-        unsigned long long relightLeft = floors < relightBudget ? relightBudget - floors : 0ull;
+        unsigned long long relightBudget = 0ull, relightLeft = 0ull;
+        relightBudgetNow(floorOf, relightBudget, relightLeft);
+        for (VctCascade &c : mVctCascades)
+            if (!c.lighting || !c.built || !c.relightOwed) c.relightCredit = 0ull;
+        // (what the frame's region rebuilds paid of the pool already: their injections carried the slabs, serviceRegions)
+        if (mRelightRegionFrame == frame) relightLeft -= std::min(relightLeft, mRelightRegionSpent);
         mRelightCount = relightBudget;
         const bool shaderHold = mEngine && mEngine->armRegistry().on(ArmId::GiRelightShaderHold);
         bool sceneGraphCurrent = false;
         for (size_t i = n; i-- > 0;) {
             VctCascade &c = mVctCascades[i];
             if (!c.relightOwed || !c.lighting || !c.built) continue;
-            const auto answered = [&c]() {
-                // (the round is done: the next one begins from what the changes during it touched, or none is owed)
-                const bool next = c.relightNextOwed;
-                c.relightOwed = next;
-                c.relightWhole = next && c.relightNextWhole;
-                c.relightBox = next ? c.relightNextBox : Ogre::Aabb::BOX_NULL;
-                c.relightNextOwed = c.relightNextWhole = false;
-                c.relightNextBox = Ogre::Aabb::BOX_NULL;
-                c.relightCursor = std::numeric_limits<float>::quiet_NaN();
-                c.relightSwept = 0;
-            };
             if (injectedThisFrame(i)) {
-                if (c.injectedWholeFrame == frame) answered();   // a whole volume's injection read the lights as they are
+                if (c.injectedWholeFrame == frame) relightAnswered(c);   // a whole volume's injection read the lights as they are
                 continue;
             }
+            RelightSlab slab;
+            const RelightTake take = takeRelightSlab(i, i < 8u ? floorOf[i] : 0ull, relightLeft, shaderHold, slab);
+            if (take != RelightTake::Pay) continue;
             Ogre::PhotonCommitLight d;
             d.delta = true;
             for (int a = 0; a < 3; ++a) d.keepHi[a] = Ogre::uint32(c.resolution);
-            // THE OWED CELLS: the box (or the whole volume), aligned to the injection's 4^3 groups
-            const Ogre::Aabb box(c.centre, Ogre::Vector3(c.halfSize));
-            const Ogre::Vector3 corner = box.getMinimum();
-            const float cell = c.cell();
-            const int res = c.resolution;
-            int lo[3] = { 0, 0, 0 }, hi[3] = { res, res, res };
-            if (!c.relightWhole) {
-                bool empty = false;
-                for (int a = 0; a < 3; ++a) {
-                    const int l = std::max(0, int(std::floor((c.relightBox.getMinimum()[a] - corner[a]) / cell)));
-                    const int h = std::min(res, int(std::ceil((c.relightBox.getMaximum()[a] - corner[a]) / cell)));
-                    if (h <= l) empty = true;
-                    lo[a] = l / 4 * 4;
-                    hi[a] = std::min(res, (h + 3) / 4 * 4);
-                }
-                if (empty) { answered(); continue; }
-            }
-            // THE SLAB THIS FRAME PAYS FOR: from the cursor - a WORLD z (PHOTON-7 stage 5's read A4: a scroll shifts the
-            // planes by 2 (mod 4) cells, and the old count took the 4-aligned slab's start for the cursor and closed the
-            // round 2 planes short) - in whole planes of 4 (the injection's 4^3 groups: a slab may start up to 2 planes
-            // before the cursor, relit again, exact by the delta) up to the box's end, the next frame on from its end.
-            // The round counts the planes PAST THE CURSOR only. Its credit first, then the pool.
-            const unsigned long long area = (unsigned long long)(hi[0] - lo[0]) * (unsigned long long)(hi[1] - lo[1]);
-            const int span = hi[2] - lo[2];
-            int cursorPlane = std::isfinite(c.relightCursor) ? int(std::lround((c.relightCursor - corner.z) / cell)) : lo[2];
-            if (cursorPlane < lo[2] || cursorPlane >= hi[2]) cursorPlane = lo[2];
-            const int start = std::max(lo[2], cursorPlane / 4 * 4);
-            // A LAMP'S DELTA WAITS FOR ITS SHADER (ASYNC-SHADERS-1), as a scroll's commit does: the delta injection's
-            // permutation (asked for at the cascade's first injection) is the background compiler's while it builds -
-            // the relight stays owed a frame, never compiled in the frame (shader.async_after_open: a lamp change after an
-            // open compiled VCT/LightInjection on the UI thread, 673 ms). Such a frame cannot pay: its floor accrues
-            // nothing (the test door gi.relightShaderHold holds every cascade there).
-            const bool shaderWaits = (commitShaderAsync() && !c.lighting->commitLightReady()) || shaderHold;
-            // THE CREDIT THIS FRAME: the floor added on a frame that can pay, capped at one 4-plane slab of the owed box
-            // or one floor, the larger (a frame always spends its own floor; nothing banks past it)
-            const unsigned long long floorHere = i < 8u ? floorOf[i] : 0ull;
-            const unsigned long long cap = std::max(4ull * area, floorHere);
-            const unsigned long long credit =
-                shaderWaits ? std::min(c.relightCredit, cap) : std::min(c.relightCredit + floorHere, cap);
-            c.relightSlab = cap;
-            const unsigned long long avail = credit + relightLeft;
-            int planes = int(std::min<unsigned long long>((unsigned long long)(hi[2] - start),
-                                                          area ? avail / area / 4ull * 4ull : 0ull));
-            planes = std::min(planes, (span - c.relightSwept + (cursorPlane - start) + 3) / 4 * 4);
-            if (planes < 4 || !area) {   // its credit grows (capped): a later frame pays the slab
-                c.relightCredit = credit;
-                ++c.relightCarried;
-                continue;
-            }
-            const int end = std::min(hi[2], start + planes);
-            d.injectLo[0][0] = Ogre::uint32(lo[0]); d.injectHi[0][0] = Ogre::uint32(hi[0]);
-            d.injectLo[0][1] = Ogre::uint32(lo[1]); d.injectHi[0][1] = Ogre::uint32(hi[1]);
-            d.injectLo[0][2] = Ogre::uint32(start); d.injectHi[0][2] = Ogre::uint32(end);
+            d.injectLo[0][0] = Ogre::uint32(slab.lo[0]); d.injectHi[0][0] = Ogre::uint32(slab.hi[0]);
+            d.injectLo[0][1] = Ogre::uint32(slab.lo[1]); d.injectHi[0][1] = Ogre::uint32(slab.hi[1]);
+            d.injectLo[0][2] = Ogre::uint32(slab.start); d.injectHi[0][2] = Ogre::uint32(slab.end);
             d.numInjectBoxes = 1u;
-            if (shaderWaits) {
-                if (!shaderHold) ++mCommitShaderWaits;
-                continue;
-            }
             if (!sceneGraphCurrent) {
                 giUpdateSceneGraph(mSceneMgr);   // an injection reads the lights' DERIVED poses
                 sceneGraphCurrent = true;
@@ -7148,22 +7203,8 @@ void PhotonComponent::relightAndFeedback() {
                 mInjectingRelight = false;
                 row.setUnits(ok ? 1u : 0u);
             }
-            if (ok) {   // (a refused injection keeps the credit it had: the frame paid nothing, so it accrued nothing)
-                ++c.relights;
-                const unsigned long long spent = area * (unsigned long long)(end - start);
-                const unsigned long long fromCredit = std::min(spent, credit);
-                c.relightCredit = credit - fromCredit;
-                c.relightVoxels += spent;
-                relightLeft -= std::min(relightLeft, spent - fromCredit);
-                c.relightSwept += std::max(0, end - cursorPlane);
-                if (c.relightSwept >= span) {
-                    ++c.relightRounds;
-                    answered();
-                } else {
-                    c.relightCursor = corner.z + float(end >= hi[2] ? lo[2] : end) * cell;
-                    ++c.relightCarried;
-                }
-            }
+            // (a refused injection keeps the credit it had: the frame paid nothing, so it accrued nothing)
+            if (ok) relightLeft -= std::min(relightLeft, paidRelightSlab(i, slab));
         }
         // THE JACOBI REFERENCE (the measuring door gi.bounceJacobi, set to N): the innermost N cascades (every one when N
         // is the chain's count or more) restarted from their direct terms where it comes on, then every brick of them a
