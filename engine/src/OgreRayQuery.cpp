@@ -656,7 +656,6 @@ private:
         unsigned long long portalScans = 0ull;
         double portalScanMs = 0.0;
         std::future<PortalScanOut> portalJob;   ///< the scan in flight (its own thread)
-        double portalArmWas = 0.0;   // (MEASURING ARM, reverted)
         /// THE HIT TABLE's AREA LIGHTS (PHOTON-7 11-2 (2)): how many it holds - a rest texel's stop then waits for one
         /// full cycle of the hit's time-stratified area draw (kHitAreaStrataPerHit samples).
         uint32_t hitAreaLights = 0u;
@@ -6867,7 +6866,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
     pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
-    pp.alpha[1] = mArms ? float(mArms->value(ArmId::ReflectC2Arm)) : 0.0f;   // MEASURING ARM (reverted)
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
     scene->fogAlong(pp.fog, fogAerial);
     // ---- THE REST (PHOTON-2 1e, fix F1; round 2: R1, G1-G6) -----------------------------------------------------
@@ -7822,9 +7820,8 @@ void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
     const uint32_t cap = giQualityFacts(scene->giParams().quality).reflectEmitters;
     if (writes == sa.emitterWrites && rowsSerial == sa.emitterRows && edits == sa.emitterEdits &&
         meshes == sa.emitterMeshes && slotCount == sa.emitterSlotCount && cap == sa.emitterCap &&
-        sa.portalSerial == sa.emitterPortalSerial && (mArms ? mArms->value(ArmId::ReflectPortalsOff) : 0.0) == sa.portalArmWas)
+        sa.portalSerial == sa.emitterPortalSerial)
         return;
-    sa.portalArmWas = mArms ? mArms->value(ArmId::ReflectPortalsOff) : 0.0;   // (MEASURING ARM, reverted)
     sa.emitterPortalSerial = sa.portalSerial;
     sa.emitterWrites = writes;
     sa.emitterRows = rowsSerial;
@@ -7898,10 +7895,8 @@ void RayQueryTier::updateEmitterTable(OgreScene *scene, SceneAs &sa) {
     sa.st.reflectEmitters = int(all.size());
     // ...AND THE SKY's PORTALS after them (PHOTON-7 11-2 (6), updatePortals: slot kPortalSlot; the reflection's emitter
     // NEE skips them, C2's sky NEE takes them alone - jah_rq_emitters.glsl's kind)
-    if (!(mArms && mArms->value(ArmId::ReflectPortalsOff) > 0.5)) {   // (MEASURING ARM reflect.portalsOff, reverted)
-        words.insert(words.end(), sa.portalWords.begin(), sa.portalWords.end());
-        setKey.insert(setKey.end(), sa.portalWords.begin(), sa.portalWords.end());
-    }
+    words.insert(words.end(), sa.portalWords.begin(), sa.portalWords.end());
+    setKey.insert(setKey.end(), sa.portalWords.begin(), sa.portalWords.end());
     if (setKey != sa.emitterSetKey) {
         sa.emitterSetKey.swap(setKey);
         ++sa.st.reflectEmitterSetSerial;
