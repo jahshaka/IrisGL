@@ -10162,18 +10162,17 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
             std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
     }
 
-    // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against EVERY
-    // caster, still and moving, to the cards' sun range, no mover gate (rq_card_gather.comp's mask law; PHOTON-7 8A A4:
-    // a mover is GI geometry, in the store - the three masks change together)
+    // ---- THE PARAMETERS: the hit set's (the one function), then this job's - the hit's own sun rays against the
+    // still casters to the cards' sun range, no mover gate (rq_card_gather.comp's mask law)
     CardGatherParams pp{};
     hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
-    pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
     pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
-    pp.knobs[3] = float(kRayMaskStill | kRayMaskMover);   // the world, movers in it (rq_card_gather.comp's mask law)
+    pp.knobs[3] = float(kRayMaskStill);   // the still world (rq_card_gather.comp's mask law)
     pp.knobs2[1] = float(count);
     std::memcpy(v.params[ring].mapped, &pp, sizeof(pp));
     std::memcpy(v.records[ring].mapped, job.records, size_t(count) * kCardGatherRecordFloats * sizeof(float));
@@ -10495,18 +10494,18 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
         else
             std::memcpy(rb.mapped, hs.geomRowOfSlot->data(), size_t(want));
     }
-    // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against every caster, still and
-    // moving, no mover gate (rq_voxel_sides.comp's mask law, the cards' gather's; PHOTON-7 8A A4)
+    // ---- THE PARAMETERS: the hit set's, then this job's - the hit's own sun rays against the still casters, no mover
+    // gate (rq_voxel_sides.comp's mask law, the cards' gather's)
     VoxelSideParams pp{};
     hitSetParams(hs, geomSlots, pp.hit, HitReader::Cache);
-    pp.hit.hitSun2[0] = float(kRayMaskStillCaster | kRayMaskMoverCaster);
+    pp.hit.hitSun2[0] = float(kRayMaskStillCaster);
     pp.hit.hitSun2[2] = kCardGatherSunRange;
     pp.hit.hitSun2[3] = 0.0f;
     pp.hit.counts[3] = 0.0f;
     pp.knobs[0] = float(std::max(job.rays, 1u));
     pp.knobs[1] = std::max(job.reach, 0.0f);
     pp.knobs[2] = std::max(job.lift, 0.0f);
-    pp.knobs[3] = float(kRayMaskStill | kRayMaskMover);   // the world, movers in it (A4)
+    pp.knobs[3] = float(kRayMaskStill);
     pp.cascade[0] = cascade;
     pp.cascade[1] = job.brickDims[0];
     pp.cascade[2] = job.brickDims[1];

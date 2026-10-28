@@ -31,9 +31,9 @@
 //     than that read the sky inside), and only there is it the sky over the ray's bin (a cone of the bin's solid angle
 //     2 pi / N: jahEnvCone) - the sky enters ONLY at an earned miss. A hit past every cascade reads its card, or is no
 //     sample (above).
-// THE MASK: THE WORLD, movers in it (kRayMaskStill | kRayMaskMover; PHOTON-7 8A A4 - a mover is GI geometry, in the
-// store since A1, so a ray that hits it reads its voxels like any surface's; its bounce is in the cards). Its own sun
-// rays at a voxel-answered hit take every caster (kRayMaskStillCaster | kRayMaskMoverCaster) for the same reason.
+// THE MASK: the still world alone (kRayMaskStill, until stage 8's 8-M): no brick fires when a mover moves, and the
+// gate's card half counts a mover's occlusion where a reader asks for it. Its own sun rays at a voxel-answered hit
+// take the still casters (kRayMaskStillCaster) for the same reason.
 //
 // THE COUNTS (the e = 0 counter, the lead's 10-2a): per dispatch, the rays traced and each one's answer - a card, a
 // cascade, a back face, no sample, the sky - the texels gathered, and the BURIED texels (jahRayOriginBuried: their

@@ -24,8 +24,8 @@
 // CASCADES ALONE: the cache is bound as its stand-ins with zero slots (the lead's R1 - the cards read the voxels, so a voxel
 // that read a card closed a loop; RayQueryTier::gatherVoxelSides), never Sourced -, a back face of a one-sided surface 0,
 // a hit nothing shades no sample, a miss - an EXIT from the world's box (10-3 R4: it stopped at the reach) - the sky
-// over the ray's bin. THE WORLD, movers in it (kRayMaskStill | kRayMaskMover, PHOTON-7 8A A4: a mover is GI geometry,
-// in the store - a ray that hits it reads its voxels; the hit's own sun rays every caster).
+// over the ray's bin. The still world alone
+// (kRayMaskStill, until 8-M).
 // THE COUNTS: nine (rays, a card, a cascade, a back face, no sample, the sky, the sides gathered, sides with no sample,
 // the BURIED sides - jahRayOriginBuried) a dispatch, read back (GiStatus::voxelSides) - inside a watertight room the sky
 // stays 0.
