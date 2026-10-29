@@ -1306,7 +1306,7 @@ void main()
 		// point its mean hit distance names along the view ray - so under motion its history is read where THAT point
 		// was, not where the surface was (the surface's history smeared the reflected image along the walk: gi.walk_rough's
 		// lag, R12 / §3397). Reprojected with no depth test (an image behind a mirror has none); off the previous image,
-		// or on a texel with no history, the surface's history answers. Still, the point projects to the pixel itself: the
+		// on a texel with no history or of another surface, the surface's history answers. Still, the point projects to the pixel itself: the
 		// rest and every still frame read what they read.
 		ivec2 lobeAt = histAt;
 		{
@@ -1327,7 +1327,14 @@ void main()
 					bool wf;
 					uint wn;
 					unpackGeom( imageLoad( historyPrev, ivec3( pc, eye ) ).y, wd, wf, wn, wc );
-					if( wn > 0u )
+					// ...ON THE SAME REFLECTOR: the previous pixel there showed a point of this pixel's own plane (the
+					// image behind a mirror is that mirror's: a texel of another surface holds another lobe) - Lumen's 1 %
+					// relative depth bound over the facing, measured along the normal, and the same class
+					const vec3 wasAt = jahWorldAt( before, ( vec2( pc ) + 0.5 ) / vec2( size ), wd );
+					const float NoVv = clamp( dot( pixelNormal, toEyeField ), 0.1, 1.0 );
+					const bool onPlane = wd > 0.0 && wf == pixelFoliage && finite3( wasAt ) &&
+										 abs( dot( pixelNormal, wasAt - pixelWorld ) ) < kGatherDepthThreshold * pixelDist / NoVv;
+					if( wn > 0u && onPlane )
 						lobeAt = pc;
 				}
 			}
