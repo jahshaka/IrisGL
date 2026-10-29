@@ -15,6 +15,12 @@
 //             write their history through the ping-pong). A held cell within the ring's reach of an active one is
 //             traced at that one's index for it, and still never integrated.
 // The clocks live on the GPU (the resume decides them): every gather job reads its cell's K and sample index here.
+// A NAMED COST (the lead's ruling, 2026-10-29): the cards' one rest decision (SurfaceCache::refreshResidency) waits for
+// every reader's rest, and with per-cell rests that is the LAST cell's - cells an input reached late (a relight listed a
+// report later) rest later, so the decision comes ~100 frames after a view-wide rest's on gi.pane_stack_cards (292
+// frames against 195). A read of the cards "at rest" waits on giAtRest, never a frame count. (Unmeasured, on the
+// leftovers: a card read only by HELD cells is drained at a decision - its marks predate the rest span - and its
+// departure resumes those cells onto the voxels.)
 #ifndef JAH_PROBE_REST_GLSL
 #define JAH_PROBE_REST_GLSL
 
