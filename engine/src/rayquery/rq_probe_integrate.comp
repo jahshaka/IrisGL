@@ -1269,7 +1269,6 @@ void main()
 		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
 	// THE STREAK (8B): one more frame where the reprojected history was taken, 1 where it was not
-	if( p.young.w < 0.5 )   // (MEASURING ARM: young.w 1 = the streak's store skipped)
 	imageStore( streakCur, at, vec4( prevCount > 0u
 										? min( round( imageLoad( streakPrev, ivec3( histAt, eye ) ).x * 255.0 ) + 1.0, 255.0 ) / 255.0
 										: 1.0 / 255.0 ) );
