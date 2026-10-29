@@ -1544,9 +1544,6 @@ constexpr ArmDef kArms[] = {
       "a dropped one), the radiance it returned, its hit and the sun's visibility there - "
       "GatherStatus::rays, the verb world.gatherHits. One more ray per hit while on, and the view "
       "never holds its rest (a held view traces nothing). Nothing reads it but the readback." },
-    { ArmId::ReflectRefineOff, 0.0, 0.0, 1.0,
-      "MEASURING ARM (PHOTON-7 8B B2, to be reverted): 1 = the reflection's refinement field unread and unwritten (the "
-      "slew off) - the temporal pass's hand-over priced ABBA in one process. 0 = shipped." },
     { ArmId::ReflectNee, 1.0, 0.0, 1.0,
       "THE REFLECTION'S NEXT-EVENT ESTIMATION (PHOTON-7 stage 11, 11-1b): 1 = every VNDF draw of a texel an emitter of "
       "the table reaches is paired with ONE ray drawn in an emitter's bounding-sphere cone, the two combined by the "
