@@ -1355,37 +1355,6 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,
 // and the frame's sample `s` - a record, no sample, the sample - or, for a batch that folded its whole count, none.
-/// MEASURING ARM (8B B2 (e), to be reverted): THE PICKED STOPPED TEXEL's MEAN HIT, READ - one ray along the lobe's mean
-/// segment to its first hit and the shared hit read there (jahHitStoreRead: the card, else the store) at `footprint`;
-/// w = 1 answered. `slotOut` the hit's slot (0xFFFFFFFF none).
-vec4 instrMeanRead( vec3 origin, vec3 meanL, float meanT, float footprint, out uint slotOut )
-{
-	slotOut = 0xFFFFFFFFu;
-	rayQueryEXT q;
-	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, origin, 0.0, meanL,
-						   max( meanT * 1.5, 1e-3 ) );
-	JAH_RQ_PROCEED( q )
-	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
-		return vec4( 0.0 );
-	const float t = rayQueryGetIntersectionTEXT( q, true );
-	const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) );
-	slotOut = slot;
-	const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) );
-	const uint geom = uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) );
-	const vec2 bary = rayQueryGetIntersectionBarycentricsEXT( q, true );
-	const mat4x3 toWorld = rayQueryGetIntersectionObjectToWorldEXT( q, true );
-	vec3 wound;
-	const bool known = jahHitWoundNormal( slot, geom, prim, toWorld, wound );
-	const vec3 n = known ? ( dot( wound, meanL ) > 0.0 ? -wound : wound ) : -meanL;
-	const JahHitSurface was = jahHitSurf;
-	jahHitSurf = JahHitSurface( slot, geom, prim, bary, toWorld, t, false, known );
-	bool ok = false;
-	uint src = 0u;
-	const vec3 r = jahHitStoreRead( slot, origin + meanL * t, n, meanL, footprint, false, ok, src );
-	jahHitSurf = was;
-	return vec4( ok && finite3( r ) ? r : vec3( 0.0 ), ok ? 1.0 : 0.0 );
-}
-
 void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf, bool ownMoving, float lobeAlpha,
 					EyeImage thisEye, bool atRest, bool restInPlace, bool restBatch, uint batchRays,
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
@@ -1676,26 +1645,6 @@ void main()
 		stoppedCard = !real && meanKind == 1u;
 		if( !real && !stoppedCard )
 		{
-			{
-				// MEASURING ARM (8B B2 (e), to be reverted): the picked stopped texel's mean hit read and its tests
-				const int ps = jahPickSlot( tc );
-				if( ps >= 0 && meanT > 0.0 )
-				{
-					uint hs;
-					const float lobeR = 2.0 * meanT * max( alpha, 1e-4 );
-					const vec4 rd = instrMeanRead( origin, meanL, meanT, reflectFootprint( max( alpha, 1e-4 ), meanT ), hs );
-					const vec4 rl = instrMeanRead( origin, meanL, meanT, lobeR, hs );
-					const uint b = uint( ps ) * 64u;
-					jahPick[b + 56u] = 1u;
-					jahPick[b + 57u] = floatBitsToUint( rd.x );
-					jahPick[b + 58u] = floatBitsToUint( rd.y );
-					jahPick[b + 59u] = floatBitsToUint( rd.z );
-					jahPick[b + 60u] = hs;
-					jahPick[b + 61u] = restHitKind( origin + meanL * meanT, meanR );
-					jahPick[b + 62u] = restHitKind( origin + meanL * meanT, lobeR );
-					jahPick[b + 63u] = floatBitsToUint( rl.y );
-				}
-			}
 			// (a stopped texel still REFINING - B2's code-a-frame slew - is still active: the view holds once each arrived)
 			if( JAH_HIT_ON && ( imageLoad( restRefine, ivec3( tc, gEye ) ).w & kRefineRefining ) != 0u )
 				atomicAdd( jahHitBuf[2], 1u );
