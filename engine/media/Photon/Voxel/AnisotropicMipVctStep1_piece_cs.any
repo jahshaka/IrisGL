@@ -34,10 +34,12 @@
 	// apply, and encoding into one would throw away the headroom it is there for
 	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
 	// the UNORM write clamps it -- which is the clip this patch removes).
+	// THE fp16 STORE ROUNDS FIRST (REDS-1 item 5): an rgba16f store truncates on NVIDIA 595.x (jah_half_round.glsl)
+	@insertpiece( JahHalfRound )
 	@property( uav0_orig_pf_srgb )
 		#define jahStoreLight( x ) toSRGB( x )
 	@else
-		#define jahStoreLight( x ) ( x )
+		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
 @end
 

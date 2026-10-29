@@ -48,6 +48,7 @@ layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
 /// pass, before any stock-drawn surface is added to it.
 layout( set = 0, binding = 5 ) uniform sampler2D idDepth;
 
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_atom_id.glsl"
 #include "jah_reproject.glsl"
 
@@ -101,5 +102,5 @@ void main()
 	// The depth buffer's value at that distance: the inverse of viewDistance.
 	const float rawWas = p.camPos.w < 0.5 ? p.projParams.x + ( raw - p.projParams.x ) * ( zWas / max( dist, 1e-6 ) )
 										  : p.projParams.x + p.projParams.y / max( zWas, 1e-6 );
-	imageStore( velocity, px, vec4( uvWas - uv, rawWas - raw, 1.0 ) );
+	imageStore( velocity, px, jahRoundHalf( vec4( uvWas - uv, rawWas - raw, 1.0 ) ) );
 }

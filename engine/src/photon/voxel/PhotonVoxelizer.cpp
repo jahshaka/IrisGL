@@ -557,11 +557,19 @@ namespace Ogre
         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
             textures[i]->scheduleTransitionTo( GpuResidency::OnStorage );
 
-        mAlbedoVox->setPixelFormat( PFG_RGBA8_UNORM );
+        // THE ALBEDO AND THE METAL ARE 16-BIT RATIOS (REDS-1, the lead's ruling): a ratio lives in [0, 1],
+        // but an 8-bit UNORM is NOT exact at the store's own quantum - albedo 0.5 is 127.5 / 255 and was
+        // stored 0.498039, -0.39 % of every bounce's diffuse share, -0.22 % of a sealed room's series
+        // limit (3.5 store steps: gi.bounce_series (2)); a coloured F0 in the metal volume is the same
+        // class. RGBA16_UNORM holds a ratio within 7.6e-6 (0.0015 % at 0.5). Nothing else moves: the
+        // voxeliser's image declarations, the scroll's copies and its scratch, the mip chain
+        // (PhotonMipChain) and the door's readback all follow the bound texture's format. The cost:
+        // 8 bytes a voxel where it was 4, each volume (+9.1 MiB a 128^3 cascade with the albedo's mips).
+        mAlbedoVox->setPixelFormat( PFG_RGBA16_UNORM );
         // JAHSHAKA fork ad452604a+155a56bf8 (was 0087): THE EMISSIVE VOXEL IS A FLOAT.
         //
-        // Albedo is a RATIO and lives in [0, 1] by definition, so its UNORM store
-        // above is exact. EMISSIVE is a RADIANCE -- W/(m^2 sr), no upper bound
+        // Albedo is a RATIO and lives in [0, 1] by definition, so a UNORM store
+        // suits it (at 16 bits, above). EMISSIVE is a RADIANCE -- W/(m^2 sr), no upper bound
         // worth naming -- and this store was the one place it was clipped: the
         // material store carries it as four honest floats (PhotonVoxelMaterial:
         // shaderMaterial.emissive[i] = emissiveCol[i]) and the merge accumulates
@@ -587,8 +595,8 @@ namespace Ogre
         // Voxelizer_piece_cs.any.
         mEmissiveVox->setPixelFormat( PFG_RGBA16_FLOAT );
         mNormalVox->setPixelFormat( PFG_R10G10B10A2_UNORM );
-        // the metal's F0 and weight are ratios in [0, 1], like the albedo
-        mMetalVox->setPixelFormat( PFG_RGBA8_UNORM );
+        // the metal's F0 and weight are ratios in [0, 1], like the albedo: 16 bits (above)
+        mMetalVox->setPixelFormat( PFG_RGBA16_UNORM );
         if( hasTypedUavs )
             mAccumValVox->setPixelFormat( PFG_R16_UINT );
         else

@@ -73,6 +73,7 @@ layout( rg32ui, set = 0, binding = 11 ) uniform readonly uimage2DArray statePrev
 #define JAH_FOG_AERIAL( uvw ) textureLod( fogAerial, uvw, 0.0 )
 #define JAH_FOG_HAS_AIR
 #define JAH_FOG_HAS_HEIGHT_FOG
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_atmosphere.glsl"
 #include "jah_height_fog.glsl"
 #include "jah_fog_along.glsl"
@@ -120,8 +121,8 @@ void main()
 		// becomes kAtlasNoSample, which keeps it out of the filter and the SH sums like a dropped record.
 		const vec4 texel = imageLoad( probeAtlas, xy );
 		// (ADDED to what the trace wrote: the crossed panes' own light, PHOTON-7 10-4 R7 - 0 where no pane was crossed)
-		imageStore( probeAtlas, xy, shaded ? vec4( min( texel.xyz + radiance * weight, vec3( kMaxRadiance ) ), texel.w )
-										   : vec4( 0.0, 0.0, 0.0, kAtlasNoSample ) );
+		imageStore( probeAtlas, xy, jahRoundHalf( shaded ? vec4( min( texel.xyz + radiance * weight, vec3( kMaxRadiance ) ), texel.w )
+										   : vec4( 0.0, 0.0, 0.0, kAtlasNoSample ) ) );
 		return;
 	}
 	// A texel outside the image is never written (no robustness on this device:
@@ -211,9 +212,9 @@ void main()
 			atomicAdd( jahHitBuf[7], lost );
 		if( v > st.v )
 		{
-			imageStore( historyCur, at3, vec4( rs.M, rs.m2 ) );
+			imageStore( historyCur, at3, jahRoundHalf( vec4( rs.M, rs.m2 ) ) );
 			if( jahRestHasResidual( float( v ), hasH, N ) )
-				imageStore( historyPrev, at3, rs.res );
+				imageStore( historyPrev, at3, jahRoundHalf( rs.res ) );
 			st.v = v;
 			st.hitT = restT;
 			imageStore( stateCur, at3, uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -249,13 +250,13 @@ void main()
 		// screen's share the trace wrote and the delta carry theirs already
 		const float gain = finite1( d2g.y ) ? d2g.y : 0.0;
 		imageStore( reflectSample, at3,
-					share ? vec4( max( was.xyz + weight * gain * fogged + delta, vec3( 0.0 ) ),
+					jahRoundHalf( share ? vec4( max( was.xyz + weight * gain * fogged + delta, vec3( 0.0 ) ),
 								  was.w + weight * max( lengths.x, 1e-3 ) )
-						  : vec4( max( gain * fogged + delta, vec3( 0.0 ) ), max( lengths.x, 1e-3 ) ) );
+						  : vec4( max( gain * fogged + delta, vec3( 0.0 ) ), max( lengths.x, 1e-3 ) ) ) );
 	}
 	else if( share )
 	{
 		const vec4 was = imageLoad( reflectSample, at3 );
-		imageStore( reflectSample, at3, was / max( 1.0 - weight, 1e-6 ) );
+		imageStore( reflectSample, at3, jahRoundHalf( was / max( 1.0 - weight, 1e-6 ) ) );
 	}
 }

@@ -52,6 +52,7 @@ layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRows { uvec4 jahGe
 #define JAH_GEOM_SLOTS uint( p.skin.y )
 #define JAH_GEOM_ROW_OF( slot ) jahGeomRowOfSlot[slot]
 #define JAH_GEOM_LANE( row, k ) jahGeomRows[( row ) * 3u + ( k )]
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_rq_geom.glsl"
 #define JAH_SKIN_INSTANCE( s, k ) inst[( s ) * 10u + ( k )]
 #include "jah_skin_prev.glsl"
@@ -124,5 +125,5 @@ void main()
 					  p.fwd.xyz, uvWas, zWas ) == 1 )
 		return;
 	const float rawWas = p.projParams.x + p.projParams.y / max( zWas, 1e-6 );
-	imageStore( velocity, px, vec4( uvWas - uv, rawWas - raw, 1.0 ) );
+	imageStore( velocity, px, jahRoundHalf( vec4( uvWas - uv, rawWas - raw, 1.0 ) ) );
 }

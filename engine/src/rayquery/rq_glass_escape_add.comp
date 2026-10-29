@@ -1,5 +1,6 @@
 #version 460
 #extension GL_GOOGLE_include_directive : require
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 
 // THE BLENDED PASSES' ESCAPES INTO THE PICTURE (PHOTON-7 10-4 R4, the lead's design (D)): every pixel's fixed-point sum
 // rq_glass_escape.comp left (three words a pixel, r g b; a saturated word - counted there - adds its top) added to the
@@ -35,5 +36,5 @@ void main()
 	accum[at + 2u] = 0u;
 	const ivec3 q = ivec3( g );
 	const vec4 c = imageLoad( target, q );
-	imageStore( target, q, vec4( c.xyz + vec3( s ) * p.knobs.w, c.w ) );
+	imageStore( target, q, jahRoundHalf( vec4( c.xyz + vec3( s ) * p.knobs.w, c.w ) ) );
 }

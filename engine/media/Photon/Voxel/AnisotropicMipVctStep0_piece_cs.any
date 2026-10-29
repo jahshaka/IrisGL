@@ -12,10 +12,12 @@
 	@insertpiece( DeclSRgbFuncs )
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE STORE'S ENCODING FOLLOWS ITS FORMAT (the directional volumes are
 	// float: written linear).
+	// THE fp16 STORE ROUNDS FIRST (REDS-1 item 5): an rgba16f store truncates on NVIDIA 595.x (jah_half_round.glsl)
+	@insertpiece( JahHalfRound )
 	@property( uav0_orig_pf_srgb )
 		#define jahStoreLight( x ) toSRGB( x )
 	@else
-		#define jahStoreLight( x ) ( x )
+		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
 @end
 

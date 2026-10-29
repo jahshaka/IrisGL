@@ -93,6 +93,7 @@ const uint kCardReadsBlock = 1u + 2u * kCardReadsK;
 /// THE TEXEL'S OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl): the gather starts at the open centroid
 layout( rgba8, set = 0, binding = 38 ) uniform readonly image2D cardOpen;
 #include "jah_card_open.glsl"
+#include "jah_half_round.glsl"
 
 // THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots): the records jobs' one
 // text. (NOT a reader: the cache's own gather stamps no demand - a card is resident for what the views read.)
@@ -331,7 +332,7 @@ void main()
 					   0.0 );
 	}
 	if( inCard )
-		imageStore( cardGather, at, vec4( answer.xyz, imageLoad( cardGather, at ).w ) );
+		imageStore( cardGather, at, vec4( jahRoundHalf( answer.xyz ), imageLoad( cardGather, at ).w ) );   // (the fp16 store truncates: jah_half_round.glsl)
 	// THE COUNTS, one atomic a subgroup a count (every lane reaches here: no lane returned early)
 	for( uint k = 0u; k < kCountWords; ++k )
 	{
