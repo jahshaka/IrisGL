@@ -460,6 +460,7 @@ int gnEye = 0;
 #include "jah_geometric_normal.glsl"
 #include "jah_ray_origin.glsl"
 
+float gRayT[kJahPixelDiffuseRays];   // (8B: the fallback's rays' distances for the cell's bins)
 vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 {
 	const int n = kJahPixelDiffuseRays;
@@ -493,6 +494,8 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 															 persp ) );
 	vec3 sum = vec3( 0.0 );
 	float taken = 0.0;
+	for( int i = 0; i < kJahPixelDiffuseRays; ++i )
+		gRayT[i] = -2.0;   // (no record: an exhausted ray)
 	for( int i = 0; i < n; ++i )
 	{
 		const vec3 d = normalize( basis * jahRayCosineDir( i, n ) );
@@ -501,7 +504,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		if( vr.exitReason == kJahRayHit )
 		{
 			// (its distance in metres: cascade 0's normalised units along dLS over the direction's scale)
-			restStoreRay( d, true, vr.tC0 / max( length( d * JAH_VOX_INVSIZE( 0 ).xyz ), 1e-12 ) );
+			gRayT[i] = vr.tC0 / max( length( d * JAH_VOX_INVSIZE( 0 ).xyz ), 1e-12 );
 			sum += vr.radiance;
 			taken += 1.0;
 			continue;
@@ -510,7 +513,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 			continue;
 		if( vr.exitReason == kJahRayEscaped && jahEscapeIsExit( startLS, dLS, vr.tC0 ) )
 		{
-			restStoreRay( d, false, 0.0 );
+			gRayT[i] = -1.0;
 			sum += jahEnvCone( d, binTan );
 			taken += 1.0;
 			continue;
@@ -522,13 +525,13 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		JAH_RQ_PROCEED( rq )
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
-			restStoreRay( d, false, 0.0 );
+			gRayT[i] = -1.0;
 			sum += jahEnvCone( d, binTan );   // an exit: the sky
 			taken += 1.0;
 			continue;
 		}
 		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
-		restStoreRay( d, true, tHit );
+		gRayT[i] = tHit;
 		const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 		const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 		const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
@@ -553,6 +556,12 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		sum += radiance;
 		taken += 1.0;
 	}
+	// THE RAYS INTO THE CELL's BINS (8B), after the loop: their hits, their escapes (-1), none for an exhausted one (-2).
+	// (A NAMED COST, the leftover list's: this pipeline's cold driver compile is 120 s with the bins' writes, 67-71 s
+	// without them - the whole hit set is inlined into this loop; paid once per shader change, at the warm or a first boot)
+	for( int i = 0; i < n; ++i )
+		if( gRayT[i] > -1.5 )
+			restStoreRay( normalize( basis * jahRayCosineDir( i, n ) ), gRayT[i] >= 0.0, gRayT[i] );
 	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0 );
 }
 
