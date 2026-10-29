@@ -975,7 +975,18 @@ private:
         unsigned long long frame = 0ull;
         unsigned long long cacheFrame = 0ull;   ///< the cache's own frame of the issue (the roots' clock, R3 (c))
         bool carriesMoves = false;              ///< it carries its frame's relight move words (the readers' threshold)
+        /// ...and the instances those relights lit (PHOTON-7 stage 8B, B1): listed as the changed-region list's Card kind
+        /// when the report reads them VISIBLE (a texel moved a code), dropped when every texel stayed under one
+        std::vector<Ogre::Aabb> boxes;
     };
+    /// THE RELIT INSTANCES WHOSE VISIBILITY IS STILL OWED (PHOTON-7 stage 8B, B1; R3 (a)'s display quantum applied to the
+    /// gather's cells): the plan's relit boxes wait for the report that measures their moves; listed at once wherever no
+    /// report will measure them (unmeasured, dropped) - listPendingRelits.
+    std::vector<Ogre::Aabb> mPendingRelitBoxes;
+    void listPendingRelits() {
+        mLateRelitBoxes.insert(mLateRelitBoxes.end(), mPendingRelitBoxes.begin(), mPendingRelitBoxes.end());
+        mPendingRelitBoxes.clear();
+    }
     static constexpr unsigned kReportSlots = 8u;
     ReportTicket mReportReadings[kReportSlots];
     unsigned mReportNextIssue = 0u, mReportNextTake = 0u;

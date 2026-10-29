@@ -620,7 +620,13 @@ void SurfaceCache::destroyAll() {
         if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
         if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
         if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
-        for (ReportTicket &t : mReportReadings) t.ticket.reset();
+        for (ReportTicket &t : mReportReadings) {
+            t.ticket.reset();
+            // (a report never read: its relit instances are listed, never dropped - 8B B1)
+            mLateRelitBoxes.insert(mLateRelitBoxes.end(), t.boxes.begin(), t.boxes.end());
+            t.boxes.clear();
+        }
+        listPendingRelits();
         mReportNextIssue = mReportNextTake = 0u;
         for (DemandTicket &t : mDemandReadings) t.ticket.reset();
         mDemandNextIssue = mDemandNextTake = 0u;
@@ -2200,7 +2206,9 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
             std::find(mRelitInstances.begin(), mRelitInstances.end(), inst) != mRelitInstances.end())
             continue;
         mRelitInstances.push_back(inst);
-        mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+        // (listed when its report reads the move VISIBLE - a texel moved a code - never for a sub-quantum relight:
+        // PHOTON-7 stage 8B B1, R3 (a)'s display quantum at the gather's cells; mPendingRelitBoxes)
+        mPendingRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
     }
 }
 
@@ -2888,6 +2896,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
         ++mVisibleRelights;
         ++mUnmeasuredRelights;
         mRelitMeasured = false;
+        listPendingRelits();   // (counted visible: listed at once)
     };
     if (shaderReadyRelight && !ensureIndirectBuffers()) { unmeasured(); return; }
     if (!shaderReadyRelight || !ensureIndirectBuffers()) return;
@@ -2975,6 +2984,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
     }
     if (cardsRead && ready) endIndirectFrame(mPlanFrame);
     if (mMovesOwed && !mReportPending) { mMovesOwed = false; unmeasured(); }   // (no report will carry them)
+    if (!mMovesOwed && !mPendingRelitBoxes.empty()) listPendingRelits();      // (no move owed to a report: at once)
 }
 
 bool SurfaceCache::ensureIndirectBuffers() {
@@ -3115,12 +3125,16 @@ void SurfaceCache::flushReport() {
         ++mIndirectOverflows;
         if (mMovesOwed) { ++mVisibleRelights; ++mUnmeasuredRelights; }
         mMovesOwed = false;
+        listPendingRelits();
         return;
     }
     r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
     r.frame = mReportPendingHost;
     r.cacheFrame = mReportPendingCache;
     r.carriesMoves = mMovesOwed;
+    r.boxes.clear();
+    if (mMovesOwed) r.boxes.swap(mPendingRelitBoxes);
+    else listPendingRelits();
     mMovesOwed = false;
     mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
 }
@@ -3179,8 +3193,12 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             float codes = 0.0f;
             std::memcpy(&codes, &w[1u + kReportCapacity], sizeof(codes));
             const bool nonFinite = w[2u + kReportCapacity] != 0u;
-            if (nonFinite || codes > 0.0f) ++mVisibleRelights;
-            else ++mSubQuantumRelights;
+            if (nonFinite || codes > 0.0f) {
+                ++mVisibleRelights;
+                mLateRelitBoxes.insert(mLateRelitBoxes.end(), r.boxes.begin(), r.boxes.end());
+            } else
+                ++mSubQuantumRelights;
+            r.boxes.clear();
             mMoveCodesLast = nonFinite ? -1.0f : codes;
             mMoveCodesFrame = r.cacheFrame;
         }
