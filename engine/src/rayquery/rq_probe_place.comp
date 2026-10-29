@@ -62,8 +62,9 @@ layout( set = 0, binding = 1 ) uniform sampler2DArray gBufNormals;
 layout( set = 0, binding = 2 ) uniform sampler2DArray sceneDepth;
 layout( std430, set = 0, binding = 3 ) buffer Records { JahProbeRecord r[]; } records;
 /// `appended` = how many cells asked for a second probe this frame (the DEMAND, the
-/// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks).
-layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[3]; uint row[]; } counter;
+/// budget aside); then each eye row's count of them (pass 1 adds, pass 2 ranks). Words 1-4 are the integrate's
+/// (rq_probe_integrate.comp's GatherCounter: the foliage rule, the two starved counts, the longest hand-over begun).
+layout( std430, set = 0, binding = 4 ) buffer Counter { uint appended; uint pad[4]; uint row[]; } counter;
 layout( std430, set = 0, binding = 5 ) buffer Args { uint x; uint y; uint z; } args;
 /// THE REST CLOCK (PHOTON-7 stage 8B, B1): the frame's sample index is the GPU's (jah_probe_rest.glsl) - the jitter and
 /// the adaptive window follow the view's one rest clock, so every active cell's probes stand where its rest needs them.
