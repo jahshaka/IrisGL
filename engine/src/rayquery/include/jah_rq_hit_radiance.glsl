@@ -213,6 +213,7 @@ vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec =
 /// ...and the near-mirror continuation's part (11-2 (7)) and its hit slot (0xFFFFFFFF none or an exit)
 vec3 jahC2PickMirror = vec3( 0.0 );
 uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
+vec3 jahC2PickImage = vec3( 0.0 );   // ...and the image draw's part (11-2 (8))
 
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
@@ -256,7 +257,24 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		const uint k1 = jahReflectPcg( k0 ^ 0xA54FF53Au );
 		const vec3 u3 = vec3( float( k0 & 0xFFFFFFu ) * ( 1.0 / 16777216.0 ), float( k1 & 0xFFFFu ) / 65536.0,
 							  float( k1 >> 16u ) / 65536.0 );
-		sky = jahNeePick( P, N, reflect( -V, N ), alpha, L2, true, u3, true );
+		sky = jahNeePick( P, N, reflect( -V, N ), alpha, L2, true, u3, kJahNeeKindPortals );
+	}
+	// THE LAMPS' IMAGES IN PLANAR NEAR-MIRRORS (PHOTON-7 11-2 (8), the lead's ruling): a lamp's glint in a mirror whose
+	// roughness the lamp's own angular size dominates (the host's gate, RayQueryTier::updateHitTable) is a near-delta
+	// peak only a BRDF draw could find - one sample in hundreds at 0.6 against a texel of 0.05. A SECOND STRATEGY draws
+	// toward the lamp's image (uniform in its widened sphere's cone, jahImagePick); each pair's component - that lamp's
+	// lobe at that mirror, jahCardLampLobe on both sides - is estimated by both at the balance heuristic: the BRDF draw's
+	// hit keeps r2 less ( 1 - q / ( q + p_k ) ) of it, the image draw adds what its ray finds of it at p_k / ( q + p_k ).
+	// Unbiased for ANY image set (a draw that misses its mirror adds 0); none at x: the BRDF draw alone, as before.
+	JahImagePick img;
+	img.ok = false;
+	img.W = 0.0;
+	if( !centre )
+	{
+		const uint k4 = jahReflectPcg( floatBitsToUint( u.y ) ^ jahReflectPcg( floatBitsToUint( u.x ) ^ 0x1A6E5u ) );
+		const uint k5 = jahReflectPcg( k4 ^ 0x6C8E9CF5u );
+		img = jahImagePick( P, N, vec3( float( k4 & 0xFFFFFFu ) * ( 1.0 / 16777216.0 ), float( k5 & 0xFFFFu ) / 65536.0,
+										float( k5 >> 16u ) / 65536.0 ) );
 	}
 	const float qB = centre ? 0.0 : jahReflectFoldedPdf( N, N, V, L2, alpha );
 	const float wSkyB = centre || !( sky.pdfB > 0.0 ) ? 1.0 : qB / max( qB + sky.pdfB, 1e-30 );
@@ -305,12 +323,29 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
 												 centre, ok2, src2 );
 			jahC2PickSpec = jahHitDirectPickSpec;   // (THE PICK: the secondary hit's own lamps' specular, inside r2)
+			// (8): each image component this hit holds - its mirror, L2 in its cone - kept at the BRDF draw's weight
+			vec3 imageCut = vec3( 0.0 );
+			if( img.W > 0.0 )
+			{
+				const uint nE = jahEmitterCount();
+				for( uint i = 0u; i < nE; ++i )
+				{
+					JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+					if( T.u[T.u[5] + i * kJahEmitterWords + 7u] != kJahImageSlot || T.u[T.u[5] + i * kJahEmitterWords + 5u] != slot2 )
+						continue;
+					const float pk = jahImagePdfAt( i, P, N, L2, img.W );
+					if( !( pk > 0.0 ) )
+						continue;
+					const vec3 gk = jahCardLampLobe( slot2, o + L2 * t2, n2, -L2, T.u[T.u[5] + i * kJahEmitterWords + 6u] );
+					imageCut += gk * ( 1.0 - qB / max( qB + pk, 1e-30 ) );
+				}
+			}
 			// (a near-mirror's reflection is continued inside the read: 11-2 (7), the one law)
 			jahC2PickMirror = w * jahHitMirrorPart * gain;
 			jahC2PickMirrorSlot = jahHitMirrorSlot;
 			jahHitSurf = first;
 			jahHitTracedLobe = tracedWas;
-			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
+			rad = ok2 && finite3( r2 ) ? r2 - imageCut : vec3( 0.0 );   // (imageCut is a part of r2: no clamp)
 		}
 	}
 	vec3 c = w * rad * gain;
@@ -331,6 +366,35 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 				jahC2PickPortal = w * JAH_HIT_LOBE_SKY( sky.L, alpha, false ) *
 								  ( jahReflectFoldedTarget( N, N, V, sky.L, alpha ) / ( ab * max( qL + sky.pdfL, 1e-30 ) ) );
 				c += jahC2PickPortal;
+			}
+		}
+	}
+	// ...AND THE IMAGE DRAW (8): its ray's first hit - the chosen pair's component there at p_k / ( q + p_k ), 0 elsewhere
+	jahC2PickImage = vec3( 0.0 );
+	if( img.ok && dot( img.L, N ) > 0.0 && sa + sb > 1e-4 )
+	{
+		rayQueryEXT qi;
+		rayQueryInitializeEXT( qi, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, img.L,
+							   jahWorldExitT( o, img.L, 1.0e4 ) );
+		JAH_RQ_PROCEED( qi )
+		const JahImage m = jahImageAt( img.index );
+		if( rayQueryGetIntersectionTypeEXT( qi, true ) == gl_RayQueryCommittedIntersectionTriangleEXT &&
+			uint( rayQueryGetIntersectionInstanceCustomIndexEXT( qi, true ) ) == m.mirror )
+		{
+			const float ti = rayQueryGetIntersectionTEXT( qi, true );
+			vec3 wi;
+			const bool knownI = jahHitWoundNormal( m.mirror, uint( rayQueryGetIntersectionGeometryIndexEXT( qi, true ) ),
+												   uint( rayQueryGetIntersectionPrimitiveIndexEXT( qi, true ) ),
+												   rayQueryGetIntersectionObjectToWorldEXT( qi, true ), wi );
+			const bool backI = knownI && dot( wi, img.L ) > 0.0 && ( jahHitFlags( m.mirror ) & kJahHitGpuTwoSided ) == 0u;
+			if( !backI )
+			{
+				const vec3 nI = knownI ? ( dot( wi, img.L ) > 0.0 ? -wi : wi ) : -img.L;
+				const vec3 gk = jahCardLampLobe( m.mirror, o + img.L * ti, nI, -img.L, m.lamp );
+				const float qL = jahReflectFoldedPdf( N, N, V, img.L, alpha );
+				jahC2PickImage = w * gk *
+								 ( jahReflectFoldedTarget( N, N, V, img.L, alpha ) / ( ( sa + sb ) * max( qL + img.pdf, 1e-30 ) ) );
+				c += jahC2PickImage;
 			}
 		}
 	}

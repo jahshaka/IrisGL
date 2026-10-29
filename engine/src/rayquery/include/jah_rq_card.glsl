@@ -228,6 +228,10 @@ void jahCardLobeHemi( float r, out float a, out float b );
 /// THE LIGHTS' SPECULAR LOBE AT A CARD TEXEL TOWARD V (PHOTON-3 stage 2): E mu vis f_s( L, V ) summed over
 /// the lights the relight shades, the sun weighted by the texel's stored visibility `sunVis`, each lamp by its own bit
 /// of the texel's lamp mask (`lampBits`: the SunVis texel; `lampIds` the card's lamp table - PHOTON-7 stage 5, 5-3).
+#ifndef JAH_LAMP_ONLY_DECLARED
+#define JAH_LAMP_ONLY_DECLARED
+int jahLampOnly = -1;   // (jah_rq_card_lights.glsl states it: one lamp's lobe alone, PHOTON-7 11-2 (8))
+#endif
 /// The INCLUDER defines it (jah_rq_card_lights.glsl, from the ray tier's light table).
 vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, uvec4 lampBits,
 						uvec4 lampIds[12] );
@@ -312,6 +316,33 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	jahCardPickCut = cutLobe;
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cutLobe, indirect,
 								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
+}
+
+/// ONE LAMP's LOBE AT A CARD HIT (PHOTON-7 11-2 (8)): the part of jahCardRadiance's lights' lobe that lamp `lamp` (its
+/// index in the light table) sends toward viewDir - the image draw's component, read by the same function on both of
+/// its strategies. 0 where no lit card answers the hit (the store's other routes are not this component).
+vec3 jahCardLampLobe( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, uint lamp )
+{
+	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
+	if( !( pick.ok && pick.lit ) )
+		return vec3( 0.0 );
+	const JahCardRecordGpu c = jahCards[pick.card];
+	const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
+	if( !( spec.w > 0.0 ) )
+		return vec3( 0.0 );
+	const vec4 normal = JAH_CARD_NORMAL( pick.texel );
+	const vec3 nV = normal.xyz * 2.0 - 1.0;
+	const vec3 Nstored = normalize( normalize( c.rowU.xyz ) * nV.x + normalize( c.rowV.xyz ) * nV.y +
+									c.axis.xyz * nV.z );
+	const vec3 N = dot( Nstored, c.axis.xyz ) > 0.99985 ? c.axis.xyz : Nstored;
+	const float alpha = JAH_CARD_SHADOW_ROUGH( pick.texel ).y / 1.001001 + 0.001;
+	const float r = sqrt( max( alpha, 0.0 ) );
+	const int was = jahLampOnly;
+	jahLampOnly = int( lamp );
+	const vec3 lobe = jahCardLightsLobe( hitPos, N, normalize( viewDir ), r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
+										 JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
+	jahLampOnly = was;
+	return lobe;
 }
 
 #endif   // JAH_RQ_CARD_GLSL
