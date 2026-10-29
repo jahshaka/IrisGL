@@ -707,7 +707,7 @@ void main()
 			st = ( st & ~( kCellHeld | kCellHandover ) ) | kCellRefining | kCellConverged;
 			cellState[w + 9u] = 0u;
 			restart = true;
-			atomicOr( jahClock[2], 1u );
+			atomicOr( jahClock[2], 3u );   // (bit 2: a refinement re-rested a held cell - the hold waits on it, the record's key)
 		}
 		else if( restart )
 		{

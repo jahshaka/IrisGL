@@ -243,7 +243,7 @@ struct StillnessRun::Impl {
             if (kv.second.index >= list.size()) continue;
             StillnessFrame &f = list[kv.second.index];
             // THE HOLD WAITED ON THIS FRAME: an input reached a cell (its clock restarted); THE GATHER HELD: every cell
-            f.holdKey = r->second.reached > 0u;
+            f.holdKey = r->second.reached > 0u || r->second.refined;
             f.gatherHeld = r->second.everyHeld;
             if (!kv.second.trail) f.held = f.gatherHeld && f.reflOk;
             f.restFrames = r->second.restK;

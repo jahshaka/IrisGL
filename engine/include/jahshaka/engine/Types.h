@@ -3781,6 +3781,9 @@ struct GatherRestRecord {
     /// ...and B3's hand-over: the longest a held cell's picture began to walk that frame, in frames (M = ceil(delta /
     /// one code)); 0 none began
     unsigned handoverM = 0u;
+    /// ...and B3's refinement: a card region re-rested a held cell in the background that frame (its rest restarted, its
+    /// picture held - the hold waits for its rest and its hand-over)
+    bool refined = false;
 };
 
 struct GatherStatus {

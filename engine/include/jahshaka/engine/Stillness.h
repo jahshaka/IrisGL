@@ -167,7 +167,8 @@ struct StillnessFrame {
     /// includes it (the picture walks at a code a frame)
     unsigned           handoverM = 0;
     /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7; PHOTON-7 stage 8B, B1): an input REACHED a cell of the gather's
-    /// this frame (its rest clock restarted: GatherRestRecord::reached, the frame's own record).
+    /// this frame (its rest clock restarted: GatherRestRecord::reached, the frame's own record) - or a REFINEMENT re-rested a
+    /// held cell (8B B3, GatherRestRecord::refined: the hold waits for its rest and its hand-over as for an input's).
     bool               holdKey = false;
     /// ...and the reflection held this frame or none traces (the view's hold = the gather's and this)
     bool               reflOk = true;

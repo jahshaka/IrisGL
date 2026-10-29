@@ -1008,6 +1008,7 @@ void ScreenProbeGather::readPending(View &v) {
                 rec.frame = v.pending[i].gatherFrame;
                 rec.restK = std::min(clock[0], 1u << 20);   // (0xFFFFFFFF, no active component: every cell held)
                 rec.reached = clock[3];
+                rec.refined = (clock[2] & 2u) != 0u;
                 rec.held = clock[4];
                 rec.active = clock[5];
                 rec.everyHeld = clock[5] == 0u && clock[4] > 0u;
