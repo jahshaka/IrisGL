@@ -565,7 +565,7 @@ namespace Ogre
         // voxeliser's image declarations, the scroll's copies and its scratch, the mip chain
         // (PhotonMipChain) and the door's readback all follow the bound texture's format. The cost:
         // 8 bytes a voxel where it was 4, each volume (+9.1 MiB a 128^3 cascade with the albedo's mips).
-        mAlbedoVox->setPixelFormat( PFG_RGBA16_UNORM );
+        mAlbedoVox->setPixelFormat( PFG_RGBA8_UNORM );   // ARM (REDS-1 item 4)
         // JAHSHAKA fork ad452604a+155a56bf8 (was 0087): THE EMISSIVE VOXEL IS A FLOAT.
         //
         // Albedo is a RATIO and lives in [0, 1] by definition, so a UNORM store
@@ -596,7 +596,7 @@ namespace Ogre
         mEmissiveVox->setPixelFormat( PFG_RGBA16_FLOAT );
         mNormalVox->setPixelFormat( PFG_R10G10B10A2_UNORM );
         // the metal's F0 and weight are ratios in [0, 1], like the albedo: 16 bits (above)
-        mMetalVox->setPixelFormat( PFG_RGBA16_UNORM );
+        mMetalVox->setPixelFormat( PFG_RGBA8_UNORM );   // ARM (REDS-1 item 4)
         if( hasTypedUavs )
             mAccumValVox->setPixelFormat( PFG_R16_UINT );
         else
