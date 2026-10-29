@@ -389,6 +389,7 @@ vec3 jahCardRound( vec3 v )
 @insertpiece( JahDiffuseAlbedo )
 @insertpiece( JahSpecularAlbedo )
 @insertpiece( JahCardView )
+@insertpiece( JahHalfRound )
 @property( jah_cloud_shadow )
 	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
 	@insertpiece( JahCloudShadow )
@@ -621,8 +622,9 @@ void main()
 		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
 	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
 	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampThrough, lampMask, lampThroughMask ) );
-	// (RGBA16F, 10-2d: the store rounds to nearest itself - jahCardRound is the R11G11B10F layers')
-	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
+	// (RGBA16F, 10-2d: the store TRUNCATES on NVIDIA 595.x - REDS-1, measured - so the value is rounded first: jahRoundHalf;
+	// jahCardRound is the R11G11B10F layers')
+	imageStore( cardRadiance, at, vec4( jahRoundHalf( radiance ), 1.0 ) );
 @property( jah_card_gather )
 	{
 		// THE MOVE (10-2c, the lead's ruling: accumulated from the LAST REPORTED value, never frame to frame): the texel's
@@ -651,7 +653,7 @@ void main()
 			atomicOr( cardMoves[16385u], 1u );
 		if( fresh || d > code )
 		{
-			imageStore( cardGather, at, vec4( g.xyz, S ) );
+			imageStore( cardGather, at, vec4( jahRoundHalf( g.xyz ), S ) );
 			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );
 			const uint slot = ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u );
 			if( mb > cardMoves[slot] )

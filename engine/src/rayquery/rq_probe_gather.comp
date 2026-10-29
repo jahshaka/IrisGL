@@ -74,6 +74,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 #define JAH_PROBE_PARAMS_BINDING 1
 #include "jah_probe_params.glsl"
 #include "jah_ray_origin.glsl"
+#include "jah_half_round.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
@@ -506,7 +507,7 @@ void main()
 
 	// THE RAY'S TEXEL, from the lanes that own a direction.
 	if( lane < rays )
-		imageStore( probeAtlas, block + texel, atlasTexel );
+		imageStore( probeAtlas, block + texel, jahRoundHalf( atlasTexel ) );   // (the fp16 store truncates: jah_half_round.glsl)
 	// ...AND THE 8x8 BLOCK'S PADDING, cleared so a reader never finds an older
 	// frame's radiance in it: each lane clears the block texel at its OWN 8x8
 	// position when that texel lies outside the octRes x octRes map. The padding

@@ -916,6 +916,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_reproject.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_half_round.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
@@ -1110,6 +1111,11 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # ...and the fp16 statistic's stochastic store (PHOTON_2_SPEC R1), the law's and the ray jobs' one text
+    # THE fp16 STORE ROUNDED TO NEAREST (REDS-1): the relight's half-float layers take it as the ray jobs do
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahHalfRound
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHalfRound_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_half_round.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahHalfStochastic
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHalfStochastic_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl
