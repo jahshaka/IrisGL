@@ -1314,7 +1314,6 @@ constexpr ArmDef kArms[] = {
       "Refit the top-level structure when the traced SET is unchanged, instead of rebuilding "
       "it (the rebuild is the default: the better tree, 0.21-0.35 ms at 8,001 instances). "
       "far_blas_measure --tlas. Was JAH_RQ_REFIT (read once per process)." },
-    { ArmId::ReflectImagesOff, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2 (8), reverted): 1 = no lamp-image pairs (the price ABBA)." },
     { ArmId::GatherTemporal, 1.0, 0.0, 1.0,
       "The screen-probe gather's pixel history (PHOTON-GATHER-1c). 0 = each frame's estimate alone, "
       "no history read or written (the measurement lever: gi.gather, gi.gather_temporal, "
