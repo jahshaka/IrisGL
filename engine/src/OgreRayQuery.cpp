@@ -7713,7 +7713,7 @@ PortalScanOut scanPortals(const PortalScanIn &in) {
         }
     }
     // THE OPENINGS: the connected opening cells (6-neighbours), each one's principal axes
-    struct Portal { float c[3]; float r; float n[3]; double power; float L[3]; };
+    struct Portal { float c[3]{}; float r = 0.f; float n[3]{}; double power = 0.0; float L[3]{}; };
     std::vector<Portal> portals;
     const float *sh = in.sh;
     const bool haveSh = in.haveSh;
