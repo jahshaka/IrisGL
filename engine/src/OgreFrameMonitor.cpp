@@ -1294,11 +1294,11 @@ constexpr ArmDef kArms[] = {
       "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "
       "the rest's hand-over length (gatherSettleFramesOf N) and the temporal pass' window. 0 = shipped "
       "(kReflectMaxFrames, Lumen's 12)." },
+    { ArmId::ReflectMirrorContOff, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2 (7), reverted): 1 = no near-mirror continuation (the price's ABBA)." },
     { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
       "gi.reflect_mover --cost-posed. Was JAH_R7_NO_POSED (two per-frame reads)." },
-    { ArmId::ReflectMirrorContOff, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2 (7), reverted): 1 = no near-mirror continuation (the price's ABBA)." },
     { ArmId::ReflectPick, 0.0, 0.0, 16777216.0,
       "THE PICK (PHOTON-7 11-2, the reds' instrument; jahlab pick): 1 + x + 4096 y names a full-resolution pixel - its "
       "trace texel's sample (the direction, the hit, the traced and C2 parts, the NEE, the record) and rest terms (the "
