@@ -502,7 +502,7 @@ void main()
 				const float LDref = unpackHalf2x16( refine.y ).y;
 				const float eRef = unpackHalf2x16( refine.z >> 16u ).x;
 				const float sigmaDiff = sqrt( max( eRef * eRef - e * e, 0.0 ) );
-				const bool drift = false;   // MEASURING ARM (8B B2, to be reverted): the drift term off - (A) alone
+				const bool drift = open && abs( LD - LDref ) > kReflectDriftK * sigmaDiff + 1e-7;
 				if( !open || drift )
 				{
 					// the window starts (again) here: its mean, its error and its sample count
