@@ -210,10 +210,8 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     return true;
 }
 
-float gHitMirrorContOffArm = 0.0f;   // MEASURING ARM (11-2 (7), reverted)
 void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out, HitReader reader) {
     out = HitSetParams();
-    out.counts[3] = gHitMirrorContOffArm;   // MEASURING ARM (reverted): 1 = no near-mirror continuation in any reader
     out.cards[2] = 1.0f;   // (the readers' demand stamps on: a reader past its demand span turns them off - cards.z)
     // THE CASCADES, every slot a shader indexes: past the chain's length the last cascade's (none: the unit box)
     const unsigned n = src.cascadeCount;
