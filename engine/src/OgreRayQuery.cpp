@@ -6966,7 +6966,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                    : rv.framesSinceMoverMoved <= 2u ? 2.0f
                                                     : 1.0f;
     pp.alpha[2] = pointSnapKnob();   // the ray origin's depth-rebuilt point term (READ_B F5 (b))
-    pp.alpha[0] = 1.0f;   // MEASURING ARM (8B B2, to be reverted): the refinement off for every row
     // THE HIT's AREA DRAW's CYCLE (PHOTON-7 11-2 (2)): with an area light in the hit table a rest texel's stop waits for one
     // full cycle of its time-stratified strata (jah_rq_hit_direct.glsl kHitAreaStrata^2); none, no wait
     pp.alpha[3] = sa.hitAreaLights > 0u ? float(kHitAreaStrataPerHit) : 0.0f;
@@ -7083,7 +7082,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             foldBytes(&h, sizeof(h));
         }
         foldF(pp.motion[0]); foldF(pp.motion[1]); foldF(pp.motion[2]);
-        foldF(pp.alpha[2]); foldF(pp.alpha[3]);   // (MEASURING ARM: alpha.x out)   // (NOT alpha.y: the pick, an instrument - its slot
+        foldF(pp.alpha[0]); foldF(pp.alpha[2]); foldF(pp.alpha[3]);   // (NOT alpha.y: the pick, an instrument - its slot
                                                                     // moves every frame and it changes no picture)
         foldBytes(pp.fog, sizeof(pp.fog));
         // (the rest block's freeze and reference arms; NOT its ray count, rest.z - the rest's own budget, which moves

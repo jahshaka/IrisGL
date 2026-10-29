@@ -321,11 +321,11 @@ void main()
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
 	// THE REFINEMENT WORD (B2): a rest's own - cleared on every frame off rest (the break's compose read it first)
-	uvec4 refine = p.alpha.x > 0.5 ? uvec4( 0u ) : imageLoad( restRefine, ivec3( tc, gEye ) );   // (MEASURING ARM)
+	uvec4 refine = imageLoad( restRefine, ivec3( tc, gEye ) );
 	if( p.knobs2.x < 0.5 && refine != uvec4( 0u ) )
 	{
 		refine = uvec4( 0u );
-		if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );   // (MEASURING ARM)
+		imageStore( restRefine, ivec3( tc, gEye ), refine );
 	}
 	// A texel the trace declined this frame keeps what it holds (the filter reads no answer there).
 	JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
@@ -388,7 +388,7 @@ void main()
 				const vec3 D = refineSlew( jahRefineD( refine ), T );
 				refine = all( equal( jahRefineD( jahRefineWithD( refine, D ) ), jahRefineD( jahRefineWithD( refine, T ) ) ) )
 							 ? uvec4( 0u ) : jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), D );
-				if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );   // (MEASURING ARM)
+				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			return;
 		}
@@ -430,7 +430,7 @@ void main()
 			// ends a refinement
 			refine = ( refine.w & kRefineReach ) != 0u ? jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), sofar )
 													   : uvec4( 0u );
-			if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );   // (MEASURING ARM)
+			imageStore( restRefine, ivec3( tc, gEye ), refine );
 			if( vPrev > 0.0 || hasH )
 			{
 				hs.ok = true;
@@ -512,7 +512,7 @@ void main()
 			if( ( refine.w & kRefineRefining ) != 0u )
 				refine = jahRefineWithD( refine, refineSlew( jahRefineD( refine ), answer ) );
 			if( refine != refineWas )
-				if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );   // (MEASURING ARM)
+				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			{
 				const int ps = jahPickSlotT( tc );   // THE PICK (the reds' instrument)
 				if( ps >= 0 )
