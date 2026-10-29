@@ -163,7 +163,7 @@ void jahCardLobeHemi( float r, out float a, out float b )
 /// THE GATHER-HITS INSTRUMENT (FAR-SUN-1): what answered every ray, as a readback and as a
 /// picture - the gather's counterpart of the reflection trace's Hits view. Nothing in the frame
 /// reads either binding; with both knobs off nothing is written.
-///   31  one uvec4 per ray of every UNIFORM probe (probe x 64 + the ray's lane), written under
+///   31  two uvec4 per ray of every UNIFORM probe ((probe x 64 + the ray's lane) x 2), written under
 ///       p.hits.x (the arm "gather.hitsReadback"): x = the source (bits 0-3: 1 the card, 2 the
 ///       voxels, 3 the sky, 4 a decode record, 5 a FAR decode record, 6 a dropped record) | the
 ///       answering cascade << 4 (the voxels) | the hit's sun visibility, unorm8 << 8 | the hit
@@ -171,7 +171,8 @@ void jahCardLobeHemi( float r, out float a, out float b )
 ///       quadrature re-weight, half precision (the atlas texel over it is the radiance
 ///       returned) | the hit normal's x, snorm8 << 16 | its z, snorm8 << 24 (the whole normal:
 ///       a hit's truth is its own cosine to the sun, a chair's side as much as the street);
-///       z = packHalf2x16( the hit's x, y ), w = packHalf2x16( the hit's z, the distance ).
+///       z = packHalf2x16( the hit's x, y ), w = packHalf2x16( the hit's z, the distance ); and a SECOND uvec4, the hit's
+///       x, y, z and the distance as float bits (REDS-1: a reader names the 1/64 m card texel a hit answered from).
 ///   32  the photon view's overlay (the GatherHits view, p.hits.y): every uniform probe's cell
 ///       painted ray by ray, one octahedral texel to one block of the cell, in its source's
 ///       colour (kGatherHitColour).
@@ -489,9 +490,9 @@ void main()
 				const uint weightNormal = ( packHalf2x16( vec2( reweight, 0.0 ) ) & 0xFFFFu ) |
 										  ( ( uint( int( round( hn.x * 127.0 ) ) ) & 0xFFu ) << 16u ) |
 										  ( ( uint( int( round( hn.z * 127.0 ) ) ) & 0xFFu ) << 24u );
-				jahGatherRays[probe * uint( kOctResMax * kOctResMax ) + lane] =
-					uvec4( word, weightNormal, packHalf2x16( hp.xy ),
-						   packHalf2x16( vec2( hp.z, distance ) ) );
+				const uint rec = ( probe * uint( kOctResMax * kOctResMax ) + lane ) * 2u;
+				jahGatherRays[rec] = uvec4( word, weightNormal, packHalf2x16( hp.xy ), packHalf2x16( vec2( hp.z, distance ) ) );
+				jahGatherRays[rec + 1u] = uvec4( floatBitsToUint( hp ), floatBitsToUint( distance ) );   // the floats (REDS-1)
 			}
 			if( p.hits.y > 0.5 )
 				gatherHitPaint( cell, t, octRes, kGatherHitColour( source, cascade ) );

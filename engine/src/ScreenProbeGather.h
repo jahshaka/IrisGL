@@ -761,8 +761,9 @@ private:
         void *raysAtlasReadbackMapped = nullptr;
         std::vector<GatherRay> raysHost;
         unsigned raysHostFrame = 0u;
-        /// The bytes of one ring slot of each (the uniform probes' records; their atlas rows).
-        VkDeviceSize raysSlotBytes() const { return VkDeviceSize(uniformProbes) * 64u * 16u; }
+        /// The bytes of one ring slot of each (the uniform probes' records - TWO uvec4 a ray, the second the hit's position
+        /// and distance as floats: REDS-1, a reader must name the texel a hit answered from; their atlas rows).
+        VkDeviceSize raysSlotBytes() const { return VkDeviceSize(uniformProbes) * 64u * 32u; }
         unsigned raysAtlasRows() const { return ((uniformProbes + atlasCols - 1u) / std::max(atlasCols, 1u)) * 8u; }
         VkDeviceSize raysAtlasSlotBytes() const { return VkDeviceSize(atlasW) * raysAtlasRows() * 8u; }
 
