@@ -250,6 +250,27 @@ bool fastBrickChanged( uint c, uint idx )
 	else { a = jahFastBricks[3].w[2u * idx]; b = jahFastBricks[3].w[2u * idx + 1u]; }
 	return jahBrickChangedWords( a, b );
 }
+// MEASURING ARM (8B B5's threshold, to be reverted): p.fast.w = N + 1 >= 2 counts a brick's ray as moving only when its
+// change at the ray's light, held over N frames, passes one display code (the rows' oneCodeAt, tests/support/displaycode.h)
+float armSrgbEnc( float L ) { return L <= 0.0031308 ? 12.92 * L : 1.055 * pow( L, 1.0 / 2.4 ) - 0.055; }
+float armSrgbDec( float v ) { return v <= 0.04045 ? v / 12.92 : pow( ( v + 0.055 ) / 1.055, 2.4 ); }
+float armOneCodeAt( float L )
+{
+	const float code = min( floor( armSrgbEnc( max( L, 0.0 ) ) * 255.0 ), 254.0 );
+	return armSrgbDec( ( code + 1.0 ) / 255.0 ) - armSrgbDec( code / 255.0 );
+}
+float armBrickChange( uint c, uint idx )
+{
+	uint a = 0u, b = 0u;
+	if( c == 0u ) { a = jahFastBricks[0].w[2u * idx]; b = jahFastBricks[0].w[2u * idx + 1u]; }
+	else if( c == 1u ) { a = jahFastBricks[1].w[2u * idx]; b = jahFastBricks[1].w[2u * idx + 1u]; }
+	else if( c == 2u ) { a = jahFastBricks[2].w[2u * idx]; b = jahFastBricks[2].w[2u * idx + 1u]; }
+	else { a = jahFastBricks[3].w[2u * idx]; b = jahFastBricks[3].w[2u * idx + 1u]; }
+	if( ( a & 0x7F800000u ) == 0x7F800000u || ( b & 0x7F800000u ) == 0x7F800000u )
+		return 1e30;
+	return max( uintBitsToFloat( a ), uintBitsToFloat( b ) );
+}
+float gArmRayL = -1.0;   // the ray's light (luminance; < 0 unknown: a decoded record)
 bool fastRayMoving( vec3 x, uint slot, bool near )
 {
 	if( near && slot < JAH_HIT_INSTANCES )
@@ -272,6 +293,13 @@ bool fastRayMoving( vec3 x, uint slot, bool near )
 			continue;
 		// the finest cascade holding the point answers; a mask this frame's light work did not write is no change
 		const uvec3 b = uvec3( g );
+		if( p.fast.w > 50.5 )   // MEASURING ARM: N 50 = the bricks never move (the slot and the skin alone: Lumen's input)
+			return false;
+		if( p.fast.w > 1.5 && p.fastBrickDims[c].w > 0.5 && gArmRayL >= 0.0 )   // MEASURING ARM
+		{
+			const float d = armBrickChange( c, ( b.z * dims.y + b.y ) * dims.x + b.x );
+			return d * gArmRayL * ( p.fast.w - 1.0 ) > armOneCodeAt( gArmRayL );
+		}
 		return p.fastBrickDims[c].w > 0.5 && fastBrickChanged( c, ( b.z * dims.y + b.y ) * dims.x + b.x );
 	}
 	return false;
@@ -541,6 +569,7 @@ void main()
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
+		gArmRayL = recorded ? -1.0 : max( dot( radiance, vec3( 0.2126, 0.7152, 0.0722 ) ), 0.0 );   // MEASURING ARM
 		if( hit && p.fast.w > 0.5 && fastRayMoving( origin + dir * tHit, hitSlot, !far ) )
 			atomicAdd( sMovingRays, 1u );
 		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
