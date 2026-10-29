@@ -186,7 +186,7 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 		jahHitAreaSeq = floatBitsToUint( P.x ) * 73856093u ^ floatBitsToUint( P.z ) * 19349663u ^ uint( i ) * 83492791u;
 		bool ok = false;
 		uint source = 0u;
-		const vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
+		const vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, 1e-4 /* ARM REDS-1: c0 level 0 */, false,
 												   ok, source );
 		if( !ok || !finite3( radiance ) )
 		{
