@@ -3923,6 +3923,10 @@ struct GatherStatus {
     /// ...and per pixel the VIEW DISTANCE the integrate wrote (the history word's bits 0-20: linear depth along the
     /// view axis; 0 = no surface), the same layout (PHOTON-2 round 2, M1's moving window).
     std::vector<float> historyDist;
+    /// ...and per pixel the history's VALIDITY STREAK (PHOTON-7 stage 8B): the frames its history has been carried
+    /// unbroken (0..255; 1 = none usable this frame) - what "the gather saw it before the stop" means (the stillness
+    /// door's mask); `historyCount` is the BLEND's N (B5's fast update stores the shortened N'), never an age.
+    std::vector<unsigned char> historyStreak;
     unsigned historyCountW = 0u, historyCountH = 0u;
     unsigned historyCountFrame = 0u;
     /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY

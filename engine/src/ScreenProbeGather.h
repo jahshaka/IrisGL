@@ -644,6 +644,12 @@ private:
         VkImage history[2] = {};
         VkDeviceMemory historyMemory[2] = {};
         VkImageView historyView[2] = {};
+        /// THE HISTORY's VALIDITY STREAK (PHOTON-7 stage 8B, the lead's ruling): R8 at the history's resolution, a
+        /// ping-pong pair like it - the frames each pixel's history has been carried unbroken (/ 255), 0 none. The count in
+        /// the history word is the blend's N (B5's fast update stores N'), never this.
+        VkImage streak[2] = {};
+        VkDeviceMemory streakMemory[2] = {};
+        VkImageView streakView[2] = {};
         /// Which of the pair is THIS frame's.
         unsigned flip = 0u;
         /// THE VIEW'S AGE: consecutive frames the history has been written
@@ -797,6 +803,7 @@ private:
         std::vector<unsigned char> histHost;
         std::vector<unsigned char> histClassHost;   ///< ...its class bit (bit 21), the same layout
         std::vector<float> histDistHost;            ///< ...its view distance (bits 0-20), the same layout
+        std::vector<unsigned char> histStreakHost;  ///< ...and its validity streak (the streak pair), the same layout
         unsigned histHostFrame = 0u;
         /// THE GATHER-HITS READBACK (FAR-SUN-1): the trace's per-ray records (device, one
         /// uvec4 per ray of every uniform probe), a host ring of them and of the atlas rows the

@@ -304,6 +304,11 @@ struct StillnessRun::Impl {
             for (size_t i = 0; i < n.size(); ++i) n[i] = (unsigned char)std::min<unsigned>(g.historyCount[i], 255u);
             std::ofstream hc(dumpPath(tag + ".ghc"), std::ios::binary);
             hc.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
+            // ...and THE STREAK (8B): the history's age, the same grid (.ghs) - the door's mask reads it
+            if (g.historyStreak.size() == g.historyCount.size()) {
+                std::ofstream hs(dumpPath(tag + ".ghs"), std::ios::binary);
+                hs.write(reinterpret_cast<const char *>(g.historyStreak.data()), std::streamsize(g.historyStreak.size()));
+            }
         }
         int px = 0, rs = 0;
         for (size_t i = 0; i < g.historyCount.size(); ++i)
@@ -625,7 +630,11 @@ struct StillnessRun::Impl {
             for (unsigned x = 0; x < picW; ++x) {
                 const unsigned gx = std::min(g.historyCountW - 1, unsigned((unsigned long long)x * g.historyCountW / picW));
                 const unsigned gy = std::min(g.historyCountH - 1, unsigned((unsigned long long)y * g.historyCountH / picH));
-                mask[size_t(y) * picW + x] = g.historyCount[size_t(gy) * g.historyCountW + gx] >= spec.visibleAge ? 1u : 0u;
+                // (THE STREAK, 8B: the frames the pixel's history has been carried unbroken - "the gather saw it before the
+                // stop"; the count is the blend's N, which B5's fast update shortens while the pixel is still the same)
+                const size_t gi = size_t(gy) * g.historyCountW + gx;
+                const unsigned age = g.historyStreak.size() == g.historyCount.size() ? g.historyStreak[gi] : g.historyCount[gi];
+                mask[size_t(y) * picW + x] = age >= spec.visibleAge ? 1u : 0u;
             }
         w.visibleFromGather = true;
         maskKnown[size_t(win)] = true;

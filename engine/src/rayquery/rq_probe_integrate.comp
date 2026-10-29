@@ -196,6 +196,11 @@ layout( std430, set = 0, binding = 53 ) buffer JahCellState { uint jahCellState[
 /// record their hits there too - a card, a brick or a lamp they read can change, and the resume's region test reaches a
 /// cell only through its bins (the integrate's rays had none: a relight they read resumed nothing).
 layout( std430, set = 0, binding = 54 ) buffer JahCellStore { uint jahCellStore[]; };
+/// THE HISTORY's VALIDITY STREAK (PHOTON-7 stage 8B, the lead's ruling), last frame's and this frame's halves (the
+/// history's flip): the frames each pixel's history has been carried unbroken, / 255 (0: none) - an AGE, what the stillness
+/// door's "seen before the stop" reads; the history word's count is the blend's N (B5's fast update stores N'), never this.
+layout( r8, set = 0, binding = 55 ) uniform readonly image2DArray streakPrev;
+layout( r8, set = 0, binding = 56 ) uniform writeonly image2DArray streakCur;
 /// A PROBE's MOVING SHARE, this frame's and last (PHOTON-7 stage 8B, B5; the cell's word kCellMovingWord, written by
 /// rq_probe_gather.comp, shifted a frame by the resume's finalize): a uniform probe is its cell's bytes 0 and 2, an
 /// adaptive one - its cell in its record's normal.w, + 1 - bytes 1 and 3; in [0, 1]
@@ -822,6 +827,7 @@ void main()
 		if( p.knobs5.z > 0.5 )
 		{
 			imageStore( historyCur, at, imageLoad( historyPrev, at ) );
+			imageStore( streakCur, at, imageLoad( streakPrev, at ) );   // (the streak rides with its history)
 			imageStore( roughHistoryCur, at, imageLoad( roughHistoryPrev, at ) );
 		}
 		return;
@@ -873,6 +879,7 @@ void main()
 		if( temporal )
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
+			imageStore( streakCur, at, vec4( 0.0 ) );
 			imageStore( roughHistoryCur, at, uvec4( 0u ) );
 			if( gRestK >= 1.0 )
 			{
@@ -1261,6 +1268,10 @@ void main()
 		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
 		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
+	// THE STREAK (8B): one more frame where the reprojected history was taken, 1 where it was not
+	imageStore( streakCur, at, vec4( prevCount > 0u
+										? min( round( imageLoad( streakPrev, ivec3( histAt, eye ) ).x * 255.0 ) + 1.0, 255.0 ) / 255.0
+										: 1.0 / 255.0 ) );
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
 					   packGeom( pixelDist, pixelFoliage, countNext, mean.w,

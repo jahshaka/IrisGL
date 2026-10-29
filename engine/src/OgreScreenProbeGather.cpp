@@ -183,10 +183,13 @@ constexpr unsigned kIntegrateSkyVisBinding = kIntegrateHitFirst + kHitSetBinding
 /// cell's pixels write their history through and nothing else).
 constexpr unsigned kIntegrateClockBinding = kIntegrateSkyVisBinding + 1u;
 constexpr unsigned kIntegrateCellStateBinding = kIntegrateClockBinding + 1u;
+/// ...and THE HISTORY's VALIDITY STREAK pair (55 last frame's, 56 this frame's; 8B, the lead's ruling) after it.
 /// ...and THE CELLS' DISTANCE STORE (54, 8B): the pixel's own rays - the field fallback's voxel and TLAS continuation - write
 /// their hits into its cell's bins as the trace's do, so a change they read resumes the cell (the resume's region test).
 constexpr unsigned kIntegrateCellStoreBinding = kIntegrateCellStateBinding + 1u;
-constexpr unsigned kIntegrateBindings = kIntegrateCellStoreBinding + 1u;
+constexpr unsigned kIntegrateStreakPrevBinding = kIntegrateCellStoreBinding + 1u;
+constexpr unsigned kIntegrateStreakCurBinding = kIntegrateStreakPrevBinding + 1u;
+constexpr unsigned kIntegrateBindings = kIntegrateStreakCurBinding + 1u;
 /// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
 /// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
 constexpr HitSetSlots kIntegrateHitSlots = {
@@ -200,7 +203,7 @@ constexpr HitSetSlots kIntegrateHitSlots = {
     49u,
     50u,
 };
-static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 55u,
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 57u,
               "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50, the sky "
               "visibility at 51");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
@@ -210,7 +213,7 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
 /// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3); the sky visibility (51, 10-4 R11).
 constexpr unsigned kIntegrateStorageImages = 10u;
-static_assert(kIntegrateBindings == 12u + kIntegrateStorageImages + kHitSetBindings,
+static_assert(kIntegrateBindings == 14u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
               "roughness and the prefiltered maps, the hit set, the rest's clock and cells");
 /// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
@@ -541,6 +544,10 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         }
         t[kIntegrateSkyVisBinding] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   // the sky visibility (51, 10-4 R11)
         counts[kIntegrateSkyVisBinding] = 1u;
+        for (unsigned b : { kIntegrateStreakPrevBinding, kIntegrateStreakCurBinding }) {   // the history's streak (8B)
+            t[b] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            counts[b] = 1u;
+        }
         for (unsigned b : { kIntegrateClockBinding, kIntegrateCellStateBinding, kIntegrateCellStoreBinding }) {   // the cells' rest (8B)
             t[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             counts[b] = 1u;
@@ -708,6 +715,11 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
         if (!mHost.gatherMakeImage(in.width, in.height, v.layers, VK_FORMAT_R32G32_UINT, v.history[k],
                                    v.historyMemory[k], v.historyView[k], err))
             return false;
+        // ...AND ITS VALIDITY STREAK (8B), one byte a pixel beside each half (raw Vulkan images like the history's - no
+        // Ogre texture, so no ManualTexture rule applies)
+        if (!mHost.gatherMakeImage(in.width, in.height, v.layers, VK_FORMAT_R8_UNORM, v.streak[k], v.streakMemory[k],
+                                   v.streakView[k], err))
+            return false;
     }
     // THE REST MEAN (PHOTON-GATHER-1d), one image at the target's resolution —
     // and a 1x1 stand-in for a STEREO view, which never rests: a tracked head's
@@ -853,6 +865,10 @@ void ScreenProbeGather::drop(View &v) {
     mHost.gatherRetireBuffer(v.records, v.recordsMemory);
     for (unsigned k = 0; k < 2u; ++k) {
         mHost.gatherRetireImage(v.history[k], v.historyMemory[k], v.historyView[k]);
+        mHost.gatherRetireImage(v.streak[k], v.streakMemory[k], v.streakView[k]);
+        v.streak[k] = VK_NULL_HANDLE;
+        v.streakMemory[k] = VK_NULL_HANDLE;
+        v.streakView[k] = VK_NULL_HANDLE;
         v.history[k] = VK_NULL_HANDLE;
         v.historyMemory[k] = VK_NULL_HANDLE;
         v.historyView[k] = VK_NULL_HANDLE;
@@ -909,6 +925,7 @@ void ScreenProbeGather::drop(View &v) {
     v.histReadbackMemory = VK_NULL_HANDLE;
     v.histReadbackMapped = nullptr;
     v.histHost.clear();
+    v.histStreakHost.clear();
     v.histClassHost.clear();
     v.histDistHost.clear();
     v.histHostFrame = 0u;
@@ -1001,10 +1018,20 @@ void ScreenProbeGather::readPending(View &v) {
             // bits 22-25 of each rg32ui texel (jah_probe_history.glsl packGeom), the eye layers side by side.
             if (v.pending[i].history && v.histReadbackMapped) {
                 const size_t layerTexels = size_t(v.w) * v.h;
-                const uint32_t *src = reinterpret_cast<const uint32_t *>(
-                    static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 8u);
+                const char *slot = static_cast<const char *>(v.histReadbackMapped) + size_t(i) * layerTexels * v.layers * 9u;
+                const uint32_t *src = reinterpret_cast<const uint32_t *>(slot);
                 detail::decodeGatherHistory(src, v.w, v.h, v.layers, v.histHost, v.histClassHost,
                                             v.histDistHost);   // -O2 (ReadbackDecode.h)
+                // ...and the streak, its layers side by side as the count's (8B)
+                {
+                    const unsigned char *st = reinterpret_cast<const unsigned char *>(slot + layerTexels * v.layers * 8u);
+                    v.histStreakHost.assign(size_t(v.w) * v.layers * v.h, 0u);
+                    for (unsigned l = 0; l < v.layers; ++l)
+                        for (unsigned y = 0; y < v.h; ++y)
+                            for (unsigned x = 0; x < v.w; ++x)
+                                v.histStreakHost[size_t(y) * v.w * v.layers + size_t(l) * v.w + x] =
+                                    st[size_t(l) * layerTexels + size_t(y) * v.w + x];
+                }
                 v.histHostFrame = v.pending[i].gatherFrame;
                 v.pending[i].history = false;
             }
@@ -1105,9 +1132,10 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // before the view's age says so).
     // ...and the rest mean (PHOTON-GATHER-1d), which the integrate binds on every
     // frame and writes only at rest; and the rough specular's prefiltered maps, history pair and rest mean (7-3).
-    constexpr int kImages = 8;
+    constexpr int kImages = 10;   // (+ the streak pair, 8B: a new history's streak is 0 - never a stale one)
     const VkImage images[kImages] = { v.atlas,       v.history[0],      v.history[1],      v.restMean,
-                                      v.prefiltered, v.roughHistory[0], v.roughHistory[1], v.roughRest };
+                                      v.prefiltered, v.roughHistory[0], v.roughHistory[1], v.roughRest,
+                                      v.streak[0],   v.streak[1] };
     VkImageMemoryBarrier b[kImages] = {};
     for (int i = 0; i < kImages; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1334,7 +1362,12 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
         const unsigned rest = o.heldLast ? std::max(restKnownOf(o), restLengthOf(o.tuningLast, o.historyFramesLast) + due)
                                          : restKnownOf(o);
         const unsigned n = restLengthOf(o.tuningLast, o.historyFramesLast);
-        restFrames = restFrames ? std::min(restFrames, rest) : rest;
+        // THE REST LENGTH THE CARDS' DECISION READS (its demand window's start) is capped at the frames since the view's
+        // last WHOLE re-trace (8B): with every cell held the clock reads "no active component" (1 << 20), and the window
+        // reached back past the move into the last pose's marks (lab.card_set_binds: the far pose rested at A's set)
+        const unsigned sinceWhole = o.frame > o.lastMovedFrame + 1u ? o.frame - 1u - o.lastMovedFrame : 0u;
+        const unsigned reported = std::min(rest, sinceWhole);
+        restFrames = restFrames ? std::min(restFrames, reported) : reported;
         restLength = std::max(restLength, n);
         if (rest < n + due) return false;   // (its whole demand span traced)
     }
@@ -1394,6 +1427,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.rays = v.raysHost;
     out.raysFrame = v.raysHostFrame;
     out.historyCount = v.histHost;
+    out.historyStreak = v.histStreakHost;
     out.historyClass = v.histClassHost;
     out.historyDist = v.histDistHost;
     out.historyCountW = v.histHost.empty() ? 0u : v.w * v.layers;
@@ -1531,7 +1565,7 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     // already holds (a still camera, a lamp step at rest) has its count too: the stillness door's mask, never a wait
     // for a frame that will not trace.
     if (slotFree && in.tuning.historyReadback && temporal && v.age > 0u) {
-        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 9u;   // (8 B the history word, 1 B its streak)
         if (!v.histReadback) {
             std::string rerr;
             if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true,
@@ -1552,6 +1586,9 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
             region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
             vkCmdCopyImageToBuffer(cmd, v.history[(v.flip & 1u) ^ 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1,
+                                   &region);
+            region.bufferOffset += VkDeviceSize(v.w) * v.h * v.layers * 8u;   // (the streak after the words)
+            vkCmdCopyImageToBuffer(cmd, v.streak[(v.flip & 1u) ^ 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1,
                                    &region);
             VkMemoryBarrier toHost{};
             toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -1634,6 +1671,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (!in.tuning.historyReadback) {
         for (unsigned i = 0; i < kFramesInFlight; ++i) v.pending[i].history = false;
         if (!v.histHost.empty()) {
+            v.histStreakHost.clear();
+            v.histStreakHost.shrink_to_fit();
             v.histHost.clear();
             v.histHost.shrink_to_fit();
             v.histClassHost.clear();
@@ -2347,6 +2386,14 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kIntegrateCellStateBinding].pBufferInfo = &cellStateInfo;
         w[kIntegrateCellStoreBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kIntegrateCellStoreBinding].pBufferInfo = &cellStoreInfo;
+        VkDescriptorImageInfo streakInfo[2] = {};   // (8B: last frame's half, this frame's - the history's flip)
+        streakInfo[0].imageView = v.streakView[prev];
+        streakInfo[1].imageView = v.streakView[cur];
+        for (unsigned k = 0; k < 2u; ++k) {
+            streakInfo[k].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            w[kIntegrateStreakPrevBinding + k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            w[kIntegrateStreakPrevBinding + k].pImageInfo = &streakInfo[k];
+        }
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 
@@ -2890,7 +2937,7 @@ void ScreenProbeGather::finish(const void *key) {
     // writes this half again two frames on.
     bool historyThisFrame = false;
     if (in.tuning.historyReadback && temporal) {
-        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 8u;
+        const VkDeviceSize slotBytes = VkDeviceSize(v.w) * v.h * v.layers * 9u;   // (8 B the history word, 1 B its streak)
         if (!v.histReadback) {
             std::string rerr;
             if (!mHost.gatherMakeBuffer(slotBytes * kFramesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true,
@@ -2910,6 +2957,8 @@ void ScreenProbeGather::finish(const void *key) {
             region.imageSubresource.layerCount = v.layers;
             region.imageExtent = { v.w, v.h, 1u };
             vkCmdCopyImageToBuffer(cmd, v.history[v.flip & 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1, &region);
+            region.bufferOffset += VkDeviceSize(v.w) * v.h * v.layers * 8u;   // (the streak after the words)
+            vkCmdCopyImageToBuffer(cmd, v.streak[v.flip & 1u], VK_IMAGE_LAYOUT_GENERAL, v.histReadback, 1, &region);
             VkMemoryBarrier toHost{};
             toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
