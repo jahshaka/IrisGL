@@ -533,7 +533,7 @@ void main()
 						const float n1 = max( vm - v0, 1.0 ), n2 = max( v - vm, 1.0 );
 						const float h1 = ( Lm * vm - L0 * v0 ) / n1, h2 = ( LL * v - Lm * vm ) / n2;
 						const float sigma = e * jahDenoiseSlopeAt( LD ) * sqrt( v );
-						const bool drift = abs( h2 - h1 ) > kReflectDriftK * sigma * sqrt( 1.0 / n1 + 1.0 / n2 );
+						const bool drift = false && abs( h2 - h1 ) > kReflectDriftK * sigma * sqrt( 1.0 / n1 + 1.0 / n2 );   // MEASURING ARM (8B B2, to be reverted): (B) off
 						if( drift )
 						{
 							refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LL ) ) & 0xFFFF0000u );
