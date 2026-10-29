@@ -762,6 +762,7 @@ struct StillnessRun::Impl {
 //   + due        the read-back's due after it (the period + the ring + the issue frame's one + 1)
 //   + W          the decision's own work: its captures and card-to-card rounds, from the decision to its last GI row
 //   + N + 1      the re-rest after that work, and the hold's own frame
+//   + C, + H     the re-rest's convergence and the hand-over's steps after it (8B: B1's C, B3's H - both measured)
 // with N the gather's settle (StillnessFrame::settleFrames) and the due the cards' demand due (the record's period + lag +
 // 1); and W'S PACE: W <= ceil(the work's pages / the tier's indirect pages a frame) + due (the rounds pipelined: one due
 // covers the chain), the pages the frames' own indirect texels relit over a page. A window without a decision derives none.
@@ -811,7 +812,13 @@ void stillnessDeriveLiveness(StillnessWindow &w) {
             w.convergeFrames = int(i) - w.decisionWorkEnd - 1;
             break;
         }
-    w.holdBound = int(N + due) + int(due) + W + w.convergeFrames + int(N) + 1;
+    // THE HAND-OVER's STEPS H (PHOTON-7 stage 8B, B3): a held cell a card refinement reached re-rests on its own frames,
+    // then walks from the held picture to its new answer over M = ceil(delta / one code) frames, counted active - the
+    // hold waits for the longest hand-over the record shows beginning after the work's last row (measured, as C is)
+    w.handoverFrames = 0;
+    for (size_t i = size_t(w.decisionWorkEnd) + 1u; i < n; ++i)
+        w.handoverFrames = std::max(w.handoverFrames, int(w.frames[i].handoverM));
+    w.holdBound = int(N + due) + int(due) + W + w.convergeFrames + int(N) + w.handoverFrames + 1;
     const double page = double(d.cardsPageSize) * double(d.cardsPageSize);
     const double P = page > 0.0 ? double(d.cardsIndirectTexels) / page : 0.0;
     for (int i = w.decisionFrame; i <= w.decisionWorkEnd; ++i) {
@@ -1509,7 +1516,7 @@ std::string StillnessReport::summary() const
           << (w.frames.empty() ? 0 : w.frames.size() - 1) << " visible="
           << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " lastHoldKey=" << w.lastHoldKeyFrame << " hold=" << w.holdFrame
           << " firstRest=" << w.firstRestFrame << " decision=" << w.decisionFrame << " workEnd=" << w.decisionWorkEnd
-          << " holdBound=" << w.holdBound << " converge=" << w.convergeFrames << " pace=" << w.workPace
+          << " holdBound=" << w.holdBound << " converge=" << w.convergeFrames << " handover=" << w.handoverFrames << " pace=" << w.workPace
           << " pages=" << w.workPages
           << " | frames to <1 code (from stop / from last GI row; = the window: never):";
         for (size_t k = 0; k < names.size() && k < w.settleFromStop.size(); ++k)

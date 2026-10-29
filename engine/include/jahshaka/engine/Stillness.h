@@ -308,6 +308,9 @@ struct StillnessWindow {
     /// ...C, the frames the gather's cells took to converge after the work's last row before their rest began again (8B,
     /// B1: the re-rest is C + N + 1 - the history catching up with its samples is part of the rest's start)
     int convergeFrames = 0;
+    /// ...H, the longest card-refinement hand-over (M frames, StillnessFrame::handoverM) that began after the work's last
+    /// row (8B, B3: a refining cell walks to its new answer a code a frame, counted active - the hold waits for it)
+    int handoverFrames = 0;
     /// ...and C after the LAST hold key (the frames before the gather's rest began again; 0 with none after it)
     int lastKeyConverge = 0;
     double workPages = 0.0;

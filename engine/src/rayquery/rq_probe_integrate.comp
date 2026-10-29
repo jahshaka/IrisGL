@@ -1431,7 +1431,7 @@ void main()
 		{
 			const vec3 dc = abs( dispCodes( outV.xyz ) - dispCodes( imageLoad( probeIrradiance, at ).xyz ) );
 			atomicMax( jahCellState[kCellWords * index + 9u], uint( max( max( dc.x, dc.y ), dc.z ) * 16.0 + 0.999 ) );
-			imageStore( restMean, at, vec4( outV.xyz, ( gRoughTarget ? 6.0 : 2.0 ) + ( gSkyNow >= 0.0 ? gSkyNow : 1.5 ) ) );
+			imageStore( restMean, at, jahRoundHalf( vec4( outV.xyz, ( gRoughTarget ? 6.0 : 2.0 ) + ( gSkyNow >= 0.0 ? gSkyNow : 1.5 ) ) ) );
 		}
 	}
 	else
