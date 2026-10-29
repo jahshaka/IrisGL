@@ -181,7 +181,7 @@ Answer answerAt( ivec2 t )
 	// taken into its history, its rest restarted at v = 0) holds the answer it showed - not the path's - and one REFINING
 	// shows its slewed answer; dropping them to the probe or the sky flashed the mirror 98 codes for a frame
 	// (rtreflect.lamp_step_held's eref, frames 143-161, the first rest frames past 2N)
-	const uvec4 refineW = p.alpha.x > 0.5 ? uvec4( 0u ) : imageLoad( restRefine, ivec3( t, gEye ) );   // (MEASURING ARM)
+	const uvec4 refineW = imageLoad( restRefine, ivec3( t, gEye ) );
 	if( !( v > 0.0 ) && p.knobs2.x >= jahRestHandOverLength( N ) && !sc.resume &&
 		( refineW.w & kRefineRefining ) == 0u )
 		return a;
