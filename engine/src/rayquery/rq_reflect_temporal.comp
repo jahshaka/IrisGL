@@ -385,8 +385,9 @@ void main()
 				const vec4 Mq = imageLoad( historyCur, ivec3( tc, gEye ) );
 				const vec3 T = jahRestAnswer( hasHq ? clamp( Hq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 ), hasHq,
 											  clamp( Mq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), float( st.v ), Nr );
-				const vec3 D = refineSlew( uintBitsToFloat( refine.xyz ), T );
-				refine = all( equal( D, T ) ) ? uvec4( 0u ) : uvec4( floatBitsToUint( D ), kRefineRefining );
+				const vec3 D = refineSlew( jahRefineD( refine ), T );
+				refine = all( equal( jahRefineD( jahRefineWithD( refine, D ) ), jahRefineD( jahRefineWithD( refine, T ) ) ) )
+							 ? uvec4( 0u ) : jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), D );
 				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			return;
@@ -427,7 +428,8 @@ void main()
 			// B2: A CARD-ONLY REACH (the trace's mark: any texel at rest, stopped or converging) RE-RESTS IN THE
 			// BACKGROUND - the readers show `sofar` until the new rest stops and its walk is done; any other resume
 			// ends a refinement
-			refine = ( refine.w & kRefineReach ) != 0u ? uvec4( floatBitsToUint( sofar ), kRefineRefining ) : uvec4( 0u );
+			refine = ( refine.w & kRefineReach ) != 0u ? jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), sofar )
+													   : uvec4( 0u );
 			imageStore( restRefine, ivec3( tc, gEye ), refine );
 			if( vPrev > 0.0 || hasH )
 			{
@@ -484,14 +486,42 @@ void main()
 			const bool settled = v >= max( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ), p.alpha.w );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;
-			st.stop = capped ? kReflectStopFrames
-							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
+			// THE STOP (B2's (e)): within the share for kReflectStopFrames frames AND across kReflectStopSamples samples,
+			// the window restarting where its mean DRIFTS (jah_reflect_rest.glsl kReflectStopSamples, kReflectDriftK)
+			const uvec4 refineWas = refine;
+			if( capped )
+				st.stop = kReflectStopFrames;
+			else if( !( e <= share && settled && !reference ) )
+			{
+				st.stop = 0u;
+				refine.w &= ~kRefineWindow;
+			}
+			else
+			{
+				const bool open = ( refine.w & kRefineWindow ) != 0u;
+				const float LDref = unpackHalf2x16( refine.y ).y;
+				const float eRef = unpackHalf2x16( refine.z >> 16u ).x;
+				const float sigmaDiff = sqrt( max( eRef * eRef - e * e, 0.0 ) );
+				const bool drift = open && abs( LD - LDref ) > kReflectDriftK * sigmaDiff + 1e-7;
+				if( !open || drift )
+				{
+					// the window starts (again) here: its mean, its error and its sample count
+					refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LD ) ) & 0xFFFF0000u );
+					refine.z = ( uint( min( v, 65535.0 ) ) & 0xFFFFu ) | ( packHalf2x16( vec2( e, 0.0 ) ) << 16u );
+					refine.w |= kRefineWindow;
+					st.stop = 1u;
+				}
+				else
+				{
+					const bool enough = v - float( refine.z & 0xFFFFu ) >= kReflectStopSamples;
+					st.stop = min( st.stop + 1u, enough ? kReflectStopFrames : kReflectStopFrames - 1u );
+				}
+			}
 			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
 			if( ( refine.w & kRefineRefining ) != 0u )
-			{
-				refine.xyz = floatBitsToUint( refineSlew( uintBitsToFloat( refine.xyz ), answer ) );
+				refine = jahRefineWithD( refine, refineSlew( jahRefineD( refine ), answer ) );
+			if( refine != refineWas )
 				imageStore( restRefine, ivec3( tc, gEye ), refine );
-			}
 			{
 				const int ps = jahPickSlotT( tc );   // THE PICK (the reds' instrument)
 				if( ps >= 0 )
