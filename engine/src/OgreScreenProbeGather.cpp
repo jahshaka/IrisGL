@@ -2030,7 +2030,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.fast[0] = kFastUpdateMovingShare;
     pp.fast[1] = kFastUpdateMost;
     pp.fast[2] = in.fastSkinPosed ? 1.0f : 0.0f;
-    pp.fast[3] = in.fastOff ? 0.0f : 1.0f;   // MEASURING ARM (8B B5, to be reverted)
+    pp.fast[3] = 1.0f;
     for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
         const GatherRestInputs::Bricks &b = in.rest.bricks[c];
         const bool bound = b.buffer && b.dims[0] && b.dims[1] && b.dims[2];
