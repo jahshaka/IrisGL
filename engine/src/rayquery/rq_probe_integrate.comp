@@ -764,19 +764,7 @@ vec4 roughTexel( vec3 lobe, vec3 diffuse, float roughness )
 	return gate > 0.0 ? vec4( mix( lobe, diffuse, roughToDiffuse( roughness ) ), gate ) : vec4( 0.0 );
 }
 
-/// THE DEFERRED ROUGH LOBE (8B B4's pick): the state integrateMain hands main after the workgroup's barrier.
-shared vec4 sLobe[64];
-bool gRPending = false;
-ivec3 gRAt;
-int gREye;
-ivec2 gRPix, gRLobeAt, gRHistAt;
-vec3 gRLobe, gRDiffuseOut;
-uint gRPrevCount;
-float gRBlend, gRRestK, gRHandover, gRRough;
-bool gRLobeTakes;
-vec3 lobeYCoCg( vec3 c ) { return vec3( 0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b ); }
-
-void integrateMain()
+void main()
 {
 	const ivec2 full = ivec2( p.resolution.zw );
 	const ivec2 pix = ivec2( gl_GlobalInvocationID.xy );
@@ -1311,6 +1299,7 @@ void integrateMain()
 		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, lobeFallback );
 		// (a lobe that fell back to a diffuse with no rest sample is no sample: the rough rest takes none this frame)
 		const bool lobeTakes = restTakes && !( gLobeFellBack && fallbackNone );
+		bool roughStarved = false;
 		// THE LOBE's HISTORY BY ITS VIRTUAL POINT (PHOTON-7 stage 8B, B4; rq_reflect_temporal.comp's rule for the traced
 		// reflection, Lumen's GetLightingHistory): a lobe whose dominant direction is the reflection's
 		// (GetSpecularDominantDirFactor > 0.5: perceptual roughness under 0.594) shows the image behind the surface, at the
@@ -1350,13 +1339,30 @@ void integrateMain()
 				}
 			}
 		}
-		// (THE LOBE's HISTORY, its blend, its rest and its stores run after the workgroup's barrier, in main: the pick
-		// between the virtual point's history and the surface's reads this frame's 3 x 3 lobe samples - deferredRough)
-		gRPending = true;
-		gRAt = at; gREye = eye; gRPix = pix; gRLobe = lobe; gRLobeAt = lobeAt; gRHistAt = histAt;
-		gRPrevCount = prevCount; gRBlend = blend; gRRestK = restK; gRLobeTakes = lobeTakes; gRHandover = restHandover;
-		gRDiffuseOut = diffuseOut; gRRough = roughness;
-		sLobe[gl_LocalInvocationIndex] = vec4( finite3( lobe ) ? lobe : vec3( 0.0 ), finite3( lobe ) ? 1.0 : 0.0 );
+		const vec3 prevLobe =
+			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( lobeAt, eye ) ).x ) : vec3( 0.0 );
+		vec3 meanLobe = mix( prevLobe, lobe, blend );
+		if( restK >= 1.0 )
+		{
+			const vec4 stored = restK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, at );
+			vec4 rest = !lobeTakes ? stored
+							  : stored.w < -0.5 ? vec4( lobe, 1.0 )
+												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
+			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
+			if( lobeTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
+			imageStore( roughRest, at, rest );
+			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
+			// probe or the sky answers the lobe)
+			roughStarved = rest.w < -0.5 && restK >= p.knobs6.y;
+			if( roughStarved )
+				atomicAdd( gatherCounter.words[3], 1u );
+			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
+			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
+		}
+		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		imageStore( roughHistoryCur, at,
+					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
+		imageStore( roughSpec, at, roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) );
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
@@ -1374,67 +1380,5 @@ void integrateMain()
 		atomicAdd( jahCellState[kCellWords * index + 2u], uint( clamp( 255.0 * Ls / ( 1.0 + Ls ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
 		atomicAdd( jahCellState[kCellWords * index + 3u], uint( clamp( 255.0 * La / ( 1.0 + La ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
 		atomicAdd( jahCellState[kCellWords * index + 4u], 1u );
-	}
-}
-
-void main()
-{
-	sLobe[gl_LocalInvocationIndex] = vec4( 0.0 );
-	integrateMain();
-	barrier();
-	if( !gRPending )
-		return;
-	{
-		bool roughStarved = false;
-		vec3 prevLobe =
-			gRPrevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( gRLobeAt, gREye ) ).x ) : vec3( 0.0 );
-		// THE PICK (LUMEN's guard, rq_reflect_temporal.comp's step 5 with Lumen's constants - its 0.8 and its 0.01 margin,
-		// MEASURING ARM gather.lobePick): where the virtual point's history lies farther from this frame's 3 x 3 lobe
-		// samples' box centre than the surface's history (by the margin), the surface's takes 0.8 of it
-		if( p.fast.z < -0.5 && gRPrevCount > 0u && any( notEqual( gRLobeAt, gRHistAt ) ) )
-		{
-			const vec3 surf = unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( gRHistAt, gREye ) ).x );
-			vec3 m1 = vec3( 0.0 );
-			float n = 0.0;
-			const ivec2 l = ivec2( gl_LocalInvocationID.xy );
-			for( int dy = -1; dy <= 1; ++dy )
-				for( int dx = -1; dx <= 1; ++dx )
-				{
-					const ivec2 q = l + ivec2( dx, dy );
-					if( any( lessThan( q, ivec2( 0 ) ) ) || any( greaterThan( q, ivec2( 7 ) ) ) )
-						continue;
-					const vec4 v = sLobe[q.y * 8 + q.x];
-					if( v.w <= 0.0 )
-						continue;
-					m1 += lobeYCoCg( v.xyz );
-					n += 1.0;
-				}
-			const vec3 centre = m1 / max( n, 1.0 );
-			const vec3 hitY = lobeYCoCg( prevLobe ), surfY = lobeYCoCg( surf );
-			const float a = length( centre - hitY ) > length( centre - surfY ) + 0.01 ? 0.8 : 0.0;
-			prevLobe = mix( prevLobe, surf, a );
-		}
-		vec3 meanLobe = mix( prevLobe, gRLobe, gRBlend );
-		if( gRRestK >= 1.0 )
-		{
-			const vec4 stored = gRRestK < 1.5 ? vec4( 0.0, 0.0, 0.0, -1.0 ) : imageLoad( roughRest, gRAt );
-			vec4 rest = !gRLobeTakes ? stored
-							  : stored.w < -0.5 ? vec4( gRLobe, 1.0 )
-												: mix( stored, vec4( gRLobe, 1.0 ), 1.0 / gRRestK );
-			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
-			if( gRLobeTakes ) rest.xyz = jahRestStoreMean( rest.xyz, gRPix, gREye + 2, gRRestK );
-			imageStore( roughRest, gRAt, rest );
-			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
-			// probe or the sky answers the lobe)
-			roughStarved = rest.w < -0.5 && gRRestK >= p.knobs6.y;
-			if( roughStarved )
-				atomicAdd( gatherCounter.words[3], 1u );
-			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
-			meanLobe = mix( mix( prevLobe, restAnswer, gRBlend ), restAnswer, gRHandover );
-		}
-		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
-		imageStore( roughHistoryCur, gRAt,
-					uvec4( packRgbShared( meanLobe, roundingDither( gRPix, 4u ) ), 0u, 0u, 0u ) );
-		imageStore( roughSpec, gRAt, roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, gRDiffuseOut, gRRough ) );
 	}
 }
