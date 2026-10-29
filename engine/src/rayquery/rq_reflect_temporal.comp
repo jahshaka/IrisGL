@@ -232,6 +232,20 @@ layout( std430, set = 0, binding = 53 ) buffer JahMovingSe { float movingSe[]; }
 layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
 /// THE REFINEMENT (binding 62, jah_reflect_rest.glsl: the no-pop hand-over of a card-only reach) - this pass runs it.
 layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
+/// MEASURING ARM (8B B2 (A), to be reverted): THE REFINEMENT's INSTRUMENT in the pick's frame slot, words 48-55 - every
+/// texel's counts (48 refining, 49 handing over, 50 refinements begun, 51 refinements ended by a real resume, 52 walks
+/// begun) and the picked texel's word (53), held answer's red (54) and walk length (55)
+int refPickSlot()
+{
+	const uint w = floatBitsToUint( p.alpha.y );
+	return ( w & ( 1u << 30u ) ) != 0u && gEye == 0 ? int( ( w >> 24u ) & 63u ) : -1;
+}
+void refCount( uint k )
+{
+	const int s = refPickSlot();
+	if( s >= 0 )
+		atomicAdd( jahPick[uint( s ) * 64u + k], 1u );
+}
 /// THE DISPLAY CODES between two answers (the walk's delta): per channel, the slope integrated over four steps, the
 /// largest channel's.
 float refineDeltaCodes( vec3 a, vec3 b )
@@ -326,6 +340,17 @@ void main()
 		refine = uvec4( 0u );
 		imageStore( restRefine, ivec3( tc, gEye ), refine );
 	}
+	if( p.knobs2.x >= 0.5 )   // (MEASURING ARM: the instrument)
+	{
+		if( ( refine.w & kRefineRefining ) != 0u ) refCount( 48u );
+		if( ( refine.w & kRefineHandover ) != 0u ) refCount( 49u );
+		const int ps = jahPickSlotT( tc );
+		if( ps >= 0 )
+		{
+			jahPick[uint( ps ) * 64u + 53u] = refine.w;
+			jahPick[uint( ps ) * 64u + 54u] = refine.x;
+		}
+	}
 	// A texel the trace declined this frame keeps what it holds (the filter reads no answer there).
 	JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
 	if( !( st.surfDist > 0.0 ) )
@@ -419,6 +444,8 @@ void main()
 			// B2: A CARD-ONLY REACH (the trace's mark: any texel at rest, stopped or converging) RE-RESTS IN THE
 			// BACKGROUND - the readers show `sofar` until the new rest stops and its walk is done; any other resume
 			// ends a refinement
+			if( ( refine.w & kRefineReach ) != 0u ) refCount( 50u );   // (MEASURING ARM)
+			else if( ( refine.w & ( kRefineRefining | kRefineHandover ) ) != 0u ) refCount( 51u );
 			refine = ( refine.w & kRefineReach ) != 0u ? uvec4( floatBitsToUint( sofar ), kRefineRefining ) : uvec4( 0u );
 			imageStore( restRefine, ivec3( tc, gEye ), refine );
 			if( vPrev > 0.0 || hasH )
@@ -483,6 +510,8 @@ void main()
 			{
 				const uint steps = uint( clamp( ceil( refineDeltaCodes( uintBitsToFloat( refine.xyz ), answer ) ), 1.0, 255.0 ) );
 				refine.w = kRefineHandover | ( steps << 16u );
+				refCount( 52u );   // (MEASURING ARM)
+				if( jahPickSlotT( tc ) >= 0 ) jahPick[uint( jahPickSlotT( tc ) ) * 64u + 55u] = steps;
 				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			{
