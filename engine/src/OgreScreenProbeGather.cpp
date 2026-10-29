@@ -185,9 +185,7 @@ constexpr unsigned kIntegrateSkyVisBinding = kIntegrateHitFirst + kHitSetBinding
 /// cell's pixels write their history through and nothing else).
 constexpr unsigned kIntegrateClockBinding = kIntegrateSkyVisBinding + 1u;
 constexpr unsigned kIntegrateCellStateBinding = kIntegrateClockBinding + 1u;
-/// ...and THE LOBES' MEAN HIT DISTANCE (54, 8B B4): read with the prefiltered maps' own taps - the rough lobe's virtual point.
-constexpr unsigned kIntegrateLobeDistBinding = kIntegrateCellStateBinding + 1u;
-constexpr unsigned kIntegrateBindings = kIntegrateLobeDistBinding + 1u;
+constexpr unsigned kIntegrateBindings = kIntegrateCellStateBinding + 1u;
 /// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
 /// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
 constexpr HitSetSlots kIntegrateHitSlots = {
@@ -201,7 +199,7 @@ constexpr HitSetSlots kIntegrateHitSlots = {
     49u,
     50u,
 };
-static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 55u,
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 54u,
               "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50, the sky "
               "visibility at 51");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
@@ -211,7 +209,7 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
 /// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3); the sky visibility (51, 10-4 R11).
 constexpr unsigned kIntegrateStorageImages = 10u;
-static_assert(kIntegrateBindings == 12u + kIntegrateStorageImages + kHitSetBindings,
+static_assert(kIntegrateBindings == 11u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
               "roughness and the prefiltered maps, the hit set, the rest's clock and cells");
 /// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
@@ -547,8 +545,6 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             t[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             counts[b] = 1u;
         }
-        t[kIntegrateLobeDistBinding] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;   // the lobes' distance (8B, B4)
-        counts[kIntegrateLobeDistBinding] = 1u;
         if (!makeLayout(kIntegrateBindings, t, counts, mIntegrateLayout, "integrate")) return false;
     }
     {   // rq_probe_resume.comp (PHOTON-7 stage 8B, B1): one layout for its five jobs
@@ -2326,12 +2322,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         filteredRead.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[13].pImageInfo = &filteredRead;
-        VkDescriptorImageInfo lobeDistRead{};   // (8B B4: the lobes' distance through the same linear sampler)
-        lobeDistRead.sampler = mHost.gatherLinearSampler();
-        lobeDistRead.imageView = v.prefilteredDistView;
-        lobeDistRead.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        w[kIntegrateLobeDistBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w[kIntegrateLobeDistBinding].pImageInfo = &lobeDistRead;
         VkDescriptorImageInfo roughOut{};
         roughOut.imageView = mHost.gatherLayerView(v.roughSpec, true);
         roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;

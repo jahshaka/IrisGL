@@ -174,8 +174,6 @@ layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 /// filter's PREFILTERED maps (one layer a roughness level, bilinear inside each probe's block) and the output.
 layout( set = 0, binding = 12 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 13 ) uniform sampler2DArray prefilteredAtlas;
-/// THE LOBES' MEAN HIT DISTANCE (PHOTON-7 stage 8B, B4; rq_probe_filter.comp's second moment), read with the maps' taps.
-layout( set = 0, binding = 54 ) uniform sampler2DArray prefilteredDist;
 layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpec;
 /// ...the lobe's history pair (one shared-exponent word a pixel, at the diffuse history's texel) and its rest mean (a
 /// 1 x 1 stand-in under stereo, as the diffuse's).
@@ -625,8 +623,6 @@ int bilinearTaps( ivec2 c0, vec2 f, ivec2 cell, uint index, ivec2 cellOff, ivec2
 /// Whether the last lobe read ANSWERED from no probe and returned its fallback (PHOTON-7 stage 10-3, carrier 3: the rough
 /// rest takes no sample where that fallback is the diffuse's "no sample" - roughLobeNow sets it, the lobes below).
 bool gLobeFellBack = false;
-/// ...and THE LOBE's MEAN HIT DISTANCE the last read found (8B B4; -1: none - no tap held the lobe's direction)
-float gLobeDist = -1.0;
 
 vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
 {
@@ -645,7 +641,6 @@ vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], 
 	const vec2 atlasSize = vec2( textureSize( prefilteredAtlas, 0 ).xy );
 	vec3 acc = vec3( 0.0 );
 	float wacc = 0.0;
-	float tacc = 0.0, twacc = 0.0;
 	for( int t = 0; t < nTap; ++t )
 	{
 		const uint pi = tapIdx[t];
@@ -661,18 +656,9 @@ vec3 probeLobe( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], 
 							textureLod( prefilteredAtlas, vec3( at, k0 + 1.0 ), 0.0 ).xyz, fk );
 		if( !finite3( L ) )
 			continue;
-		// (8B B4: the lobe's mean hit distance at the same tap, the same level lerp - one read of the second moment)
-		const float tl = mix( textureLod( prefilteredDist, vec3( at, k0 ), 0.0 ).x,
-							  textureLod( prefilteredDist, vec3( at, k0 + 1.0 ), 0.0 ).x, fk );
-		if( finite1( tl ) )
-		{
-			tacc += tl * tapW[t];
-			twacc += tapW[t];
-		}
 		acc += L * tapW[t];
 		wacc += tapW[t];
 	}
-	gLobeDist = twacc > 0.0 ? tacc / twacc : -1.0;
 	gLobeFellBack = !( wacc > 0.0 );
 	return wacc > 0.0 ? acc / wacc : diffuse;
 }
@@ -1300,40 +1286,8 @@ void main()
 		// (a lobe that fell back to a diffuse with no rest sample is no sample: the rough rest takes none this frame)
 		const bool lobeTakes = restTakes && !( gLobeFellBack && fallbackNone );
 		bool roughStarved = false;
-		// THE LOBE's HISTORY BY ITS VIRTUAL POINT (PHOTON-7 stage 8B, B4; rq_reflect_temporal.comp's rule for the traced
-		// reflection, Lumen's GetLightingHistory): a lobe whose dominant direction is the reflection's
-		// (GetSpecularDominantDirFactor > 0.5: perceptual roughness under 0.594) shows the image behind the surface, at the
-		// point its mean hit distance names along the view ray - so under motion its history is read where THAT point
-		// was, not where the surface was (the surface's history smeared the reflected image along the walk: gi.walk_rough's
-		// lag, R12 / §3397). Reprojected with no depth test (an image behind a mirror has none); off the previous image,
-		// or on a texel with no history, the surface's history answers. Still, the point projects to the pixel itself: the
-		// rest and every still frame read what they read.
-		ivec2 lobeAt = histAt;
-		{
-			const float rough = roughness;
-			const float sDom = clamp( 1.0 - rough, 0.0, 1.0 );
-			if( prevCount > 0u && sDom * ( sqrt( sDom ) + rough ) > 0.5 && gLobeDist > 0.0 && finite1( gLobeDist ) )
-			{
-				const vec3 virt = pixelWorld - toEyeField * gLobeDist;
-				const JahEye before = jahEyeBefore( eye );
-				vec2 was;
-				float zv;
-				if( jahReproject( virt, before.camPos, before.perspective, before.rayTL, before.rayRight, before.rayDown,
-								  before.fwd, was, zv ) == 0 )
-				{
-					const ivec2 size = ivec2( jahEyeWidth(), int( p.resolution.w ) );
-					const ivec2 pc = clamp( ivec2( was * vec2( size ) ), ivec2( 0 ), size - 1 );
-					float wd, wc;
-					bool wf;
-					uint wn;
-					unpackGeom( imageLoad( historyPrev, ivec3( pc, eye ) ).y, wd, wf, wn, wc );
-					if( wn > 0u )
-						lobeAt = pc;
-				}
-			}
-		}
 		const vec3 prevLobe =
-			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( lobeAt, eye ) ).x ) : vec3( 0.0 );
+			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
 		vec3 meanLobe = mix( prevLobe, lobe, blend );
 		if( restK >= 1.0 )
 		{

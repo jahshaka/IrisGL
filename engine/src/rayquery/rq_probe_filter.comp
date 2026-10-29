@@ -94,9 +94,12 @@
 //    ...AND THE LOBE's MEAN HIT DISTANCE (PHOTON-7 stage 8B, B4): ONE QUADRATURE, TWO MOMENTS - under the same
 //    weights D(h) (d_o . d_t) dOmega_t over the same texels, the mean of the texels' own hit distances t_t (a texel
 //    whose ray escaped stands at the far query's end: its light came from there), one R32F layer a level beside the
-//    radiance. The integrate's rough lobe reprojects its history by the point that distance names behind the surface
-//    (the virtual point, rq_reflect_temporal.comp's rule for the traced reflection). A lobe across a depth break (a
-//    near edge before a far wall) has a mean that lies on neither - a named property of one distance per lobe.
+//    radiance. NO READER YET (the lead's ruling (b), 2026-10-29): the rough lobe's history by the virtual point this
+//    distance names was built and measured on gi.walk_rough (walk frames 14 / 28 / 59 breaking: B5 alone 1.86 / 4.60 /
+//    0.27 %; the virtual point 3.51 / 3.99 / 0.11; with the same-plane tap 3.55 / 3.53 / 0.23; with Lumen's 3 x 3 pick
+//    3.16 / 3.05 / 0.24) and reverted - one mean distance across a lobe that spans a depth break (a near edge before a
+//    far wall) names a point on neither, and frame 14 doubled. The leftover: the distance's VARIANCE as a third moment,
+//    and the two histories blended by the parallax error the spread predicts against the lobe's footprint.
 //
 // WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal, and the
 // prefiltered maps.
