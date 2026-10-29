@@ -127,8 +127,7 @@ const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 12u;
 const uint kJahHitAuxWords = 10u;
-/// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
-const uint kJahHitGpuMover = 1u << 2u;
+/// GpuScene.h GpuInstanceFlag: kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuSkinned = 1u << 5u;
 const uint kJahHitGpuPlanar = 1u << 10u;
 /// GpuScene.h kGpuTwoSided (a CULL_NONE macroblock: both faces are the surface) - a cache ray's back-face rule
@@ -142,14 +141,15 @@ uint jahHitFlags( uint slot )
 	return JAH_HIT_INSTANCE( slot, 7u ).w;   // boundsMax.w: the flags word
 }
 
-/// A mover or a rigged item: the caches cannot hold it, the decode always shades it.
+/// A RIGGED item: the caches hold its bind pose (the ray tier's skin cache is not theirs), the decode always shades it.
 /// A PLANAR MIRROR (D3-HIT-SHADE-2): the caches hold only its diffuse (black for a
 /// metal mirror), and a second ray from every such hit is a second bounce; the
 /// decode shades its own material with the pass' specular environment (the voxel
 /// cone, the sky) — a mirror seen in a reflection, never a black one.
+/// (A MOVER is not decoded: it answers from the store like any hit since PHOTON-7 8A A1 - the store holds it at its pose.)
 bool jahHitAlwaysDecodes( uint slot )
 {
-	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
+	return ( jahHitFlags( slot ) & ( kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
 }
 
 
