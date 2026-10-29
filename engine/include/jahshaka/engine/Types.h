@@ -5600,7 +5600,7 @@ struct RayQueryStatus {
     /// scene), read a few frames late; 0 = no ray met more. A light ray has no list (no cap) and is never counted.
     unsigned long long panesOverflow = 0;
     /// MEASURING ARM (reverted): the cards' gather's C2 sky answers (cumulative) and the first 4096 as P, N, L (9 floats)
-    unsigned long long skyRecords = 0, skyAll = 0;   // (skyRecords: those starting inside sealed_sky's room)
+    unsigned long long skyRecords = 0;
     std::vector<float> skyRec;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per

@@ -186,9 +186,6 @@ void jahTierSkyRecord( vec3 P, vec3 N, vec3 L )
 	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
 	if( ( a.x | a.y ) == 0u )
 		return;
-	atomicAdd( JahTierCounters( a ).c[2], 1u );   // (every sky answer; [1] those starting inside sealed_sky's room)
-	if( !( abs( P.x ) <= 2.01 && abs( P.z ) <= 2.01 && P.y >= -0.01 && P.y <= 3.01 ) )
-		return;
 	const uint k = atomicAdd( JahTierCounters( a ).c[1], 1u );
 	if( k >= 4096u )
 		return;

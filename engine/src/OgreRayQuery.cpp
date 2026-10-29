@@ -5162,10 +5162,9 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
         volatile uint32_t *w = static_cast<volatile uint32_t *>(mTierCounters.mapped);
         static double seen = 0.0;   // (the arm rayquery.skyRecReset: a new value empties the records)
         const double rv = mArms ? mArms->value(ArmId::SkyRecReset) : 0.0;
-        if (rv != seen) { seen = rv; w[1] = 0u; w[2] = 0u; }
+        if (rv != seen) { seen = rv; w[1] = 0u; }
         const uint32_t cnt = w[1];
         st.skyRecords = cnt;
-        st.skyAll = w[2];
         const uint32_t n = cnt < 4096u ? cnt : 4096u;
         st.skyRec.resize(size_t(n) * 9u);
         for (size_t i = 0; i < st.skyRec.size(); ++i) { uint32_t u = w[8 + i]; std::memcpy(&st.skyRec[i], &u, 4); }
