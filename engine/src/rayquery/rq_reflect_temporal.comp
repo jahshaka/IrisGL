@@ -493,8 +493,12 @@ void main()
 				st.stop = kReflectStopFrames;
 			else if( !( e <= share && settled && !reference ) )
 			{
+				// (out of its share this frame: the frame count restarts, the window's SAMPLES stand - a texel whose error
+				// sits at its share would otherwise restart a 300-sample window on every crossing and never stop: the
+				// glass's ~860 texels that never held)
 				st.stop = 0u;
-				refine.w &= ~( kRefineWindow | kRefineMiddle );
+				if( !settled )
+					refine.w &= ~( kRefineWindow | kRefineMiddle );
 			}
 			else
 			{
