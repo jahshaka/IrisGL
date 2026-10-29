@@ -1374,7 +1374,6 @@ constexpr ArmDef kArms[] = {
       "holds every gather ray within a few frames of the arm going on; a drop before that is no "
       "sample (never black), and any drop left is giStatus rayQuery.hitDropped, which a measurement "
       "that reads it refuses." },
-    { ArmId::GatherArmB45, 0.0, 0.0, 3.0, "MEASURING ARM (8B B4/B5, to be reverted): 1 = B4's virtual point off, 2 = B5 off, 3 = both." },
     { ArmId::GatherOctRes, 0.0, 0.0, 8.0,
       "The screen-probe gather's probe map resolution: rays per probe = octRes^2 (GATHER-NOISE-1's "
       "noise lever; GatherTuning::octRes). 0 = the tier's (8: 64 rays). At most 8 - one ray is one "

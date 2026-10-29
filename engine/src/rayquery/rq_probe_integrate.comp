@@ -1312,7 +1312,7 @@ void main()
 		{
 			const float rough = roughness;
 			const float sDom = clamp( 1.0 - rough, 0.0, 1.0 );
-			if( p.fast.z > -0.5 && prevCount > 0u && sDom * ( sqrt( sDom ) + rough ) > 0.5 && gLobeDist > 0.0 && finite1( gLobeDist ) )   // (MEASURING ARM: fast.z -1 = off)
+			if( prevCount > 0u && sDom * ( sqrt( sDom ) + rough ) > 0.5 && gLobeDist > 0.0 && finite1( gLobeDist ) )
 			{
 				const vec3 virt = pixelWorld - toEyeField * gLobeDist;
 				const JahEye before = jahEyeBefore( eye );

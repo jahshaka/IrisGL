@@ -2049,8 +2049,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // the world's)
     pp.fast[0] = kFastUpdateMovingShare;
     pp.fast[1] = kFastUpdateMost;
-    pp.fast[2] = (in.armB45 & 1u) ? -1.0f : in.fastSkinPosed ? 1.0f : 0.0f;   // MEASURING ARM: -1 = B4 off
-    pp.fast[3] = (in.armB45 & 2u) ? 0.0f : 1.0f;   // MEASURING ARM: B5 off
+    pp.fast[2] = in.fastSkinPosed ? 1.0f : 0.0f;
+    pp.fast[3] = 1.0f;
     for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
         const GatherRestInputs::Bricks &b = in.rest.bricks[c];
         const bool bound = b.buffer && b.dims[0] && b.dims[1] && b.dims[2];
