@@ -172,7 +172,7 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	vec3 r = jahHitStoreRead( slot, hitPos, hitNormal, dir, footprint, mirror, ok, source );
 	jahHitMirrorSlot = 0xFFFFFFFFu;
 	jahHitMirrorPart = vec3( 0.0 );
-	if( !jahHitTracedLobe )
+	if( !jahHitTracedLobe && !( JAH_HIT_PARAMS.counts.w > 0.5 ) )   // (MEASURING ARM, reverted)
 	{
 		bool answered;
 		const vec3 m = jahHitMirrorContinue( hitPos, normalize( hitNormal ), normalize( dir ), footprint, answered );

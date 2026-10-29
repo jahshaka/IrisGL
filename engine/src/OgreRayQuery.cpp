@@ -6428,6 +6428,7 @@ void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  Ogre::CompositorPass *pass, const HitListBinding &hit) {
     joinAhead(kAheadReflect);   // (its members are read below: the ahead build is joined first)
+    gHitMirrorContOffArm = mArms ? float(mArms->value(ArmId::MirrorContOff)) : 0.0f;   // MEASURING ARM (reverted)
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();

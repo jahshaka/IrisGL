@@ -318,6 +318,7 @@ enum class HitReader { View, Cache };
 /// Fills `out` from the hit set for `reader`; `geomSlots` = the per-slot row entries the job's own copy holds this frame
 /// (0: none).
 void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &out, HitReader reader);
+extern float gHitMirrorContOffArm;   // MEASURING ARM (11-2 (7), reverted): rayquery.mirrorContOff, every reader
 
 /// WHERE A JOB'S SET HOLDS THE HIT SET: the binding of each input (its shader's layout). Every one is bound.
 struct HitSetSlots {
