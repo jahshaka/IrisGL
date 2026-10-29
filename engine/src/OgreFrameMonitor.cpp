@@ -1391,6 +1391,8 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherRestOff, 0.0, 0.0, 1.0,
       "No rest mean (GatherTuning::restOff): a still view keeps running the history's EMA instead of "
       "handing over to the rest mean and holding - the door that measures the history at rest." },
+    { ArmId::GatherResumeOff, 0.0, 0.0, 1.0,
+      "MEASURING ARM (PHOTON-7 8B B1, to be reverted): the cells' resume sees no input - the oracle's negative control." },
     { ArmId::GatherRestFrames, 0.0, 0.0, 4096.0,
       "The rest mean's length in frames (GatherTuning::restFrames): a still view averages this many "
       "rest frames before it holds. 0 = the settle. With gather.restSeed it builds a CONVERGED "
