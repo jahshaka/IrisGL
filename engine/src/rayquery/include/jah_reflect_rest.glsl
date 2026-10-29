@@ -51,7 +51,7 @@ const float kReflectStopSamples = 300.0;
 /// apart by more than K_DRIFT times their difference's own standard error (sqrt( e_start^2 - e_now^2 ): the later mean
 /// holds the earlier's samples) is a mean still MOVING (a light still rising, a tail still being found), which the plain
 /// error test reads as a small variance: the window restarts there. K 3: a stationary mean trips it 0.3 % a frame.
-const float kReflectDriftK = 3.0;
+const float kReflectDriftK = 1.0e30;   // MEASURING ARM (8B B2, to be reverted): the drift term off - (A) alone
 /// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
 const uint kReflectRestVCap = 65535u;
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
