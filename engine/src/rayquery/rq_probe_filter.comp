@@ -119,7 +119,7 @@ layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray pr
 /// active cell's ring) is not filtered - nothing reads it this frame.
 layout( std430, set = 0, binding = 5 ) readonly buffer JahCellState { uint jahCellState[]; };
 const uint kFilterCellHeld = 1u;
-const uint kFilterCellWords = 10u;   // jah_probe_rest.glsl kCellWords
+const uint kFilterCellWords = 12u;   // jah_probe_rest.glsl kCellWords
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 

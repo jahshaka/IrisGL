@@ -307,7 +307,27 @@ void main()
 	cellState[kCellWords * i + kCellMovingWord] = ( cellState[kCellWords * i + kCellMovingWord] & 0xFFFFu ) << 16u;
 	// PAST N THE CELL HOLDS: its last integrate was its clock's N-th frame, whose answer IS the rest mean
 	if( ( st & kCellHeld ) == 0u && !moving && float( K ) > r.mode.y )
-		st |= kCellHeld;
+	{
+		if( ( st & kCellRefining ) != 0u )
+		{
+			// B3: ITS BACKGROUND REST ENDED - the hand-over, in M = ceil(delta / a code) equal steps, the first this frame
+			const uint M = max( ( cellState[kCellWords * i + 9u] + 15u ) / 16u, 1u );
+			st = ( st & ~kCellRefining ) | kCellHeld | kCellHandover;
+			cellState[kCellWords * i + 10u] = ( M << 16u ) | 1u;
+			cellState[kCellWords * i + 9u] = 0u;
+		}
+		else
+			st |= kCellHeld;
+	}
+	else if( ( st & kCellHandover ) != 0u && !moving )
+	{
+		const uint hw = cellState[kCellWords * i + 10u];
+		const uint j = hw & 0xFFFFu, M = hw >> 16u;
+		if( j >= M )
+			st &= ~kCellHandover;   // (its last step was drawn: held)
+		else
+			cellState[kCellWords * i + 10u] = ( M << 16u ) | ( j + 1u );
+	}
 	cellState[kCellWords * i] = st;
 }
 
@@ -352,7 +372,9 @@ void main()
 		ring = near <= D ? 1u : 0u;
 		if( K == kNone )
 			K = near <= D + 1 ? nearK : 0u;
-		atomicAdd( jahClock[4], 1u );
+		// (a cell HANDING OVER is held for the clock and the ring, but counts ACTIVE: its integrate runs - the view is
+		// not at rest while a picture steps)
+		atomicAdd( jahClock[( st & kCellHandover ) != 0u ? 5 : 4], 1u );
 		if( ring != 0u )
 			atomicAdd( jahClock[7], 1u );
 	}
@@ -371,6 +393,7 @@ shared vec3 sLo[64];
 shared vec3 sHi[64];
 shared float sFar[64];
 shared uint sReached;
+shared uint sRefined;   // (B3: a Card region alone reached the cell - a cache refinement)
 
 vec4 regionLo( uint k ) { return regionWords[2u + 2u * k]; }
 vec4 regionHi( uint k ) { return regionWords[3u + 2u * k]; }
@@ -496,7 +519,10 @@ void main()
 	const ivec2 full = ivec2( p.resolution.zw );
 	const JahEye e = jahEyeNow( eye );
 	if( tid == 0u )
+	{
 		sReached = 0u;
+		sRefined = 0u;
+	}
 
 	// ---- THE CELL'S SURFACE: its pixels' world box and its farthest view distance (a sky pixel: the far plane) ----------
 	vec3 lo = vec3( 1e30 ), hi = vec3( -1e30 );
@@ -634,6 +660,13 @@ void main()
 					reached = coneMeetsSphere( centre, d, cosCone, sinCone, 0.0, wayEnd, q, R + rho );
 				else if( !hits )
 					continue;
+				else if( kind == kRegionCard )
+				{
+					// A CACHE REFINEMENT (B3): it changes what the cell reads but is no change of the world - a held cell
+					// re-rests in the background and hands over (the finalize, the integrate); never a resume by itself
+					if( coneMeetsSphere( centre, d, cosCone, sinCone, tMin, tMax, q, R + rho ) )
+						atomicOr( sRefined, 1u );
+				}
 				else if( kind == kRegionMoverShadow )
 				{
 					if( !sun )
@@ -657,6 +690,12 @@ void main()
 	{
 		const uint w = kCellWords * index;
 		uint st = cellState[w] & ~kCellReached;
+		// B3: a refinement alone on a HELD (or refining, or handing-over) cell re-rests it in the background - its clock
+		// restarts with its component's (the block's "reached"), it counts as converged (no history to catch up: the rest
+		// mean is made from its own frames), its outputs hold; on an ACTIVE cell it is an ordinary resume
+		const bool background = sReached == 0u && sRefined != 0u &&
+								( st & ( kCellHeld | kCellRefining | kCellHandover ) ) != 0u;
+		bool restart = sReached != 0u || ( sRefined != 0u && !background );
 		// THE CELL's CONVERGENCE (the lead's ruling: a rest starts when no input reaches the cell AND its own history has
 		// converged): while its clock is 0, its SAMPLES' cell mean (the integrate's sums, the frame before) is followed by
 		// an exponential mean over the HISTORY's settle (r.lists.z: the frames its EMA takes to forget a step - what "the
@@ -669,13 +708,22 @@ void main()
 		cellState[w + 2u] = 0u;
 		cellState[w + 3u] = 0u;
 		cellState[w + 4u] = 0u;
-		if( sReached != 0u )
+		if( background )
 		{
-			st = ( st & ~( kCellHeld | kCellConverged ) ) | kCellReached;
+			st = ( st & ~( kCellHeld | kCellHandover ) ) | kCellRefining | kCellConverged;
+			cellState[w + 9u] = 0u;
+			restart = true;
+			atomicOr( jahClock[2], 1u );
+		}
+		else if( restart )
+		{
+			st = ( st & ~( kCellHeld | kCellConverged | kCellRefining | kCellHandover ) ) | kCellReached;
 			cellState[w + 7u] = 0u;
 			atomicOr( jahClock[2], 1u );
 			atomicAdd( jahClock[3], 1u );
 		}
+		else if( ( st & kCellRefining ) != 0u )
+			st |= kCellConverged;   // (B3: a background rest has nothing to catch up)
 		else if( ( st & kCellHeld ) == 0u && jahClock[9u + 2u * index] == 0u )
 		{
 			if( count == 0u )
@@ -709,7 +757,7 @@ void main()
 		// ...AND ITS BLOCK's FACTS for the components (1 active, 2 reached, 4 not converged)
 		if( ( st & kCellHeld ) == 0u )
 			atomicOr( jahClock[blockFlagsAt( blockOfCell( index ) )],
-					  1u | ( sReached != 0u ? 2u : 0u ) | ( ( st & kCellConverged ) == 0u ? 4u : 0u ) );
+					  1u | ( restart ? 2u : 0u ) | ( ( st & kCellConverged ) == 0u ? 4u : 0u ) );
 	}
 }
 #endif

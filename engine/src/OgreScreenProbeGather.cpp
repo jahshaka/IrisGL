@@ -334,7 +334,7 @@ constexpr size_t kRegionBlockBytes = (2u + 2u * kGiRegionCap) * 16u;
 /// THE CELLS' WORDS: the state, the ring bit and the convergence's four a cell (jah_probe_rest.glsl kCellWords); the
 /// distance store's least and most hit of 64 bins a cell and their escape bits (kRestStoreWords); the clock's eight,
 /// then two a cell (its index, its K) and two a block (its K, its frame's facts) - clockWordsOf.
-constexpr unsigned kCellStateWords = 10u;   // jah_probe_rest.glsl kCellWords
+constexpr unsigned kCellStateWords = 12u;   // jah_probe_rest.glsl kCellWords (B3: the hand-over's two words)
 constexpr unsigned kCellStoreWords = 130u;
 constexpr unsigned kClockWords = 8u;
 /// THE READ-BACK RING'S SLOT: the placement's and the integrate's four words, then the clock's eight.

@@ -29,14 +29,24 @@ const uint kCellRing = 2u;      ///< ...and is traced this frame for an active n
 const uint kCellReached = 4u;   ///< an input reached it this frame (the instrument's bit; the resume's own)
 const uint kCellField = 8u;     ///< a pixel of it read the field's fallback since the camera stopped (the integrate's)
 const uint kCellConverged = 16u;  ///< settling, its history caught up with its samples (the resume's)
+/// THE NO-POP HAND-OVER (PHOTON-7 stage 8B, B3): a HELD cell whose only input is a CACHE REFINEMENT (a Card region: a
+/// capture, a relight, an eviction) keeps its picture and RE-RESTS in the background on the same rest sequence
+/// (REFINING: traced and integrated, its outputs and histories untouched), and at its rest's end hands the new picture
+/// over in M = ceil(delta / one code) equal steps (HANDOVER: held, untraced, its outputs stepped toward the targets the
+/// last rest frame stored) - never a step of more than a code a frame. A real change (a light, a material, a mover, the
+/// camera) resumes it at once.
+const uint kCellRefining = 32u;
+const uint kCellHandover = 64u;
 /// THE CELL's WORDS (the cells' state buffer, kCellWords a cell): [0] the state bits, [1] the ring bit; the integrate's
 /// sums this frame over its pixels, in display codes x 16: [2] of this frame's SAMPLES, [3] of the HISTORY's answer, [4]
 /// the pixels; the resume's (float bits): [5] the samples' cell mean followed over N frames (exponential), [6] its
-/// variance, [7] the frames since the cell's last reach; [8] THE FAST UPDATE's moving shares (B5): byte 0 the cell's
+/// variance, [7] the frames since the cell's last reach; [9] B3's hand-over size: the refined rest's largest change
+/// against the held picture, display codes x 16 (the integrate's atomicMax at the rest's last frame); [10] its progress:
+/// j | M << 16 (the finalize's); [11] unused; [8] THE FAST UPDATE's moving shares (B5): byte 0 the cell's
 /// uniform probe's this frame, byte 1 its adaptive twin's (the trace's: the share of its rays whose hit MOVED, x 255),
 /// bytes 2-3 the same last frame (the finalize shifts them up each gathered frame: Lumen's one frame of memory); [9]
 /// unused.
-const uint kCellWords = 10u;
+const uint kCellWords = 12u;
 const uint kCellMovingWord = 8u;
 
 /// A BRICK CHANGED AT ALL this frame, either of its two words (PhotonVoxelLighting's brick mask: the direct term's and

@@ -176,7 +176,7 @@ layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 /// filter's PREFILTERED maps (one layer a roughness level, bilinear inside each probe's block) and the output.
 layout( set = 0, binding = 12 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 13 ) uniform sampler2DArray prefilteredAtlas;
-layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpec;
+layout( rgba16f, set = 0, binding = 14 ) uniform image2DArray roughSpec;   // (read too: B3's hand-over steps it)
 /// ...the lobe's history pair (one shared-exponent word a pixel, at the diffuse history's texel) and its rest mean (a
 /// 1 x 1 stand-in under stereo, as the diffuse's).
 layout( r32ui, set = 0, binding = 15 ) uniform readonly uimage2DArray roughHistoryPrev;
@@ -216,6 +216,13 @@ vec2 probeMovingOf( uint pi )
 float gRestK = 0.0;
 uint gFrameIndex = 0u;
 uint gCell = 0u;
+/// B3: the pixel's cell RE-RESTS IN THE BACKGROUND (kCellRefining): its outputs and histories hold, its rest mean fills
+bool gRefining = false;
+bool gRoughTarget = false;   // (B3: this pixel's lobe stored its hand-over target)
+/// ...and the sky share this frame measured (-1: none - the pixel keeps its own), for the hand-over's target
+float gSkyNow = -1.0;
+/// the display code of a radiance, per channel (the irradiance's curve L / (1 + L), 0..255)
+vec3 dispCodes( vec3 c ) { return 255.0 * max( c, vec3( 0.0 ) ) / ( 1.0 + max( c, vec3( 0.0 ) ) ); }
 /// A ray of the pixel's in its cell's bin of world directions: its hit distance from the pixel (the least and the most),
 /// or an escape
 void restStoreRay( vec3 d, bool hit, float t )
@@ -822,8 +829,30 @@ void main()
 	gRestK = jahRestKOf( index );
 	gCell = index;
 	gFrameIndex = jahFrameIndexOf( index );
-	if( ( jahCellState[kCellWords * index] & kCellHeld ) != 0u )
+	const uint cellSt = jahCellState[kCellWords * index];
+	gRefining = ( cellSt & kCellRefining ) != 0u;
+	if( ( cellSt & kCellHeld ) != 0u )
 	{
+		// B3: A CELL HANDING OVER steps its outputs toward the targets its refined rest's last frame stored - equal steps,
+		// the remaining distance over the remaining steps (a linear walk from the held picture, never a code a frame more)
+		if( ( cellSt & kCellHandover ) != 0u )
+		{
+			const uint hw = jahCellState[kCellWords * index + 10u];
+			const uint j = hw & 0xFFFFu, M = max( hw >> 16u, 1u );
+			const float step = 1.0 / float( max( M + 1u - min( j, M ), 1u ) );
+			const vec4 tgt = imageLoad( restMean, at );
+			if( tgt.w > 1.5 )
+			{
+				const vec4 cur = imageLoad( probeIrradiance, at );
+				imageStore( probeIrradiance, at, jahRoundHalf( mix( cur, vec4( tgt.xyz, 1.0 ), step ) ) );
+				const bool lobe = tgt.w > 5.5;
+				if( lobe )
+					imageStore( roughSpec, at, jahRoundHalf( mix( imageLoad( roughSpec, at ), imageLoad( roughRest, at ), step ) ) );
+				const float sky = tgt.w - ( lobe ? 6.0 : 2.0 );
+				if( j >= M && sky <= 1.0 )
+					imageStore( skyVis, at, vec4( sky ) );
+			}
+		}
 		if( p.knobs5.z > 0.5 )
 		{
 			imageStore( historyCur, at, imageLoad( historyPrev, at ) );
@@ -1133,9 +1162,11 @@ void main()
 	// (a pixel no probe answers this frame - a starved one, a silhouette - keeps the share it last measured: no flicker;
 	// the view's first frame has no last one - its image is new - and such a pixel reads the sky's share unmeasured, 1)
 	if( wsum >= weightFloor )
-		imageStore( skyVis, at, vec4( clamp( skySum / wsum, 0.0, 1.0 ) ) );
+		gSkyNow = clamp( skySum / wsum, 0.0, 1.0 );
 	else if( p.knobs5.x < 1.0 )
-		imageStore( skyVis, at, vec4( 1.0 ) );
+		gSkyNow = 1.0;
+	if( gSkyNow >= 0.0 && !gRefining )   // (B3: a refining cell's sky share is its hand-over's target, below)
+		imageStore( skyVis, at, vec4( gSkyNow ) );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
@@ -1272,6 +1303,10 @@ void main()
 	imageStore( streakCur, at, vec4( prevCount > 0u
 										? min( round( imageLoad( streakPrev, ivec3( histAt, eye ) ).x * 255.0 ) + 1.0, 255.0 ) / 255.0
 										: 1.0 / 255.0 ) );
+	// (B3: a refining cell's history holds until its rest's last frame, which writes the refined answer)
+	if( gRefining && restK < p.knobs6.y )
+		imageStore( historyCur, at, imageLoad( historyPrev, at ) );
+	else
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
 					   packGeom( pixelDist, pixelFoliage, countNext, mean.w,
@@ -1354,20 +1389,53 @@ void main()
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
 		}
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		const vec4 roughNew = roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness );
+		if( gRefining )
+		{
+			// B3: the lobe's history and output hold; at the rest's last frame the new texel is the hand-over's target
+			// (in the rough rest mean, done with), its change against the held one counted in the cell's hand-over size
+			if( restK < p.knobs6.y )
+				imageStore( roughHistoryCur, at, imageLoad( roughHistoryPrev, at ) );
+			else
+			{
+				imageStore( roughHistoryCur, at,
+							uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
+				imageStore( roughRest, at, jahRoundHalf( roughNew ) );
+				const vec3 dc = abs( dispCodes( roughNew.xyz ) - dispCodes( imageLoad( roughSpec, at ).xyz ) );
+				atomicMax( jahCellState[kCellWords * index + 9u], uint( max( max( dc.x, dc.y ), dc.z ) * 16.0 + 0.999 ) );
+				gRoughTarget = true;
+			}
+		}
+		else
+		{
 		imageStore( roughHistoryCur, at,
 					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
-		imageStore( roughSpec, at, jahRoundHalf( roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) ) );
+		imageStore( roughSpec, at, jahRoundHalf( roughNew ) );
+		}
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
 	if( p.stereo.z > 0.5 )
 		outV = float( prevCount ) < p.stereo.z ? vec4( 0.5, 0.0, 0.5, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
-	imageStore( probeIrradiance, at, jahRoundHalf( outV ) );
+	if( gRefining )
+	{
+		// B3: the output holds; at the rest's last frame the new answer is the hand-over's target - in the rest mean, done
+		// with (w: 2 + the sky share, + 4 where the lobe has its target too; a sky share none measured: 1.5, kept) - and its
+		// change against the held picture sets the hand-over's steps (the finalize: M = ceil(delta / a code))
+		if( restK >= p.knobs6.y )
+		{
+			const vec3 dc = abs( dispCodes( outV.xyz ) - dispCodes( imageLoad( probeIrradiance, at ).xyz ) );
+			atomicMax( jahCellState[kCellWords * index + 9u], uint( max( max( dc.x, dc.y ), dc.z ) * 16.0 + 0.999 ) );
+			imageStore( restMean, at, vec4( outV.xyz, ( gRoughTarget ? 6.0 : 2.0 ) + ( gSkyNow >= 0.0 ? gSkyNow : 1.5 ) ) );
+		}
+	}
+	else
+		imageStore( probeIrradiance, at, jahRoundHalf( outV ) );
 	// THE CELL's CONVERGENCE (PHOTON-7 stage 8B, B1; the lead's ruling on the rest's start): this frame's SAMPLE and the
 	// HISTORY's answer at each pixel, summed in display codes (x 16, the irradiance's display curve L / (1 + L)) -
 	// rq_probe_resume.comp says a settling cell has converged when its history's answer has caught up with its samples'
 	// mean over the last N frames (within a code and their standard error) and that mean stopped moving
-	if( gRestK < 0.5 )
+	if( gRestK < 0.5 && !gRefining )
 	{
 		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
 		// (LIKE WITH LIKE: the sample and the history's mean BEFORE the field's composition - both the answered share's
