@@ -606,8 +606,8 @@ void main()
 		radiance = ( direct * kD + indirect ) * openF + flatTerm;
 	}
 	if( ( mode & 3u ) != 0u )
-		imageStore( cardIndirect, at, vec4( jahRoundHalf( cached ), 1.0 ) );
-	imageStore( cardFlat, at, vec4( jahRoundHalf( flatTerm ), 1.0 ) );
+		imageStore( cardIndirect, at, vec4( uintBitsToFloat( floatBitsToUint( clamp( cached, vec3( 0.0 ), vec3( 65024.0, 65024.0, 64512.0 ) ) ) + uvec3( 0x10000u, 0x10000u, 0x20000u ) ), 1.0 ) );   /* ARM (REDS-1): the old R11G11B10F rounding */
+	imageStore( cardFlat, at, vec4( uintBitsToFloat( floatBitsToUint( clamp( flatTerm, vec3( 0.0 ), vec3( 65024.0, 65024.0, 64512.0 ) ) ) + uvec3( 0x10000u, 0x10000u, 0x20000u ) ), 1.0 ) );   /* ARM (REDS-1): the old R11G11B10F rounding */
 	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampThrough, lampMask, lampThroughMask ) );
 	// (RGBA16F, 10-2d: the store TRUNCATES on NVIDIA 595.x - REDS-1, measured - so the value is rounded first: jahRoundHalf)
 	imageStore( cardRadiance, at, vec4( jahRoundHalf( radiance ), 1.0 ) );
