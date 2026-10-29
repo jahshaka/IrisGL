@@ -246,16 +246,6 @@ layout( set = 0, binding = 49 ) uniform sampler2DArray jahHitPool;
 layout( set = 0, binding = 50 ) uniform sampler2D jahHitCloud;
 #define JAH_HIT_LOBE_INTEGRAL
 #include "jah_rq_hit_radiance.glsl"
-// MEASURING ARM (reverted): a sky answer counted, and whether a ray past the world's exit would have hit
-void jahProbeSkyCount( vec3 o, vec3 d )
-{
-	jahTierCount( 4u );
-	rayQueryEXT qx;
-	rayQueryInitializeEXT( qx, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, d, 1.0e4 );
-	while( rayQueryProceedEXT( qx ) ) {}
-	if( rayQueryGetIntersectionTypeEXT( qx, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
-		jahTierCount( 5u );
-}
 void jahCardLobeHemi( float r, out float a, out float b )
 {
 	a = 0.0;
@@ -478,7 +468,6 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		if( vr.exitReason == kJahRayEscaped && jahEscapeIsExit( startLS, dLS, vr.tC0 ) )
 		{
 			sum += jahEnvCone( d, binTan );
-			jahProbeSkyCount( origin, d );   // (MEASURING ARM, reverted)
 			taken += 1.0;
 			continue;
 		}
@@ -490,7 +479,6 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
 			sum += jahEnvCone( d, binTan );   // an exit: the sky
-			jahProbeSkyCount( origin, d );   // (MEASURING ARM, reverted)
 			taken += 1.0;
 			continue;
 		}
