@@ -2197,6 +2197,7 @@ private:
     X(HitListCap, "rq.hitListCap") /* the hit list holds at most N records (0: its demand-sized capacity) - the overflow arm */ \
     X(ReflectRestReference, "reflect.restReference") /* the reflection's 4,096-sample reference at rest, no stop, no filter (R1 (f)'s measuring arm) */ \
     X(GatherDecodeHits, "gather.decodeHits") /* every gather hit a record (the decode route), never the caches */ \
+    X(GatherFastThreshold, "gather.fastThreshold") /* MEASURING ARM (8B B5, to be reverted): N > 0 = a brick's ray moves past one code over N frames */ \
     X(GatherOctRes, "gather.octRes") /* the probe map's resolution (rays = octRes^2; 0 = the tier's) */ \
     X(GatherStride, "gather.stride") /* the probe stride in pixels (0 = the tier's) */ \
     X(GatherHistory, "gather.historyFrames") /* the pixel history's floor in frames (0 = shipped) */ \

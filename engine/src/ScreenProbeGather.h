@@ -477,6 +477,7 @@ struct GatherInputs {
     /// THE FAST UPDATE's skin (PHOTON-7 stage 8B, B5): a skinned item was posed this frame (the skin pass's posed slots at
     /// this frame) - a ray hitting a skinned slot then counts as moving (rq_probe_gather.comp's fastRayMoving)
     bool fastSkinPosed = false;
+    unsigned fastThreshold = 0u;   // MEASURING ARM (8B B5, to be reverted)
     /// THE DEMAND'S DUE (SurfaceCache::demandDueFrames; 0: no span, stamp always): the view stamps the cards it reads at
     /// its rest indices [1, N + this] alone - its demand span (PHOTON-7 stage 10, the per-reader snapshot).
     unsigned demandDue = 0u;
