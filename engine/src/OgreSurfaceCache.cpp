@@ -962,8 +962,8 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
     // card is the same card (its demand, its flags) at a new rect, RE-CAPTURED there - the capture rewrites every layer
     // of the rect, the relight and the march follow it (planRelights' captured cards), exactly as a newly arrived card.
     mPageOwner[best] = 3u;
-    for (std::vector<CardRec> &list : cards)
-        for (CardRec &c : list) {
+    for (size_t inst = 0; inst < cards.size(); ++inst)
+        for (CardRec &c : cards[inst]) {
             if (!c.size || c.atlasX < x0 || c.atlasX >= x0 + kCardPageSize || c.atlasY < y0 ||
                 c.atlasY >= y0 + kCardPageSize)
                 continue;
@@ -983,6 +983,10 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
             c.roots |= roots;   // (moved for the arrival that needed the room: its root's work)
             c.moverTraced = false;
             ++mCompactionMoves;
+            // (a moved card answers no hit until its re-capture: the voxels do meanwhile - a change of what its instance's
+            // hits read, the changed-region list's Card kind, PHOTON-7 stage 8B B1)
+            if (inst < mInstances.size())
+                mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
         }
     mPageOwner[best] = 0u;
     mPageSubSize[best] = 0u;
@@ -1128,6 +1132,12 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
 }
 
 void SurfaceCache::refreshResidency(const CardSceneView &view) {
+    // A CARD THAT LEAVES CHANGES WHAT ITS INSTANCE's HITS READ (the voxels answer them from the next frame): its instance's
+    // box joins the frame's relit boxes - the changed-region list's Card kind (PHOTON-7 stage 8B, B1: the gather's
+    // cells that read it resume; an eviction is no input it may rest across)
+    const auto departedBox = [this](size_t inst) {
+        if (inst < mInstances.size()) mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+    };
     // 1. WHAT THE SCENE STILL OFFERS. Membership is decided by the CANDIDATE
     //    LIST the scene hands over, so an item that was destroyed, hidden, made
     //    a mover or re-materialled out of the GI channel simply stops being
@@ -1468,6 +1478,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     changed = true;
                     mDeparted = true;
                     forcedLeft = true;
+                    departedBox(i);
                 }
     if (windowDrain && !decide) {
         for (size_t i = 0; i < per.size(); ++i)
@@ -1482,6 +1493,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                 changed = true;
                 drained = true;
                 mDeparted = true;
+                departedBox(i);
             }
     }
     if (windowDrain && drained) ++mWindowDrains;
@@ -1588,6 +1600,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                 ++mRestDrained;
                 changed = true;
                 mDeparted = true;
+                departedBox(i);
             }
         // ...and the prefix's others arrive, in rank order (placed below: compaction, never eviction)
         arriving.clear();
@@ -1671,6 +1684,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             ++mEvicted;
             changed = true;
             mDeparted = true;
+            departedBox(e.inst);
             roomChanged();
             placed = place(c);
         }

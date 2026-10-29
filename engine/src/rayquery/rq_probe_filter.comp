@@ -111,6 +111,7 @@ layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray pr
 /// active cell's ring) is not filtered - nothing reads it this frame.
 layout( std430, set = 0, binding = 5 ) readonly buffer JahCellState { uint jahCellState[]; };
 const uint kFilterCellHeld = 1u;
+const uint kFilterCellWords = 10u;   // jah_probe_rest.glsl kCellWords
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -190,8 +191,8 @@ void main()
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
 	{
-		const uint cells = uint( max( grid.x, 1 ) * max( grid.y, 1 ) );
-		if( ( jahCellState[cellIndex] & kFilterCellHeld ) != 0u && jahCellState[cells + cellIndex] == 0u )
+		if( ( jahCellState[kFilterCellWords * cellIndex] & kFilterCellHeld ) != 0u &&
+			jahCellState[kFilterCellWords * cellIndex + 1u] == 0u )
 			return;   // (uniform across the workgroup: one probe a group)
 	}
 	if( lane == 0u )

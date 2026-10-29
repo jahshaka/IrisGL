@@ -302,6 +302,7 @@ struct RestParams {
     uint32_t brickPyramid[GatherRestInputs::kCascades][4] = {};
     uint32_t brickLevelOffset[GatherRestInputs::kCascades][2][4] = {};
     float field[4] = {};   ///< the irradiance field owes work over itself
+    float blocks[4] = {};  ///< the blocks: their side in cells, across, down, their count
 };
 static_assert(sizeof(RestParams) % 16u == 0u, "the resume's block is whole vec4s (std140)");
 /// THE RESUME SET (rq_probe_resume.comp): the gather's params, its own block, the depth, the cells' state and store, the
@@ -311,13 +312,21 @@ constexpr unsigned kResumeMaskBinding = 7u;
 /// THE LIST's BLOCK as the resume declares it (two vec4s of header, two a region, kGiRegionCap regions): the
 /// stand-in bound where no list has closed is at least this big.
 constexpr size_t kRegionBlockBytes = (2u + 2u * kGiRegionCap) * 16u;
-/// THE CELLS' WORDS: the state and the ring bit a cell; the distance store's least and most hit of 64 bins a cell and
-/// their escape bits (jah_probe_rest.glsl kRestStoreWords); the clock.
-constexpr unsigned kCellStateWords = 2u;
+/// THE CELLS' WORDS: the state, the ring bit and the convergence's four a cell (jah_probe_rest.glsl kCellWords); the
+/// distance store's least and most hit of 64 bins a cell and their escape bits (kRestStoreWords); the clock's eight,
+/// then two a cell (its index, its K) and two a block (its K, its frame's facts) - clockWordsOf.
+constexpr unsigned kCellStateWords = 10u;   // jah_probe_rest.glsl kCellWords
 constexpr unsigned kCellStoreWords = 130u;
 constexpr unsigned kClockWords = 8u;
 /// THE READ-BACK RING'S SLOT: the placement's and the integrate's four words, then the clock's eight.
 constexpr unsigned kReadbackSlotBytes = 16u + 4u * kClockWords;
+/// THE BLOCKS' SIDE, the least (the ring's least reach 2: 2 (2 + 1) + 1) - the clock buffer is sized for it.
+constexpr unsigned kLeastBlockSide = 7u;
+VkDeviceSize clockWordsOf(unsigned gridW, unsigned gridH) {
+    const VkDeviceSize blocks = VkDeviceSize((gridW + kLeastBlockSide - 1u) / kLeastBlockSide) *
+                                ((gridH + kLeastBlockSide - 1u) / kLeastBlockSide);
+    return kClockWords + 2u * VkDeviceSize(gridW) * gridH + 2u * blocks;
+}
 /// THE BRICK PYRAMID's levels at most (a cascade of 2^7 bricks a side: 1024^3 cells).
 constexpr unsigned kPyramidLevels = 8u;
 
@@ -706,7 +715,8 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     // of the cells asking for a second probe — what the placement's select pass ranks
     // in a fixed order (rq_probe_place.comp, PHOTON-VIEW-NOISE-1).
     v.placeRows = (in.stereo ? 2u : 1u) * v.gridH;   // one word per eye and grid row
-    if (!mHost.gatherMakeBuffer(16u + 4ull * v.placeRows,
+    // (+ two words: each eye's adaptive slots counted out past the share - rq_probe_place.comp's select, 8B B1)
+    if (!mHost.gatherMakeBuffer(16u + 4ull * v.placeRows + 8u,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -735,7 +745,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
                                     err) ||
             !mHost.gatherMakeBuffer(cells * kCellStoreWords * 4u, use, false, v.cellStore, v.cellStoreMemory, nullptr,
                                     err) ||
-            !mHost.gatherMakeBuffer(kClockWords * 4u, use, false, v.clock, v.clockMemory, nullptr, err))
+            !mHost.gatherMakeBuffer(clockWordsOf(v.gridW, v.gridH) * 4u, use, false, v.clock, v.clockMemory, nullptr, err))
             return false;
         v.cellsCleared = false;
     }
@@ -792,7 +802,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
                   1ull * v.atlasW * v.atlasH * 4ull * v.prefilteredLayers + pixels * 8ull + pixels * 2ull * 4ull +
                   (unsigned long long)restW * restH * 8ull + pixels * 1ull +   // (+ the sky visibility, 1 byte a pixel)
                   (unsigned long long)v.uniformProbes * (kCellStateWords + kCellStoreWords) * 4ull +
-                  kClockWords * 4ull;   // (+ the cells' rest, 8B B1: 528 B a cell; the pyramids as the masks size them)
+                  clockWordsOf(v.gridW, v.gridH) * 4ull;   // (+ the cells' rest, 8B B1: 568 B a cell; the pyramids as sized)
     v.targetsReady = true;
     v.atlasNeedsClear = true;
     v.age = 0u;
@@ -859,7 +869,6 @@ void ScreenProbeGather::drop(View &v) {
     v.cellStateMemory = v.cellStoreMemory = v.clockMemory = v.pyramidMemory = VK_NULL_HANDLE;
     v.pyramidBytes = 0u;
     v.cellsCleared = false;
-    v.quietRun = 0u;
     v.clockKnown = false;
     v.clockFrame = v.clockK = v.cellsReached = v.cellsHeld = v.cellsActive = v.cellsRing = 0u;
     v.restLog.clear();
@@ -959,7 +968,7 @@ void ScreenProbeGather::readPending(View &v) {
                 v.cellsRing = clock[7];
                 GatherRestRecord rec;
                 rec.frame = v.pending[i].gatherFrame;
-                rec.restK = clock[0];
+                rec.restK = std::min(clock[0], 1u << 20);   // (0xFFFFFFFF, no active component: every cell held)
                 rec.reached = clock[3];
                 rec.held = clock[4];
                 rec.active = clock[5];
@@ -1258,24 +1267,25 @@ unsigned ScreenProbeGather::shippedRestLength() {
     return restLengthOf(GatherTuning(), historyFramesOf(GatherTuning()));
 }
 
-/// THE REST CLOCK AS THE HOST KNOWS IT (PHOTON-7 stage 8B, B1): the GPU decides K (a cell an input reached puts it back
-/// to 0), so the host has it a few frames late - the last retired clock plus the frames traced since (each a step
-/// unless a reach put it back: the device's stamps keep the exact span, jah_rq_card.glsl's gate, so the cards'
-/// decision this feeds is never early by more than the read-back's frames). The view's last traced frame is
-/// `v.frame - 1`; before any clock retired, the frames since the last input.
+/// THE REST CLOCK AS THE HOST KNOWS IT (PHOTON-7 stage 8B, B1): the GPU decides each component's K (a reach or a cell
+/// still converging keeps it at 0), so the host has the least K over the active components as the last retired clock
+/// read it, a few frames late - never extended (no frame count says a component stepped). The view's last traced frame
+/// is `v.frame - 1`; before any clock retired, the frames since the last input.
 unsigned ScreenProbeGather::restKnownOf(const View &v) {
     if (v.frame == 0u) return 0u;
     const unsigned last = v.frame - 1u;
     if (!v.clockKnown || int32_t(v.clockFrame - v.lastMovedFrame) < 0) return last - std::min(last, v.lastInputFrame);
-    return v.clockK + (last - std::min(last, v.clockFrame));
+    if (v.clockK == 0xFFFFFFFFu) return 1u << 20;   // (no active component: every cell held)
+    return v.clockK;   // (never extended: a component still converging keeps its clock at 0 with no input)
 }
 
-/// EVERY CELL HOLDS, as the host can say it: the view held whole, or the last retired clock is past N with no input
-/// since it (an input since may have resumed a cell: unknown until its own clock retires - not held meanwhile).
+/// EVERY CELL HOLDS, as the host can say it: the view held whole, or the last retired clock counted no active cell and no
+/// input came since it (an input since may have resumed a cell: unknown until its own clock retires - not held meanwhile).
 bool ScreenProbeGather::everyCellHeldOf(const View &v, unsigned restN) {
+    (void)restN;
     if (v.heldLast) return true;
     if (!v.clockKnown || int32_t(v.lastInputFrame - v.clockFrame) > 0) return false;
-    return restKnownOf(v) > restN;
+    return v.cellsActive == 0u && v.cellsHeld > 0u;
 }
 
 bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsigned &restFrames, unsigned &restLength,
@@ -1717,7 +1727,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // here), gatherInputsBusy (a write owed lands as a region when it lands) and the readers' hold owed (the cards'
     // decision's work lands as Card regions in the cells it reaches).
     const unsigned restN = restLengthOf(in.tuning, historyFramesOf(in.tuning));
-    bool restStill = false, restFinalizeOnly = false;
+    bool restStill = false;
     GatherRestInputs restIn = in.rest;
     {
         const bool sameCamera =
@@ -1768,15 +1778,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         v.historyFramesLast = historyFramesOf(in.tuning);
         if (!restStill || inputs) v.lastInputFrame = v.frame;
         if (!restStill) v.lastMovedFrame = v.frame;
-        v.quietRun = restStill && !inputs ? std::min(v.quietRun + 1u, 1u << 20) : 0u;
-        // EVERY CELL HOLDS: N + 1 still frames with no input - the clock is past N (it only restarts on a reach, and a
-        // reach needs an input), so every active cell holds at this frame's finalize and nothing is left to integrate.
-        // Nothing is dispatched but, on the first such frame, the clock and the finalize (the cells' held state is
-        // written there; a later resume must find them held); the last traced frame's targets are re-bound.
-        v.heldLast = restStill && !inputs && v.quietRun > restN;
-        restFinalizeOnly = v.heldLast && v.quietRun == restN + 1u;
+        // EVERY CELL HOLDS: the last retired frame's clock counted no active cell, and no input came since it (a held
+        // cell resumes only on an input) - nothing is dispatched; the last traced frame's targets are re-bound.
+        v.heldLast = restStill && !inputs && v.clockKnown && v.cellsActive == 0u && v.cellsHeld > 0u &&
+                     int32_t(v.clockFrame - v.lastInputFrame) >= 0;
         v.restFrames = restKnownOf(v);
-        if (v.heldLast && !restFinalizeOnly) {
+        if (v.heldLast) {
             // THE RE-BIND IS THE SECOND HALF'S (finish): the registration is
             // scoped to the opaque pass, and the hit decode pass runs between.
             v.finishPending = true;
@@ -2342,6 +2349,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                                                                   : kYoungReachPixels) /
                                                              float(stride))))) +
         (in.tuning.filterOff ? 0u : filterRadiusOf(in.tuning));
+    // THE BLOCKS (the components' grain): B = 2 (the reach + 1) + 1 - a whole block between two components, so no cell
+    // within the reach + 1 of both
+    const unsigned blockSide = std::max(kLeastBlockSide, 2u * (ringReach + 1u) + 1u);
+    rp.blocks[0] = float(blockSide);
+    rp.blocks[1] = float((v.gridW + blockSide - 1u) / blockSide);
+    rp.blocks[2] = float((v.gridH + blockSide - 1u) / blockSide);
+    rp.blocks[3] = rp.blocks[1] * rp.blocks[2];
     rp.mode[0] = restStill ? 1.0f : 0.0f;
     rp.mode[1] = float(restN);
     rp.mode[2] = float(ringReach);
@@ -2355,7 +2369,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     rp.lists[3] = float(liveMasks);
     rp.field[0] = restStill && restIn.fieldBusy ? 1.0f : 0.0f;
     std::memcpy(v.restParamsMapped[ring], &rp, sizeof(rp));
-    const bool restTests = restStill && restIn.any();
+    // (the test runs every still frame: a settling cell's convergence is read there, inputs or none)
+    const bool restTests = restStill;
     {
         VkWriteDescriptorSet w[kResumeBindings] = {};
         for (unsigned i = 0; i < kResumeBindings; ++i) {
@@ -2527,16 +2542,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         edge();
         run(kResumeRing, cellGroups, 1u);
         edge();
-    }
-    // THE FIRST WHOLE HOLD (above): the cells' state written, nothing else - the re-bind is the second half's
-    if (restFinalizeOnly) {
-        v.finishPending = true;
-        v.finishHold = true;
-        v.finishTraced = false;
-        v.finishIn = in;
-        v.finishTemporal = temporal;
-        v.finishCpuMs = msSince(cpuStart);
-        return;
     }
 
     // ...AND THE FRAME MONITOR'S OWN ROWS BESIDE THEM (`gather.place`,

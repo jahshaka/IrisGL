@@ -15,21 +15,26 @@
 //                           a lighting box (a slab re-injected, a card relit, a lamp, a lamp's shadow) on the bin's hit
 //                           footprint [nearest, farthest hit], a mover's SUN shadow where the footprint's sun rays cross
 //                           its box (the list's toSun) - each bin widened by its cone and the cell's own extent;
-//                       (4) a changed brick (one code: 1 % of the voxel's radiance, either word) under a bin's footprint,
+//                       (4) a changed brick (any change, either word: a converged store writes nothing) under a bin's footprint,
 //                           in the cascade the view's hit reads there (the camera's level, jah_rq_hit.glsl);
 //                       (5) the irradiance field is at work (its integration, empties, restarts - an edit's marks, the
 //                           brick moves' accumulation - or refinements owed) and a pixel of the cell read its fallback
 //                           since the camera stopped (the integrate's bit): what that fallback reads moves.
-//   JAH_RESUME_CLOCK    one thread: K = 0 when the view moved or any cell resumed, else K + 1; the frame's sample index.
-//   JAH_RESUME_FINAL    one thread a cell: moving - every cell active, its distance store and its field bit emptied;
-//                       an active cell past N holds (its last integrate was K = N: the rest mean exactly).
-//   JAH_RESUME_RING     one thread a cell: a held cell within the ring's reach of an active one is traced this frame.
+//   JAH_RESUME_CLOCK    THE COMPONENTS, one workgroup: the active blocks (a block holds an active cell) that touch are
+//                       labelled one component (the least block index, propagated to a fixed point in shared
+//                       memory); a component's K is 0 when the view moved, a cell of it resumed, a cell of it is still
+//                       converging at K = 0, or it joins blocks of two clocks - else K + 1.
+//   JAH_RESUME_FINAL    one thread a cell: moving - every cell active, its distance store, field bit and convergence
+//                       emptied; an active cell past its K = N holds (its last integrate was K = N: the rest mean).
+//   JAH_RESUME_RING     one thread a cell: its clock (its block's where the block is active, else the active block
+//                       within the ring's reach + 1 - one at most: a whole block separates two components) and its ring
+//                       bit (a held cell within the reach of an active one is traced this frame).
 // A MOVING CAMERA puts every cell in MOVING (FINAL resets them, K = 0), so nothing that changed during motion is lost:
 // every cell settles from K = 0 at the stop, its rest sampling the scene as it is then.
 #extension GL_GOOGLE_include_directive : require
 
 #if defined( JAH_RESUME_CLOCK )
-layout( local_size_x = 1, local_size_y = 1, local_size_z = 1 ) in;
+layout( local_size_x = 1024, local_size_y = 1, local_size_z = 1 ) in;
 #elif defined( JAH_RESUME_PYRAMID ) || defined( JAH_RESUME_FINAL ) || defined( JAH_RESUME_RING )
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 #else
@@ -66,6 +71,8 @@ layout( std140, set = 0, binding = 1 ) uniform RestParams
 	/// x 1 = the irradiance field owes work over itself (its build, a fresh pass, its empties, its refinements): a cell
 	/// whose rest read its fallback resumes
 	vec4 field;
+	/// THE BLOCKS (the components' grain): x B, cells a block side; y, z the blocks across and down; w their count
+	vec4 blocks;
 } r;
 
 layout( set = 0, binding = 2 ) uniform sampler2DArray sceneDepth;
@@ -84,8 +91,11 @@ layout( std430, set = 0, binding = 8 ) buffer BrickPyramid { uint brickPyramid[]
 
 const uint kRegionSlab = 1u, kRegionCard = 2u, kRegionEdit = 3u, kRegionMover = 4u, kRegionMoverShadow = 5u,
 		   kRegionLampShadow = 6u, kRegionLamp = 7u;
-/// A brick changed by a code: one per cent of the voxel's own radiance (GiBrickMask's law), either word.
-const float kRestBrickCode = 0.01;
+/// A brick CHANGED AT ALL, either word (the feedback writes a voxel only when it moves a store step: a converged store
+/// writes nothing). Never a per-frame threshold: a store converging under 1 % a frame for 40 frames moves its readers by
+/// many codes, and a test against each frame's own change would never resume a cell over it (the selftest's fixture B
+/// held stale walls 51 codes off at a 1 % bar).
+const float kRestBrickCode = 0.0;
 
 uint levelOffset( uint c, uint l ) { return r.brickLevelOffset[c][l >> 2u][l & 3u]; }
 uvec3 levelDims( uint c, uint l )
@@ -103,8 +113,19 @@ bool brickChanged( uint c, uint idx )
 	else { a = uintBitsToFloat( brickMask[3].w[2u * idx] ); b = uintBitsToFloat( brickMask[3].w[2u * idx + 1u] ); }
 	// (a NaN word is a change: the bits are tested, never x == x)
 	const bool na = ( floatBitsToUint( a ) & 0x7F800000u ) == 0x7F800000u, nb = ( floatBitsToUint( b ) & 0x7F800000u ) == 0x7F800000u;
-	return na || nb || a >= kRestBrickCode || b >= kRestBrickCode;
+	return na || nb || a > kRestBrickCode || b > kRestBrickCode;
 }
+
+uint cellsOf() { return uint( p.resolution.x ) * uint( p.resolution.y ); }
+uint blockOfCell( uint cell )
+{
+	const uint gw = max( uint( p.resolution.x ), 1u ), B = max( uint( r.blocks.x ), 1u );
+	return ( ( cell / gw ) / B ) * max( uint( r.blocks.y ), 1u ) + ( cell % gw ) / B;
+}
+uint blockKAt( uint b ) { return jahClock[8u + 2u * cellsOf() + b]; }
+uint blockFlagsAt( uint b ) { return 8u + 2u * cellsOf() + uint( r.blocks.w ) + b; }
+/// A CLOCK's sample index: the rest's own (kRestSequenceBase + the seed + K), the moving counter at K = 0, 0 frozen.
+uint indexOfK( uint K ) { return r.seq.z > 0.5 ? 0u : K > 0u ? uint( r.seq.y ) + K : uint( r.seq.x ); }
 
 #if defined( JAH_RESUME_PYRAMID )
 // ---- THE PYRAMID: thread = one node of one cascade (y), over all its levels ---------------------------------------------
@@ -147,38 +168,132 @@ void main()
 }
 
 #elif defined( JAH_RESUME_CLOCK )
-// ---- THE CLOCK ----------------------------------------------------------------------------------------------------------
+// ---- THE COMPONENTS: one workgroup ----------------------------------------------------------------------------------------
+const uint kMaxBlocks = 2048u;
+const uint kNone = 0xFFFFFFFFu;
+shared uint sLabel[kMaxBlocks];
+shared uint sFlags[kMaxBlocks];
+shared uint sReach[kMaxBlocks];
+shared uint sMinK[kMaxBlocks];
+shared uint sMaxK[kMaxBlocks];
+shared uint sChanged;
+shared uint sLeast;
+shared uint sAnyReached;
 void main()
 {
+	const uint tid = gl_LocalInvocationIndex;
 	const bool moving = r.mode.x < 0.5 || r.mode.w < 0.5;
-	const bool any = jahClock[2] != 0u;
-	const uint K = ( moving || any ) ? 0u : min( jahClock[0] + 1u, 1u << 20 );
-	jahClock[0] = K;
-	if( any && !moving )
-		jahClock[6] += 1u;
-	const uint index = r.seq.z > 0.5 ? 0u : K > 0u ? uint( r.seq.y ) + K : uint( r.seq.x );
-	jahClock[1] = index;
-	jahClock[4] = 0u;
-	jahClock[5] = 0u;
-	jahClock[7] = 0u;
+	const uint bw = max( uint( r.blocks.y ), 1u ), bh = max( uint( r.blocks.z ), 1u );
+	const uint blocks = uint( r.blocks.w );
+	// (more blocks than the workgroup's memory: every active block is ONE component - the shared clock, exact, coarser)
+	const bool one = blocks > kMaxBlocks;
+	if( tid == 0u )
+	{
+		sLeast = kNone;
+		sAnyReached = 0u;
+	}
+	for( uint b = tid; b < min( blocks, kMaxBlocks ); b += 1024u )
+	{
+		const uint f = jahClock[blockFlagsAt( b )];
+		sFlags[b] = f;
+		sLabel[b] = ( f & 1u ) != 0u ? b : kNone;
+		sReach[b] = 0u;
+		sMinK[b] = kNone;
+		sMaxK[b] = 0u;
+	}
+	barrier();
+	// THE LABELS: each active block takes the least label of its active 8-neighbours until none changes
+	if( !one )
+		for( uint it = 0u; it < blocks + 1u; ++it )
+		{
+			if( tid == 0u )
+				sChanged = 0u;
+			barrier();
+			for( uint b = tid; b < blocks; b += 1024u )
+			{
+				if( sLabel[b] == kNone )
+					continue;
+				const int bx = int( b % bw ), by = int( b / bw );
+				uint m = sLabel[b];
+				for( int dy = -1; dy <= 1; ++dy )
+					for( int dx = -1; dx <= 1; ++dx )
+					{
+						const int x = bx + dx, y = by + dy;
+						if( x < 0 || y < 0 || x >= int( bw ) || y >= int( bh ) )
+							continue;
+						m = min( m, sLabel[uint( y ) * bw + uint( x )] );
+					}
+				if( m < sLabel[b] )
+				{
+					sLabel[b] = m;
+					sChanged = 1u;
+				}
+			}
+			barrier();
+			if( sChanged == 0u )
+				break;
+			barrier();
+		}
+	// EACH COMPONENT's FACTS: a cell of it reached, or one still converging while it settles; its blocks' clocks
+	for( uint b = tid; b < min( blocks, kMaxBlocks ); b += 1024u )
+	{
+		const uint f = sFlags[b];
+		if( ( f & 1u ) == 0u )
+			continue;
+		const uint root = one ? 0u : sLabel[b];
+		const uint K = blockKAt( b );
+		if( ( f & 2u ) != 0u || ( ( f & 4u ) != 0u && K == 0u ) )
+			atomicOr( sReach[root], 1u );
+		atomicMin( sMinK[root], K );
+		atomicMax( sMaxK[root], K );
+	}
+	barrier();
+	for( uint b = tid; b < blocks; b += 1024u )
+	{
+		const uint f = b < kMaxBlocks ? sFlags[b] : jahClock[blockFlagsAt( b )];
+		// (an inactive block has no clock - kNone; on a move every block's is 0: every cell settles)
+		uint K = moving ? 0u : kNone;
+		if( !moving && ( f & 1u ) != 0u )
+		{
+			const uint root = one ? 0u : sLabel[b];
+			const bool restart = sReach[root] != 0u || sMinK[root] != sMaxK[root];
+			K = restart ? 0u : min( sMinK[root] + 1u, 1u << 20 );
+			atomicMin( sLeast, K );
+			if( sReach[root] != 0u )
+				atomicOr( sAnyReached, 1u );
+		}
+		jahClock[8u + 2u * cellsOf() + b] = K;
+		jahClock[blockFlagsAt( b )] = 0u;   // (the next frame's test starts from none)
+	}
+	barrier();
+	if( tid == 0u )
+	{
+		jahClock[0] = sLeast;
+		if( !moving && jahClock[2] != 0u )
+			jahClock[6] += 1u;
+		jahClock[4] = 0u;
+		jahClock[5] = 0u;
+		jahClock[7] = 0u;
+	}
 }
 
 #elif defined( JAH_RESUME_FINAL )
 // ---- THE FINALIZE: one thread a cell -------------------------------------------------------------------------------------
 void main()
 {
-	const uint cells = uint( p.resolution.x ) * uint( p.resolution.y );
+	const uint cells = cellsOf();
 	const uint i = gl_GlobalInvocationID.x;
 	if( i >= cells )
 		return;
 	const bool moving = r.mode.x < 0.5 || r.mode.w < 0.5;
-	uint st = moving ? 0u : cellState[i];
-	const uint K = jahClock[0];
+	uint st = moving ? 0u : cellState[kCellWords * i];
+	const uint K = blockKAt( blockOfCell( i ) );
 	// THE DISTANCE STORE IS THE STILL CAMERA's: every ray an active cell traced since the camera stopped (its settle and
 	// its rest), emptied when the view moves - a superset of the rest's own rays (the test can only resume more), and
 	// never empty on the frame after a resume (an empty store answers no test: a cell an input reaches every frame would
 	// step its clock 0, 1, 0, 1 - the rest sequence's first sample taken again and again)
 	if( moving )
+	{
 		for( uint b = 0u; b < kRestBins; ++b )
 		{
 			cellStore[kRestStoreWords * i + b] = 0x7F800000u;   // +inf: no hit yet
@@ -186,43 +301,67 @@ void main()
 			if( b < 2u )
 				cellStore[kRestStoreWords * i + 128u + b] = 0u;   // no escape yet
 		}
-	// PAST N THE CELL HOLDS: its last integrate was the rest's N-th frame, whose answer IS the rest mean
+		for( uint w = 1u; w < kCellWords; ++w )
+			cellState[kCellWords * i + w] = 0u;
+	}
+	// PAST N THE CELL HOLDS: its last integrate was its clock's N-th frame, whose answer IS the rest mean
 	if( ( st & kCellHeld ) == 0u && !moving && float( K ) > r.mode.y )
 		st |= kCellHeld;
-	cellState[i] = st;
+	cellState[kCellWords * i] = st;
 }
 
 #elif defined( JAH_RESUME_RING )
-// ---- THE RING: one thread a cell -----------------------------------------------------------------------------------------
+// ---- THE RING AND THE CELLS' CLOCKS: one thread a cell ------------------------------------------------------------------
 void main()
 {
 	const ivec2 grid = ivec2( p.resolution.xy );
-	const uint cells = uint( grid.x * grid.y );
+	const uint cells = cellsOf();
 	const uint i = gl_GlobalInvocationID.x;
 	if( i >= cells )
 		return;
-	const uint st = cellState[i];
+	const uint st = cellState[kCellWords * i];
+	const ivec2 cell = ivec2( int( i ) % grid.x, int( i ) / grid.x );
+	const int eye = jahEyeOfCell( cell.x );
+	const ivec2 x0 = ivec2( eye * jahEyeGridW(), 0 ), x1 = x0 + ivec2( jahEyeGridW(), grid.y ) - 1;
+	const int D = int( r.mode.z );
+	// THE CELL's CLOCK: its own block's while the block is active (its K is its component's), else the active cell's
+	// nearest within D + 1 (its placement's neighbourhood reads one cell past the ring; a whole block separates two
+	// components, so it is one component's)
+	const uint kNone = 0xFFFFFFFFu;
+	uint K = blockKAt( blockOfCell( i ) );
 	uint ring = 0u;
+	int near = 0x7FFFFFFF;
+	uint nearK = 0u;
+	if( ( st & kCellHeld ) != 0u )
+		for( int y = max( cell.y - D - 1, x0.y ); y <= min( cell.y + D + 1, x1.y ); ++y )
+			for( int x = max( cell.x - D - 1, x0.x ); x <= min( cell.x + D + 1, x1.x ); ++x )
+			{
+				const uint n = uint( y * grid.x + x );
+				if( ( cellState[kCellWords * n] & kCellHeld ) != 0u )
+					continue;
+				const int d = max( abs( x - cell.x ), abs( y - cell.y ) );
+				if( d < near )
+				{
+					near = d;
+					nearK = blockKAt( blockOfCell( n ) );
+				}
+			}
 	if( ( st & kCellHeld ) != 0u )
 	{
-		const ivec2 cell = ivec2( int( i ) % grid.x, int( i ) / grid.x );
-		const int eye = jahEyeOfCell( cell.x );
-		const ivec2 x0 = ivec2( eye * jahEyeGridW(), 0 ), x1 = x0 + ivec2( jahEyeGridW(), grid.y ) - 1;
-		const int D = int( r.mode.z );
-		for( int y = max( cell.y - D, x0.y ); y <= min( cell.y + D, x1.y ) && ring == 0u; ++y )
-			for( int x = max( cell.x - D, x0.x ); x <= min( cell.x + D, x1.x ); ++x )
-				if( ( cellState[uint( y * grid.x + x )] & kCellHeld ) == 0u )
-				{
-					ring = 1u;
-					break;
-				}
+		ring = near <= D ? 1u : 0u;
+		if( K == kNone )
+			K = near <= D + 1 ? nearK : 0u;
 		atomicAdd( jahClock[4], 1u );
 		if( ring != 0u )
 			atomicAdd( jahClock[7], 1u );
 	}
 	else
 		atomicAdd( jahClock[5], 1u );
-	cellState[cells + i] = ring;
+	if( K == kNone )
+		K = 0u;
+	jahClock[8u + 2u * i] = indexOfK( K );
+	jahClock[9u + 2u * i] = K;
+	cellState[kCellWords * i + 1u] = ring;
 }
 
 #else
@@ -408,7 +547,7 @@ void main()
 	// ---- (1) THE OVERFLOW ------------------------------------------------------------------------------------------------
 	bool reached = r.lists.y > 0.5;
 	// ---- (5) THE FIELD AT WORK under a cell that read its fallback ---------------------------------------------------------
-	reached = reached || ( r.field.x > 0.5 && ( cellState[index] & kCellField ) != 0u );
+	reached = reached || ( r.field.x > 0.5 && ( cellState[kCellWords * index] & kCellField ) != 0u );
 
 	// ---- (2) THE EYE COLUMN: the pyramid from the eye through the cell's rectangle to its farthest surface --------------
 	{
@@ -515,14 +654,59 @@ void main()
 	barrier();
 	if( tid == 0u )
 	{
-		uint st = cellState[index] & ~kCellReached;
+		const uint w = kCellWords * index;
+		uint st = cellState[w] & ~kCellReached;
+		// THE CELL's CONVERGENCE (the lead's ruling: a rest starts when no input reaches the cell AND its own history has
+		// converged): while its clock is 0, its SAMPLES' cell mean (the integrate's sums, the frame before) is followed by
+		// an exponential mean over the gather's N frames (and its variance) restarted at the cell's last reach - converged
+		// when the history's answer is within a code (and 3 of that mean's standard errors) of it: the samples say what
+		// the cell is now and the history has caught up, so no hand-over transient sits inside a declared rest. Read
+		// every frame (no window to wait out).
+		const uint sumS = cellState[w + 2u], sumA = cellState[w + 3u], count = cellState[w + 4u];
+		cellState[w + 2u] = 0u;
+		cellState[w + 3u] = 0u;
+		cellState[w + 4u] = 0u;
 		if( sReached != 0u )
 		{
-			st = ( st & ~kCellHeld ) | kCellReached;
+			st = ( st & ~( kCellHeld | kCellConverged ) ) | kCellReached;
+			cellState[w + 7u] = 0u;
 			atomicOr( jahClock[2], 1u );
 			atomicAdd( jahClock[3], 1u );
 		}
-		cellState[index] = st;
+		else if( ( st & kCellHeld ) == 0u && jahClock[9u + 2u * index] == 0u )
+		{
+			if( count == 0u )
+				st |= kCellConverged;   // (nothing drawn there: no picture to converge)
+			else
+			{
+				const float x = float( sumS ) / ( 16.0 * float( count ) ), a = float( sumA ) / ( 16.0 * float( count ) );
+				const uint frames = cellState[w + 7u];
+				float m = x, var = 0.0;
+				if( frames > 0u )
+				{
+					const float alpha = 2.0 / ( max( r.mode.y, 1.0 ) + 1.0 );
+					m = uintBitsToFloat( cellState[w + 5u] );
+					var = uintBitsToFloat( cellState[w + 6u] );
+					const float d = x - m;
+					m += alpha * d;
+					var = ( 1.0 - alpha ) * ( var + alpha * d * d );
+				}
+				cellState[w + 5u] = floatBitsToUint( m );
+				cellState[w + 6u] = floatBitsToUint( var );
+				cellState[w + 7u] = min( frames + 1u, 1u << 20 );
+				const float alpha = 2.0 / ( max( r.mode.y, 1.0 ) + 1.0 );
+				const float se = sqrt( var * alpha / ( 2.0 - alpha ) );
+				if( frames + 1u >= 2u && abs( a - m ) < 1.0 + 3.0 * se )
+					st |= kCellConverged;
+				else
+					st &= ~kCellConverged;
+			}
+		}
+		cellState[w] = st;
+		// ...AND ITS BLOCK's FACTS for the components (1 active, 2 reached, 4 not converged)
+		if( ( st & kCellHeld ) == 0u )
+			atomicOr( jahClock[blockFlagsAt( blockOfCell( index ) )],
+					  1u | ( sReached != 0u ? 2u : 0u ) | ( ( st & kCellConverged ) == 0u ? 4u : 0u ) );
 	}
 }
 #endif

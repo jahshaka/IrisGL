@@ -189,11 +189,24 @@ void main()
 	const uint eyes = jahStereo() ? 2u : 1u;
 	const uint cap = uint( max( p.knobs3.y, 0.0 ) ) / eyes;
 	demand = max( demand, 1u );
-	const uint shift = ( ( jahFrameIndex() % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
+	// (THE CELL's OWN SAMPLE INDEX, PHOTON-7 stage 8B, B1: its component's rest clock - every cell of a component and of
+	// its ring shares it, so the window a component sees is the one its rest sequence names)
+	const uint shift = ( ( jahFrameIndexOf( index ) % demand ) * ( cap % demand ) ) % demand;   // no 32-bit overflow
 	const uint rank = ( raw + demand - shift ) % demand;
 	if( rank >= cap )
 		return;
-	const uint slot = uint( eye ) * cap + rank;
+	// THE SLOT: the raw rank where every asking cell is served (demand <= the share: unique whatever the shifts); past
+	// it two components' windows may name one rank, so the slot is counted out (a probe's rays key on its CELL, never its
+	// slot - rq_probe_gather.comp) and a winner past the share is not given one (counter.row's last words count them)
+	uint slot = uint( eye ) * cap + raw;
+	if( demand > cap )
+	{
+		const uint rows = ( jahStereo() ? 2u : 1u ) * uint( grid.y );
+		const uint taken = atomicAdd( counter.row[rows + uint( eye )], 1u );
+		if( taken >= cap )
+			return;
+		slot = uint( eye ) * cap + taken;
+	}
 	const uint adaptiveIndex = uint( p.knobs3.x ) + slot;
 	Surface w;
 	w.world = records.r[index].sh[0].xyz;
@@ -254,7 +267,7 @@ void main()
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const float stride = max( p.knobs.x, 1.0 );
 	const int s = int( stride );
-	const uint frame = jahFrameIndex();
+	const uint frame = jahFrameIndexOf( index );
 	// THE CELL'S EYE AND ITS ORIGIN IN THAT EYE'S IMAGE (PHOTON-GA-VR,
 	// LAYERED-STEREO-1): under stereo the right eye's cells follow the left
 	// eye's in the probe LIST, and a cell's origin is its own-grid coordinate x

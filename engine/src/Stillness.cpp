@@ -717,9 +717,22 @@ struct StillnessRun::Impl {
             if (i > 0 && f.giRowCount) w.lastGiRowFrame = int(i);
             if (i > 0 && f.holdKey) w.lastHoldKeyFrame = int(i);
             if (w.holdFrame < 0 && f.held) w.holdFrame = int(i);
-            if (w.gatherHoldFrame < 0 && f.gatherHeld) w.gatherHoldFrame = int(i);
+            // THE GATHER's HOLD IS ITS LAST HOLD RUN's START (PHOTON-7 stage 8B, B1: the gather rests per cell, so a hold
+            // can end on an input that reaches a cell after it - the hold that counts is the one that lasts to the
+            // window's end; -1 where the window ends unheld)
+            if (f.gatherHeld && (i == 0 || !w.frames[i - 1].gatherHeld)) w.gatherHoldFrame = int(i);
+            if (!f.gatherHeld) w.gatherHoldFrame = -1;
             if (w.reflHoldFrame < 0 && f.reflHeld) w.reflHoldFrame = int(i);
         }
+        // C AFTER THE LAST WRITE (PHOTON-7 stage 8B, B1): the frames after the last hold key before the gather's rest began
+        // again - the gather's hold is then within C + N + 1 of that write
+        w.lastKeyConverge = 0;
+        for (size_t i = size_t(std::max(w.lastHoldKeyFrame, 0)) + 1u; i < w.frames.size(); ++i)
+            if (w.frames[i].restFrames >= 1u &&
+                (w.frames[i - 1].restFrames == 0u || w.frames[i].restFrames < w.frames[i - 1].restFrames)) {
+                w.lastKeyConverge = int(i) - std::max(w.lastHoldKeyFrame, 0) - 1;
+                break;
+            }
         stillnessDeriveLiveness(w);
         for (unsigned k = 0; k <= n; ++k) {
             if (!w.frames.empty()) w.visiblePixels[k] = w.frames.size() > 1 ? w.frames[1].classes[k].pixels : 0u;
@@ -779,7 +792,16 @@ void stillnessDeriveLiveness(StillnessWindow &w) {
     const unsigned N = d.settleFrames;
     const unsigned due = d.cardsDemandEvery + d.cardsDemandLag + 1u;
     const int W = w.decisionWorkEnd - w.decisionFrame;
-    w.holdBound = int(N + due) + int(due) + W + int(N) + 1;
+    // THE RE-REST's CONVERGENCE (PHOTON-7 stage 8B, B1, the lead's ruling: a cell's rest starts when no input reaches it
+    // AND its history has caught up with its samples): the frames after the work's last row before the gather's rest
+    // begins again (its clock 1), measured - the re-rest is C + N + 1, never a fixed N + 1
+    w.convergeFrames = 0;
+    for (size_t i = size_t(w.decisionWorkEnd) + 1u; i < n; ++i)
+        if (w.frames[i].restFrames >= 1u && (w.frames[i - 1].restFrames == 0u || w.frames[i].restFrames < w.frames[i - 1].restFrames)) {
+            w.convergeFrames = int(i) - w.decisionWorkEnd - 1;
+            break;
+        }
+    w.holdBound = int(N + due) + int(due) + W + w.convergeFrames + int(N) + 1;
     const double page = double(d.cardsPageSize) * double(d.cardsPageSize);
     const double P = page > 0.0 ? double(d.cardsIndirectTexels) / page : 0.0;
     for (int i = w.decisionFrame; i <= w.decisionWorkEnd; ++i) {
@@ -1477,7 +1499,8 @@ std::string StillnessReport::summary() const
           << (w.frames.empty() ? 0 : w.frames.size() - 1) << " visible="
           << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " lastHoldKey=" << w.lastHoldKeyFrame << " hold=" << w.holdFrame
           << " firstRest=" << w.firstRestFrame << " decision=" << w.decisionFrame << " workEnd=" << w.decisionWorkEnd
-          << " holdBound=" << w.holdBound << " pace=" << w.workPace << " pages=" << w.workPages
+          << " holdBound=" << w.holdBound << " converge=" << w.convergeFrames << " pace=" << w.workPace
+          << " pages=" << w.workPages
           << " | frames to <1 code (from stop / from last GI row; = the window: never):";
         for (size_t k = 0; k < names.size() && k < w.settleFromStop.size(); ++k)
             o << " " << names[k] << "=" << w.settleFromStop[k] << "/" << w.settleFromLastGiRow[k] << "("

@@ -83,7 +83,9 @@ layout( std430, set = 0, binding = 40 ) buffer JahCellStore { uint jahCellStore[
 /// THE DEMAND SPAN ON THE CLOCK (PHOTON-7 stage 10's per-reader snapshot, read on the device since 8B: the rest clock is
 /// the GPU's): the view stamps the cards it reads at its rest indices [1, span] alone (p.knobs6.x = the span; 0 = no
 /// span: always) - moving, K = 0, it always stamps.
-#define JAH_CARD_STAMP_GATE ( p.knobs6.x < 0.5 || jahClock[0] == 0u || float( jahClock[0] ) <= p.knobs6.x )
+/// (the probe's cell, set at main's head: its stamps' gate, jah_probe_rest.glsl jahCardStampsOf)
+uint gCell = 0u;
+#define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
 #include "jah_ray_origin.glsl"
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
@@ -251,14 +253,14 @@ void main()
 	const bool adaptive = probe >= uniformProbes;
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % gridW, int( cellIndex ) / gridW );
-	const uint frame = jahFrameIndex();
+	const uint frame = jahFrameIndexOf( cellIndex );
+	gCell = cellIndex;
 	// THE CELL'S REST (PHOTON-7 stage 8B, B1): a HELD cell outside every active cell's ring is not traced (nothing reads
 	// its probes this frame: its own pixels write their history through) - its block reads "no answer", as a probe on
 	// nothing; an ACTIVE cell keeps its rays' distances by world direction (since the camera stopped: rq_probe_resume.comp).
-	const uint cells = uint( max( p.resolution.x, 1.0 ) * max( p.resolution.y, 1.0 ) );
-	const uint cellSt = jahCellState[cellIndex];
+	const uint cellSt = jahCellState[kCellWords * cellIndex];
 	const bool cellHeld = ( cellSt & kCellHeld ) != 0u;
-	const bool traced = !cellHeld || jahCellState[cells + cellIndex] != 0u;
+	const bool traced = !cellHeld || jahCellState[kCellWords * cellIndex + 1u] != 0u;
 	const bool onSurface = posW.w > 0.5 && traced;
 	const bool keepsDistance = !cellHeld;
 	// ...and the two probes of one cell are decorrelated by a constant, so the

@@ -143,7 +143,7 @@ layout( rgba16f, set = 0, binding = 4 ) uniform image2DArray probeIrradiance;
 layout( rg32ui, set = 0, binding = 5 ) uniform readonly uimage2DArray historyPrev;
 layout( rg32ui, set = 0, binding = 6 ) uniform writeonly uimage2DArray historyCur;
 /// THE REST MEAN (PHOTON-GATHER-1d): at rest — the camera, the lighting and the
-/// scene held still (jahRestK() = the rest frame k >= 1) — a TRUE MEAN of the rest
+/// scene held still (the cell's rest clock k >= 1) — a TRUE MEAN of the rest
 /// frames' estimates, restarted at the first rest frame, premultiplied by
 /// coverage like the history. The same pixel reads and writes it (the camera has
 /// not moved, so there is no reprojection and no race): one image, not a pair.
@@ -191,7 +191,11 @@ layout( r8, set = 0, binding = 51 ) uniform writeonly image2DArray skyVis;
 #include "jah_probe_rest.glsl"
 layout( std430, set = 0, binding = 53 ) buffer JahCellState { uint jahCellState[]; };
 /// THE DEMAND SPAN ON THE CLOCK (rq_probe_gather.comp's note): p.knobs6.x = the span
-#define JAH_CARD_STAMP_GATE ( p.knobs6.x < 0.5 || jahClock[0] == 0u || float( jahClock[0] ) <= p.knobs6.x )
+/// (the pixel's cell's clock: its K and its sample index, set at main's head)
+float gRestK = 0.0;
+uint gFrameIndex = 0u;
+uint gCell = 0u;
+#define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
@@ -297,10 +301,10 @@ void jahCardLobeHemi( float r, out float a, out float b )
 /// AT REST THE KEY IS THE REST FRAME'S OWN INDEX (PHOTON-7 stage 10-3; L1: the picture at rest is the pose's): the
 /// view's frame counter counts every frame the view traced before its rest began, so a key on it rounded the rest's
 /// history differently by the path - how long the view had lived, which another view's state set (the resize history's
-/// row). The rest index (jahRestK(): 1, 2, ... N) is the same sequence whatever came before it.
+/// row). The rest index (the cell's K, gRestK: 1, 2, ... N) is the same sequence whatever came before it.
 float roundingDither( ivec2 localPix, uint salt )
 {
-	const uint key = jahRestK() >= 1.0 ? 0x80000000u + uint( jahRestK() ) : uint( p.knobs6.z );
+	const uint key = gRestK >= 1.0 ? 0x80000000u + uint( gRestK ) : uint( p.knobs6.z );
 	const uint h = jahPcg( uint( localPix.x ) * 1973u + uint( localPix.y ) * 9277u + key * 26699u + salt * 104729u );
 	return float( h & 0xFFFFFFu ) / 16777216.0;
 }
@@ -764,7 +768,10 @@ void main()
 	// A HELD CELL (PHOTON-7 stage 8B, B1): its pixels' picture is their rest mean - the irradiance, the rough specular
 	// and the sky visibility this target holds since the rest's N-th frame, untouched - and their histories are written
 	// through (this frame's half becomes the held one) so the ping-pong reads them where it flips to.
-	if( ( jahCellState[index] & kCellHeld ) != 0u )
+	gRestK = jahRestKOf( index );
+	gCell = index;
+	gFrameIndex = jahFrameIndexOf( index );
+	if( ( jahCellState[kCellWords * index] & kCellHeld ) != 0u )
 	{
 		if( p.knobs5.z > 0.5 )
 		{
@@ -821,7 +828,7 @@ void main()
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
 			imageStore( roughHistoryCur, at, uvec4( 0u ) );
-			if( jahRestK() >= 1.0 )
+			if( gRestK >= 1.0 )
 			{
 				imageStore( restMean, at, vec4( 0.0 ) );
 				imageStore( roughRest, at, vec4( 0.0 ) );
@@ -873,7 +880,7 @@ void main()
 	// frame by frame as the pixel ages (the converged answer is the bilinear's).
 	// NEVER AT REST: the rest mean is the shipped estimator's mean, exactly.
 	float reach = 1.0;
-	if( temporal && jahRestK() < 1.0 && float( prevCount ) < p.young.x )
+	if( temporal && gRestK < 1.0 && float( prevCount ) < p.young.x )
 		reach = mix( max( p.young.y, 1.0 ), 1.0, float( prevCount ) / max( p.young.x, 1.0 ) );
 
 	// THE FOUR GRID PROBES AROUND THE PIXEL: the cells whose centres bracket
@@ -883,7 +890,7 @@ void main()
 	// is taken on that shifted grid - rq_probe_place.comp's offset, the same hash; plane.w 1 = the centres)
 	vec2 g = ( vec2( lx, pix.y ) + 0.5 ) / stride - 0.5;
 	if( p.plane.w < 0.5 )
-		g = ( vec2( lx, pix.y ) + 0.5 - ( floor( jahSample2( ivec2( 0 ), 0u, jahFrameIndex() ) * stride ) + 0.5 ) ) / stride;
+		g = ( vec2( lx, pix.y ) + 0.5 - ( floor( jahSample2( ivec2( 0 ), 0u, gFrameIndex ) * stride ) + 0.5 ) ) / stride;
 	const ivec2 c0 = ivec2( floor( g ) );
 	const vec2 f = g - vec2( c0 );
 	const int bands = p.knobs4.x > 5.0 ? 9 : 4;
@@ -1136,7 +1143,7 @@ void main()
 	// Bistro 0.19 -> 0.23). The hand-over's weight starts at 0 on the first rest frame ((k - 1) / (N - 1): that frame
 	// steps exactly as a settling one, Bistro's first rest frame jumped 0.18 -> 0.26 at k / N) and reaches 1 at k = N,
 	// where the answer is still the rest mean exactly.
-	const float restK = jahRestK();
+	const float restK = gRestK;
 	// (the rest's law, held for the rough specular's rest below: whether this frame's sample enters, and the hand-over)
 	bool restTakes = false;
 	float restHandover = 0.0;
@@ -1193,8 +1200,8 @@ void main()
 					 1.0 );
 		// (THE CELL READS THE FIELD, PHOTON-7 stage 8B, B1: while the field's work is owed a held cell that read it
 		// resumes - its fallback moves with the field; its pixels mark it, the camera's move clears it)
-		if( cover < 1.0 && ( jahCellState[index] & kCellField ) == 0u )
-			atomicOr( jahCellState[index], kCellField );
+		if( cover < 1.0 && ( jahCellState[kCellWords * index] & kCellField ) == 0u )
+			atomicOr( jahCellState[kCellWords * index], kCellField );
 	}
 	// ---- THE ROUGH SPECULAR (7-3; the header's second output) -----------------
 	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer)
@@ -1263,4 +1270,16 @@ void main()
 	if( p.stereo.z > 0.5 )
 		outV = float( prevCount ) < p.stereo.z ? vec4( 0.5, 0.0, 0.5, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
 	imageStore( probeIrradiance, at, outV );
+	// THE CELL's CONVERGENCE (PHOTON-7 stage 8B, B1; the lead's ruling on the rest's start): this frame's SAMPLE and the
+	// HISTORY's answer at each pixel, summed in display codes (x 16, the irradiance's display curve L / (1 + L)) -
+	// rq_probe_resume.comp says a settling cell has converged when its history's answer has caught up with its samples'
+	// mean over the last N frames (within a code and their standard error) and that mean stopped moving
+	if( gRestK < 0.5 )
+	{
+		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
+		const float Ls = max( dot( sample1.xyz, luma ), 0.0 ), La = max( dot( outV.xyz, luma ), 0.0 );
+		atomicAdd( jahCellState[kCellWords * index + 2u], uint( clamp( 255.0 * Ls / ( 1.0 + Ls ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
+		atomicAdd( jahCellState[kCellWords * index + 3u], uint( clamp( 255.0 * La / ( 1.0 + La ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
+		atomicAdd( jahCellState[kCellWords * index + 4u], 1u );
+	}
 }

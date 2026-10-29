@@ -660,8 +660,6 @@ private:
         VkDeviceMemory restParamsMemory[3] = {};
         void *restParamsMapped[3] = {};
         VkDescriptorSet resumeSets[3] = {};
-        /// ...consecutive still frames with no resume input (past N + 1 of them every cell holds: nothing dispatched)
-        unsigned quietRun = 0u;
         /// ...the changed-region list's close this view read last (a close is read once)
         unsigned long long regionSerialSeen = 0ull;
         /// ...the gather frame of the last frame that had a resume input or moved, and of the last that moved (the

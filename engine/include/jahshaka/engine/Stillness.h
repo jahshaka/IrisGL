@@ -302,6 +302,11 @@ struct StillnessWindow {
     /// due after it, W = the decision's work (workEnd - decision), the re-rest after it, the hold's own frame; W's PACE:
     /// ceil(the work's pages / the tier's pages a frame) + due. -1 where the window has no such frame.
     int firstRestFrame = -1, decisionFrame = -1, decisionWorkEnd = -1, holdBound = -1, workPace = -1;
+    /// ...C, the frames the gather's cells took to converge after the work's last row before their rest began again (8B,
+    /// B1: the re-rest is C + N + 1 - the history catching up with its samples is part of the rest's start)
+    int convergeFrames = 0;
+    /// ...and C after the LAST hold key (the frames before the gather's rest began again; 0 with none after it)
+    int lastKeyConverge = 0;
     double workPages = 0.0;
     /// THE MOVE BEFORE THE STOP: the GI rows that fired on its frames ("name:frames/units", ',' joined) and how
     /// many frames before the stop the last of them landed (-1: none) — a commit that lands inside the move is the

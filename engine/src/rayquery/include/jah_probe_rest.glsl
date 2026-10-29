@@ -2,17 +2,19 @@
 //
 // MOVING is the VIEW's (the camera, a restart of the estimator): every cell settles. With the camera still each cell is
 // ACTIVE or HELD:
-//   ACTIVE  - its probes are traced and its pixels integrated, on the view's ONE REST CLOCK K (0 = settling, 1 ... N the
-//             rest mean, the shipped rest law of rq_probe_integrate.comp). ONE clock for every active cell (rule (a)): the
-//             placement's grid offset, the adaptive window and the integrate's bilinear are ONE offset a frame for every
-//             cell (rq_probe_place.comp), so two neighbouring cells on two rest indices would read each other's probes at
-//             the wrong index and the held picture would follow the path. A cell any input of which changed (rq_probe_
-//             resume.comp's four tests) RESUMES and puts the clock back to 0 - every active cell re-rests with it.
-//   HELD    - its picture is its rest mean at K = N, bit for bit: it is never traced for itself and never integrated (its
-//             pixels write their history through the ping-pong, rq_probe_integrate.comp). A held cell inside the RING of
-//             an active one is traced at the active clock (its probes are what the active pixels' taps and the filter
-//             read) and still never integrated.
-// The clock lives on the GPU (the resume decides it): every gather job reads K and the frame's sample index here.
+//   ACTIVE  - its probes are traced and its pixels integrated, on its COMPONENT's rest clock K (0 = settling, 1 ... N the
+//             rest mean, the shipped rest law of rq_probe_integrate.comp). THE CLOCK IS A CONNECTED REGION's (the lead's
+//             ruling (b)): the cells are grouped in BLOCKS of B x B, B = 2 (the ring's reach + 1) + 1, and the active
+//             blocks that touch form one component with one K - so every probe an active pixel's taps, its filter and
+//             its placement's neighbourhood read is traced at that pixel's own rest index (the placement's jitter, the
+//             adaptive window and the bilinear are one offset a frame over a component), and two components never share
+//             a probe (a whole block lies between them). A cell an input reaches (rq_probe_resume.comp) RESUMES and puts
+//             ITS component's clock back to 0; a component stays at 0 while a cell of it is still converging (its own
+//             picture moved a code over the last N frames); other components keep their rests.
+//   HELD    - its picture is its rest mean at K = N, bit for bit: never traced for itself, never integrated (its pixels
+//             write their history through the ping-pong). A held cell within the ring's reach of an active one is
+//             traced at that one's index for it, and still never integrated.
+// The clocks live on the GPU (the resume decides them): every gather job reads its cell's K and sample index here.
 #ifndef JAH_PROBE_REST_GLSL
 #define JAH_PROBE_REST_GLSL
 
@@ -20,6 +22,12 @@ const uint kCellHeld = 1u;      ///< the cell holds its rest picture
 const uint kCellRing = 2u;      ///< ...and is traced this frame for an active neighbour (never integrated)
 const uint kCellReached = 4u;   ///< an input reached it this frame (the instrument's bit; the resume's own)
 const uint kCellField = 8u;     ///< a pixel of it read the field's fallback since the camera stopped (the integrate's)
+const uint kCellConverged = 16u;  ///< settling, its history caught up with its samples (the resume's)
+/// THE CELL's WORDS (the cells' state buffer, kCellWords a cell): [0] the state bits, [1] the ring bit; the integrate's
+/// sums this frame over its pixels, in display codes x 16: [2] of this frame's SAMPLES, [3] of the HISTORY's answer, [4]
+/// the pixels; the resume's (float bits): [5] the samples' cell mean followed over N frames (exponential), [6] its
+/// variance, [7] the frames since the cell's last reach, [8] unused.
+const uint kCellWords = 10u;
 
 /// THE BINS OF THE REST's DISTANCE STORE: 8 x 8 over the WHOLE SPHERE of world directions (an octahedral map), so the
 /// cell's uniform probe and its adaptive twin - two tangent frames - fill one store. Each bin keeps the least and the
@@ -33,18 +41,28 @@ const uint kRestStoreWords = 130u;
 #ifndef JAH_REST_CLOCK_QUALIFIER
 #define JAH_REST_CLOCK_QUALIFIER readonly
 #endif
-/// [0] K, the rest clock; [1] the frame's sample index (the rest's own kRestSequenceBase + seed + K, or the moving
-/// counter); [2] any cell reached this frame; [3] the cells reached this frame; [4] held, [5] active after the
-/// finalize; [6] the frames that resumed (cumulative); [7] the cells traced as ring.
+/// THE CLOCKS: [0] the least K over the active components (0xFFFFFFFF: none active); [1] unused; [2] any cell reached
+/// this frame; [3] the cells reached; [4] held, [5] active after the finalize; [6] the frames any cell resumed on
+/// (cumulative); [7] the cells traced as ring. Then per cell (8 + 2 c) its sample index and (9 + 2 c) its K; then per
+/// block (8 + 2 cells + b) its K and (8 + 2 cells + blocks + b) the frame's flags (the test's: 1 active, 2 reached,
+/// 4 an active cell not converged).
 layout( std430, set = 0, binding = JAH_REST_CLOCK_BINDING ) JAH_REST_CLOCK_QUALIFIER buffer JahRestClock
 {
-	uint jahClock[8];
+	uint jahClock[];
 };
 
-/// THE REST CLOCK as the integrate's rest law reads it (0: no rest frame).
-float jahRestK() { return float( jahClock[0] ); }
-/// THE FRAME'S SAMPLE INDEX (what the placement's jitter, the adaptive window, the rays and the bilinear key on).
-uint jahFrameIndex() { return jahClock[1]; }
+/// A CELL's REST CLOCK as the integrate's rest law reads it (0: settling) and its frame's sample index (what the
+/// placement's jitter, the adaptive window, the rays and the bilinear key on).
+float jahRestKOf( uint cell ) { return float( jahClock[9u + 2u * cell] ); }
+/// ...and whether its demand stamps the cards (PHOTON-7 stage 10's per-reader snapshot, per cell since 8B): settling or
+/// moving (K 0) it stamps, resting only at its rest indices [1, span] (span 0: always) - the stop's decision reads the
+/// readers' latest rest span (SurfaceCache::refreshResidency's window, from the least active clock's start)
+bool jahCardStampsOf( uint cell, float span )
+{
+	const uint k = jahClock[9u + 2u * cell];
+	return span < 0.5 || k == 0u || float( k ) <= span;
+}
+uint jahFrameIndexOf( uint cell ) { return jahClock[8u + 2u * cell]; }
 
 /// A world direction's bin (the full-sphere octahedron, z < 0 folded over the diamond's edges).
 vec2 jahRestOctUv( vec3 d )
