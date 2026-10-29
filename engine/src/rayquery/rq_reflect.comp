@@ -275,13 +275,93 @@ float exposureOf()
 	const float e = p.denoiser.y > 0.5 ? texelFetch( jahExposure, ivec2( 0 ), 0 ).x : p.denoiser.x;
 	return finite1( e ) && e > 0.0 ? e : 1.0;
 }
-/// A SEGMENT A MOVED INSTANCE CROSSED THIS FRAME (G6): origin o, unit direction d, length t, against the swept boxes.
+/// THE CHANGED-REGION LIST (PHOTON-7 8B, B2: jah_rest_regions.glsl; OgreRayQuery.cpp kReflectRegionsBinding) and THE
+/// BRICK MASKS, one binding a cascade in the hit set's order (stand-ins where none is this frame's: restBrickDims.w 0).
+#define JAH_REST_REGIONS_BINDING 57
+#include "jah_rest_regions.glsl"
+layout( std430, set = 0, binding = 58 ) readonly buffer JahRestBricks0 { uint w[]; } restBricks0;
+layout( std430, set = 0, binding = 59 ) readonly buffer JahRestBricks1 { uint w[]; } restBricks1;
+layout( std430, set = 0, binding = 60 ) readonly buffer JahRestBricks2 { uint w[]; } restBricks2;
+layout( std430, set = 0, binding = 61 ) readonly buffer JahRestBricks3 { uint w[]; } restBricks3;
+bool restBrickChanged( uint c, uint idx )
+{
+	uint a = 0u, b = 0u;
+	if( c == 0u ) { a = restBricks0.w[2u * idx]; b = restBricks0.w[2u * idx + 1u]; }
+	else if( c == 1u ) { a = restBricks1.w[2u * idx]; b = restBricks1.w[2u * idx + 1u]; }
+	else if( c == 2u ) { a = restBricks2.w[2u * idx]; b = restBricks2.w[2u * idx + 1u]; }
+	else { a = restBricks3.w[2u * idx]; b = restBricks3.w[2u * idx + 1u]; }
+	return jahBrickChangedWords( a, b );
+}
+/// A SEGMENT THE TRACED GEOMETRY CHANGED ACROSS THIS FRAME (G6; B2): origin o, unit direction d, length t, against the
+/// list's MOVERS - a moved, staged or posed slot's swept box (its bounds this frame and last, joined: every transform
+/// write, flags change and birth of a ray-tier slot is one, OgreEngine::listRayMovers). An EDIT is the STORE's geometry
+/// (a region rebuild's voxel cells, up to a coarse cascade's whole box) or a material: what a HIT reads, never what a
+/// ray meets (restHitChanged). The list overflowed or restarted: every segment.
 bool restSegmentMoved( vec3 o, vec3 d, float t )
 {
-	const int n = min( int( p.restMovers.x + 0.5 ), 16 );
-	for( int i = 0; i < n; ++i )
-		if( jahSegmentHitsBox( o, d, t, p.restMoverBox[2 * i].xyz, p.restMoverBox[2 * i + 1].xyz ) )
+	if( p.restLists.y > 0.5 )
+		return true;
+	const uint n = min( uint( p.restLists.x + 0.5 ), 128u );
+	for( uint k = 0u; k < n; ++k )
+	{
+		const uint kind = regionKind( k );
+		if( kind == kRegionMover && jahSegmentHitsBox( o, d, t, regionLo( k ).xyz, regionHi( k ).xyz ) )
 			return true;
+	}
+	return false;
+}
+/// A HIT WHOSE LIGHT CHANGED THIS FRAME (B2): the point x a ray found, its read's radius r (the lobe's footprint there) -
+/// a LIGHT region of the list around it (a scroll's slab, a relit card's instance, a lamp's range, a lamp's shadow
+/// range, an edit of the store's geometry or a material: what the hit reads changed there - the cards' and the store's
+/// answers alike; the traced geometry is the segments'), or
+/// a BRICK the frame's light work changed under it: the store's bounce, which spreads beyond any listed box (a mover's
+/// bounce on the still walls beside it). The finest cascade holding the point whose brick is at least the radius answers
+/// (the coarsest holding it for a wider read), over the bricks within half a brick of it: the trilinear read's reach.
+bool restHitChanged( vec3 x, float r )
+{
+	if( p.restLists.y > 0.5 )
+		return true;
+	const uint n = min( uint( p.restLists.x + 0.5 ), 128u );
+	for( uint k = 0u; k < n; ++k )
+	{
+		const uint kind = regionKind( k );
+		if( kind == kRegionSlab || kind == kRegionCard || kind == kRegionLamp || kind == kRegionLampShadow ||
+			kind == kRegionEdit )
+		{
+			const vec3 lo = regionLo( k ).xyz - vec3( r ), hi = regionHi( k ).xyz + vec3( r );
+			if( all( greaterThanEqual( x, lo ) ) && all( lessThanEqual( x, hi ) ) )
+				return true;
+		}
+	}
+	if( p.restLists.z < 0.5 )
+		return false;
+	int pick = -1;
+	for( uint c = 0u; c < 4u; ++c )
+	{
+		const float brick = p.restBrickOrigin[c].w;
+		const uvec3 dims = uvec3( p.restBrickDims[c].xyz );
+		if( brick <= 0.0 || any( equal( dims, uvec3( 0u ) ) ) )
+			continue;
+		const vec3 g = ( x - p.restBrickOrigin[c].xyz ) / brick;
+		if( any( lessThan( g, vec3( 0.0 ) ) ) || any( greaterThanEqual( g, vec3( dims ) ) ) )
+			continue;
+		pick = int( c );
+		if( brick >= r )
+			break;
+	}
+	if( pick < 0 || p.restBrickDims[pick].w < 0.5 )
+		return false;   // (no cascade holds the point, or its mask is not this frame's: no change)
+	const uint c = uint( pick );
+	const float brick = p.restBrickOrigin[c].w;
+	const ivec3 dims = ivec3( p.restBrickDims[c].xyz );
+	const vec3 g = ( x - p.restBrickOrigin[c].xyz ) / brick;
+	const ivec3 b0 = clamp( ivec3( floor( g - 0.5 ) ), ivec3( 0 ), dims - 1 );
+	const ivec3 b1 = clamp( ivec3( floor( g + 0.5 ) ), ivec3( 0 ), dims - 1 );
+	for( int z = b0.z; z <= b1.z; ++z )
+		for( int y = b0.y; y <= b1.y; ++y )
+			for( int xx = b0.x; xx <= b1.x; ++xx )
+				if( restBrickChanged( c, uint( ( z * dims.y + y ) * dims.x + xx ) ) )
+					return true;
 	return false;
 }
 
@@ -721,6 +801,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	uint photonSource = 0u;
 	bool screenHit = false, screenMoving = false;
 	vec3 screenWas = world, screenPos = world;
+	jahC2Seg[0] = jahC2Seg[1] = jahC2Seg[2] = vec4( 0.0 );   // (C2's segments: this sample's alone - B2's resume test)
+	jahC2HitR = 0.0;
 	vec3 screenRadiance = vec3( 0.0 );
 	float screenT = 0.0;
 	float blendVouch = 1.0;
@@ -1143,10 +1225,11 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	// THE RECORD's TRACED LOBE (C2) at the sample's gain and its ray share (the screen's share is the trace's own)
 	if( record && recTraced )
 		recDelta += gainB * ( blend ? 1.0 - blendVouch : 1.0 ) * recLobe;
-	// THE REST'S RESUME TEST (G6), the ray just traced: its segment, the lobe's mean segment (the throw), the hit's sun
-	// leg - a moved instance's swept box across any of them, or the hit itself on a moving slot, resumes the texel (and
-	// the NEE's segment and its hit the same: PHOTON-7 11-1b).
-	if( atRest && !resume )
+	// THE REST'S RESUME TEST (G6; PHOTON-7 8B, B2: against the changed-region list), the ray just traced: a GEOMETRY
+	// region across its segment, the lobe's mean segment (the throw), the hit's sun leg, the NEE's segment (11-1b) or
+	// C2's secondary rays (its BRDF draw's, its portals' and its image draw's), or the hit itself on a moving slot; or
+	// a LIGHT region or a changed brick at its hit, the mean segment's end or C2's hit - resumes the texel.
+	if( atRest && !resume && ( p.restLists.x > 0.5 || p.restLists.y > 0.5 || p.restLists.z > 0.5 || p.motion.w > 0.5 ) )
 	{
 		bool hitMoving = screenHit && screenMoving && p.motion.w > 0.5;
 		if( !hitMoving && slotHit && !recFar && p.motion.w > 0.5 )
@@ -1156,10 +1239,16 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		}
 		const float t = min( hitT, maxT );
 		const float meanT = x.meanT;
+		const vec3 meanL = reflect( -V, worldN );
 		resume = hitMoving || restSegmentMoved( origin, L, t ) ||
-				 ( meanT > 0.0 && restSegmentMoved( origin, reflect( -V, worldN ), meanT ) ) ||
+				 ( meanT > 0.0 && restSegmentMoved( origin, meanL, meanT ) ) ||
 				 ( hitT < maxT && p.hit.hitSun.w > 0.5 && restSegmentMoved( origin + L * hitT, p.hit.hitSun.xyz, p.hit.hitSun2.z ) ) ||
 				 neeHitMoving || ( neeT > 0.0 && restSegmentMoved( origin, nee.L, min( neeT, maxT ) ) );
+		for( int k = 0; k < 3 && !resume; ++k )
+			resume = jahC2Seg[k].w > 0.0 && restSegmentMoved( jahC2SegO, jahC2Seg[k].xyz, jahC2Seg[k].w );
+		resume = resume || ( hitT < maxT && restHitChanged( origin + L * hitT, reflectFootprint( lobeAlpha, hitT ) ) ) ||
+				 ( meanT > 0.0 && restHitChanged( origin + meanL * meanT, reflectFootprint( lobeAlpha, meanT ) ) ) ||
+				 ( jahC2HitR > 0.0 && restHitChanged( jahC2SegO + jahC2Seg[0].xyz * jahC2Seg[0].w, jahC2HitR ) );
 	}
 	o.L = L; o.traced = traced; o.recN = recN; o.screenRadiance = screenRadiance; o.recBary = recBary;
 	o.nee = neePart; o.recDelta = recDelta;
@@ -1511,7 +1600,9 @@ void main()
 	if( live && restStop >= kReflectStopFrames )
 	{
 		const float meanT = inPlace.hitT;
-		if( !( meanT > 0.0 ) || !restSegmentMoved( origin, reflect( -V, worldN ), meanT ) )
+		const vec3 meanL = reflect( -V, worldN );
+		if( !( meanT > 0.0 ) ||
+			!( restSegmentMoved( origin, meanL, meanT ) || restHitChanged( origin + meanL * meanT, reflectFootprint( max( alpha, 1e-4 ), meanT ) ) ) )
 		{
 			// No sample - and the texel's state is left as it is. A CAPPED texel (its count at the field's ceiling: it
 			// stopped by the cap, not by its standard error) is counted every frame into the hit list's fourth word -

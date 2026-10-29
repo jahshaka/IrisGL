@@ -49,15 +49,7 @@ const uint kCellHandover = 64u;
 const uint kCellWords = 12u;
 const uint kCellMovingWord = 8u;
 
-/// A BRICK CHANGED AT ALL this frame, either of its two words (PhotonVoxelLighting's brick mask: the direct term's and
-/// the feedback's relative change; the feedback writes a voxel only when it moves a store step, so a converged store
-/// writes nothing). Never a per-frame threshold (rq_probe_resume.comp's kRestBrickCode); a NaN word is a change (the
-/// bits are tested, never x == x). The resume's test and the fast update's moving ray (rq_probe_gather.comp) read it.
-bool jahBrickChangedWords( uint a, uint b )
-{
-	const bool na = ( a & 0x7F800000u ) == 0x7F800000u, nb = ( b & 0x7F800000u ) == 0x7F800000u;
-	return na || nb || uintBitsToFloat( a ) > 0.0 || uintBitsToFloat( b ) > 0.0;
-}
+#include "jah_rest_regions.glsl"   // (jahBrickChangedWords, the region kinds)
 
 /// THE BINS OF THE REST's DISTANCE STORE: 8 x 8 over the WHOLE SPHERE of world directions (an octahedral map), so the
 /// cell's uniform probe and its adaptive twin - two tangent frames - fill one store. Each bin keeps the least and the

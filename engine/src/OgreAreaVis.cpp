@@ -62,7 +62,7 @@ std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm) 
 
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, unsigned long long restKey, bool freshImages, float liftA, float liftB,
+                  unsigned strata, const PhotonComponent &photon, bool freshImages, float liftA, float liftB,
                   float mask, CameraImageF &eye) {
     // ---- THE LIGHTS, in HlmsPbs's order, and the rest's test ----------------
     std::vector<float> lightKey;
@@ -92,15 +92,38 @@ bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const O
     const float *now[5] = { eye.camPos, eye.rayTL, eye.rayRight, eye.rayDown, eye.fwd };
     bool sameCamera = st.age > 0u;
     for (int k = 0; k < 5 && sameCamera; ++k) sameCamera = std::memcmp(st.prev[k], now[k], sizeof(st.prev[k])) == 0;
-    const bool still = sameCamera && restKey == st.restKey && lightKey == st.lightKey;
-    st.restKey = restKey;
+    // (a material edit: the casters' alpha - the light set's key, a restart of the sums)
+    const unsigned long long edits = photon.materialEditSerial();
+    lightKey.push_back(float(edits & 0xFFFFFFull));
+    lightKey.push_back(float((edits >> 24u) & 0xFFFFFFull));
+    const bool still = sameCamera && lightKey == st.lightKey;
+    // THE TRACED GEOMETRY THAT CHANGED (PHOTON-7 8B, B2): the list's movers' swept boxes - every transform write, flags
+    // change and birth of a traced slot is one (an EDIT is the store's geometry or a material, which no visibility ray
+    // reads; a material edit restarts the light set below, its alpha being the casters') - an overflow or a restart:
+    // every texel. Each resting texel whose light rays one meets rests again from the next frame (jah_area_vis_law.glsl)
+    // EACH CLOSE IS READ ONCE (two frames reading one close would restart its texels twice), and a close the view missed
+    // that carried an input restarts every texel (the gather's missed-draw rule, without its held exception: the
+    // visibility's history is cheap to re-rest)
+    const GiChangedRegions &regions = photon.changedRegions();
+    const unsigned long long serial = photon.regionCloseSerial(), lastInput = photon.lastInputCloseSerial();
+    const bool fresh = serial != st.listSerialSeen;
+    const bool missed = st.listSerialSeen != 0ull && lastInput > st.listSerialSeen && lastInput < serial;
+    st.listSerialSeen = serial;
+    std::vector<const GiChangedRegion *> boxes;
+    const bool all = missed || (fresh && regions.available && (regions.overflow != 0u || regions.restart));
+    if (fresh && regions.available)
+        for (const GiChangedRegion &r : regions.regions)
+            if (r.kind == GiRegionKind::Mover) boxes.push_back(&r);
+    const bool listed = all || !boxes.empty();
     if (lightKey != st.lightKey) st.age = 0u;   // a light added, removed or moved: the sums are another set's
     st.lightKey = lightKey;
     const unsigned n = std::max(strata, 1u);
     st.strata = n;
     st.restFrames = still ? std::min(st.restFrames + 1u, 1u << 20) : 0u;
+    if (st.restFrames == 0u) st.restListAt = 0u;
+    if (st.restFrames > 0u && listed) st.restListAt = st.restFrames;
     // THE HOLD: past n^2 rest frames the rest mean is every stratum once - nothing is dispatched
-    st.held = still && st.restFrames > n * n && !freshImages;
+    st.held = still && !listed && st.restFrames > st.restListAt + n * n && !freshImages;
     if (st.held) return true;
 
     std::memcpy(pp.camPos, eye.camPos, sizeof(pp.camPos));
@@ -138,6 +161,19 @@ bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const O
     pp.strata[3] = float(std::min(st.age, 65535u));
     pp.rest[0] = float(st.restFrames);
     pp.rest[1] = float(n * n);
+    // (the boxes, merged to fit: box i takes every listed box j = i mod kAreaVisRegions - never one dropped)
+    const unsigned nb = unsigned(std::min<size_t>(boxes.size(), kAreaVisRegions));
+    for (size_t j = 0; j < boxes.size(); ++j) {
+        const unsigned i = unsigned(j % kAreaVisRegions);
+        const Vec3 &lo = boxes[j]->lo, &hi = boxes[j]->hi;
+        const float l[3] = { lo.x, lo.y, lo.z }, u[3] = { hi.x, hi.y, hi.z };
+        for (int c = 0; c < 3; ++c) {
+            pp.regionBox[2 * i][c] = j < kAreaVisRegions ? l[c] : std::min(pp.regionBox[2 * i][c], l[c]);
+            pp.regionBox[2 * i + 1][c] = j < kAreaVisRegions ? u[c] : std::max(pp.regionBox[2 * i + 1][c], u[c]);
+        }
+    }
+    pp.regions[0] = float(nb);
+    pp.regions[1] = all ? 1.0f : 0.0f;
     return false;
 }
 
@@ -296,7 +332,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     // (no hold before a resolve has written the product: the trace's history can be complete while the resolve's
     // permutation still builds, F2)
     const bool held = areaVisFrame(mAreaState, pp, lights, cam, mView->chainDesc(), w, h, fullW, fullH, n,
-                                   scene->gatherRestKey(), mAreaFresh || !mAreaVisWritten, 0.0f,
+                                   scene->photon(), mAreaFresh || !mAreaVisWritten, 0.0f,
                                    std::max(cell0, 0.001f), 0.0f, mAreaEye);
     mAreaRan = true;
     mAreaRead = true;

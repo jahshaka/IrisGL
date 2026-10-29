@@ -22,7 +22,9 @@
 // THE REST LAW (the gather's, word for word - R2): at rest (p.rest.x = the rest frame k >= 1) a TRUE MEAN of the rest
 // frames' samples, restarted at the first (never seeded from the history), handed over from the moving history
 // linearly over N = n^2 frames (p.rest.y), at k = N exactly the mean of every stratum once - after which the host holds:
-// nothing is dispatched and the visibility stays what it is.
+// nothing is dispatched and the visibility stays what it is. PER TEXEL (PHOTON-7 8B, B2): a geometry box of the
+// changed-region list across a texel's light rays puts THAT texel back on its moving history and restarts its rest
+// (its start in the surface word's w); the host holds once n^2 frames have passed since the last frame that listed one.
 // TWO RATIOS (the spec's glossy-lobe rule, measured: gi.card_lamp_shadow (8) read 4.6 codes of a 0.3-rough metal's
 // unoccluded specular between the diffuse-weighted visible fraction and the specular-weighted one - over a code): the
 // DIFFUSE set's weight is the stratum's form factor (what the LTC diffuse integrates), the SPECULAR set's the GGX lobe
@@ -74,6 +76,41 @@ vec4 jahAreaStoreHalf( vec4 v, ivec2 tc, uint which )
 	return r;
 }
 
+/// A CHANGED BOX ACROSS THE POINT's LIGHT RAYS (PHOTON-7 8B, B2): every light in range, its rays from P to its rectangle
+/// bounded by the segment to its centre widened linearly to the rectangle's half diagonal, against each box's bounding
+/// sphere - conservative (a box near the bundle reaches it), never view-wide.
+bool jahAreaRegionReached( vec3 P )
+{
+	if( p.regions.y > 0.5 )
+		return true;
+	const int boxes = clamp( int( p.regions.x + 0.5 ), 0, kAreaVisRegions );
+	if( boxes == 0 )
+		return false;
+	const int count = clamp( int( p.lights.x + 0.5 ), 0, kAreaVisLights );
+	for( int i = 0; i < kAreaVisLights; ++i )
+	{
+		if( i >= count )
+			break;
+		const vec3 eu = p.light[i].eu.xyz, ev = p.light[i].ev.xyz;
+		const vec3 C = p.light[i].c0.xyz + 0.5 * ( eu + ev );
+		const vec3 d = C - P;
+		const float len2 = dot( d, d );
+		if( len2 > p.light[i].eu.w * p.light[i].eu.w )
+			continue;   // (past its range: no ray of it)
+		const float lightR = 0.5 * length( eu + ev );
+		for( int b = 0; b < boxes; ++b )
+		{
+			const vec3 lo = p.regionBox[2 * b].xyz, hi = p.regionBox[2 * b + 1].xyz;
+			const vec3 q = 0.5 * ( lo + hi );
+			const float R = 0.5 * length( hi - lo );
+			const float u = len2 > 0.0 ? clamp( dot( q - P, d ) / len2, 0.0, 1.0 ) : 0.0;
+			if( length( q - ( P + d * u ) ) <= R + lightR * u )
+				return true;
+		}
+	}
+	return false;
+}
+
 void jahAreaVisTrace( ivec2 tc )
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
@@ -105,6 +142,23 @@ void jahAreaVisTrace( ivec2 tc )
 	// bias, a cell of cascade 0 along the shaded normal (the cones' jahConeStart; F6, gi.area_contact)
 	vec3 liftN = N;
 	const float lift = JAH_AREA_LIFT( pix, rawDepth, P, N, dist, liftN );
+
+	// ---- A TEXEL WHOSE OWN REST IS COMPLETE HOLDS (PHOTON-7 8B, B2): at rest, its rest k past N (every stratum once)
+	// and no changed box across its light rays - its picture is its rest mean, bit for bit: no ray, no new sample (a
+	// sample past N would weigh a stratum twice). The view's frame at rest leaves the camera still, so its history is
+	// its own texel (the same surface: its stored distance bit for bit).
+	const bool reachedNow = p.rest.x >= 1.0 && jahAreaRegionReached( P );
+	if( p.rest.x >= 1.0 && p.strata.w >= 1.0 && !reachedNow )
+	{
+		const uvec4 g = JAH_AREA_PREV_G( tc );
+		if( g.y > 0u && g.x == floatBitsToUint( dist ) && p.rest.x - float( g.w ) > p.rest.y )
+		{
+			vec4 hS, hU, hS2, hU2;
+			JAH_AREA_REST_LOAD( tc, hS, hU, hS2, hU2 );
+			JAH_AREA_STORE_CUR( tc, hS, hU, hS2, hU2, uvec4( g.x, min( g.y + 1u, kAreaCountMax ), g.z, g.w ) );
+			return;
+		}
+	}
 
 	// ---- THIS FRAME'S SAMPLE: one stratum of each light ------------------------------------------------------------
 	const uint n = clamp( uint( p.strata.x + 0.5 ), 1u, kAreaStrataMax );
@@ -155,6 +209,7 @@ void jahAreaVisTrace( ivec2 tc )
 	// ---- THE HISTORY ------------------------------------------------------------------------------------------------
 	vec4 prevS = vec4( 0.0 ), prevU = vec4( 0.0 ), prevS2 = vec4( 0.0 ), prevU2 = vec4( 0.0 );
 	uint prevCount = 0u;
+	uint prevRestStart = 0u;
 	if( p.strata.w >= 1.0 )
 	{
 		vec2 was;
@@ -175,6 +230,7 @@ void jahAreaVisTrace( ivec2 tc )
 				prevS2 = JAH_AREA_PREV_S2( pc );
 				prevU2 = JAH_AREA_PREV_U2( pc );
 				prevCount = g.y;
+				prevRestStart = g.w;
 			}
 		}
 	}
@@ -182,7 +238,19 @@ void jahAreaVisTrace( ivec2 tc )
 	vec4 meanS = mix( prevS, sampleS, blend ), meanU = mix( prevU, sampleU, blend );
 	vec4 meanS2 = mix( prevS2, sampleS2, blend ), meanU2 = mix( prevU2, sampleU2, blend );
 	// ---- AT REST, THE REST MEAN (R2) ---------------------------------------------------------------------------------
-	const float restK = p.rest.x;
+	// THE TEXEL's OWN REST (PHOTON-7 8B, B2): the view's rest frame at which this texel's rest began (the surface word's
+	// w; 0 = the view's own start) - a changed box across its light rays this frame puts it back on its moving history
+	// for the frame and restarts its rest from the next (the gather's cells' rule); a texel with no history at rest
+	// starts its rest now. Its rest index k counts from there; the stratum sequence stays the view's (any n^2
+	// consecutive frames are every stratum once).
+	uint restStart = 0u;
+	if( p.rest.x >= 1.0 )
+	{
+		restStart = prevCount > 0u ? prevRestStart : uint( p.rest.x ) - 1u;
+		if( reachedNow )
+			restStart = uint( p.rest.x );
+	}
+	const float restK = p.rest.x >= 1.0 ? p.rest.x - float( restStart ) : 0.0;
 	if( restK >= 1.0 )
 	{
 		// (the first rest frame takes its sample whole, never the stored mean: R2)
@@ -213,7 +281,7 @@ void jahAreaVisTrace( ivec2 tc )
 	meanS2 = jahAreaStoreHalf( meanS2, tc, 2u );
 	meanU2 = jahAreaStoreHalf( meanU2, tc, 3u );
 	JAH_AREA_STORE_CUR( tc, meanS, meanU, meanS2, meanU2,
-						uvec4( floatBitsToUint( dist ), min( prevCount + 1u, kAreaCountMax ), jahAreaPackNormal( N ), 0u ) );
+						uvec4( floatBitsToUint( dist ), min( prevCount + 1u, kAreaCountMax ), jahAreaPackNormal( N ), restStart ) );
 }
 #endif
 

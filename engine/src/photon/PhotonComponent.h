@@ -989,10 +989,6 @@ public:
     /// With the row off the tier records no dispatch, the Component allocates
     /// nothing, the Hlms listener sets no property and no pixel moves.
     bool probeGatherWanted() const;
-    /// ...and the gather's REST KEY (OgreRayQuery.cpp; PHOTON-2 stage 2's round, H1): every write to an
-    /// input of its answer - the lights, the geometry, the material edits, the lighting serial, the cloud
-    /// layer's GI, the field's dispatches, the surface cache's captures and relights.
-    unsigned long long gatherRestKey() const;
     /// The settle's key: the discontinuities only (OgreRayQuery.cpp).
     unsigned long long gatherRestartKey() const;
     /// HARD SUN CONTACT SHADOWS (PHOTON-RAYS-1). The row is stored here and

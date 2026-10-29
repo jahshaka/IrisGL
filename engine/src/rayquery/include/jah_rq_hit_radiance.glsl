@@ -214,9 +214,18 @@ vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec =
 vec3 jahC2PickMirror = vec3( 0.0 );
 uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
 vec3 jahC2PickImage = vec3( 0.0 );   // ...and the image draw's part (11-2 (8))
+/// C2's SEGMENTS (PHOTON-7 8B, B2: the reflection's rest resume test, rq_reflect.comp, crosses them with the changed
+/// regions): the secondary rays' one origin, and the BRDF draw's, the portals' draw's and the image draw's rays - xyz the
+/// direction, w the length (to the first hit, or the world's exit for an escape; 0 = not traced) - and the BRDF draw's
+/// hit read's radius (its footprint; 0 = an exit or no draw). Reset at every call.
+vec3 jahC2SegO = vec3( 0.0 );
+vec4 jahC2Seg[3] = vec4[3]( vec4( 0.0 ), vec4( 0.0 ), vec4( 0.0 ) );
+float jahC2HitR = 0.0;
 
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
+	jahC2Seg[0] = jahC2Seg[1] = jahC2Seg[2] = vec4( 0.0 );
+	jahC2HitR = 0.0;
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
 	if( !( mu > 0.0 ) || !( metal.w > 0.0 || any( greaterThan( metal.xyz, vec3( 0.0 ) ) ) ) )
 		return vec3( 0.0 );
@@ -281,9 +290,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	// THE RAY: the one origin law off a hit on level 0 (no drawn surface's bound), to the world's exit
 	const vec3 o = jahRayOrigin( P, N, carried, 0.0 );
 	rayQueryEXT q;
-	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, L2,
-						   jahWorldExitT( o, L2, 1.0e4 ) );
+	const float exitB = jahWorldExitT( o, L2, 1.0e4 );
+	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
 	JAH_RQ_PROCEED( q )
+	jahC2SegO = o;
+	jahC2Seg[0] = vec4( L2, exitB );
 	vec3 rad = vec3( 0.0 );
 	jahC2PickSlot = 0xFFFFFFFFu;
 	jahC2PickT = 0.0;
@@ -299,6 +310,8 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		const uint slot2 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) );
 		jahC2PickSlot = slot2;
 		jahC2PickT = t2;
+		jahC2Seg[0].w = t2;
+		jahC2HitR = max( 2.0 * t2 * sqrt( alpha ), 1e-4 );
 		const uint prim2 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) );
 		const uint geom2 = uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) );
 		const vec2 bary2 = rayQueryGetIntersectionBarycentricsEXT( q, true );
@@ -354,9 +367,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	if( sky.ok && dot( sky.L, N ) > 0.0 )
 	{
 		rayQueryEXT qn;
-		rayQueryInitializeEXT( qn, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L,
-							   jahWorldExitT( o, sky.L, 1.0e4 ) );
+		const float exitN = jahWorldExitT( o, sky.L, 1.0e4 );
+		rayQueryInitializeEXT( qn, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
 		JAH_RQ_PROCEED( qn )
+		jahC2Seg[1] = vec4( sky.L, rayQueryGetIntersectionTypeEXT( qn, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
+										? rayQueryGetIntersectionTEXT( qn, true ) : exitN );
 		if( rayQueryGetIntersectionTypeEXT( qn, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
 			const float qL = jahReflectFoldedPdf( N, N, V, sky.L, alpha );
@@ -374,9 +389,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	if( img.ok && dot( img.L, N ) > 0.0 && sa + sb > 1e-4 )
 	{
 		rayQueryEXT qi;
-		rayQueryInitializeEXT( qi, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, img.L,
-							   jahWorldExitT( o, img.L, 1.0e4 ) );
+		const float exitI = jahWorldExitT( o, img.L, 1.0e4 );
+		rayQueryInitializeEXT( qi, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
 		JAH_RQ_PROCEED( qi )
+		jahC2Seg[2] = vec4( img.L, rayQueryGetIntersectionTypeEXT( qi, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
+										 ? rayQueryGetIntersectionTEXT( qi, true ) : exitI );
 		const JahImage m = jahImageAt( img.index );
 		if( rayQueryGetIntersectionTypeEXT( qi, true ) == gl_RayQueryCommittedIntersectionTriangleEXT &&
 			uint( rayQueryGetIntersectionInstanceCustomIndexEXT( qi, true ) ) == m.mirror )

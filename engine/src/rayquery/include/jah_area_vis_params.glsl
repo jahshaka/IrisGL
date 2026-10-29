@@ -8,6 +8,9 @@
 
 /// The forward LTC set's ceiling (HlmsPbs's area LTC limit, EnginePrivate.h kAreaLtcLimit): a channel a light.
 const int kAreaVisLights = 4;
+/// THE GEOMETRY BOXES A FRAME HANDS THE TRACE (PHOTON-7 8B, B2; EnginePrivate.h kAreaVisRegions): the changed-region
+/// list's movers and edits, merged on the host to fit - never dropped.
+const int kAreaVisRegions = 32;
 
 /// ONE AREA LIGHT as the trace reads it, in world space: the rectangle's corner (w = 1 two-sided), its two edges (eu.w
 /// = the light's range), and the direction it shines (its -Z; the cards' `emit`).
@@ -58,6 +61,12 @@ JAH_AREA_VIS_PARAMS_BLOCK AreaVisParams
 	/// x = how many lights (<= kAreaVisLights).
 	vec4 lights;
 	JahAreaVisLight light[kAreaVisLights];
+	/// THE GEOMETRY THAT CHANGED THIS FRAME (PHOTON-7 8B, B2: the rest breaks PER TEXEL, as the gather's cells do): x =
+	/// how many boxes follow (the changed-region list's movers' swept boxes and edits), y = 1 = every texel is reached
+	/// (the list overflowed or restarted). A resting texel whose light rays one meets leaves its rest for its moving
+	/// history and rests again from the next frame (jah_area_vis_law.glsl); box i = [2i] its lower corner, [2i + 1] upper.
+	vec4 regions;
+	vec4 regionBox[2 * kAreaVisRegions];
 } p;
 
 /// The view distance a depth texel stands for (reverse-Z safe, both projections) - rq_sun_contact.comp's.
