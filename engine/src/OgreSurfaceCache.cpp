@@ -343,7 +343,7 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     // radiance's precision - they were R11G11B10F, a 6-bit mantissa at 0.4-0.8 % a step, and a relight that does not march
     // rebuilt the radiance from them: gi.card_closed_form +0.08..0.10 %, 1.3-1.7 store steps; +16 MB each at 2048^2).
     mRadianceFormatName = "RGBA16F";
-    const Ogre::PixelFormatGpu radFmt = Ogre::PFG_R11G11B10_FLOAT;   // ARM (REDS-1 follow-up): the old layers
+    const Ogre::PixelFormatGpu radFmt = Ogre::PFG_RGBA16_FLOAT;
     // THE RADIANCE ITSELF IS RGBA16F (PHOTON-7 stage 10, 10-2d; the lead's ruling, +16 MB - the spec's memory list): a
     // store whose quantum (R11G11B10F's 1.6 % step) is over the display code cannot hold laws stated within a code,
     // and every reader of it - a reflection's hit, the gather's, another card's - inherits the step (gi.card_residency
