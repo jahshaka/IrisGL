@@ -338,12 +338,12 @@ bool SurfaceCache::makeAtlas(std::string &err) {
 
     // THE SIXTH LAYER, RADIANCE (PHOTON-CARDS-1, SC-1c): what a hit will read.
     // Written by the `Jahshaka/CardLight` compute job and by nothing else, so it
-    // is a UAV — never a render target, never a copy destination. RGBA16F (below: 32 MB at 2048 square); the Indirect
-    // and Flat layers are R11G11B10F - four bytes of unsigned HDR - when the device can STORE to it from a compute job,
-    // RGBA16F otherwise.
+    // is a UAV — never a render target, never a copy destination. RGBA16F (below: 32 MB at 2048 square), and so are the
+    // Indirect and Flat layers beside it (REDS-1, the lead's ruling: a layer the radiance is REBUILT from carries the
+    // radiance's precision - they were R11G11B10F, a 6-bit mantissa at 0.4-0.8 % a step, and a relight that does not march
+    // rebuilt the radiance from them: gi.card_closed_form +0.08..0.10 %, 1.3-1.7 store steps; +16 MB each at 2048^2).
     mRadianceFormatName = "RGBA16F";
-    Ogre::PixelFormatGpu radFmt = Ogre::PFG_R11G11B10_FLOAT;
-    if (!tm->checkSupport(radFmt, Ogre::TextureTypes::Type2D, Ogre::TextureFlags::Uav)) radFmt = Ogre::PFG_RGBA16_FLOAT;
+    const Ogre::PixelFormatGpu radFmt = Ogre::PFG_RGBA16_FLOAT;
     // THE RADIANCE ITSELF IS RGBA16F (PHOTON-7 stage 10, 10-2d; the lead's ruling, +16 MB - the spec's memory list): a
     // store whose quantum (R11G11B10F's 1.6 % step) is over the display code cannot hold laws stated within a code,
     // and every reader of it - a reflection's hit, the gather's, another card's - inherits the step (gi.card_residency
@@ -357,7 +357,7 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     // ...and THE CACHED INDIRECT HALF, the march's answer per texel (Lumen's
     // IndirectLighting atlas): the expensive half is recomputed only when the
     // chain re-injects, and a direct-only relight reads it back. Same format,
-    // read and written by the same job. +16 MB.
+    // read and written by the same job. +32 MB (RGBA16F).
     mIndirect = tm->createTexture(processUniqueName("cardIndirect"), Ogre::GpuPageOutStrategy::Discard,
                                   Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
     mIndirect->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
@@ -366,7 +366,7 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mIndirect->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
     // ...and THE FLAT TERM (ENGINE-POLISH-PHOTON-1 stage 3): the emissive and the
     // specular lobe's re-emission, what the read adds outside the diffuse view
-    // restore. Same format, written by the same job. +16 MB.
+    // restore. Same format, written by the same job. +32 MB (RGBA16F).
     mFlat = tm->createTexture(processUniqueName("cardFlat"), Ogre::GpuPageOutStrategy::Discard,
                               Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
     mFlat->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
@@ -2592,14 +2592,6 @@ void SurfaceCache::relightCards() {
     if (mLightJob->getProperty("jah_card_gather") != (gatherBound ? 1 : 0))
         mLightJob->setProperty("jah_card_gather", gatherBound ? 1 : 0);
     mLightJob->setNumUavUnits(gatherBound ? 13u : 12u);   // (11: the open fraction, 12: the gather layer)
-    // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
-    // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
-    {
-        // (the Indirect and Flat layers': the radiance is RGBA16F, rounded to nearest by the store itself)
-        const Ogre::int32 round = mIndirect->getPixelFormat() == Ogre::PFG_R11G11B10_FLOAT ? 1 : 0;
-        if (mLightJob->getProperty("jah_card_round_r11g11b10") != round)
-            mLightJob->setProperty("jah_card_round_r11g11b10", round);
-    }
     // Every light volume a reader binds per cascade: the total, the directional
     // axes, the per-axis coverage (PHOTON-VOXEL-3), the surface position
     // (PHOTON-VOXEL-4), the back side and the normal - PhotonVoxelLighting's list.

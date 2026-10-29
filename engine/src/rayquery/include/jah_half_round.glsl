@@ -4,7 +4,7 @@
 // every value by its binade (round to nearest would sit in [ -1/2, +1/2 ]). Vulkan leaves the conversion's rounding to
 // the implementation. A value about to be stored in a half-float image takes half a half-float step on its float bits
 // first (the 10-bit mantissa's half unit: bit 12 of the float's 23), so the truncating store rounds half away from
-// zero: to nearest (a tie is 1 input in 2^13 of a step; radiance is non-negative). The same trick as the R11G11B10F layers' jahCardRound (JahCardLight_cs.glsl). Never through
+// zero: to nearest (a tie is 1 input in 2^13 of a step; radiance is non-negative). The same trick the R11G11B10F layers' jahCardRound used (deleted with them, REDS-1). Never through
 // unpackHalf2x16( packHalf2x16( x ) ), which the compiler folds to x. Clamped to the half's largest finite value first
 // (65504: +Inf's bits plus the half step are a NaN pattern); an Inf or a NaN is returned as it came, never rounded.
 // WRONG IN THE fp16 DENORMAL RANGE, stated: below the half's smallest normal (|x| < 2^-14) the half's half step is the

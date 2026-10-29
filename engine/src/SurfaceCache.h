@@ -799,7 +799,7 @@ private:
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;
-    /// THE CACHED INDIRECT HALF (a UAV, R11G11B10F like the radiance), per channel:
+    /// THE CACHED INDIRECT HALF (a UAV, RGBA16F like the radiance - REDS-1), per channel:
     /// the diffuse half where the channel has a diffuse albedo, the specular lobe's
     /// indirect share where it has none (kD = 0: a metal) - so a relight recovers the
     /// irradiance and re-emits both lobes from it (ENGINE-POLISH-PHOTON-1 stage 3);
