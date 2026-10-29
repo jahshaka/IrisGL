@@ -1402,7 +1402,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	// its resume restarts its rest mid-batch, and the eased hand-over of 2N samples at k samples a frame lands the new
 	// read in 2N / k frames (measured: rtreflect.lamp_step_held's eref bursts, unchanged when only stopped texels were
 	// marked). A scene change resumes at once. The mark is this frame's.
-	if( atRest )
+	if( atRest && p.alpha.x < 0.5 )   // (MEASURING ARM)
 	{
 		uvec4 rw = imageLoad( restRefine, ivec3( tc, gEye ) );
 		const bool reach = resume && ( stoppedCard || s.card );
@@ -1646,7 +1646,7 @@ void main()
 		if( !real && !stoppedCard )
 		{
 			// (a stopped texel still REFINING - B2's code-a-frame slew - is still active: the view holds once each arrived)
-			if( JAH_HIT_ON && ( imageLoad( restRefine, ivec3( tc, gEye ) ).w & kRefineRefining ) != 0u )
+			if( JAH_HIT_ON && p.alpha.x < 0.5 && ( imageLoad( restRefine, ivec3( tc, gEye ) ).w & kRefineRefining ) != 0u )
 				atomicAdd( jahHitBuf[2], 1u );
 			// No sample - and the texel's state is left as it is. A CAPPED texel (its count at the field's ceiling: it
 			// stopped by the cap, not by its standard error) is counted every frame into the hit list's fourth word -
