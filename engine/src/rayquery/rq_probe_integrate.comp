@@ -456,15 +456,9 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 	{
 		const vec3 d = normalize( basis * jahRayCosineDir( i, n ) );
 		const vec3 dLS = JAH_CONES_TO_LS( d );
-		jahSideDbgA = vec4( -1.0 );
 		const JahVoxelRayResult vr = jahVoxelRay( startLS, dLS, surfLS, nLS, epsC0, ivec4( 0 ), 0.0, 0.0, true );
 		if( vr.exitReason == kJahRayHit )
 		{
-			// MEASURING ARM (reverted): a hit answering light from inside sealed_hall's interior
-			if( max( vr.radiance.x, max( vr.radiance.y, vr.radiance.z ) ) > 1e-5 && abs( worldPos.x ) < 11.95 &&
-				abs( worldPos.z ) < 11.95 && worldPos.y > -0.05 && worldPos.y < 5.05 )
-				jahTierRec16( vec4( worldPos, vr.radiance.x ), vec4( d, float( vr.cascade ) ), jahSideDbgA,
-							  vec4( jahSideDbgB.xyz, float( gPixQ.x + 4096 * gPixQ.y ) ) );
 			sum += vr.radiance;
 			taken += 1.0;
 			continue;

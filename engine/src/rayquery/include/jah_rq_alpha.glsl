@@ -179,27 +179,8 @@ void jahPanesOverflowCount()
 	if( ( a.x | a.y ) != 0u )
 		atomicAdd( JahTierCounters( a ).c[0], 1u );
 }
-/// MEASURING ARM (11-2 sealed_hall; reverted): records of 16 words from word 8, the count in [1] (the first 1024)
-void jahTierRec16( vec4 a, vec4 b, vec4 c, vec4 d )
-{
-	const uvec2 ad = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
-	if( ( ad.x | ad.y ) == 0u )
-		return;
-	const uint k = atomicAdd( JahTierCounters( ad ).c[1], 1u );
-	if( k >= 1024u )
-		return;
-	const uint o = 8u + k * 16u;
-	for( int i = 0; i < 4; ++i )
-	{
-		JahTierCounters( ad ).c[o + uint( i )] = floatBitsToUint( a[i] );
-		JahTierCounters( ad ).c[o + 4u + uint( i )] = floatBitsToUint( b[i] );
-		JahTierCounters( ad ).c[o + 8u + uint( i )] = floatBitsToUint( c[i] );
-		JahTierCounters( ad ).c[o + 12u + uint( i )] = floatBitsToUint( d[i] );
-	}
-}
 #else
 void jahPanesOverflowCount() {}
-void jahTierRec16( vec4 a, vec4 b, vec4 c, vec4 d ) {}
 #endif
 /// ...a pane to the overflow
 void jahPanesOverflow( inout JahPanes p, float t, uint w )

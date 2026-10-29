@@ -5599,10 +5599,6 @@ struct RayQueryStatus {
     /// rest are applied - their transmittance multiplied, their own light left out. Cumulative over the tier's life (every
     /// scene), read a few frames late; 0 = no ray met more. A light ray has no list (no cap) and is never counted.
     unsigned long long panesOverflow = 0;
-    /// MEASURING ARM (reverted): the integrate's voxel-ray hits answering light inside sealed_hall's box (16 floats each:
-    /// origin, radiance.r | dir, cascade | axis a, na, nv[a], along | iso, back luma, c, pixel)
-    unsigned long long sideRecords = 0;
-    std::vector<float> sideRec;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append

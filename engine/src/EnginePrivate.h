@@ -2186,7 +2186,6 @@ private:
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
-    X(SkyRecReset, "rayquery.skyRecReset") /* MEASURING ARM (11-2, reverted): a new value empties the side records */ \
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
     X(AtomDecode, "atom.decode") /* the screen decode armed (0: the Atom items drawn by nothing) */ \
     X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \
