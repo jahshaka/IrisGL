@@ -53,6 +53,27 @@ float jahRestHandOverWeight( float v, float N )
 	const float x = 1.0 - min( v / jahRestHandOverLength( N ), 1.0 );
 	return 1.0 - x * x;
 }
+/// THE NO-POP HAND-OVER OF A CACHE REFINEMENT (PHOTON-7 8B, B2 - the gather's B3 in the reflection's form; the set's
+/// binding 62, OgreRayQuery.cpp kReflectRefineBinding: an rgba32ui a trace texel and eye, xyz the HELD answer's float
+/// bits, w the word). A texel reached at rest by a CARD region alone - a capture, a relight, a card-to-card round: the
+/// cache refined what its hit reads, the world did not change - stopped or still converging, RE-RESTS IN THE BACKGROUND: its rest restarts as a resume's, but every reader SHOWS the held answer (REFINING); when
+/// the new rest stops, the temporal pass takes delta = the display codes between the held answer and the new one and
+/// WALKS over M = ceil( delta / one code ) frames (HANDOVER, step j of M: mix( held, new, j / M )) - never more than a
+/// code a frame. A real change (a mover, a light, a slab, an edit, a brick) resumes it at once from what it shows. The
+/// word: kRefineReach = the trace found a card-only reach THIS frame (the temporal pass consumes it), then the state's
+/// two bits, j in [8:15], M in [16:23].
+const uint kRefineReach = 1u, kRefineRefining = 2u, kRefineHandover = 4u;
+uint jahRefineStep( uint w ) { return ( w >> 8u ) & 0xFFu; }
+uint jahRefineSteps( uint w ) { return max( ( w >> 16u ) & 0xFFu, 1u ); }
+/// What a reader SHOWS of a texel's composed answer under its refinement word `r`.
+vec3 jahRefineShown( vec3 answer, uvec4 r )
+{
+	if( ( r.w & kRefineRefining ) != 0u )
+		return uintBitsToFloat( r.xyz );
+	if( ( r.w & kRefineHandover ) != 0u )
+		return mix( uintBitsToFloat( r.xyz ), answer, float( jahRefineStep( r.w ) ) / float( jahRefineSteps( r.w ) ) );
+	return answer;
+}
 /// THE COMPOSED ANSWER (G2): the hand-over from the frozen history H (`hasH`: the texel carried one) to the rest mean
 /// M of v samples, the rest mean after it.
 vec3 jahRestAnswer( vec3 H, bool hasH, vec3 M, float v, float N )

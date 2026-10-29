@@ -290,7 +290,7 @@ constexpr unsigned kReflectStopFrames = 8u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 62u;
+constexpr unsigned kReflectBindings = 63u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -387,8 +387,11 @@ constexpr unsigned kColourPickSlots = 256u, kColourPickWords = 128u;
 /// crosses one of its segments, or a light region or a changed brick lies at one of its hits (rq_reflect.comp).
 constexpr unsigned kReflectRegionsBinding = kReflectPickBinding + 1u;
 constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
-static_assert(kReflectBindings == kReflectBricksBinding + GatherRestInputs::kCascades,
-              "the brick masks are the reflection set's last bindings");
+/// ...and THE REFINEMENT (62, PHOTON-7 8B, B2's no-pop hand-over; jah_reflect_rest.glsl kRefine*): rgba32ui a trace
+/// texel and eye - a texel reached at rest by a CARD region alone re-rests in the background showing its answer, then
+/// walks to the new one at a code a frame (the gather's B3, the reflection's form).
+constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
+static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement word is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
@@ -1200,6 +1203,8 @@ private:
         ReflectImage reference;
         /// THE REST'S STOP SHARE (binding 51): r32ui a trace texel, a float's bits.
         ReflectImage share;
+        /// THE REFINEMENT (binding 62, B2's no-pop hand-over): rgba32ui a trace texel, jah_reflect_rest.glsl's layout.
+        ReflectImage refine;
         /// THE REST'S COMPACT LIST (binding 52, kReflectCompactBinding): [0..1] the halves' counts, then the halves; the
         /// half this frame lists into flips each traced frame.
         RawBuffer compactList;
@@ -6123,6 +6128,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 59 ...1
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 60 ...2
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 61 ...3
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 62 the refinement word (PHOTON-7 8B, B2's hand-over)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6306,6 +6312,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
+    retireImage(rv.refine);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
@@ -6324,6 +6331,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
     if (!makeStorageImage(w, h, formats[0], rv.nee, err, layers)) return false;
     if (!makeStorageImage(w, h, VK_FORMAT_R32_UINT, rv.share, err, layers)) return false;   // the stop share: a float's bits, atomic min
+    if (!makeStorageImage(w, h, VK_FORMAT_R32G32B32A32_UINT, rv.refine, err, layers)) return false;   // the refinement (B2): the held answer's bits + the word
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
     if (!makeStorageImage(reference ? w : 1u, reference ? h : 1u, VK_FORMAT_R32G32B32A32_SFLOAT, rv.reference, err,
                           layers))
@@ -6346,10 +6354,10 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // clear waits for those stages and makes their writes available before it writes;
     // a freshly made image has no earlier access and the same barrier costs it nothing.
     // The old contents are discarded (UNDEFINED): they are cleared.
-    constexpr int kImages = 8;
+    constexpr int kImages = 9;
     VkImageMemoryBarrier toGeneral[kImages] = {};
     ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference,
-                                    &rv.share, &rv.nee };
+                                    &rv.share, &rv.nee, &rv.refine };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -6397,6 +6405,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
+    retireImage(rv.refine);
     retire(rv.compactList);
     retire(rv.histReadback);
     retire(rv.movingSe);
@@ -7326,6 +7335,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!shareImg.imageView) { bail("the rest's stop-share binding is null"); return; }
     w[kReflectShareBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectShareBinding].pImageInfo = &shareImg;
+    // THE REFINEMENT WORD (62, B2): the trace marks a card-only reach, the temporal pass runs the hand-over, the filter
+    // and the compose read the answer it shows
+    VkDescriptorImageInfo refineImg{};
+    refineImg.imageView = rv.refine.view;
+    refineImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
+    w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectRefineBinding].pImageInfo = &refineImg;
     // THE REST'S COMPACT LIST (52)
     if (!rv.compactList.buffer) {
         std::string lerr;

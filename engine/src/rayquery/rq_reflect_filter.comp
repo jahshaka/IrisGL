@@ -60,6 +60,8 @@ layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 /// floats order as their bits); the temporal pass read and reset it (all ones: no pixel measured the texel) before
 /// this pass. A statistic, never colour fed back.
 layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
+/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl jahRefineShown): a card-only reach's held answer and its walk.
+layout( rgba32ui, set = 0, binding = 62 ) uniform readonly uimage2DArray restRefine;
 /// THE PREVIOUS FRAME'S PICTURE (binding 47, the screen trace's `jahSsrPrev`: the scene's linear colour at the frame's end,
 /// full size) - the stop's share is the slope of the pixel's FINAL displayed colour (PHOTON-7 stage 11, the lead's ruling
 /// (a)); bound only where the chain screen-traces (p.screen.x), a 1 x 1 stand-in otherwise.
@@ -177,7 +179,8 @@ Answer answerAt( ivec2 t )
 	// sample a frame) a texel still holding none answers nothing: the composite's weight 0, the probe or the sky answers.
 	if( !( v > 0.0 ) && p.knobs2.x >= jahRestHandOverLength( N ) )
 		return a;
-	const vec3 answer = jahRestAnswer( hasH ? Hr.xyz : vec3( 0.0 ), hasH, M.xyz, v, N );
+	const vec3 answer = jahRefineShown( jahRestAnswer( hasH ? Hr.xyz : vec3( 0.0 ), hasH, M.xyz, v, N ),
+										imageLoad( restRefine, ivec3( t, gEye ) ) );
 	if( !finite3( answer ) )
 		return a;
 	a.ok = true;

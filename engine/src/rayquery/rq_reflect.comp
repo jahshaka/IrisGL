@@ -283,6 +283,9 @@ layout( std430, set = 0, binding = 58 ) readonly buffer JahRestBricks0 { uint w[
 layout( std430, set = 0, binding = 59 ) readonly buffer JahRestBricks1 { uint w[]; } restBricks1;
 layout( std430, set = 0, binding = 60 ) readonly buffer JahRestBricks2 { uint w[]; } restBricks2;
 layout( std430, set = 0, binding = 61 ) readonly buffer JahRestBricks3 { uint w[]; } restBricks3;
+/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl kRefine*): the trace marks a card-only reach of any texel at rest
+/// (kRefineReach, this frame's), and counts a texel handing over as still active.
+layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
 bool restBrickChanged( uint c, uint idx )
 {
 	uint a = 0u, b = 0u;
@@ -291,6 +294,21 @@ bool restBrickChanged( uint c, uint idx )
 	else if( c == 2u ) { a = restBricks2.w[2u * idx]; b = restBricks2.w[2u * idx + 1u]; }
 	else { a = restBricks3.w[2u * idx]; b = restBricks3.w[2u * idx + 1u]; }
 	return jahBrickChangedWords( a, b );
+}
+/// A HIT A RELIT OR CAPTURED CARD's INSTANCE BOX HOLDS (B2): the cache REFINED what the hit reads - the world did not
+/// change. A stopped texel it alone reaches re-rests in the background and walks (jah_reflect_rest.glsl kRefine*).
+bool restHitCard( vec3 x, float r )
+{
+	const uint n = min( uint( p.restLists.x + 0.5 ), 128u );
+	for( uint k = 0u; k < n; ++k )
+	{
+		if( regionKind( k ) != kRegionCard )
+			continue;
+		const vec3 lo = regionLo( k ).xyz - vec3( r ), hi = regionHi( k ).xyz + vec3( r );
+		if( all( greaterThanEqual( x, lo ) ) && all( lessThanEqual( x, hi ) ) )
+			return true;
+	}
+	return false;
 }
 /// A SEGMENT THE TRACED GEOMETRY CHANGED ACROSS THIS FRAME (G6; B2): origin o, unit direction d, length t, against the
 /// list's MOVERS - a moved, staged or posed slot's swept box (its bounds this frame and last, joined: every transform
@@ -311,9 +329,9 @@ bool restSegmentMoved( vec3 o, vec3 d, float t )
 	return false;
 }
 /// A HIT WHOSE LIGHT CHANGED THIS FRAME (B2): the point x a ray found, its read's radius r (the lobe's footprint there) -
-/// a LIGHT region of the list around it (a scroll's slab, a relit card's instance, a lamp's range, a lamp's shadow
-/// range, an edit of the store's geometry or a material: what the hit reads changed there - the cards' and the store's
-/// answers alike; the traced geometry is the segments'), or
+/// a LIGHT region of the list around it (a scroll's slab, a lamp's range, a lamp's shadow range, an edit of the store's
+/// geometry or a material: what the hit reads changed there; the traced geometry is the segments', a card's refinement
+/// restHitCard's), or
 /// a BRICK the frame's light work changed under it: the store's bounce, which spreads beyond any listed box (a mover's
 /// bounce on the still walls beside it). The finest cascade holding the point whose brick is at least the radius answers
 /// (the coarsest holding it for a wider read), over the bricks within half a brick of it: the trilinear read's reach.
@@ -325,8 +343,7 @@ bool restHitChanged( vec3 x, float r )
 	for( uint k = 0u; k < n; ++k )
 	{
 		const uint kind = regionKind( k );
-		if( kind == kRegionSlab || kind == kRegionCard || kind == kRegionLamp || kind == kRegionLampShadow ||
-			kind == kRegionEdit )
+		if( kind == kRegionSlab || kind == kRegionLamp || kind == kRegionLampShadow || kind == kRegionEdit )
 		{
 			const vec3 lo = regionLo( k ).xyz - vec3( r ), hi = regionHi( k ).xyz + vec3( r );
 			if( all( greaterThanEqual( x, lo ) ) && all( lessThanEqual( x, hi ) ) )
@@ -735,6 +752,7 @@ struct JahReflectSample
 	uint c2MirrorSlot;
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
+	bool card;   // (B2: this sample's resume is a CARD region's alone - a refinement)
 };
 JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 {
@@ -766,7 +784,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.c2MirrorSlot = 0xFFFFFFFFu;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
-	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
+	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false; o.card = false;
 	return o;
 }
 // THE SAMPLE at index `frame` (every random input of it is keyed on it: the draw, the screen's coin, the mover gate's turn).
@@ -1249,6 +1267,14 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		resume = resume || ( hitT < maxT && restHitChanged( origin + L * hitT, reflectFootprint( lobeAlpha, hitT ) ) ) ||
 				 ( meanT > 0.0 && restHitChanged( origin + meanL * meanT, reflectFootprint( lobeAlpha, meanT ) ) ) ||
 				 ( jahC2HitR > 0.0 && restHitChanged( jahC2SegO + jahC2Seg[0].xyz * jahC2Seg[0].w, jahC2HitR ) );
+		// ...AND A CARD's REFINEMENT at a hit (B2): a resume all the same, marked as the cards' alone
+		if( !resume && p.restLists.x > 0.5 )
+		{
+			o.card = ( hitT < maxT && restHitCard( origin + L * hitT, reflectFootprint( lobeAlpha, hitT ) ) ) ||
+					 ( meanT > 0.0 && restHitCard( origin + meanL * meanT, reflectFootprint( lobeAlpha, meanT ) ) ) ||
+					 ( jahC2HitR > 0.0 && restHitCard( jahC2SegO + jahC2Seg[0].xyz * jahC2Seg[0].w, jahC2HitR ) );
+			resume = o.card;
+		}
 	}
 	o.L = L; o.traced = traced; o.recN = recN; o.screenRadiance = screenRadiance; o.recBary = recBary;
 	o.nee = neePart; o.recDelta = recDelta;
@@ -1334,7 +1360,7 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf, bool ownMoving, float lobeAlpha,
 					EyeImage thisEye, bool atRest, bool restInPlace, bool restBatch, uint batchRays,
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
-					uint vNow, uint folds, uint consumed, float restT, JahReflectSample s )
+					uint vNow, uint folds, uint consumed, float restT, bool stoppedCard, JahReflectSample s )
 {
 	jahPickSample( tc, s, vNow, restStop, atRest );   // THE PICK (the reds' instrument; nothing unless the arm names tc)
 	bool resume;
@@ -1372,6 +1398,19 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	st.v = restInPlace ? vNow : 0u;
 	st.stop = restInPlace && !resume ? restStop : 0u;
 	st.resume = atRest && resume;
+	// THE REFINEMENT's MARK (B2): a resume by a CARD region alone - on a stopped texel (its mean hit's test, main) or one
+	// still converging, refining or handing over - re-rests in the background (the temporal pass). Unlike the gather's
+	// active cell, a converging texel too: its resume restarts its rest mid-batch, and the eased hand-over of 2N samples
+	// at k samples a frame walks the refined read in 2N / k frames (measured: rtreflect.lamp_step_held's eref bursts,
+	// 0.72 -> 4.96 codes at frames 133-143, unchanged when only stopped texels refined). The mark is this frame's.
+	if( atRest )
+	{
+		uvec4 rw = imageLoad( restRefine, ivec3( tc, gEye ) );
+		const bool reach = resume && ( stoppedCard || s.card );
+		const uint w = ( rw.w & ~kRefineReach ) | ( reach ? kRefineReach : 0u );
+		if( w != rw.w )
+			imageStore( restRefine, ivec3( tc, gEye ), uvec4( rw.xyz, w ) );
+	}
 	st.centre = centre;
 	st.folded = folded;
 	st.delta = !centre && !vndf;
@@ -1596,14 +1635,19 @@ void main()
 		if( compactOn )
 			live = false;   // the compact pass's (this lane works in the tile's deal)
 	}
-	bool resume = false;
+	bool resume = false, stoppedCard = false;
 	if( live && restStop >= kReflectStopFrames )
 	{
 		const float meanT = inPlace.hitT;
 		const vec3 meanL = reflect( -V, worldN );
-		if( !( meanT > 0.0 ) ||
-			!( restSegmentMoved( origin, meanL, meanT ) || restHitChanged( origin + meanL * meanT, reflectFootprint( max( alpha, 1e-4 ), meanT ) ) ) )
+		const float meanR = reflectFootprint( max( alpha, 1e-4 ), meanT );
+		const bool real = meanT > 0.0 && ( restSegmentMoved( origin, meanL, meanT ) || restHitChanged( origin + meanL * meanT, meanR ) );
+		stoppedCard = !real && meanT > 0.0 && p.restLists.x > 0.5 && restHitCard( origin + meanL * meanT, meanR );
+		if( !real && !stoppedCard )
 		{
+			// (a texel HANDING OVER - B2's walk - is still active: the view holds once every walk is done)
+			if( JAH_HIT_ON && ( imageLoad( restRefine, ivec3( tc, gEye ) ).w & kRefineHandover ) != 0u )
+				atomicAdd( jahHitBuf[2], 1u );
 			// No sample - and the texel's state is left as it is. A CAPPED texel (its count at the field's ceiling: it
 			// stopped by the cap, not by its standard error) is counted every frame into the hit list's fourth word -
 			// RayQueryStatus::reflectRestCapped, the defect reading (commit 8).
@@ -2008,7 +2052,7 @@ void main()
 			}
 			reflectFinish( tc, dist, world, origin, prevSurf, ownMoving, lobeAlpha, thisEye, atRest, restInPlace,
 						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds,
-						   folds + runUsed, restT, s );
+						   folds + runUsed, restT, stoppedCard, s );
 			phase = 2u;
 		}
 	}
