@@ -5158,17 +5158,6 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
     st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
     st.panesOverflow = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[0] : 0u;
-    if (mTierCounters.mapped) {   // MEASURING ARM (reverted): the cards' gather's C2 sky records
-        volatile uint32_t *w = static_cast<volatile uint32_t *>(mTierCounters.mapped);
-        static double seen = 0.0;   // (the arm rayquery.skyRecReset: a new value empties the records)
-        const double rv = mArms ? mArms->value(ArmId::SkyRecReset) : 0.0;
-        if (rv != seen) { seen = rv; w[1] = 0u; }
-        const uint32_t cnt = w[1];
-        st.skyRecords = cnt;
-        const uint32_t n = cnt < 4096u ? cnt : 4096u;
-        st.skyRec.resize(size_t(n) * 9u);
-        for (size_t i = 0; i < st.skyRec.size(); ++i) { uint32_t u = w[8 + i]; std::memcpy(&st.skyRec[i], &u, 4); }
-    }
     return st;
 }
 
@@ -8287,12 +8276,11 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     out.tierCounters = tierCountersAddress();
 }
 
-static constexpr uint32_t kTierWordsArm = 8u + 4096u * 9u;   // MEASURING ARM (reverted)
 uint64_t RayQueryTier::tierCountersAddress() {
     if (!mTierCounters.buffer) {
         std::string err;
-        if (!makeBuffer(kTierWordsArm * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mTierCounters, err)) return 0u;   // (MEASURING ARM)
-        std::memset(mTierCounters.mapped, 0, kTierWordsArm * 4u);
+        if (!makeBuffer(16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mTierCounters, err)) return 0u;
+        std::memset(mTierCounters.mapped, 0, 16u);
     }
     return uint64_t(addressOf(mTierCounters.buffer));
 }
