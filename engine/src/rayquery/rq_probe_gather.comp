@@ -82,6 +82,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 layout( std430, set = 0, binding = 39 ) buffer JahCellState { uint jahCellState[]; };   // (B5: the moving shares written)
 /// THE FAST UPDATE's BRICK MASKS (B5): each cascade's, two words a brick (jahBrickChangedWords), in the hit set's order
 layout( std430, set = 0, binding = 41 ) readonly buffer JahFastBricks { uint w[]; } jahFastBricks[4];
+layout( std430, set = 0, binding = 42 ) readonly buffer JahArmFb { uint w[]; } jahArmFb[4];   // MEASURING ARM (a)(1)
 layout( std430, set = 0, binding = 40 ) buffer JahCellStore { uint jahCellStore[]; };
 /// THE DEMAND SPAN ON THE CLOCK (PHOTON-7 stage 10's per-reader snapshot, read on the device since 8B: the rest clock is
 /// the GPU's): the view stamps the cards it reads at its rest indices [1, span] alone (p.knobs6.x = the span; 0 = no
@@ -262,10 +263,12 @@ float armOneCodeAt( float L )
 float armBrickChange( uint c, uint idx )
 {
 	uint a = 0u, b = 0u;
-	if( c == 0u ) { a = jahFastBricks[0].w[2u * idx]; b = jahFastBricks[0].w[2u * idx + 1u]; }
-	else if( c == 1u ) { a = jahFastBricks[1].w[2u * idx]; b = jahFastBricks[1].w[2u * idx + 1u]; }
-	else if( c == 2u ) { a = jahFastBricks[2].w[2u * idx]; b = jahFastBricks[2].w[2u * idx + 1u]; }
-	else { a = jahFastBricks[3].w[2u * idx]; b = jahFastBricks[3].w[2u * idx + 1u]; }
+	// (a)(1): THE ABSOLUTE MOVE - the feedback's brick state [4] (this frame's pass: the most a voxel's total moved) and
+	// [7] (this frame's injections'), absolute radiance
+	if( c == 0u ) { a = jahArmFb[0].w[10u * idx + 4u]; b = jahArmFb[0].w[10u * idx + 7u]; }
+	else if( c == 1u ) { a = jahArmFb[1].w[10u * idx + 4u]; b = jahArmFb[1].w[10u * idx + 7u]; }
+	else if( c == 2u ) { a = jahArmFb[2].w[10u * idx + 4u]; b = jahArmFb[2].w[10u * idx + 7u]; }
+	else { a = jahArmFb[3].w[10u * idx + 4u]; b = jahArmFb[3].w[10u * idx + 7u]; }
 	if( ( a & 0x7F800000u ) == 0x7F800000u || ( b & 0x7F800000u ) == 0x7F800000u )
 		return 1e30;
 	return max( uintBitsToFloat( a ), uintBitsToFloat( b ) );
@@ -298,7 +301,7 @@ bool fastRayMoving( vec3 x, uint slot, bool near )
 		if( p.fast.w > 1.5 && p.fastBrickDims[c].w > 0.5 && gArmRayL >= 0.0 )   // MEASURING ARM
 		{
 			const float d = armBrickChange( c, ( b.z * dims.y + b.y ) * dims.x + b.x );
-			return d * gArmRayL * ( p.fast.w - 1.0 ) > armOneCodeAt( gArmRayL );
+			return d * ( p.fast.w - 1.0 ) > armOneCodeAt( gArmRayL );   // (a)(1): the absolute move against the ray's code
 		}
 		return p.fastBrickDims[c].w > 0.5 && fastBrickChanged( c, ( b.z * dims.y + b.y ) * dims.x + b.x );
 	}

@@ -111,7 +111,7 @@ constexpr unsigned kPlaceClockBinding = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's seven (25-31, PHOTON-CARDS-5 + the Specular layer, ENGINE-POLISH-PHOTON-1, + the sun's visibility,
 /// PHOTON-3: jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 42u;
+constexpr unsigned kTraceBindings = 43u;   // (+ 42: MEASURING ARM 8B B5 (a)(1), the feedback's brick state)
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
 /// ...and THE DIRECT TERM's volume per cascade (32, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
@@ -142,7 +142,7 @@ constexpr float kFastUpdateMost = 0.9f;
 static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
                   kTracePoolBinding == kTraceOverlayBinding + 1u && kTraceCloudBinding == kTracePoolBinding + 1u &&
                   kTraceDirectBackBinding == kTraceCloudBinding + 1u && kTraceClockBinding == kTraceDirectBackBinding + 1u &&
-                  kTraceFastBricksBinding == kTraceCellStoreBinding + 1u && kTraceFastBricksBinding + 1u == kTraceBindings &&
+                  kTraceFastBricksBinding == kTraceCellStoreBinding + 1u && kTraceFastBricksBinding + 2u == kTraceBindings &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 /// THE HIT SET's PLACE IN THE TRACE SET (HitSetSlots, the one writer): the TLAS (0), the volumes by kind (4-7, 15-18,
@@ -161,7 +161,7 @@ constexpr HitSetSlots kTraceHitSlots = {
     kTracePoolBinding,
     kTraceCloudBinding,
 };
-static_assert(kTraceBindings == kHitSetBindings + 9u,
+static_assert(kTraceBindings == kHitSetBindings + 10u,
               "the trace set is the hit set, its own five, the rest's three and the fast update's masks");
 /// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
 /// and the prefiltered maps it stores (PHOTON-7 stage 7, 7-3: the rough specular's source).
@@ -494,6 +494,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         }
         t[kTraceFastBricksBinding] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;   // the fast update's masks (8B, B5)
         c[kTraceFastBricksBinding] = GatherRestInputs::kCascades;
+        t[kTraceFastBricksBinding + 1u] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;   // MEASURING ARM: the feedback's state
+        c[kTraceFastBricksBinding + 1u] = GatherRestInputs::kCascades;
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -2203,6 +2205,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kTraceFastBricksBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kTraceFastBricksBinding].descriptorCount = GatherRestInputs::kCascades;
         w[kTraceFastBricksBinding].pBufferInfo = fastMasks;
+        VkDescriptorBufferInfo fbStates[GatherRestInputs::kCascades] = {};   // MEASURING ARM (8B B5 (a)(1))
+        for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
+            const GatherRestInputs::Bricks &b = in.rest.bricks[c];
+            fbStates[c].buffer = b.fbBuffer ? b.fbBuffer : dummyStorage;
+            fbStates[c].offset = b.fbBuffer ? b.fbOffset : 0u;
+            fbStates[c].range = b.fbBuffer ? b.fbRange : VK_WHOLE_SIZE;
+        }
+        w[kTraceFastBricksBinding + 1u].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kTraceFastBricksBinding + 1u].descriptorCount = GatherRestInputs::kCascades;
+        w[kTraceFastBricksBinding + 1u].pBufferInfo = fbStates;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 

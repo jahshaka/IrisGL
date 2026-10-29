@@ -387,6 +387,9 @@ struct GatherRestInputs {
         float origin[3] = { 0.0f, 0.0f, 0.0f };
         float brickMetres = 0.0f;
         bool live = false;
+        /// MEASURING ARM (8B B5 (a)(1), to be reverted): the feedback's brick state (10 words a brick)
+        VkBuffer fbBuffer = VK_NULL_HANDLE;
+        VkDeviceSize fbOffset = 0u, fbRange = 0u;
     } bricks[kCascades];
     /// THE FIELD AT WORK (PhotonComponent::fieldWideWorkOwed: its integration, empties, restarts or refinements): every
     /// cell a pixel of which read the field's fallback since the camera stopped resumes.
