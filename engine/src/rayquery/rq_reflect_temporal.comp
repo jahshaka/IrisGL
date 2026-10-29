@@ -321,11 +321,11 @@ void main()
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
 	// THE REFINEMENT WORD (B2): a rest's own - cleared on every frame off rest (the break's compose read it first)
-	uvec4 refine = imageLoad( restRefine, ivec3( tc, gEye ) );
+	uvec4 refine = p.alpha.x > 0.5 ? uvec4( 0u ) : imageLoad( restRefine, ivec3( tc, gEye ) );   // (MEASURING ARM)
 	if( p.knobs2.x < 0.5 && refine != uvec4( 0u ) )
 	{
 		refine = uvec4( 0u );
-		imageStore( restRefine, ivec3( tc, gEye ), refine );
+		if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );
 	}
 	// A texel the trace declined this frame keeps what it holds (the filter reads no answer there).
 	JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
@@ -387,7 +387,7 @@ void main()
 											  clamp( Mq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), float( st.v ), Nr );
 				const vec3 D = refineSlew( uintBitsToFloat( refine.xyz ), T );
 				refine = all( equal( D, T ) ) ? uvec4( 0u ) : uvec4( floatBitsToUint( D ), kRefineRefining );
-				imageStore( restRefine, ivec3( tc, gEye ), refine );
+				if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			return;
 		}
@@ -428,7 +428,7 @@ void main()
 			// BACKGROUND - the readers show `sofar` until the new rest stops and its walk is done; any other resume
 			// ends a refinement
 			refine = ( refine.w & kRefineReach ) != 0u ? uvec4( floatBitsToUint( sofar ), kRefineRefining ) : uvec4( 0u );
-			imageStore( restRefine, ivec3( tc, gEye ), refine );
+			if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );
 			if( vPrev > 0.0 || hasH )
 			{
 				hs.ok = true;
@@ -490,7 +490,7 @@ void main()
 			if( ( refine.w & kRefineRefining ) != 0u )
 			{
 				refine.xyz = floatBitsToUint( refineSlew( uintBitsToFloat( refine.xyz ), answer ) );
-				imageStore( restRefine, ivec3( tc, gEye ), refine );
+				if( p.alpha.x < 0.5 ) imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			{
 				const int ps = jahPickSlotT( tc );   // THE PICK (the reds' instrument)
