@@ -235,6 +235,7 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 /// THE CARD THE LAST READ ANSWERED FROM (its record in the card table; 0xFFFFFFFF none): the cards' TLAS gather records
 /// which cards each texel's rays read (rq_card_gather.comp: the card-to-card re-listing, PHOTON-7 stage 10).
 uint jahCardPicked = 0xFFFFFFFFu;
+vec3 jahCardPickCut = vec3( 0.0 );   // THE PICK (the reds' instrument): the last read's cutLobe (C2's share left out)
 
 /// THE NEAR-MIRROR BOUND (PHOTON-7 11-2 (7)): the G-buffer's floor, jah_reflect_draw.glsl's kMirrorPackAlpha - at or
 /// under it the relight stores no specular (JahCardLight_cs.glsl takes the same 0.0011).
@@ -247,6 +248,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 #endif
 	ok = pick.ok && pick.lit;
 	jahCardPicked = ok ? pick.card : 0xFFFFFFFFu;
+	jahCardPickCut = vec3( 0.0 );
 	if( !ok )
 		return vec3( 0.0 );
 	// THE VIEW TERM (jah_card_view.glsl): the stored normal in the card's own
@@ -307,6 +309,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 			lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
 									  JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
 	}
+	jahCardPickCut = cutLobe;
 	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cutLobe, indirect,
 								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
 }

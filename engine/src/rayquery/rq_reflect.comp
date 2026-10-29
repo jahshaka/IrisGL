@@ -649,7 +649,7 @@ struct JahReflectSample
 	vec3 c2;        // THE PICK's (the reds' instrument): the hit's traced lobe (C2) inside `traced` / a record's lobe
 	uint c2Slot;    // ...its secondary ray's hit slot (0xFFFFFFFF an exit), distance, BRDF part and portal part
 	float c2T;
-	vec3 c2Brdf, c2Portal, c2Spec, c2Mirror;
+	vec3 c2Brdf, c2Portal, c2Spec, c2Mirror, cut;
 	uint c2MirrorSlot;
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
@@ -679,6 +679,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.c2Portal = vec3( 0.0 );
 	o.c2Spec = vec3( 0.0 );
 	o.c2Mirror = vec3( 0.0 );
+	o.cut = vec3( 0.0 );
 	o.c2MirrorSlot = 0xFFFFFFFFu;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
@@ -938,8 +939,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !decodeAlways )
 			{
 				jahHitTracedLobe = c2;
+				jahCardPickCut = vec3( 0.0 );
 				traced = jahHitRadianceStore( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
 												reflectFootprint( lobeAlpha, t ), centre, ok, photonSource );
+				o.cut = jahCardPickCut;   // (THE PICK: the store's lobe share C2 replaces, left out of `traced`)
 				jahHitTracedLobe = false;
 				vec3 hAlbedo, hEmissive;
 				float hRough;
@@ -1225,6 +1228,7 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 	jahPick[b + 28u] = floatBitsToUint( s.c2Spec.x );
 	jahPick[b + 29u] = floatBitsToUint( s.c2Mirror.x );
 	jahPick[b + 30u] = s.c2MirrorSlot;
+	jahPick[b + 31u] = floatBitsToUint( s.cut.x );
 }
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,
