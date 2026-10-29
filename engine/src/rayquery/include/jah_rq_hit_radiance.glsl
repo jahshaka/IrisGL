@@ -214,6 +214,9 @@ vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec =
 vec3 jahC2PickMirror = vec3( 0.0 );
 uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
 
+#ifndef JAH_C2_SKY_HOOK
+#define JAH_C2_SKY_HOOK( P, N, L )   // (MEASURING ARM, reverted: the cards' gather records its sky answers)
+#endif
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -274,7 +277,10 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickMirror = vec3( 0.0 );
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	{
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
+		JAH_C2_SKY_HOOK( P, N, L2 );   // (MEASURING ARM, reverted)
+	}
 	else
 	{
 		const float t2 = rayQueryGetIntersectionTEXT( q, true );

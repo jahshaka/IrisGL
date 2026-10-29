@@ -104,6 +104,7 @@ layout( rgba8, set = 0, binding = 38 ) uniform readonly image2D cardOpen;
 // escape the sky over the lobe's cone
 vec3 jahEnvCone( vec3 dirWorld, float tanHalfAngle );
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) jahEnvCone( d, max( alpha, 1e-3 ) )
+#define JAH_C2_SKY_HOOK( P, N, L ) jahTierSkyRecord( P, N, L )   // (MEASURING ARM, reverted)
 #define JAH_HIT_LOBE_MASK uint( p.knobs.w )
 #include "jah_rq_hit_set_records.glsl"
 

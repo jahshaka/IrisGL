@@ -179,8 +179,30 @@ void jahPanesOverflowCount()
 	if( ( a.x | a.y ) != 0u )
 		atomicAdd( JahTierCounters( a ).c[0], 1u );
 }
+/// MEASURING ARM (11-2, the sealed_sky inner-face split; reverted): [1] the cards' gather's C2 sky answers, then from
+/// word 8 the first 4096 of them, nine floats each - the secondary's start P, its normal N, its direction L
+void jahTierSkyRecord( vec3 P, vec3 N, vec3 L )
+{
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) == 0u )
+		return;
+	const uint k = atomicAdd( JahTierCounters( a ).c[1], 1u );
+	if( k >= 4096u )
+		return;
+	const uint b = 8u + k * 9u;
+	JahTierCounters( a ).c[b + 0u] = floatBitsToUint( P.x );
+	JahTierCounters( a ).c[b + 1u] = floatBitsToUint( P.y );
+	JahTierCounters( a ).c[b + 2u] = floatBitsToUint( P.z );
+	JahTierCounters( a ).c[b + 3u] = floatBitsToUint( N.x );
+	JahTierCounters( a ).c[b + 4u] = floatBitsToUint( N.y );
+	JahTierCounters( a ).c[b + 5u] = floatBitsToUint( N.z );
+	JahTierCounters( a ).c[b + 6u] = floatBitsToUint( L.x );
+	JahTierCounters( a ).c[b + 7u] = floatBitsToUint( L.y );
+	JahTierCounters( a ).c[b + 8u] = floatBitsToUint( L.z );
+}
 #else
 void jahPanesOverflowCount() {}
+void jahTierSkyRecord( vec3 P, vec3 N, vec3 L ) {}
 #endif
 /// ...a pane to the overflow
 void jahPanesOverflow( inout JahPanes p, float t, uint w )
