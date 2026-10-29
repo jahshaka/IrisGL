@@ -260,6 +260,7 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 /// estimates an irradiance integral with a few stochastic rays, which cannot sample a polished hit's near-delta
 /// lobe (a mirror floor's sun glint, gi.id_depth), so it takes the lobe's integral mu ( F0 A( mu, r ) + w B( mu, r ) )
 /// - the store's own re-emission, energy-exact in expectation (Lumen's choice for the same reason).
+vec3 jahHitDirectPickSpec = vec3( 0.0 );   // THE PICK (the reds' instrument): the last jahHitDirect's lamp specular part
 vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
@@ -403,6 +404,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 		}
 	}
 	// a surface with no specular lobe (kS = 0) adds exactly zero: its light is the diffuse lobe's, bit for bit
+	jahHitDirectPickSpec = spec;
 	return sum * albedo + spec;
 }
 
@@ -423,8 +425,12 @@ vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, 
 		jahSpecularAlbedoHemi( roughness, sa, sb );
 	const vec3 specLobe = metal.xyz * sa + metal.w * sb;
 	const vec3 whole = albedo * jahDiffuseAlbedoHemi( roughness ) + specLobe;
-	// (C2: where the reader traces the lobe itself the bounce's specular share is left out - the traced lobe replaces it)
-	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) + ( jahHitTracedLobe ? vec3( 0.0 ) : specLobe );
+	// (C2: where the reader traces the lobe itself the bounce's specular share is left out - the traced lobe replaces it;
+	// and a NEAR-MIRROR sends none of it - a view-independent store holds no near-delta lobe, PHOTON-7 11-2 (7): its
+	// reflection is traced by the reader, C2's continuation)
+	const bool nearMirror = roughness * roughness <= 0.0011;
+	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) +
+						( jahHitTracedLobe || nearMirror ? vec3( 0.0 ) : specLobe );
 	return mix( bounce, bounce * toward / max( whole, vec3( 1e-12 ) ), greaterThan( whole, vec3( 0.0 ) ) );
 }
 

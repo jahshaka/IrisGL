@@ -6891,6 +6891,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             const uint32_t v = uint32_t(pv - 1.0);
             packed = (v % 4096u) | ((v / 4096u) % 4096u) << 12u | (frameNow() % kReflectPickSlots) << 24u | (1u << 30u);
             rv.pickFrames[frameNow() % kReflectPickSlots] = frameNow();
+            // (the slot this frame writes is zeroed first - its last writer retired 64 frames ago: a texel that writes
+            // nothing this frame - stopped, or not the trace's this frame - reads empty, never a 64-frame-old sample)
+            if (rv.pick.mapped)
+                std::memset(static_cast<char *>(rv.pick.mapped) + size_t(frameNow() % kReflectPickSlots) * kReflectPickWords * 4u,
+                            0, kReflectPickWords * 4u);
         }
         std::memcpy(&pp.alpha[1], &packed, sizeof(packed));
     }
@@ -7708,7 +7713,7 @@ PortalScanOut scanPortals(const PortalScanIn &in) {
         }
     }
     // THE OPENINGS: the connected opening cells (6-neighbours), each one's principal axes
-    struct Portal { float c[3]; float r; float n[3]; double power; float L[3]; };
+    struct Portal { float c[3]{}; float r = 0.f; float n[3]{}; double power = 0.0; float L[3]{}; };
     std::vector<Portal> portals;
     const float *sh = in.sh;
     const bool haveSh = in.haveSh;
