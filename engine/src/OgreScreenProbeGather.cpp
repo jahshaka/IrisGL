@@ -183,7 +183,10 @@ constexpr unsigned kIntegrateSkyVisBinding = kIntegrateHitFirst + kHitSetBinding
 /// cell's pixels write their history through and nothing else).
 constexpr unsigned kIntegrateClockBinding = kIntegrateSkyVisBinding + 1u;
 constexpr unsigned kIntegrateCellStateBinding = kIntegrateClockBinding + 1u;
-constexpr unsigned kIntegrateBindings = kIntegrateCellStateBinding + 1u;
+/// ...and THE CELLS' DISTANCE STORE (54, 8B): the pixel's own rays - the field fallback's voxel and TLAS continuation - write
+/// their hits into its cell's bins as the trace's do, so a change they read resumes the cell (the resume's region test).
+constexpr unsigned kIntegrateCellStoreBinding = kIntegrateCellStateBinding + 1u;
+constexpr unsigned kIntegrateBindings = kIntegrateCellStoreBinding + 1u;
 /// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
 /// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
 constexpr HitSetSlots kIntegrateHitSlots = {
@@ -197,7 +200,7 @@ constexpr HitSetSlots kIntegrateHitSlots = {
     49u,
     50u,
 };
-static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 54u,
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 55u,
               "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50, the sky "
               "visibility at 51");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
@@ -207,7 +210,7 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
 /// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3); the sky visibility (51, 10-4 R11).
 constexpr unsigned kIntegrateStorageImages = 10u;
-static_assert(kIntegrateBindings == 11u + kIntegrateStorageImages + kHitSetBindings,
+static_assert(kIntegrateBindings == 12u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
               "roughness and the prefiltered maps, the hit set, the rest's clock and cells");
 /// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
@@ -538,7 +541,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
         }
         t[kIntegrateSkyVisBinding] = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;   // the sky visibility (51, 10-4 R11)
         counts[kIntegrateSkyVisBinding] = 1u;
-        for (unsigned b : { kIntegrateClockBinding, kIntegrateCellStateBinding }) {   // the cells' rest (8B, B1)
+        for (unsigned b : { kIntegrateClockBinding, kIntegrateCellStateBinding, kIntegrateCellStoreBinding }) {   // the cells' rest (8B)
             t[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             counts[b] = 1u;
         }
@@ -2342,6 +2345,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kIntegrateClockBinding].pBufferInfo = &clockInfo;
         w[kIntegrateCellStateBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kIntegrateCellStateBinding].pBufferInfo = &cellStateInfo;
+        w[kIntegrateCellStoreBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kIntegrateCellStoreBinding].pBufferInfo = &cellStoreInfo;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kIntegrateBindings, w, 0, nullptr);
     }
 

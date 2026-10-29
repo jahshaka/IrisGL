@@ -191,6 +191,10 @@ layout( r8, set = 0, binding = 51 ) uniform writeonly image2DArray skyVis;
 #define JAH_REST_CLOCK_BINDING 52
 #include "jah_probe_rest.glsl"
 layout( std430, set = 0, binding = 53 ) buffer JahCellState { uint jahCellState[]; };
+/// THE CELLS' DISTANCE STORE (PHOTON-7 stage 8B; rq_probe_gather.comp's bins, jah_probe_rest.glsl): the pixel's own rays
+/// record their hits there too - a card, a brick or a lamp they read can change, and the resume's region test reaches a
+/// cell only through its bins (the integrate's rays had none: a relight they read resumed nothing).
+layout( std430, set = 0, binding = 54 ) buffer JahCellStore { uint jahCellStore[]; };
 /// A PROBE's MOVING SHARE, this frame's and last (PHOTON-7 stage 8B, B5; the cell's word kCellMovingWord, written by
 /// rq_probe_gather.comp, shifted a frame by the resume's finalize): a uniform probe is its cell's bytes 0 and 2, an
 /// adaptive one - its cell in its record's normal.w, + 1 - bytes 1 and 3; in [0, 1]
@@ -206,6 +210,20 @@ vec2 probeMovingOf( uint pi )
 float gRestK = 0.0;
 uint gFrameIndex = 0u;
 uint gCell = 0u;
+/// A ray of the pixel's in its cell's bin of world directions: its hit distance from the pixel (the least and the most),
+/// or an escape
+void restStoreRay( vec3 d, bool hit, float t )
+{
+	const uint at = kRestStoreWords * gCell;
+	const uint bin = jahRestBin( d );
+	if( hit )
+	{
+		atomicMin( jahCellStore[at + bin], floatBitsToUint( max( t, 0.0 ) ) );
+		atomicMax( jahCellStore[at + 64u + bin], floatBitsToUint( max( t, 0.0 ) ) );
+	}
+	else
+		atomicOr( jahCellStore[at + 128u + ( bin >> 5u )], 1u << ( bin & 31u ) );
+}
 #define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
@@ -482,6 +500,8 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		const JahVoxelRayResult vr = jahVoxelRay( startLS, dLS, surfLS, nLS, epsC0, ivec4( 0 ), 0.0, 0.0, true );
 		if( vr.exitReason == kJahRayHit )
 		{
+			// (its distance in metres: cascade 0's normalised units along dLS over the direction's scale)
+			restStoreRay( d, true, vr.tC0 / max( length( d * JAH_VOX_INVSIZE( 0 ).xyz ), 1e-12 ) );
 			sum += vr.radiance;
 			taken += 1.0;
 			continue;
@@ -490,6 +510,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 			continue;
 		if( vr.exitReason == kJahRayEscaped && jahEscapeIsExit( startLS, dLS, vr.tC0 ) )
 		{
+			restStoreRay( d, false, 0.0 );
 			sum += jahEnvCone( d, binTan );
 			taken += 1.0;
 			continue;
@@ -501,11 +522,13 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		JAH_RQ_PROCEED( rq )
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
+			restStoreRay( d, false, 0.0 );
 			sum += jahEnvCone( d, binTan );   // an exit: the sky
 			taken += 1.0;
 			continue;
 		}
 		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+		restStoreRay( d, true, tHit );
 		const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 		const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 		const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
