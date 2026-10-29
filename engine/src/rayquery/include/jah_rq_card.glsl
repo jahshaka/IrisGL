@@ -179,14 +179,7 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 	// THE FACE BUCKET ON EVERY HIT, ANSWERED OR NOT (PHOTON-7 stage 10-3, F3): the rest's demand is the faces the rays
 	// HIT. A mark written only when no card answered made it follow the cache's state - a resident card not yet
 	// (re)captured answers nothing, so whether a face was marked followed the capture queue's history.
-	// (...and a reader whose rest is per cell marks the FACES only from its rest span - or moving: the cards' one rest
-	// decision ranks the faces the RESTED picture reads, a set the pose fixes and no settle's timing does (PHOTON-7 8B,
-	// the lead's ruling); its settling cells' card stamps above still keep what they read resident: JAH_CARD_FACE_GATE)
-#ifdef JAH_CARD_FACE_GATE
-	if( stamps && JAH_CARD_FACE_GATE )
-#else
 	if( stamps )
-#endif
 	{
 		const uint w = 8u * reader + jahCardBucket( facing );
 		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );

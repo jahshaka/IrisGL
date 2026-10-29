@@ -1610,13 +1610,6 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (size_t k = 0; k < per[i].size(); ++k) {
                 CardRec &c = per[i][k];
                 if (!c.size || keep[i][k] || (view.forcedCardMode > 0 && heldCard(i, c))) continue;
-                // READ IN MOTION (8B, the lead's check): the decision ranks the rest span's faces alone, so a card only cells
-                // that never rest read (a mover resuming them every frame - K 0, no face marks) is outside the prefix; while
-                // they still read it (fresh, the moving residency's window) it stays - it leaves when they stop reading it
-                bool readNow = false;
-                for (unsigned r = 0; r < kDemandReaders && !readNow; ++r)
-                    readNow = c.readBy[r] && c.readBy[r] + mDemandWindow >= mDemandNewest[r];
-                if (readNow) continue;
                 freeRect(c.atlasX, c.atlasY, c.size);
                 c.size = 0u;
                 ++mEvicted;
