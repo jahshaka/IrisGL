@@ -1365,6 +1365,7 @@ constexpr ArmDef kArms[] = {
       "for 4,096 rest frames - no texel stops, the view holds after them - and the filter composites that mean "
       "unfiltered (reach 0): the per-texel integral the held picture is compared against; 2 = the same over a disjoint "
       "rest sequence (two references measure the reference's own noise). 0 = shipped (the image is 1 x 1)." },
+    { ArmId::GatherFastUpdateOff, 0.0, 0.0, 1.0, "MEASURING ARM (8B B5, to be reverted): the fast update off." },
     { ArmId::GatherDecodeHits, 0.0, 0.0, 1.0,
       "EVERY screen-probe gather hit is a hit RECORD shaded by the visibility-buffer decode, "
       "never read from the cards or the voxels (SPECKLE-FIX-1). The route-agreement instrument: "
