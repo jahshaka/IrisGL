@@ -706,6 +706,10 @@ private:
         VkImage prefiltered = VK_NULL_HANDLE;
         VkDeviceMemory prefilteredMemory = VK_NULL_HANDLE;
         VkImageView prefilteredView = VK_NULL_HANDLE;
+        /// THE LOBE's MEAN HIT DISTANCE beside each prefiltered level (PHOTON-7 stage 8B, B4): R32F, one layer a level
+        VkImage prefilteredDist = VK_NULL_HANDLE;
+        VkDeviceMemory prefilteredDistMemory = VK_NULL_HANDLE;
+        VkImageView prefilteredDistView = VK_NULL_HANDLE;
         /// THE ROUGH SPECULAR'S HISTORY (7-3), full resolution, ping-ponged with the diffuse's pair (the same flip): ONE
         /// r32ui word a pixel, the lobe's mean as a shared-exponent word - validated by the diffuse's texel at the same
         /// coordinate (rq_probe_integrate.comp) - and its REST MEAN (rgba16f; a 1 x 1 stand-in for a stereo view).

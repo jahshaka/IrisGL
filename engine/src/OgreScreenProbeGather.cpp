@@ -165,9 +165,11 @@ static_assert(kTraceBindings == kHitSetBindings + 9u,
               "the trace set is the hit set, its own five, the rest's three and the fast update's masks");
 /// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
 /// and the prefiltered maps it stores (PHOTON-7 stage 7, 7-3: the rough specular's source).
-/// ...and the cells' state (5, PHOTON-7 stage 8B, B1): a probe the trace skipped is not filtered.
-constexpr unsigned kFilterBindings = 6u;
+/// ...and the cells' state (5, PHOTON-7 stage 8B, B1): a probe the trace skipped is not filtered; and the lobes' mean hit
+/// distances beside the prefiltered levels (6, 8B B4: the rough lobe's virtual point).
+constexpr unsigned kFilterBindings = 7u;
 constexpr unsigned kFilterCellStateBinding = 5u;
+constexpr unsigned kFilterLobeDistBinding = 6u;
 /// The integrate's eighteen: params, records, normals, depth, the irradiance, the
 /// history's two halves (one packed texel each, PHOTON-GA-VR), the rest mean,
 /// the photon view's overlay (PHOTON-VIEW-1), the frame's counter, the
@@ -183,7 +185,9 @@ constexpr unsigned kIntegrateSkyVisBinding = kIntegrateHitFirst + kHitSetBinding
 /// cell's pixels write their history through and nothing else).
 constexpr unsigned kIntegrateClockBinding = kIntegrateSkyVisBinding + 1u;
 constexpr unsigned kIntegrateCellStateBinding = kIntegrateClockBinding + 1u;
-constexpr unsigned kIntegrateBindings = kIntegrateCellStateBinding + 1u;
+/// ...and THE LOBES' MEAN HIT DISTANCE (54, 8B B4): read with the prefiltered maps' own taps - the rough lobe's virtual point.
+constexpr unsigned kIntegrateLobeDistBinding = kIntegrateCellStateBinding + 1u;
+constexpr unsigned kIntegrateBindings = kIntegrateLobeDistBinding + 1u;
 /// THE HIT SET's PLACE IN THE INTEGRATE SET (rq_probe_integrate.comp's bindings): the TLAS, the volumes by kind, the sky,
 /// the card read's four and its view term's seven, the geometric normal's two, the record's four, the hit's surface two.
 constexpr HitSetSlots kIntegrateHitSlots = {
@@ -197,7 +201,7 @@ constexpr HitSetSlots kIntegrateHitSlots = {
     49u,
     50u,
 };
-static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 54u,
+static_assert(36u + SurfaceCache::kViewLayers == 43u && kIntegrateSkyVisBinding == 51u && kIntegrateBindings == 55u,
               "the integrate's hit set: the card read's view term fills 36 - 42, the set ends at 50, the sky "
               "visibility at 51");
 /// THE PACKED HISTORY TEXEL (PHOTON-GA-VR): rg32ui, 8 bytes a pixel for each half
@@ -207,7 +211,7 @@ constexpr unsigned kHistoryTexelBytes = 8u;
 /// — bindings 4..8; then the frame's counter buffer (9, PHOTON-2 L8: the foliage rule's own accepts); and the rough
 /// specular's output, the lobe's history pair and its rest mean (14 - 17, 7-3); the sky visibility (51, 10-4 R11).
 constexpr unsigned kIntegrateStorageImages = 10u;
-static_assert(kIntegrateBindings == 11u + kIntegrateStorageImages + kHitSetBindings,
+static_assert(kIntegrateBindings == 12u + kIntegrateStorageImages + kHitSetBindings,
               "the integrate set: four inputs, nine storage images, the counter, the field's two atlases, the "
               "roughness and the prefiltered maps, the hit set, the rest's clock and cells");
 /// THE ROUGH SPECULAR'S LEVELS (PHOTON-7 stage 7, 7-3, the lead's ruling B; rq_probe_filter.comp's job 3): the probes'
@@ -504,6 +508,7 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 3 depth (the taps' depth walk)
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 the prefiltered maps (7-3)
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 5 the cells' state (8B, B1)
+            VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 6 the lobes' mean hit distance (8B, B4)
         };
         if (!makeLayout(kFilterBindings, t, nullptr, mFilterLayout, "filter")) return false;
     }
@@ -542,6 +547,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             t[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             counts[b] = 1u;
         }
+        t[kIntegrateLobeDistBinding] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;   // the lobes' distance (8B, B4)
+        counts[kIntegrateLobeDistBinding] = 1u;
         if (!makeLayout(kIntegrateBindings, t, counts, mIntegrateLayout, "integrate")) return false;
     }
     {   // rq_probe_resume.comp (PHOTON-7 stage 8B, B1): one layout for its five jobs
@@ -691,6 +698,11 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     // probe radiance format: a radiance needs no sign and no alpha) - the rough specular's source.
     // (one more layer under the quadrature door - the filtered map itself; the door switched re-makes the targets)
     v.prefilteredLayers = kRoughSpecLevels + (in.roughQuadrature ? 1u : 0u);
+    // (the lobes' mean hit distance, 8B B4: R32F - the distance is a reprojection's, never accumulated; R16F through the
+    // half store's rounding when that helper is on this branch, 18.7 MB less at 1080p)
+    if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, kRoughSpecLevels, VK_FORMAT_R32_SFLOAT, v.prefilteredDist,
+                               v.prefilteredDistMemory, v.prefilteredDistView, err))
+        return false;
     if (!mHost.gatherMakeImage(v.atlasW, v.atlasH, v.prefilteredLayers, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                                v.prefiltered, v.prefilteredMemory, v.prefilteredView, err))
         return false;
@@ -815,6 +827,7 @@ bool ScreenProbeGather::ensureTargets(View &v, const GatherInputs &in, unsigned 
     v.vramBytes = 1ull * v.atlasW * v.atlasH * 8ull + (unsigned long long)total * kRecordBytes +
                   pixels * 8ull + v.historyBytes + (unsigned long long)restW * restH * 8ull +
                   1ull * v.atlasW * v.atlasH * 4ull * v.prefilteredLayers + pixels * 8ull + pixels * 2ull * 4ull +
+                  1ull * v.atlasW * v.atlasH * 4ull * kRoughSpecLevels +   // (+ the lobes' distance, 8B B4)
                   (unsigned long long)restW * restH * 8ull + pixels * 1ull +   // (+ the sky visibility, 1 byte a pixel)
                   (unsigned long long)v.uniformProbes * (kCellStateWords + kCellStoreWords) * 4ull +
                   clockWordsOf(v.gridW, v.gridH) * 4ull;   // (+ the cells' rest, 8B B1: 568 B a cell; the pyramids as sized)
@@ -869,6 +882,10 @@ void ScreenProbeGather::drop(View &v) {
     v.roughRestMemory = VK_NULL_HANDLE;
     v.roughRestView = VK_NULL_HANDLE;
     mHost.gatherRetireImage(v.prefiltered, v.prefilteredMemory, v.prefilteredView);
+    mHost.gatherRetireImage(v.prefilteredDist, v.prefilteredDistMemory, v.prefilteredDistView);
+    v.prefilteredDist = VK_NULL_HANDLE;
+    v.prefilteredDistMemory = VK_NULL_HANDLE;
+    v.prefilteredDistView = VK_NULL_HANDLE;
     v.prefiltered = VK_NULL_HANDLE;
     v.prefilteredMemory = VK_NULL_HANDLE;
     v.prefilteredView = VK_NULL_HANDLE;
@@ -1102,9 +1119,10 @@ void ScreenProbeGather::clearAtlas(View &v, VkCommandBuffer cmd) {
     // before the view's age says so).
     // ...and the rest mean (PHOTON-GATHER-1d), which the integrate binds on every
     // frame and writes only at rest; and the rough specular's prefiltered maps, history pair and rest mean (7-3).
-    constexpr int kImages = 8;
+    constexpr int kImages = 9;
     const VkImage images[kImages] = { v.atlas,       v.history[0],      v.history[1],      v.restMean,
-                                      v.prefiltered, v.roughHistory[0], v.roughHistory[1], v.roughRest };
+                                      v.prefiltered, v.roughHistory[0], v.roughHistory[1], v.roughRest,
+                                      v.prefilteredDist };
     VkImageMemoryBarrier b[kImages] = {};
     for (int i = 0; i < kImages; ++i) {
         b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2214,6 +2232,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         filterRaw.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         filterStored.imageView = v.prefilteredView;
         filterStored.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo filterDist{};
+        filterDist.imageView = v.prefilteredDistView;
+        filterDist.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet w[kFilterBindings] = {};
         for (unsigned i = 0; i < kFilterBindings; ++i) {
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2231,6 +2252,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[3].pImageInfo = &depth;
         w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[4].pImageInfo = &filterStored;
+        w[kFilterLobeDistBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[kFilterLobeDistBinding].pImageInfo = &filterDist;
         w[kFilterCellStateBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kFilterCellStateBinding].pBufferInfo = &cellStateInfo;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kFilterBindings, w, 0, nullptr);
@@ -2303,6 +2326,12 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         filteredRead.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[13].pImageInfo = &filteredRead;
+        VkDescriptorImageInfo lobeDistRead{};   // (8B B4: the lobes' distance through the same linear sampler)
+        lobeDistRead.sampler = mHost.gatherLinearSampler();
+        lobeDistRead.imageView = v.prefilteredDistView;
+        lobeDistRead.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        w[kIntegrateLobeDistBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[kIntegrateLobeDistBinding].pImageInfo = &lobeDistRead;
         VkDescriptorImageInfo roughOut{};
         roughOut.imageView = mHost.gatherLayerView(v.roughSpec, true);
         roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
