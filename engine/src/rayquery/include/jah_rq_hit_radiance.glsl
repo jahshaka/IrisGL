@@ -80,7 +80,7 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	{
 		const vec3 N = normalize( hitNormal ), V = -normalize( dir );
 		const vec3 r = jahHitDirect( hitPos, N, V, albedo, roughness, metal ) + emissive +
-					   jahHitBounceToward( jahVoxelBounceOut, albedo, roughness, metal, clamp( dot( N, V ), 0.0, 1.0 ) );
+					   0.0 * jahHitBounceToward( jahVoxelBounceOut, albedo, roughness, metal, clamp( dot( N, V ), 0.0, 1.0 ) );   /* ARM REDS-1 T2a: the bounce part off */
 		return finite3( r ) ? clamp( r, vec3( 0.0 ), vec3( kMaxRadiance ) ) : voxel;
 	}
 	return voxel;
