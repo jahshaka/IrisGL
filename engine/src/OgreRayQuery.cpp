@@ -8913,6 +8913,13 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
             }
         }
         r.fieldBusy = ph.fieldWideWorkOwed();
+        if (arm(ArmId::GatherResumeOff, false)) {   // MEASURING ARM (8B B1, to be reverted)
+            r.regionCount = 0u;
+            r.overflow = 0u;
+            r.restart = false;
+            for (GatherRestInputs::Bricks &b : r.bricks) b.live = false;
+            r.fieldBusy = false;
+        }
     }
     in.demandDue = SurfaceCache::demandDueFrames();   // (the gather's demand span: its rest indices [1, N + this])
     in.restartKey = scene->gatherRestartKey();
