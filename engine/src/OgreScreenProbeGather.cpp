@@ -111,7 +111,7 @@ constexpr unsigned kPlaceClockBinding = 6u;
 /// the voxelizer's normal (23, 24: PHOTON-VOXEL-5); then the card read's VIEW
 /// TERM's seven (25-31, PHOTON-CARDS-5 + the Specular layer, ENGINE-POLISH-PHOTON-1, + the sun's visibility,
 /// PHOTON-3: jah_rq_card_bindings.glsl at JAH_CARD_VIEW_BINDING_BASE 25).
-constexpr unsigned kTraceBindings = 41u;
+constexpr unsigned kTraceBindings = 42u;
 constexpr unsigned kTraceSideBinding = 23u;
 constexpr unsigned kTraceCardViewBinding = 25u;
 /// ...and THE DIRECT TERM's volume per cascade (32, MOVER-OCCLUSION-1: jah_rq_hit.glsl).
@@ -132,10 +132,17 @@ constexpr unsigned kTraceDirectBackBinding = 37u;
 constexpr unsigned kTraceClockBinding = 38u;
 constexpr unsigned kTraceCellStateBinding = 39u;
 constexpr unsigned kTraceCellStoreBinding = 40u;
+/// ...and THE FAST UPDATE's BRICK MASKS (41, PHOTON-7 stage 8B, B5): a ray whose hit lands on a brick this frame's light
+/// work changed is a MOVING ray (rq_probe_gather.comp), four cascades' masks, one binding.
+constexpr unsigned kTraceFastBricksBinding = 41u;
+/// LUMEN's FAST UPDATE numbers (r.Lumen.ScreenProbeGather.Temporal.FractionOfLightingMovingForFastUpdateMode and
+/// .MaxFastUpdateModeAmount, both at their defaults; LUMEN_TEMPORAL_FACTS :326-327)
+constexpr float kFastUpdateMovingShare = 0.1f;
+constexpr float kFastUpdateMost = 0.9f;
 static_assert(kTraceRaysBinding == kTraceDirectBinding + 1u && kTraceOverlayBinding == kTraceRaysBinding + 1u &&
                   kTracePoolBinding == kTraceOverlayBinding + 1u && kTraceCloudBinding == kTracePoolBinding + 1u &&
                   kTraceDirectBackBinding == kTraceCloudBinding + 1u && kTraceClockBinding == kTraceDirectBackBinding + 1u &&
-                  kTraceCellStoreBinding + 1u == kTraceBindings &&
+                  kTraceFastBricksBinding == kTraceCellStoreBinding + 1u && kTraceFastBricksBinding + 1u == kTraceBindings &&
                   kTraceDirectBinding == kTraceCardViewBinding + SurfaceCache::kViewLayers,
               "the direct volume follows the card read's view-term layers, the instrument's two follow it");
 /// THE HIT SET's PLACE IN THE TRACE SET (HitSetSlots, the one writer): the TLAS (0), the volumes by kind (4-7, 15-18,
@@ -154,7 +161,8 @@ constexpr HitSetSlots kTraceHitSlots = {
     kTracePoolBinding,
     kTraceCloudBinding,
 };
-static_assert(kTraceBindings == kHitSetBindings + 8u, "the trace set is the hit set, its own five and the rest's three");
+static_assert(kTraceBindings == kHitSetBindings + 9u,
+              "the trace set is the hit set, its own five, the rest's three and the fast update's masks");
 /// The filter's five: params, records, the raw atlas, the eye's depth (its taps' depth walk, PHOTON-2 stage 2's tail)
 /// and the prefiltered maps it stores (PHOTON-7 stage 7, 7-3: the rough specular's source).
 /// ...and the cells' state (5, PHOTON-7 stage 8B, B1): a probe the trace skipped is not filtered.
@@ -287,6 +295,11 @@ struct GatherParams {
     /// ends; the prefiltered levels (the first, the step, the count).
     float rough[4] = {};
     float roughLevels[4] = {};
+    /// THE FAST UPDATE (PHOTON-7 stage 8B, B5; jah_probe_params.glsl): the moving share's saturation and the most, the
+    /// skin posed this frame, on; the brick masks' corners / brick and dims / live, per cascade
+    float fast[4] = {};
+    float fastBrickOrigin[4][4] = {};
+    float fastBrickDims[4][4] = {};
     /// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2: hitSetParams; jah_probe_params.glsl's last member)
     HitSetParams hit;
 };
@@ -479,6 +492,8 @@ bool ScreenProbeGather::makePipelines(std::string &err) {
             t[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             c[b] = 1u;
         }
+        t[kTraceFastBricksBinding] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;   // the fast update's masks (8B, B5)
+        c[kTraceFastBricksBinding] = GatherRestInputs::kCascades;
         if (!makeLayout(kTraceBindings, t, c, mTraceLayout, "trace")) return false;
     }
     {   // rq_probe_filter.comp
@@ -973,6 +988,8 @@ void ScreenProbeGather::readPending(View &v) {
                 rec.held = clock[4];
                 rec.active = clock[5];
                 rec.everyHeld = clock[5] == 0u && clock[4] > 0u;
+                rec.movingProbes = clock[1] & 0xFFFFu;   // (B5: the trace's counts, read below 65,536 probes)
+                rec.fastProbes = clock[1] >> 16u;
                 v.restLog.push_back(rec);
                 if (v.restLog.size() > 32u) v.restLog.erase(v.restLog.begin());
             }
@@ -2006,6 +2023,24 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.roughLevels[3] = v.prefilteredLayers > kRoughSpecLevels ? float(std::min(in.roughQuadrature, 2u)) : 0.0f;
     }
     pp.alpha[2] = mHost.gatherDecodeHitsArm() ? 1.0f : 0.0f;   // the arm "gather.decodeHits"
+    // THE FAST UPDATE (PHOTON-7 stage 8B, B5; jah_probe_params.glsl): Lumen's two numbers (FractionOfLightingMovingFor-
+    // FastUpdateMode 0.1, MaxFastUpdateModeAmount 0.9), the skin posed, and each cascade's brick mask (the trace's binding
+    // kTraceFastBricksBinding) with whether THIS frame's light work wrote it - on whatever the camera does (a brick is
+    // the world's)
+    pp.fast[0] = kFastUpdateMovingShare;
+    pp.fast[1] = kFastUpdateMost;
+    pp.fast[2] = in.fastSkinPosed ? 1.0f : 0.0f;
+    pp.fast[3] = 1.0f;
+    for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
+        const GatherRestInputs::Bricks &b = in.rest.bricks[c];
+        const bool bound = b.buffer && b.dims[0] && b.dims[1] && b.dims[2];
+        for (int a = 0; a < 3; ++a) {
+            pp.fastBrickOrigin[c][a] = b.origin[a];
+            pp.fastBrickDims[c][a] = bound ? float(b.dims[a]) : 0.0f;
+        }
+        pp.fastBrickOrigin[c][3] = bound ? b.brickMetres : 0.0f;
+        pp.fastBrickDims[c][3] = bound && b.live ? 1.0f : 0.0f;
+    }
     // THE SECOND EYE (PHOTON-GA-VR): the shape, and the right eye's basis now and
     // before (written, never read, with one eye).
     pp.stereo[0] = v.stereo ? 1.0f : 0.0f;
@@ -2158,6 +2193,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[kTraceCellStateBinding].pBufferInfo = &cellStateInfo;
         w[kTraceCellStoreBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         w[kTraceCellStoreBinding].pBufferInfo = &cellStoreInfo;
+        VkDescriptorBufferInfo fastMasks[GatherRestInputs::kCascades] = {};
+        for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
+            const GatherRestInputs::Bricks &b = in.rest.bricks[c];
+            fastMasks[c].buffer = b.buffer ? b.buffer : dummyStorage;
+            fastMasks[c].offset = b.buffer ? b.offset : 0u;
+            fastMasks[c].range = b.buffer ? b.range : VK_WHOLE_SIZE;
+        }
+        w[kTraceFastBricksBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kTraceFastBricksBinding].descriptorCount = GatherRestInputs::kCascades;
+        w[kTraceFastBricksBinding].pBufferInfo = fastMasks;
         vkUpdateDescriptorSets(mHost.gatherDevice(), kTraceBindings, w, 0, nullptr);
     }
 
@@ -2492,7 +2537,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         vkCmdFillBuffer(cmd, v.clock, 0, VK_WHOLE_SIZE, 0u);
         v.cellsCleared = true;
     } else
-        vkCmdFillBuffer(cmd, v.clock, 2u * 4u, 2u * 4u, 0u);
+        vkCmdFillBuffer(cmd, v.clock, 1u * 4u, 3u * 4u, 0u);   // (and word 1, the fast update's counts: B5)
     {
         // ...AND WHAT THE FRAME'S EARLIER WORK WROTE that the resume reads: the GI step's brick masks (Ogre's compute
         // jobs) and the changed-region list's upload (a transfer) - one global edge from every earlier command

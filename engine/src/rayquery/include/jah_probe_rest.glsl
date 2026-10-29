@@ -26,8 +26,22 @@ const uint kCellConverged = 16u;  ///< settling, its history caught up with its 
 /// THE CELL's WORDS (the cells' state buffer, kCellWords a cell): [0] the state bits, [1] the ring bit; the integrate's
 /// sums this frame over its pixels, in display codes x 16: [2] of this frame's SAMPLES, [3] of the HISTORY's answer, [4]
 /// the pixels; the resume's (float bits): [5] the samples' cell mean followed over N frames (exponential), [6] its
-/// variance, [7] the frames since the cell's last reach, [8] unused.
+/// variance, [7] the frames since the cell's last reach; [8] THE FAST UPDATE's moving shares (B5): byte 0 the cell's
+/// uniform probe's this frame, byte 1 its adaptive twin's (the trace's: the share of its rays whose hit MOVED, x 255),
+/// bytes 2-3 the same last frame (the finalize shifts them up each gathered frame: Lumen's one frame of memory); [9]
+/// unused.
 const uint kCellWords = 10u;
+const uint kCellMovingWord = 8u;
+
+/// A BRICK CHANGED AT ALL this frame, either of its two words (PhotonVoxelLighting's brick mask: the direct term's and
+/// the feedback's relative change; the feedback writes a voxel only when it moves a store step, so a converged store
+/// writes nothing). Never a per-frame threshold (rq_probe_resume.comp's kRestBrickCode); a NaN word is a change (the
+/// bits are tested, never x == x). The resume's test and the fast update's moving ray (rq_probe_gather.comp) read it.
+bool jahBrickChangedWords( uint a, uint b )
+{
+	const bool na = ( a & 0x7F800000u ) == 0x7F800000u, nb = ( b & 0x7F800000u ) == 0x7F800000u;
+	return na || nb || uintBitsToFloat( a ) > 0.0 || uintBitsToFloat( b ) > 0.0;
+}
 
 /// THE BINS OF THE REST's DISTANCE STORE: 8 x 8 over the WHOLE SPHERE of world directions (an octahedral map), so the
 /// cell's uniform probe and its adaptive twin - two tangent frames - fill one store. Each bin keeps the least and the
@@ -41,7 +55,8 @@ const uint kRestStoreWords = 130u;
 #ifndef JAH_REST_CLOCK_QUALIFIER
 #define JAH_REST_CLOCK_QUALIFIER readonly
 #endif
-/// THE CLOCKS: [0] the least K over the active components (0xFFFFFFFF: none active); [1] unused; [2] any cell reached
+/// THE CLOCKS: [0] the least K over the active components (0xFFFFFFFF: none active); [1] the fast update's instrument
+/// (the trace's: the probes with a moving ray, and x 65536 those whose own amount passes one half); [2] any cell reached
 /// this frame; [3] the cells reached; [4] held, [5] active after the finalize; [6] the frames any cell resumed on
 /// (cumulative); [7] the cells traced as ring. Then per cell (8 + 2 c) its sample index and (9 + 2 c) its K; then per
 /// block (8 + 2 cells + b) its K and (8 + 2 cells + blocks + b) the frame's flags (the test's: 1 active, 2 reached,

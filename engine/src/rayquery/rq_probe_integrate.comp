@@ -190,6 +190,16 @@ layout( r8, set = 0, binding = 51 ) uniform writeonly image2DArray skyVis;
 #define JAH_REST_CLOCK_BINDING 52
 #include "jah_probe_rest.glsl"
 layout( std430, set = 0, binding = 53 ) buffer JahCellState { uint jahCellState[]; };
+/// A PROBE's MOVING SHARE, this frame's and last (PHOTON-7 stage 8B, B5; the cell's word kCellMovingWord, written by
+/// rq_probe_gather.comp, shifted a frame by the resume's finalize): a uniform probe is its cell's bytes 0 and 2, an
+/// adaptive one - its cell in its record's normal.w, + 1 - bytes 1 and 3; in [0, 1]
+vec2 probeMovingOf( uint pi )
+{
+	const bool adaptive = pi >= uint( max( p.knobs3.x, 0.0 ) );
+	const uint cell = adaptive ? uint( max( records.r[pi].normalW.w - 1.0, 0.0 ) ) : pi;
+	const uint word = jahCellState[kCellWords * cell + kCellMovingWord] >> ( adaptive ? 8u : 0u );
+	return vec2( float( word & 0xFFu ), float( ( word >> 16u ) & 0xFFu ) ) * ( 1.0 / 255.0 );
+}
 /// THE DEMAND SPAN ON THE CLOCK (rq_probe_gather.comp's note): p.knobs6.x = the span
 /// (the pixel's cell's clock: its K and its sample index, set at main's head)
 float gRestK = 0.0;
@@ -899,6 +909,7 @@ void main()
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
 	float skySum = 0.0;   // (R11: the taps' sky shares under the same weights)
+	vec2 movingSum = vec2( 0.0 );   // (B5: the taps' moving shares, this frame's and last, under the same weights)
 	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
 	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
 	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
@@ -971,6 +982,7 @@ void main()
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
 					skySum += records.r[pi].sh[6].w * w;
+					movingSum += probeMovingOf( pi ) * w;
 					wsum += w;
 				}
 			}
@@ -985,6 +997,7 @@ void main()
 		{
 			sum += shEvalAt( tapIdx[t], pixelNormal, bands ) * tapW[t];
 			skySum += records.r[tapIdx[t]].sh[6].w * tapW[t];
+			movingSum += probeMovingOf( tapIdx[t] ) * tapW[t];
 			wsum += tapW[t];
 		}
 	}
@@ -1031,6 +1044,7 @@ void main()
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
 					skySum += records.r[pi].sh[6].w * w;
+					movingSum += probeMovingOf( pi ) * w;
 					wsum += w;
 				}
 			}
@@ -1064,6 +1078,7 @@ void main()
 							continue;
 						sum += shEvalAt( pi, pixelNormal, bands ) * w;
 						skySum += records.r[pi].sh[6].w * w;
+						movingSum += probeMovingOf( pi ) * w;
 						wsum += w;
 					}
 				}
@@ -1117,8 +1132,39 @@ void main()
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	// THE GI FREEZE (M1's measuring arm, stereo.w): a pixel with a history keeps it, no new sample enters.
 	// ...and A PIXEL WITH NO SAMPLE THIS FRAME (its probes starved by a full hit list, above) keeps it too.
-	const float blend = prevCount > 0u ? ( p.stereo.w > 0.5 || noSample ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
-									   : 1.0;
+	float blend = prevCount > 0u ? ( p.stereo.w > 0.5 || noSample ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
+								 : 1.0;
+	// ---- THE FAST UPDATE (PHOTON-7 stage 8B, B5): LUMEN's FastUpdateMode, LumenScreenProbeGatherTemporal.usf:486-497 ----
+	// The pixel's MOVING SHARE m is its probes' (the share of each one's rays whose hit moved this frame:
+	// rq_probe_gather.comp's fastRayMoving), interpolated as its irradiance is; Lumen's amount
+	//     F = saturate( min( ( saturate( m / 0.1 ) - 0.2 ) / 0.8, 0.9 ) ),
+	// MAX'ED with last frame's (the same probes' shares a frame old - Lumen keeps it in the pixel's history: one frame of
+	// memory, so the light keeps up for a frame where the moving thing was), caps the frames the history averages:
+	//     N' = min( N, ( 1 - F ) Nmax ),   blend' = 1 / ( 1 + N' ).
+	// OURS IN THOSE TERMS: the blend above is 1 / ( 1 + N ) with N = min( count, Nmax ), Nmax = 1 / floor - 1 (the floor's
+	// frames, Lumen's MaxFramesAccumulated), so N = 1 / blend - 1 and N' follows exactly; F = 0 (nothing moving: every
+	// still frame, every rest) leaves the blend bit for bit. A frozen or sample-less pixel (blend 0) and a first frame (1)
+	// are not touched. The rough specular's history takes the same blend (Lumen's one N for both). AND THE HISTORY KEEPS
+	// N' (Lumen writes NewNumFramesAccumulated back): the count stored is N' + 1, rounded, so when the motion stops the
+	// history restarts its running mean from the new pose's few frames (1 / (N' + 2), 1 / (N' + 3), ...) instead of
+	// jumping back to the floor over a mean that still holds the old pose - the settle after the motion is the short
+	// history's, not the floor's.
+	uint countNext = noSample && prevCount > 0u ? prevCount : prevCount + 1u;
+	if( p.fast.w > 0.5 && blend > 0.0 && blend < 1.0 && wsum >= weightFloor )
+	{
+		const vec2 m = movingSum / wsum;
+		const vec2 amount = clamp( min( ( clamp( m / max( p.fast.x, 1e-6 ), 0.0, 1.0 ) - 0.2 ) / 0.8, vec2( p.fast.y ) ),
+								   0.0, 1.0 );
+		const float F = max( amount.x, amount.y );
+		if( F > 0.0 )
+		{
+			const float n = 1.0 / blend - 1.0;
+			const float nMax = 1.0 / floorBlend - 1.0;
+			const float nFast = min( n, ( 1.0 - F ) * nMax );
+			blend = 1.0 / ( 1.0 + nFast );
+			countNext = uint( nFast + 0.5 ) + 1u;
+		}
+	}
 	const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 	vec4 mean = mix( prev, sample1, blend );
 	// ---- AT REST, THE REST MEAN (PHOTON-GATHER-1d) ------------------------------
@@ -1181,7 +1227,7 @@ void main()
 	}
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
-					   packGeom( pixelDist, pixelFoliage, noSample && prevCount > 0u ? prevCount : prevCount + 1u, mean.w,
+					   packGeom( pixelDist, pixelFoliage, countNext, mean.w,
 								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
 					   0u, 0u ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction

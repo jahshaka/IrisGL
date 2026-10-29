@@ -77,8 +77,11 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 /// state (a probe whose cell holds outside every active cell's ring is not traced) and their distance store (an active
 /// cell's rays at rest write its bins' least and most hit distance: what the resume tests a held cell by).
 #define JAH_REST_CLOCK_BINDING 38
+#define JAH_REST_CLOCK_QUALIFIER   // (B5: the probes' moving counts, clock word 1)
 #include "jah_probe_rest.glsl"
-layout( std430, set = 0, binding = 39 ) readonly buffer JahCellState { uint jahCellState[]; };
+layout( std430, set = 0, binding = 39 ) buffer JahCellState { uint jahCellState[]; };   // (B5: the moving shares written)
+/// THE FAST UPDATE's BRICK MASKS (B5): each cascade's, two words a brick (jahBrickChangedWords), in the hit set's order
+layout( std430, set = 0, binding = 41 ) readonly buffer JahFastBricks { uint w[]; } jahFastBricks[4];
 layout( std430, set = 0, binding = 40 ) buffer JahCellStore { uint jahCellStore[]; };
 /// THE DEMAND SPAN ON THE CLOCK (PHOTON-7 stage 10's per-reader snapshot, read on the device since 8B: the rest clock is
 /// the GPU's): the view stamps the cards it reads at its rest indices [1, span] alone (p.knobs6.x = the span; 0 = no
@@ -151,6 +154,7 @@ layout( std430, set = 0, binding = 22 ) buffer JahHitBuf { uint jahHitBuf[]; };
 #define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
 #include "jah_rq_sun_ray.glsl"
 #include "jah_rq_hit_record.glsl"
+#include "jah_reproject.glsl"
 // THE HIT'S RADIANCE, after the alpha table (MOVER-OCCLUSION-1: the read traces the
 // movers above the hit, cut-outs honoured).
 // THE HIT'S OWN SURFACE (FAR-SUN-2, jah_rq_hit_direct.glsl): the hit table, the voxeliser's
@@ -231,6 +235,49 @@ void gatherHitPaint( ivec2 cell, ivec2 texel, int octRes, vec4 c )
 			imageStore( photonOverlay, ivec3( x, y, eye ), c );
 }
 
+/// THE FAST UPDATE's MOVING RAY (PHOTON-7 stage 8B, B5; Lumen's IsTraceMoving, LumenScreenProbeTracingCommon.ush:28-45,
+/// mapped to what moves here): a hit whose light changed this frame - its point in a brick this frame's light work
+/// CHANGED (the finest cascade holding it; a mover's bounce lands on still slots, so the slot alone never sees it) - or
+/// whose surface moved: a near hit on a slot whose two poses differ (jahInstanceMoved) or on a skinned item posed this
+/// frame. Lumen's own test is the hit's speed against the probe's; ours is the change itself.
+bool fastBrickChanged( uint c, uint idx )
+{
+	uint a = 0u, b = 0u;
+	// (an array of blocks is indexed by a constant: the four cascades spelt out)
+	if( c == 0u ) { a = jahFastBricks[0].w[2u * idx]; b = jahFastBricks[0].w[2u * idx + 1u]; }
+	else if( c == 1u ) { a = jahFastBricks[1].w[2u * idx]; b = jahFastBricks[1].w[2u * idx + 1u]; }
+	else if( c == 2u ) { a = jahFastBricks[2].w[2u * idx]; b = jahFastBricks[2].w[2u * idx + 1u]; }
+	else { a = jahFastBricks[3].w[2u * idx]; b = jahFastBricks[3].w[2u * idx + 1u]; }
+	return jahBrickChangedWords( a, b );
+}
+bool fastRayMoving( vec3 x, uint slot, bool near )
+{
+	if( near && slot < JAH_HIT_INSTANCES )
+	{
+		const uint flags = jahHitFlags( slot );
+		if( ( flags & kJahHitGpuSkinned ) != 0u && p.fast.z > 0.5 )
+			return true;
+		if( jahInstanceMoved( flags, JAH_HIT_INSTANCE( slot, 0u ), JAH_HIT_INSTANCE( slot, 1u ), JAH_HIT_INSTANCE( slot, 2u ),
+							  JAH_HIT_INSTANCE( slot, 3u ), JAH_HIT_INSTANCE( slot, 4u ), JAH_HIT_INSTANCE( slot, 5u ) ) )
+			return true;
+	}
+	for( uint c = 0u; c < 4u; ++c )
+	{
+		const float brick = p.fastBrickOrigin[c].w;
+		const uvec3 dims = uvec3( p.fastBrickDims[c].xyz );
+		if( brick <= 0.0 || any( equal( dims, uvec3( 0u ) ) ) )
+			continue;
+		const vec3 g = floor( ( x - p.fastBrickOrigin[c].xyz ) / brick );
+		if( any( lessThan( g, vec3( 0.0 ) ) ) || any( greaterThanEqual( g, vec3( dims ) ) ) )
+			continue;
+		// the finest cascade holding the point answers; a mask this frame's light work did not write is no change
+		const uvec3 b = uvec3( g );
+		return p.fastBrickDims[c].w > 0.5 && fastBrickChanged( c, ( b.z * dims.y + b.y ) * dims.x + b.x );
+	}
+	return false;
+}
+shared uint sMovingRays;
+
 void main()
 {
 	const uint probe = gl_WorkGroupID.x;
@@ -282,6 +329,9 @@ void main()
 	const ivec2 texel = ivec2( int( lane ) % octRes, int( lane ) / octRes );
 
 	vec4 atlasTexel = vec4( 0.0, 0.0, 0.0, -1.0 );
+	if( lane == 0u )
+		sMovingRays = 0u;
+	barrier();
 
 	if( onSurface && lane < rays )
 	{
@@ -491,6 +541,8 @@ void main()
 		}
 		if( !finite3( radiance ) )
 			radiance = vec3( 0.0 );
+		if( hit && p.fast.w > 0.5 && fastRayMoving( origin + dir * tHit, hitSlot, !far ) )
+			atomicAdd( sMovingRays, 1u );
 		atlasTexel = vec4( min( radiance * reweight, vec3( kMaxRadiance ) ), distance );
 		// THE STILL CAMERA's DISTANCES (PHOTON-7 stage 8B, B1): this ray's bin of world directions keeps the least and the
 		// most distance its cell's rays went to a hit since the camera stopped, or a bit that one escaped
@@ -538,6 +590,23 @@ void main()
 	// an empty record, so a stale frame's never reads as this one's.
 	if( p.hits.x > 0.5 && !adaptive && !( onSurface && lane < rays ) )
 		jahGatherRays[probe * uint( kOctResMax * kOctResMax ) + lane] = uvec4( 0u );
+
+	// THE PROBE's MOVING SHARE (B5), x 255 in its byte of the cell's word (byte 0 the uniform probe, 1 its adaptive twin):
+	// the integrate interpolates it to the pixel as it does the irradiance (Lumen's LightingIsMoving)
+	barrier();
+	if( lane == 0u && onSurface && p.fast.w > 0.5 )
+	{
+		const uint share = min( uint( float( sMovingRays ) * 255.0 / float( max( rays, 1u ) ) + 0.5 ), 255u );
+		if( share != 0u )
+		{
+			atomicOr( jahCellState[kCellWords * cellIndex + kCellMovingWord], share << ( adaptive ? 8u : 0u ) );
+			// THE INSTRUMENT (the status's fastProbes): the probes with a moving ray, and (high half) those whose own F
+			// passes one half (the integrate's amount at this share alone: m > 0.06 of the rays at Lumen's numbers)
+			const float m = float( share ) / 255.0;
+			const bool fast = ( clamp( m / max( p.fast.x, 1e-6 ), 0.0, 1.0 ) - 0.2 ) / 0.8 > 0.5;
+			atomicAdd( jahClock[1], 1u | ( fast ? 1u << 16u : 0u ) );
+		}
+	}
 
 	// THE RAY'S TEXEL, from the lanes that own a direction.
 	if( lane < rays )

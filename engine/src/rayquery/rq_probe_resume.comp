@@ -91,11 +91,9 @@ layout( std430, set = 0, binding = 8 ) buffer BrickPyramid { uint brickPyramid[]
 
 const uint kRegionSlab = 1u, kRegionCard = 2u, kRegionEdit = 3u, kRegionMover = 4u, kRegionMoverShadow = 5u,
 		   kRegionLampShadow = 6u, kRegionLamp = 7u;
-/// A brick CHANGED AT ALL, either word (the feedback writes a voxel only when it moves a store step: a converged store
-/// writes nothing). Never a per-frame threshold: a store converging under 1 % a frame for 40 frames moves its readers by
-/// many codes, and a test against each frame's own change would never resume a cell over it (the selftest's fixture B
-/// held stale walls 51 codes off at a 1 % bar).
-const float kRestBrickCode = 0.0;
+/// A brick CHANGED AT ALL, either word (jahBrickChangedWords). Never a per-frame threshold: a store converging under 1 %
+/// a frame for 40 frames moves its readers by many codes, and a test against each frame's own change would never resume
+/// a cell over it (the selftest's fixture B held stale walls 51 codes off at a 1 % bar).
 
 uint levelOffset( uint c, uint l ) { return r.brickLevelOffset[c][l >> 2u][l & 3u]; }
 uvec3 levelDims( uint c, uint l )
@@ -105,15 +103,13 @@ uvec3 levelDims( uint c, uint l )
 }
 bool brickChanged( uint c, uint idx )
 {
-	float a = 0.0, b = 0.0;
+	uint a = 0u, b = 0u;
 	// (an array of blocks is indexed by a constant: the four cascades spelt out)
-	if( c == 0u ) { a = uintBitsToFloat( brickMask[0].w[2u * idx] ); b = uintBitsToFloat( brickMask[0].w[2u * idx + 1u] ); }
-	else if( c == 1u ) { a = uintBitsToFloat( brickMask[1].w[2u * idx] ); b = uintBitsToFloat( brickMask[1].w[2u * idx + 1u] ); }
-	else if( c == 2u ) { a = uintBitsToFloat( brickMask[2].w[2u * idx] ); b = uintBitsToFloat( brickMask[2].w[2u * idx + 1u] ); }
-	else { a = uintBitsToFloat( brickMask[3].w[2u * idx] ); b = uintBitsToFloat( brickMask[3].w[2u * idx + 1u] ); }
-	// (a NaN word is a change: the bits are tested, never x == x)
-	const bool na = ( floatBitsToUint( a ) & 0x7F800000u ) == 0x7F800000u, nb = ( floatBitsToUint( b ) & 0x7F800000u ) == 0x7F800000u;
-	return na || nb || a > kRestBrickCode || b > kRestBrickCode;
+	if( c == 0u ) { a = brickMask[0].w[2u * idx]; b = brickMask[0].w[2u * idx + 1u]; }
+	else if( c == 1u ) { a = brickMask[1].w[2u * idx]; b = brickMask[1].w[2u * idx + 1u]; }
+	else if( c == 2u ) { a = brickMask[2].w[2u * idx]; b = brickMask[2].w[2u * idx + 1u]; }
+	else { a = brickMask[3].w[2u * idx]; b = brickMask[3].w[2u * idx + 1u]; }
+	return jahBrickChangedWords( a, b );
 }
 
 uint cellsOf() { return uint( p.resolution.x ) * uint( p.resolution.y ); }
@@ -302,8 +298,12 @@ void main()
 				cellStore[kRestStoreWords * i + 128u + b] = 0u;   // no escape yet
 		}
 		for( uint w = 1u; w < kCellWords; ++w )
-			cellState[kCellWords * i + w] = 0u;
+			if( w != kCellMovingWord )
+				cellState[kCellWords * i + w] = 0u;
 	}
+	// THE FAST UPDATE's MEMORY (B5): this frame's trace writes its moving shares into the low bytes, last frame's move up
+	// (on a moving view too: Lumen keeps the value in its history, reprojected - ours is the cell's, one frame old)
+	cellState[kCellWords * i + kCellMovingWord] = ( cellState[kCellWords * i + kCellMovingWord] & 0xFFFFu ) << 16u;
 	// PAST N THE CELL HOLDS: its last integrate was its clock's N-th frame, whose answer IS the rest mean
 	if( ( st & kCellHeld ) == 0u && !moving && float( K ) > r.mode.y )
 		st |= kCellHeld;

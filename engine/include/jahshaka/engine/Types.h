@@ -3775,6 +3775,9 @@ struct GatherRestRecord {
     unsigned restK = 0u;
     unsigned reached = 0u, held = 0u, active = 0u;
     bool everyHeld = false;
+    /// THE FAST UPDATE (PHOTON-7 stage 8B, B5): the probes that frame with a ray whose hit moved, and those whose own
+    /// amount F passed one half (rq_probe_gather.comp's instrument)
+    unsigned movingProbes = 0u, fastProbes = 0u;
 };
 
 struct GatherStatus {
