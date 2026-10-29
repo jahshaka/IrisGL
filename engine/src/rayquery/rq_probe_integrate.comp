@@ -1323,7 +1323,11 @@ void main()
 	if( gRestK < 0.5 )
 	{
 		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
-		const float Ls = max( dot( sample1.xyz, luma ), 0.0 ), La = max( dot( outV.xyz, luma ), 0.0 );
+		// (LIKE WITH LIKE: the sample and the history's mean BEFORE the field's composition - both the answered share's
+		// premultiplied irradiance; the composed answer carries the field's fallback for the unanswered share, which the
+		// sample never holds, so a cell with any field share never "caught up" and its clock stayed at 0 for ever:
+		// samples.cleanstart.World_Background's fidelity shot, 2040 cells active at K 0 through its 2002-frame cap)
+		const float Ls = max( dot( sample1.xyz, luma ), 0.0 ), La = max( dot( mean.xyz, luma ), 0.0 );
 		atomicAdd( jahCellState[kCellWords * index + 2u], uint( clamp( 255.0 * Ls / ( 1.0 + Ls ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
 		atomicAdd( jahCellState[kCellWords * index + 3u], uint( clamp( 255.0 * La / ( 1.0 + La ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
 		atomicAdd( jahCellState[kCellWords * index + 4u], 1u );
