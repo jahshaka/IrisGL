@@ -325,9 +325,12 @@ vec3 jahVoxelPaneCross( int c, vec3 uvw, ivec3 iv, vec4 iso, uint mask, bool lig
 /// on one side of the wall: gi.voxel_ray_wall's W) - and otherwise THE DIMMER OF ITS TWO SIDES: never more light than
 /// one side holds, so never light through a wall. It errs DARK, by up to the two sides' difference, where no finer
 /// cascade holds the point (the chain march asks the finer cascade first: jahVoxelRay).
+vec4 jahSideDbgA = vec4( -1.0 ), jahSideDbgB = vec4( 0.0 ), jahSideDbgC = vec4( 0.0 );   // MEASURING ARM (reverted)
 vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirLS, float s0j, float tIn, vec3 invRes,
 						 int bothAxis, vec2 bothPlanes )
 {
+	jahSideDbgA = vec4( -2.0, float( bothAxis ), float( c ), 0.0 );   // (MEASURING ARM: -2 = the both-orientation branch)
+	jahSideDbgC = vec4( vec3( iv ), 0.0 );
 	const vec4 bk = JAH_VOX_SAMPLE_BACK( c, uvw, 0.0 );
 	const vec3 nv = JAH_VOX_SAMPLE_NRM( c, uvw, 0.0 ).xyz * 2.0 - 1.0;
 	const vec3 anv = abs( nv );
@@ -343,6 +346,7 @@ vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirL
 		}
 	}
 	float along = dot( nv, -dirLS );
+	int dbgA = -1;
 	{
 		// THE AXIS THE SIDE IS DECIDED ON (PHOTON-7 11-2, gi.small_emitter): the face the ray MEETS - of the axes the cell
 		// holds faces on, the one whose coverage-weighted plane the ray reaches first from its entry (a face it travels
@@ -384,6 +388,12 @@ vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirL
 			if( side != 0.0 )
 				along = side;
 		}
+		dbgA = a;
+	}
+	{
+		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
+		jahSideDbgA = vec4( float( dbgA ), float( na ), dbgA >= 0 ? nv[dbgA] : 0.0, along );
+		jahSideDbgB = vec4( dot( iso.xyz, luma ) / iso.w, dot( bk.xyz, luma ) / iso.w, float( c ), dot( nv, -dirLS ) );
 	}
 	const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
 	return side * ( 1.0 / iso.w );
