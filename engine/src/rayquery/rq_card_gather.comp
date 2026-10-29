@@ -251,7 +251,7 @@ void main()
 			// secondary ray of the hit's lobe answers it - a cache's FIXED draw (the texel and the ray keyed: a store
 			// takes no frame noise)
 			jahHitTracedLobe = true;
-			vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, max( tHit * spread, 1e-4 ), false,
+			vec3 radiance = jahHitRadianceStore( slot, origin + dir * tHit, hitN, dir, 1e-4 /* ARM REDS-1 T2a: c0 level 0 */, false,
 												 ok, source );
 			jahHitTracedLobe = false;
 			{
