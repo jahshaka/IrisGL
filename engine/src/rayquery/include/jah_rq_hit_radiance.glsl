@@ -55,8 +55,8 @@
 // the store's non-direct share because the store was built without them. Since A1 the store holds every mover at its
 // pose - its occlusion and its bounce are in the voxels and the cards - so the gate counted them twice, and its 4 m
 // reach could not see a bus 10 m away. The hit reads the store whole.)
-vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
-						  bool mirror, out bool ok, out uint source )
+vec3 jahHitStoreRead( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
+					  bool mirror, out bool ok, out uint source )
 {
 	{
 		// The card read restores the diffuse lobe's view term for THIS ray
@@ -86,6 +86,106 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 	return voxel;
 }
 
+#ifndef JAH_HIT_LOBE_SKY
+// (an escape's sky: the ONE environment (jah_rq_hit.glsl includes it) at the lobe's cone - the card gather's own; the
+// reflection's includer reads its own sky; an earned exit, a TLAS miss to the world's exit, never a sky past a wall)
+#define JAH_HIT_LOBE_SKY( d, alpha, centre ) jahEnvCone( d, max( alpha, 1e-3 ) )
+#endif
+#ifndef JAH_HIT_LOBE_MASK
+#define JAH_HIT_LOBE_MASK 0x0Fu   // (the near copies, kRayMaskNearField; a cache's gather passes its still mask)
+#endif
+#include "jah_world_exit.glsl"
+#include "jah_reflect_draw.glsl"
+
+/// THE NEAR-MIRROR CONTINUATION (PHOTON-7 11-2 (7), the lead's rulings). A card texel is a view-independent cache, so a
+/// near-mirror's store holds no specular (JahCardLight_cs.glsl; its bounce share none, jahHitBounceToward): THE LAW IS
+/// ONE - a ray that meets a near-mirror, whoever shot it (a gather's first hit, the reflection trace's, C2's secondary),
+/// continues by ONE ray along the mirror direction (a near-delta lobe needs no sampling), DEPTH 1: its hit read by the
+/// store (jahHitStoreRead: the card, the cascades, the direct - no further continuation: a mirror-to-mirror chain stops
+/// at 1 and reads the store there, the named limit), an exit the sky, weighed by the mirror's split DFG
+/// ( F0 A( mu, r ) + w B( mu, r ) ) at its own N.V. A rough surface (past the bound) keeps its store answer. Taken in
+/// jahHitRadianceStore, the one shared hit read; a reader that traces the hit's lobe itself (jahHitTracedLobe: C2's
+/// centre ray at a mirror IS this ray) is not continued twice. The ray tiers only: the no-ray tier has no TLAS, and its
+/// store's answer for a metal is what it is. jahHitSurf is the mirror hit on entry (its material is read here) and on
+/// exit. `P2` the mirror hit, `n2` its normal facing the ray, `L2` the ray that met it, `footprint` the caller's at P2;
+/// `answered` false where nothing was traced (not a near-mirror, a grazing hit).
+uint jahHitMirrorSlot = 0xFFFFFFFFu;   // (THE PICK: the last continuation's hit slot, 0xFFFFFFFF none or an exit)
+vec3 jahHitMirrorPart = vec3( 0.0 );   // (...and its part, weighed)
+vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float footprint, out bool answered )
+{
+	answered = false;
+	vec3 alb2, emi2;
+	float rough2;
+	vec4 metal2;
+	if( !jahHitMaterial( footprint, alb2, emi2, rough2, metal2 ) || rough2 * rough2 > kMirrorPackAlpha ||
+		!( metal2.w > 0.0 || any( greaterThan( metal2.xyz, vec3( 0.0 ) ) ) ) )
+		return vec3( 0.0 );
+	const float carried = jahHitSurf.t;
+	const float alpha = max( rough2 * rough2, 1e-6 );
+	const float mu2 = clamp( dot( n2, -L2 ), 0.0, 1.0 );
+	if( !( mu2 > 0.0 ) )
+		return vec3( 0.0 );
+	float sa2, sb2;
+	jahSpecularAlbedo( mu2, rough2, sa2, sb2 );
+	const vec3 w2 = metal2.xyz * sa2 + metal2.w * sb2;
+	if( !( max( w2.x, max( w2.y, w2.z ) ) > 0.0 ) )
+		return vec3( 0.0 );
+	answered = true;
+	const vec3 L3 = reflect( L2, n2 );
+	const vec3 o3 = jahRayOrigin( P2, n2, carried, 0.0 );
+	rayQueryEXT q3;
+	rayQueryInitializeEXT( q3, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
+						   jahWorldExitT( o3, L3, 1.0e4 ) );
+	JAH_RQ_PROCEED( q3 )
+	if( rayQueryGetIntersectionTypeEXT( q3, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		return w2 * JAH_HIT_LOBE_SKY( L3, alpha, true );   // an exit: the sky
+	const float t3 = rayQueryGetIntersectionTEXT( q3, true );
+	const uint slot3 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q3, true ) );
+	jahHitMirrorSlot = slot3;
+	const uint prim3 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q3, true ) );
+	const uint geom3 = uint( rayQueryGetIntersectionGeometryIndexEXT( q3, true ) );
+	const vec2 bary3 = rayQueryGetIntersectionBarycentricsEXT( q3, true );
+	const mat4x3 toWorld3 = rayQueryGetIntersectionObjectToWorldEXT( q3, true );
+	vec3 wound3;
+	const bool known3 = jahHitWoundNormal( slot3, geom3, prim3, toWorld3, wound3 );
+	const bool back3 = known3 && dot( wound3, L3 ) > 0.0 && ( jahHitFlags( slot3 ) & kJahHitGpuTwoSided ) == 0u;
+	if( back3 || ( jahHitFlags( slot3 ) & ( kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u )
+		return vec3( 0.0 );   // (the secondary's own rules: a back face, a rigged item, a planar mirror answer none)
+	const vec3 n3 = known3 ? ( dot( wound3, L3 ) > 0.0 ? -wound3 : wound3 ) : -L3;
+	const JahHitSurface mirrorHit = jahHitSurf;
+	jahHitSurf = JahHitSurface( slot3, geom3, prim3, bary3, toWorld3, carried + t3, false, known3 );
+	bool ok3 = false;
+	uint src3 = 0u;
+	// (the footprint spreads on along the mirror ray as it did to P2: a mirror widens nothing)
+	const vec3 r3 = jahHitStoreRead( slot3, o3 + L3 * t3, n3, L3, footprint * ( 1.0 + t3 / max( carried, 1e-3 ) ), true,
+									 ok3, src3 );
+	jahHitSurf = mirrorHit;
+	return ok3 && finite3( r3 ) ? w2 * r3 : vec3( 0.0 );
+}
+
+/// THE ONE SHARED HIT READ (every TLAS hit reader's): the store's answer at the hit (jahHitStoreRead), and at a
+/// NEAR-MIRROR the reflection it owes, continued by one ray (jahHitMirrorContinue) - unless the reader traces the hit's
+/// lobe itself (C2 sets jahHitTracedLobe: its centre ray at a mirror is the same ray). `ok` true where either answered.
+vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float footprint,
+						  bool mirror, out bool ok, out uint source )
+{
+	vec3 r = jahHitStoreRead( slot, hitPos, hitNormal, dir, footprint, mirror, ok, source );
+	jahHitMirrorSlot = 0xFFFFFFFFu;
+	jahHitMirrorPart = vec3( 0.0 );
+	if( !jahHitTracedLobe )
+	{
+		bool answered;
+		const vec3 m = jahHitMirrorContinue( hitPos, normalize( hitNormal ), normalize( dir ), footprint, answered );
+		if( answered )
+		{
+			jahHitMirrorPart = m;
+			r = ( ok && finite3( r ) ? r : vec3( 0.0 ) ) + m;
+			ok = true;
+		}
+	}
+	return r;
+}
+
 // ---- C2: THE HIT's OWN SPECULAR (PHOTON-7 11-2 (3); ONE_PICTURE C2; the lead's rulings D1-D6) ---------------------------
 // The store holds a surface's INDIRECT specular only as its lobe's INTEGRAL, re-emitted alike in every direction: a
 // polished hit seen in a reflection showed none of what it reflects (a glossy slab under an emitter, a lacquered mover
@@ -104,14 +204,6 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 // light is not geometry).
 // `P` the hit, `N` its geometric normal facing the ray's origin, `V` toward that origin, `carried` the distance P was
 // carried along (its float bound), `roughness` and `metal` the hit's (jahHitMaterial), `u` two uniforms (the draw).
-#ifndef JAH_HIT_LOBE_SKY
-#define JAH_HIT_LOBE_SKY( d, alpha, centre ) vec3( 0.0 )
-#endif
-#ifndef JAH_HIT_LOBE_MASK
-#define JAH_HIT_LOBE_MASK 0x0Fu   // (the near copies, kRayMaskNearField; a cache's gather passes its still mask)
-#endif
-#include "jah_world_exit.glsl"
-#include "jah_reflect_draw.glsl"
 #include "jah_rq_emitters.glsl"
 /// THE PICK's VIEW OF C2 (the reds' instrument, rq_reflect.comp jahPickSample): the last secondary ray's - its hit slot
 /// (0xFFFFFFFF an exit), its distance, the BRDF draw's part and the portal draw's part (every caller may ignore them)
@@ -122,60 +214,6 @@ vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec =
 vec3 jahC2PickMirror = vec3( 0.0 );
 uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
 
-/// THE NEAR-MIRROR CONTINUATION (PHOTON-7 11-2 (7), the lead's ruling). A card texel is a view-independent cache, so a
-/// near-mirror's store holds no specular (JahCardLight_cs.glsl; its bounce share none, jahHitBounceToward): the
-/// reflection a secondary ray's mirror hit owes is taken where physics puts it - ONE ray along the mirror direction
-/// (a near-delta lobe needs no sampling), DEPTH 1: its hit read by the store whole (the card, the cascades, the direct,
-/// as the secondary's own read), an exit the sky, weighed by the mirror's split DFG ( F0 A( mu, r ) + w B( mu, r ) ) at
-/// its own N.V. A rough surface (past the bound) keeps its store answer as before. The CALLER has set jahHitSurf to the
-/// mirror hit (its material is read here) and restores it. `P2` the mirror hit, `n2` its normal facing the ray, `L2`
-/// the ray that met it, `carried` the distance P2 was carried along, `alpha` and `centre` the C2 lobe's (the sky's
-/// cone and the footprint's spread).
-vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float carried, float alpha, bool centre )
-{
-	jahC2PickMirrorSlot = 0xFFFFFFFFu;
-	vec3 alb2, emi2;
-	float rough2;
-	vec4 metal2;
-	if( !jahHitMaterial( max( 2.0 * carried * sqrt( alpha ), 1e-4 ), alb2, emi2, rough2, metal2 ) ||
-		rough2 * rough2 > kMirrorPackAlpha || !( metal2.w > 0.0 || any( greaterThan( metal2.xyz, vec3( 0.0 ) ) ) ) )
-		return vec3( 0.0 );
-	const float mu2 = clamp( dot( n2, -L2 ), 0.0, 1.0 );
-	if( !( mu2 > 0.0 ) )
-		return vec3( 0.0 );
-	float sa2, sb2;
-	jahSpecularAlbedo( mu2, rough2, sa2, sb2 );
-	const vec3 w2 = metal2.xyz * sa2 + metal2.w * sb2;
-	if( !( max( w2.x, max( w2.y, w2.z ) ) > 0.0 ) )
-		return vec3( 0.0 );
-	const vec3 L3 = reflect( L2, n2 );
-	const vec3 o3 = jahRayOrigin( P2, n2, carried, 0.0 );
-	rayQueryEXT q3;
-	rayQueryInitializeEXT( q3, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
-						   jahWorldExitT( o3, L3, 1.0e4 ) );
-	JAH_RQ_PROCEED( q3 )
-	if( rayQueryGetIntersectionTypeEXT( q3, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
-		return w2 * JAH_HIT_LOBE_SKY( L3, alpha, centre );   // an exit: the sky
-	const float t3 = rayQueryGetIntersectionTEXT( q3, true );
-	const uint slot3 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q3, true ) );
-	jahC2PickMirrorSlot = slot3;
-	const uint prim3 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q3, true ) );
-	const uint geom3 = uint( rayQueryGetIntersectionGeometryIndexEXT( q3, true ) );
-	const vec2 bary3 = rayQueryGetIntersectionBarycentricsEXT( q3, true );
-	const mat4x3 toWorld3 = rayQueryGetIntersectionObjectToWorldEXT( q3, true );
-	vec3 wound3;
-	const bool known3 = jahHitWoundNormal( slot3, geom3, prim3, toWorld3, wound3 );
-	const bool back3 = known3 && dot( wound3, L3 ) > 0.0 && ( jahHitFlags( slot3 ) & kJahHitGpuTwoSided ) == 0u;
-	if( back3 || ( jahHitFlags( slot3 ) & ( kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u )
-		return vec3( 0.0 );   // (the secondary's own rules: a back face, a rigged item, a planar mirror answer none)
-	const vec3 n3 = known3 ? ( dot( wound3, L3 ) > 0.0 ? -wound3 : wound3 ) : -L3;
-	jahHitSurf = JahHitSurface( slot3, geom3, prim3, bary3, toWorld3, carried + t3, false, known3 );
-	bool ok3 = false;
-	uint src3 = 0u;
-	const vec3 r3 = jahHitRadianceStore( slot3, o3 + L3 * t3, n3, L3, max( 2.0 * ( carried + t3 ) * sqrt( alpha ), 1e-4 ),
-										 centre, ok3, src3 );
-	return ok3 && finite3( r3 ) ? w2 * r3 : vec3( 0.0 );
-}
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -267,12 +305,12 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
 												 centre, ok2, src2 );
 			jahC2PickSpec = jahHitDirectPickSpec;   // (THE PICK: the secondary hit's own lamps' specular, inside r2)
-			// ...AND A NEAR-MIRROR's REFLECTION, CONTINUED by one ray (11-2 (7): its store holds none)
-			const vec3 m2 = jahHitMirrorContinue( o + L2 * t2, n2, L2, t2, alpha, centre );
-			jahC2PickMirror = w * m2 * gain;
+			// (a near-mirror's reflection is continued inside the read: 11-2 (7), the one law)
+			jahC2PickMirror = w * jahHitMirrorPart * gain;
+			jahC2PickMirrorSlot = jahHitMirrorSlot;
 			jahHitSurf = first;
 			jahHitTracedLobe = tracedWas;
-			rad = ( ok2 && finite3( r2 ) ? r2 : vec3( 0.0 ) ) + m2;
+			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
 		}
 	}
 	vec3 c = w * rad * gain;
