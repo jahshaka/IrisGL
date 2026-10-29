@@ -91,15 +91,14 @@
 //    integrate's ROUGH SPECULAR reads these maps along the lobe's dominant
 //    direction (rq_probe_integrate.comp). R11G11B10, one layer a level, at the
 //    raw atlas' addressing.
-//    ...AND THE LOBE's MEAN HIT DISTANCE (PHOTON-7 stage 8B, B4): ONE QUADRATURE, TWO MOMENTS - under the same
-//    weights D(h) (d_o . d_t) dOmega_t over the same texels, the mean of the texels' own hit distances t_t (a texel
-//    whose ray escaped stands at the far query's end: its light came from there), one R32F layer a level beside the
-//    radiance. NO READER YET (the lead's ruling (b), 2026-10-29): the rough lobe's history by the virtual point this
-//    distance names was built and measured on gi.walk_rough (walk frames 14 / 28 / 59 breaking: B5 alone 1.86 / 4.60 /
-//    0.27 %; the virtual point 3.51 / 3.99 / 0.11; with the same-plane tap 3.55 / 3.53 / 0.23; with Lumen's 3 x 3 pick
-//    3.16 / 3.05 / 0.24) and reverted - one mean distance across a lobe that spans a depth break (a near edge before a
-//    far wall) names a point on neither, and frame 14 doubled. The leftover: the distance's VARIANCE as a third moment,
-//    and the two histories blended by the parallax error the spread predicts against the lobe's footprint.
+//    (NO DISTANCE MOMENT - PHOTON-7 stage 8B, B4, measured and deleted, the lead's ruling: a second moment under the
+//    same weights, the lobe's mean hit distance (an escaped ray at the far query's end), gave the integrate's rough
+//    lobe a history by the VIRTUAL POINT that distance names behind the surface. gi.walk_rough's breaking at walk
+//    frames 14 / 28 / 59: B5 alone 1.86 / 4.60 / 0.27 %; the virtual point 3.51 / 3.99 / 0.11; with a same-plane tap
+//    3.55 / 3.53 / 0.23; with Lumen's 3 x 3 pick 3.16 / 3.05 / 0.24 - frame 14 doubled, because one mean distance
+//    across a lobe spanning a depth break (a near edge before a far wall) names a point on neither. The leftover
+//    re-adds the moment WITH the distance's variance as a third, and blends the virtual point's history against the
+//    surface's by the parallax error that spread predicts against the lobe's footprint - continuous, no box.)
 //
 // WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal, and the
 // prefiltered maps.
@@ -119,8 +118,6 @@ layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray pr
 /// THE CELLS' STATE (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): a probe the trace skipped (its cell held, outside every
 /// active cell's ring) is not filtered - nothing reads it this frame.
 layout( std430, set = 0, binding = 5 ) readonly buffer JahCellState { uint jahCellState[]; };
-/// THE LOBES' MEAN HIT DISTANCE (8B, B4; the header's job 3): one layer a level, beside the prefiltered radiance.
-layout( r32f, set = 0, binding = 6 ) uniform writeonly image2DArray prefilteredDist;
 const uint kFilterCellHeld = 1u;
 const uint kFilterCellWords = 10u;   // jah_probe_rest.glsl kCellWords
 #include "jah_reproject.glsl"
@@ -157,14 +154,12 @@ shared uint gUnsampled;
 /// world direction.
 shared vec4 gTexL[64];
 shared vec3 gTexD[64];
-shared float gTexT[64];   // (8B B4: the texel's own hit distance - the far query's end where it escaped)
 /// THE PROBE'S SKY SHARE (PHOTON-7 10-4 R11): a texel's cosine-weighted solid angle where its own ray MISSED (the sky),
 /// reduced beside the SH sums; over the cosine-weighted hemisphere it is the probe's measured sky visibility, kept in
 /// the record's free 28th float (sh[6].w) for the integrate's jahSkyVis.
 shared float gMiss[64];
 /// The most roughness levels the prefilter writes (the image's layers; p.roughLevels.z).
 const int kRoughLevelsMax = 3;
-float gOwnT = 0.0;   // this lane's texel's own hit distance (8B B4)
 
 /// THE PARALLAX TEST (ENGINE-POLISH-PHOTON-2 stage 3; Lumen's spatial filter): a neighbour's ray in
 /// direction d from its position q hit at distance t, so its sample is the radiance leaving the point
@@ -287,8 +282,7 @@ void main()
 	// mean, not the hemisphere's (measured: photon-room's floor +13 to +26 codes under the overflow arm); its pixels
 	// keep their history instead (rq_probe_integrate.comp), exactly as for a probe that lost every ray.
 	bool sampled = false;
-	bool missed = false;
-	gOwnT = 0.0;   // (the texel's own ray met nothing: the sky - R11's sky share)
+	bool missed = false;   // (the texel's own ray met nothing: the sky - R11's sky share)
 
 	if( onSurface && lane < rays )
 	{
@@ -308,7 +302,6 @@ void main()
 		const vec4 own = imageLoad( probeAtlas, block + texel );
 		sampled = !( own.w <= kAtlasNoSample + 0.5 );
 		missed = sampled && own.w < 0.0;
-		gOwnT = !sampled ? 0.0 : missed ? max( p.knobs3.w, p.knobs.y ) : own.w;
 		if( !sampled )
 			atomicAdd( gUnsampled, 1u );
 		vec3 sum = sampled ? own.xyz : vec3( 0.0 );
@@ -379,7 +372,6 @@ void main()
 	gTexL[lane] = ( sampled && finite3( filtered ) ) ? vec4( clamp( filtered, vec3( 0.0 ), vec3( kMaxRadiance ) ), solidAngle )
 													 : vec4( 0.0 );
 	gTexD[lane] = dirW;
-	gTexT[lane] = gOwnT;
 	barrier();
 	if( onSurface && lane < rays )
 	{
@@ -387,14 +379,12 @@ void main()
 		float a2[kRoughLevelsMax];
 		vec3 acc[kRoughLevelsMax];
 		float wacc[kRoughLevelsMax];
-		float tacc[kRoughLevelsMax];
 		for( int k = 0; k < kRoughLevelsMax; ++k )
 		{
 			const float r = p.roughLevels.x + p.roughLevels.y * float( k );
 			a2[k] = r * r * r * r;   // alpha = r^2 (perceptual roughness), alpha^2 = r^4
 			acc[k] = vec3( 0.0 );
 			wacc[k] = 0.0;
-			tacc[k] = 0.0;
 		}
 		for( uint t = 0u; t < rays; ++t )
 		{
@@ -410,7 +400,6 @@ void main()
 				const float den = noh2 * ( a2[k] - 1.0 ) + 1.0;
 				const float w = c * Lt.w / ( den * den );
 				acc[k] += Lt.xyz * w;
-				tacc[k] += gTexT[t] * w;
 				wacc[k] += w;
 			}
 		}
@@ -420,8 +409,6 @@ void main()
 				break;
 			const vec3 v = wacc[k] > 0.0 ? acc[k] / wacc[k] : vec3( 0.0 );
 			imageStore( prefilteredAtlas, ivec3( block + texel, k ), vec4( finite3( v ) ? v : vec3( 0.0 ), 0.0 ) );
-			const float tl = wacc[k] > 0.0 ? tacc[k] / wacc[k] : 0.0;
-			imageStore( prefilteredDist, ivec3( block + texel, k ), vec4( finite1( tl ) ? tl : 0.0 ) );
 		}
 		// THE QUADRATURE DOOR (a test door, p.roughLevels.w >= 1): the filtered map itself, in the layer after the levels
 		if( p.roughLevels.w > 0.5 )
