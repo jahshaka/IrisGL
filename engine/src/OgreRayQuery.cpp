@@ -8960,15 +8960,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
                 b.range = mask->getTotalSizeBytes();
                 b.live = vol.lighting->getBrickMaskFrame() == ph.regionCloseFrame();
             }
-            {   // MEASURING ARM (8B B5 (a)(1), to be reverted): the feedback's brick state
-                unsigned fd[3] = { 0u, 0u, 0u };
-                if (Ogre::UavBufferPacked *fb = vol.lighting->feedbackBrickState(fd)) {
-                    auto *bi = static_cast<Ogre::VulkanBufferInterface *>(fb->getBufferInterface());
-                    b.fbBuffer = bi->getVboName();
-                    b.fbOffset = VkDeviceSize(fb->_getFinalBufferStart()) * fb->getBytesPerElement();
-                    b.fbRange = fb->getTotalSizeBytes();
-                }
-            }
         }
         r.fieldBusy = ph.fieldWideWorkOwed();
         in.fastSkinPosed = posedSlotsOf(scene, mRs->getVaoManager()->getFrameCount()) != nullptr;
