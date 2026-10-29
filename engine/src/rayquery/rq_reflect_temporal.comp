@@ -48,6 +48,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
 
 int gEye = 0;
@@ -257,13 +258,13 @@ void storeMean( ivec2 tc, vec3 meanD, float var, float count, float hitT, bool r
 	}
 	const vec4 hist = vec4( clamp( jahFromDenoise( max( meanD, vec3( 0.0 ) ) ), vec3( 0.0 ), vec3( kMaxRadiance ) ),
 							max( var, 0.0 ) );
-	imageStore( historyCur, ivec3( tc, gEye ), hist );
+	imageStore( historyCur, ivec3( tc, gEye ), jahRoundHalf( hist ) );
 	st.N = count;
 	st.hitT = hitT;
 	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 	if( resumed )
 	{
-		imageStore( historyPrev, ivec3( tc, gEye ), hist );
+		imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( hist ) );
 		JahReflectState h = jahStateUnpack( imageLoad( statePrev, ivec3( tc, gEye ) ).xy );
 		h.N = count;
 		h.hitT = hitT;
@@ -409,11 +410,11 @@ void main()
 				// (the rest's mean length: the rest samples' own running mean)
 				st.hitT = vPrev > 0.0 && st.hitT > 0.0 ? max( st.hitT + ( s.w - st.hitT ) / v, 1e-3 ) : s.w;
 				st.v = uint( v );
-				imageStore( historyCur, ivec3( tc, gEye ), vec4( rs.M, rs.m2 ) );
+				imageStore( historyCur, ivec3( tc, gEye ), jahRoundHalf( vec4( rs.M, rs.m2 ) ) );
 				if( jahRestHasResidual( v, hasH, N ) )
-					imageStore( historyPrev, ivec3( tc, gEye ), rs.res );   // the stores' residual (jahRestFold)
+					imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( rs.res ) );   // the stores' residual (jahRestFold)
 				else if( centreOnly )
-					imageStore( historyPrev, ivec3( tc, gEye ), vec4( rs.M, 0.0 ) );   // the plain mean: every reader composes M
+					imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( vec4( rs.M, 0.0 ) ) );   // the plain mean: every reader composes M
 			}
 			if( !( v >= 1.0 ) )
 				return;   // nothing in the rest mean yet

@@ -43,6 +43,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
 
 int gEye = 0;
@@ -180,14 +181,14 @@ void main()
 	// THE TEXEL'S OWN SAMPLE WHOLE: a declined texel (none), the rest (its raw samples), the centre ray.
 	if( !( st.surfDist > 0.0 ) || p.knobs2.x >= 0.5 || st.centre )
 	{
-		imageStore( ssrReflection, ivec3( tc, gEye ), ownValid ? own : vec4( 0.0 ) );
+		imageStore( ssrReflection, ivec3( tc, gEye ), jahRoundHalf( ownValid ? own : vec4( 0.0 ) ) );
 		return;
 	}
 	const EyeImage e = eyeNow( gEye );
 	const Surface c = surfaceAt( tc, scale, fullRes, e );
 	if( !c.ok )
 	{
-		imageStore( ssrReflection, ivec3( tc, gEye ), ownValid ? own : vec4( 0.0 ) );
+		imageStore( ssrReflection, ivec3( tc, gEye ), jahRoundHalf( ownValid ? own : vec4( 0.0 ) ) );
 		return;
 	}
 	const bool persp = e.perspective > 0.5;
@@ -284,6 +285,6 @@ void main()
 		}
 	}
 	imageStore( ssrReflection, ivec3( tc, gEye ),
-				sumW > 0.0 ? vec4( jahFromDenoise( sum / sumW ) + ( sumNeeW > 0.0 ? sumNee / sumNeeW : vec3( 0.0 ) ), minT )
-						   : vec4( 0.0 ) );
+				jahRoundHalf( sumW > 0.0 ? vec4( jahFromDenoise( sum / sumW ) + ( sumNeeW > 0.0 ? sumNee / sumNeeW : vec3( 0.0 ) ), minT )
+						   : vec4( 0.0 ) ) );
 }

@@ -217,7 +217,7 @@ void gatherHitPaint( ivec2 cell, ivec2 texel, int octRes, vec4 c )
 	const ivec2 hi = min( base + ( ( texel + 1 ) * stride ) / res, full );
 	for( int y = lo.y; y < hi.y; ++y )
 		for( int x = lo.x; x < hi.x; ++x )
-			imageStore( photonOverlay, ivec3( x, y, eye ), c );
+			imageStore( photonOverlay, ivec3( x, y, eye ), jahRoundHalf( c ) );
 }
 
 void main()
@@ -521,5 +521,5 @@ void main()
 	// padding.)
 	const ivec2 own = ivec2( int( lane ) % kOctResMax, int( lane ) / kOctResMax );
 	if( own.x >= octRes || own.y >= octRes )
-		imageStore( probeAtlas, block + own, vec4( 0.0, 0.0, 0.0, -1.0 ) );
+		imageStore( probeAtlas, block + own, jahRoundHalf( vec4( 0.0, 0.0, 0.0, -1.0 ) ) );
 }
