@@ -599,6 +599,7 @@ private:
         /// THE ALPHA AND HIT TABLES' INPUTS as they were last written (stage 3): re-written only when one moves.
         unsigned long long alphaMaskTableSerial = ~0ull, hitMaterialSerial = ~0ull, hitLightSerial = ~0ull,
                            hitLightsRemoved = ~0ull, hitRowsSerial = ~0ull;
+        bool hitImagesOff = false;   // MEASURING ARM (11-2 (8), reverted): the arm the table was built under
         /// The mesh each job record was written for (index = the mesh-table entry): a mesh-set change
         /// re-writes the entries whose mesh changed, never the table.
         std::vector<const Ogre::Mesh *> recordedMeshAt;
@@ -7977,13 +7978,15 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         // teardown re-created never repeats an older store's value (decision 14.7).
         const unsigned long long rows = storeGate ? storeGate->getRowsSerial() : 0ull;
         const unsigned long long edits = scene->photon().materialEditSerial();
+        const bool imagesOff = arm(ArmId::ReflectImagesOff, false);   // MEASURING ARM (reverted)
         if (sa.hitTableAddress && lights == sa.hitLightSerial && removed == sa.hitLightsRemoved &&
-            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial && !sa.emitterDirty) {
+            rows == sa.hitRowsSerial && edits == sa.hitMaterialSerial && !sa.emitterDirty && imagesOff == sa.hitImagesOff) {
             if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = frameNow();
             return;
         }
         sa.hitLightSerial = lights;
         sa.hitLightsRemoved = removed;
+        sa.hitImagesOff = imagesOff;
         sa.hitRowsSerial = rows;
         sa.hitMaterialSerial = edits;
         sa.emitterDirty = false;
@@ -8100,7 +8103,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         const detail::GpuInstance *mi = gs.mirrorData();
         const uint32_t slots = gs.live() ? gs.slotCount() : 0u;
         static std::set<unsigned long long> printed;
-        if (mi && store && !lamps.empty()) {
+        if (mi && store && !lamps.empty() && !arm(ArmId::ReflectImagesOff, false)) {   // (MEASURING ARM, reverted)
             const auto &rows = store->getRowWords();
             const uint32_t nR = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
             for (uint32_t i = 0; i < slots && images < 16u; ++i) {
