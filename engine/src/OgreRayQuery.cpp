@@ -13389,13 +13389,6 @@ unsigned long long PhotonComponent::reflectionReadsKey() const {
     fold(mScene.cloudGiSerial());
     fold(mIfd ? mIfd->getDispatches() : 0ull);
     fold(mTextureArrivals);
-    if (mSurfaceCache) {   // MEASURING ARM (8B B2, to be reverted): the cards' three terms back in the view-wide key
-        CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
-        fold(cs.captures);
-        fold(cs.stillTraces);
-        fold(cs.visibleRelights);
-    }
     return key;
 }
 

@@ -325,7 +325,7 @@ bool restHitChanged( vec3 x, float r )
 	for( uint k = 0u; k < n; ++k )
 	{
 		const uint kind = regionKind( k );
-		if( kind == kRegionSlab || kind == kRegionLamp || kind == kRegionLampShadow ||   // MEASURING ARM: no Card
+		if( kind == kRegionSlab || kind == kRegionCard || kind == kRegionLamp || kind == kRegionLampShadow ||
 			kind == kRegionEdit )
 		{
 			const vec3 lo = regionLo( k ).xyz - vec3( r ), hi = regionHi( k ).xyz + vec3( r );
