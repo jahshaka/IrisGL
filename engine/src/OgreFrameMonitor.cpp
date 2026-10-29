@@ -1294,7 +1294,6 @@ constexpr ArmDef kArms[] = {
       "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "
       "the rest's hand-over length (gatherSettleFramesOf N) and the temporal pass' window. 0 = shipped "
       "(kReflectMaxFrames, Lumen's 12)." },
-    { ArmId::ReflectMirrorContOff, 0.0, 0.0, 1.0, "MEASURING ARM (PHOTON-7 11-2 (7), reverted): 1 = no near-mirror continuation (the price's ABBA)." },
     { ArmId::ReflectPosed, 1.0, 0.0, 1.0,
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
