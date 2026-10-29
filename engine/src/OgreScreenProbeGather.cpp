@@ -1766,10 +1766,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // ...and never while the gather-hits readback runs (FAR-SUN-1): a held cell traces nothing, and the
         // instrument reads the trace.
         // ...and A VIEW THAT MISSED ONE OF ITS SCENE'S DRAWS missed that frame's list: it re-rests whole (a list is
-        // read in its frame or never) - when a close it missed CARRIED an input (the closes after the last it read and
-        // before this frame's: a still scene's missed frame changes nothing, gi.screen_bind (6))
-        const bool missed = v.age > 0u && uint32_t(in.rest.drawSerial - v.recordedDraw) > 1u &&
-                            in.rest.lastInputClose > v.regionSerialSeen && in.rest.lastInputClose < in.rest.regionSerial;
+        // read in its frame or never) - unless the view HELD whole before the miss and no close it missed carried an input
+        // (the closes after the last it read and before this frame's): a held view's missed still frame changed nothing
+        // it reads (gi.screen_bind (6)). A view still settling re-rests on any miss: its declines (a pipeline building in
+        // the background) fall on frames a process cannot repeat, and the re-rest is what makes its held picture the
+        // same in every process (gi.walk_area's L2: 545 px apart with the miss forgiven while settling)
+        const bool missedInput = in.rest.lastInputClose > v.regionSerialSeen && in.rest.lastInputClose < in.rest.regionSerial;
+        const bool missed = v.age > 0u && uint32_t(in.rest.drawSerial - v.recordedDraw) > 1u && (!v.heldLast || missedInput);
         const bool restable = temporal && !in.tuning.restOff && !in.stereo;
         restStill = restable && sameCamera && in.chainKey == v.chainKey && photon == v.photonLast &&
                     !in.hitsReadback && !missed && v.cellsCleared;
