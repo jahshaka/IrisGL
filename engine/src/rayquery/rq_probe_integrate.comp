@@ -559,7 +559,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 	// THE RAYS INTO THE CELL's BINS (8B), after the loop: their hits, their escapes (-1), none for an exhausted one (-2).
 	// (A NAMED COST, the leftover list's: this pipeline's cold driver compile is 120 s with the bins' writes, 67-71 s
 	// without them - the whole hit set is inlined into this loop; paid once per shader change, at the warm or a first boot)
-	for( int i = 0; i < n; ++i )
+	for( int i = 0; i < n && p.young.w < 0.5; ++i )   // (MEASURING ARM: young.w 1 = the bins' writes off)
 		if( gRayT[i] > -1.5 )
 			restStoreRay( normalize( basis * jahRayCosineDir( i, n ) ), gRayT[i] >= 0.0, gRayT[i] );
 	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0 );
