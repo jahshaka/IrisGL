@@ -689,6 +689,9 @@ public:
     /// at the close - a cascade's brick mask whose clear was that frame holds the changes the list's frame made.
     unsigned long long regionCloseSerial() const { return mRegionCloses; }
     unsigned long long regionCloseFrame() const { return mRegionCloseFrame; }
+    /// ...and the serial of the LAST close that carried an input (its list, a live brick mask, the field at work), judged
+    /// at the next close (closeRegions): a gathering view that missed draws re-rests only past one (PHOTON-7 stage 8B).
+    unsigned long long lastInputCloseSerial() const { return mLastInputClose; }
     /// THE FIELD AT WORK (PHOTON-7 stage 8B, B1): its integration, empties, restarts or refinements owed - the gather's
     /// cells that read its fallback resume while it is (rq_probe_resume.comp).
     bool fieldWideWorkOwed() const;
@@ -2002,6 +2005,7 @@ private:
     float mRegionSunPeak = -1.0f, mRegionSkyPeak = -1.0f;
     unsigned long long mRegionCloses = 0, mRegionClosesListing = 0;
     unsigned long long mRegionCloseFrame = 0ull;   ///< regionCloseFrame
+    unsigned long long mLastInputClose = 0ull;     ///< lastInputCloseSerial
     Ogre::ConstBufferPacked *mRegionBuffer = nullptr;
     std::vector<float> mRegionCpu;
     /// The GPU list goes with the scene's GI objects (teardownGi; the close makes it again).

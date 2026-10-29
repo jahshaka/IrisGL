@@ -375,6 +375,9 @@ struct GatherRestInputs {
     VkBuffer regions = VK_NULL_HANDLE;
     VkDeviceSize regionsOffset = 0u, regionsRange = 0u;
     unsigned long long regionSerial = 0ull;
+    /// ...and the last close that carried an input (PhotonComponent::lastInputCloseSerial): a view that missed draws re-rests
+    /// whole only when a close it missed carried one.
+    unsigned long long lastInputClose = 0ull;
     unsigned regionCount = 0u;
     uint32_t overflow = 0u;
     bool restart = false;

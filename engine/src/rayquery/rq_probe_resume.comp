@@ -59,7 +59,8 @@ layout( std140, set = 0, binding = 1 ) uniform RestParams
 	/// (every sample at index 0: the A/B's freeze), w a sky pixel's column depth (the far plane)
 	vec4 seq;
 	/// x the list's regions this view reads this frame (0: none, or read already), y 1 = it overflowed or restarted,
-	/// z unused, w the cascades with this frame's brick mask
+	/// z the convergence's window in frames (the history's settle, never the rest length), w the cascades with this
+	/// frame's brick mask
 	vec4 lists;
 	/// per cascade (the hit set's order): xyz its bricks, w 1 = its mask is this frame's
 	uvec4 brickDims[kRestCascades];
@@ -658,7 +659,9 @@ void main()
 		uint st = cellState[w] & ~kCellReached;
 		// THE CELL's CONVERGENCE (the lead's ruling: a rest starts when no input reaches the cell AND its own history has
 		// converged): while its clock is 0, its SAMPLES' cell mean (the integrate's sums, the frame before) is followed by
-		// an exponential mean over the gather's N frames (and its variance) restarted at the cell's last reach - converged
+		// an exponential mean over the HISTORY's settle (r.lists.z: the frames its EMA takes to forget a step - what "the
+		// history caught up" is measured over; the rest's own length is a door and never this) and its variance,
+		// restarted at the cell's last reach - converged
 		// when the history's answer is within a code (and 3 of that mean's standard errors) of it: the samples say what
 		// the cell is now and the history has caught up, so no hand-over transient sits inside a declared rest. Read
 		// every frame (no window to wait out).
@@ -684,7 +687,7 @@ void main()
 				float m = x, var = 0.0;
 				if( frames > 0u )
 				{
-					const float alpha = 2.0 / ( max( r.mode.y, 1.0 ) + 1.0 );
+					const float alpha = 2.0 / ( max( r.lists.z, 1.0 ) + 1.0 );
 					m = uintBitsToFloat( cellState[w + 5u] );
 					var = uintBitsToFloat( cellState[w + 6u] );
 					const float d = x - m;
@@ -694,7 +697,7 @@ void main()
 				cellState[w + 5u] = floatBitsToUint( m );
 				cellState[w + 6u] = floatBitsToUint( var );
 				cellState[w + 7u] = min( frames + 1u, 1u << 20 );
-				const float alpha = 2.0 / ( max( r.mode.y, 1.0 ) + 1.0 );
+				const float alpha = 2.0 / ( max( r.lists.z, 1.0 ) + 1.0 );
 				const float se = sqrt( var * alpha / ( 2.0 - alpha ) );
 				if( frames + 1u >= 2u && abs( a - m ) < 1.0 + 3.0 * se )
 					st |= kCellConverged;

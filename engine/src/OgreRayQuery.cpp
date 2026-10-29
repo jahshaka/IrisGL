@@ -8925,6 +8925,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         const PhotonComponent &ph = scene->photon();
         r.drawSerial = scene->drawSerial();
         r.regionSerial = ph.regionCloseSerial();
+        r.lastInputClose = ph.lastInputCloseSerial();
         const GiChangedRegions &list = ph.changedRegions();
         if (Ogre::ConstBufferPacked *rb = ph.regionBuffer()) {
             auto *bi = static_cast<Ogre::VulkanBufferInterface *>(rb->getBufferInterface());

@@ -1766,8 +1766,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // ...and never while the gather-hits readback runs (FAR-SUN-1): a held cell traces nothing, and the
         // instrument reads the trace.
         // ...and A VIEW THAT MISSED ONE OF ITS SCENE'S DRAWS missed that frame's list: it re-rests whole (a list is
-        // read in its frame or never).
-        const bool missed = v.age > 0u && uint32_t(in.rest.drawSerial - v.recordedDraw) > 1u;
+        // read in its frame or never) - when a close it missed CARRIED an input (the closes after the last it read and
+        // before this frame's: a still scene's missed frame changes nothing, gi.screen_bind (6))
+        const bool missed = v.age > 0u && uint32_t(in.rest.drawSerial - v.recordedDraw) > 1u &&
+                            in.rest.lastInputClose > v.regionSerialSeen && in.rest.lastInputClose < in.rest.regionSerial;
         const bool restable = temporal && !in.tuning.restOff && !in.stereo;
         restStill = restable && sameCamera && in.chainKey == v.chainKey && photon == v.photonLast &&
                     !in.hitsReadback && !missed && v.cellsCleared;
@@ -2411,6 +2413,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     rp.seq[3] = in.farClip > 0.0f ? in.farClip : 1.0e4f;
     rp.lists[0] = restStill && restIn.regions ? float(std::min(restIn.regionCount, 128u)) : 0.0f;
     rp.lists[1] = restStill && (restIn.overflow || restIn.restart) ? 1.0f : 0.0f;
+    // THE CONVERGENCE's WINDOW: the history's own settle (settleFramesOf: the frames its EMA takes to forget a step), never
+    // the rest's length - a rest door of 256 frames made the gate wait ~120 frames to start its rest (gi.gather_sliver)
+    rp.lists[2] = float(settleFramesOf(historyFramesOf(in.tuning)));
     rp.lists[3] = float(liveMasks);
     rp.field[0] = restStill && restIn.fieldBusy ? 1.0f : 0.0f;
     std::memcpy(v.restParamsMapped[ring], &rp, sizeof(rp));

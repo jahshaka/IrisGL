@@ -457,6 +457,21 @@ void PhotonComponent::listLamp(bool hadSphere, const Ogre::Vector3 &oldCentre, f
 
 void PhotonComponent::closeRegions() {
     const unsigned long long frame = giWriterFrame();
+    // THE LAST CLOSE THAT CARRIED AN INPUT (PHOTON-7 stage 8B; the gather's missed-draw rule): the PREVIOUS close, judged
+    // now that its frame's light work is done - its list (a region, an overflow, a restart), a brick mask its frame's
+    // light work wrote, or the field at work. A view that missed draws re-rests whole only when one of the closes it
+    // missed carried an input (a still scene's missed frame changes nothing it would have read).
+    if (mRegionCloses > 0ull) {
+        const GiChangedRegions &was = mRegionsClosed;
+        bool input = was.available && (!was.regions.empty() || was.overflow || was.restart);
+        if (!input) {
+            std::vector<Volume> vols;
+            volumes(vols);
+            for (const Volume &v : vols)
+                if (v.lighting && v.lighting->getBrickMaskFrame() == mRegionCloseFrame) { input = true; break; }
+        }
+        if (input || fieldWideWorkOwed()) mLastInputClose = mRegionCloses;
+    }
     // THE CASCADES EACH REGION REACHES, against the boxes as they stand at the close (a scroll's commit earlier in the
     // frame moved one): a box test, as the dirty path's marks; a Slab names its own.
     for (RegionEntry &e : mRegionsOpen) {
