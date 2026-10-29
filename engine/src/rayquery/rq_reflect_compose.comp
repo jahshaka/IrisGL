@@ -70,7 +70,7 @@ void main()
 	}
 	imageStore( historyPrev, ivec3( tc, eye ),
 				jahRoundHalf( vec4( jahRefineShown( jahRestAnswer( hasH ? H : vec3( 0.0 ), hasH, M, v, N ),
-													imageLoad( restRefine, ivec3( tc, eye ) ) ),
+													p.alpha.x > 0.5 ? uvec4( 0u ) : imageLoad( restRefine, ivec3( tc, eye ) ) ),
 									var ) ) );
 	// THE COMPOSED COUNT: the answer's samples, H's and the rest's - packed at the state's 5.3 ceiling, 31.875, which binds
 	// only here and above the moving MaxFrames 12: the first moving frame after the break takes min( N c + 1, 12 ) = 12 for
