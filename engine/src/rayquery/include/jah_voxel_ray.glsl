@@ -375,6 +375,10 @@ vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirL
 				a = k;
 			}
 		}
+		// MEASURING ARM (BUGS-8 (1), to be reverted): the face rule only where the met axis carries at least half the
+		// canonical normal's dominant component - elsewhere the dominant axis decides, as before 50e93463
+		if( a != na && abs( nv[a] ) < 0.5 * abs( nv[na] ) )
+			a = na;
 		const float oP = cP[a];
 		const float oN = cN[a];
 		if( oP + oN > 0.0 && nv[a] != 0.0 )
