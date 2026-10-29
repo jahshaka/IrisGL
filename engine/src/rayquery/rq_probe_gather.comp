@@ -89,8 +89,6 @@ layout( std430, set = 0, binding = 40 ) buffer JahCellStore { uint jahCellStore[
 /// (the probe's cell, set at main's head: its stamps' gate, jah_probe_rest.glsl jahCardStampsOf)
 uint gCell = 0u;
 #define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
-// (the faces: from the rest span or moving - a still view's settling cell, K 0, marks none; p.young.w 1 = the view still)
-#define JAH_CARD_FACE_GATE ( p.young.w < 0.5 || jahRestKOf( gCell ) >= 0.5 )
 #include "jah_ray_origin.glsl"
 #include "jah_half_round.glsl"
 

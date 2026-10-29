@@ -2105,7 +2105,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                      float(stride));   // pixels -> cells of this view's stride
     // THE RAYS STRATIFIED ACROSS NEIGHBOURING PROBES (GATHER-NOISE-1).
     pp.young[2] = float(in.tuning.crossStrata ? in.tuning.crossStrata : kCrossStrata);
-    pp.young[3] = restStill ? 1.0f : 0.0f;   // (the view still: its settling cells mark no card face - 8B)
     std::memcpy(pp.camPos2, in.camPos2, sizeof(pp.camPos2));
     put3(pp.rayTL2, in.rayTL2, 0.0f);
     put3(pp.rayRight2, in.rayRight2, 0.0f);

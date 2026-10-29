@@ -239,8 +239,6 @@ void restStoreRay( vec3 d, bool hit, float t )
 		atomicOr( jahCellStore[at + 128u + ( bin >> 5u )], 1u << ( bin & 31u ) );
 }
 #define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
-// (the faces: from the rest span or moving - a still view's settling cell, K 0, marks none; p.young.w 1 = the view still)
-#define JAH_CARD_FACE_GATE ( p.young.w < 0.5 || jahRestKOf( gCell ) >= 0.5 )
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
