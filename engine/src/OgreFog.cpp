@@ -399,6 +399,15 @@ void FogHlmsListener::setGlassEscape(const Ogre::SceneManager *sm, bool on, unsi
         b->escapeCapacity = b->escapeList ? capacity : 0u;
     }
 }
+void FogHlmsListener::setColourPick(const Ogre::SceneManager *sm, unsigned long long ring, unsigned pixel, unsigned slot,
+                                    unsigned frame) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->pickRing = ring;
+        b->pickPixel = ring ? pixel : 0u;
+        b->pickSlot = ring ? slot : 0u;
+        b->pickFrame = ring ? frame : 0u;
+    }
+}
 bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
     return b && b->lampRaysOn;
@@ -670,6 +679,9 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
         // open shares' records (PhotonVct_piece_ps.any) - the PBS template's passes (its PhotonVct reads the volumes)
         if (rec->escapePass && !casterPass && hlms->getType() == Ogre::HLMS_PBS)
             hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_glass_escape", 1);
+        // THE COLOUR PICK (BUGS-8, the arm colour.pick): while a ring is registered, every colour pass of the scene
+        // records the picked pixel's fragments (JahColourPick_piece_ps.any; the pass buffer's last two uint4)
+        if (rec->pickRing && !casterPass) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_colour_pick", 1);
     }
     // ...AND AT THE NO-RAY TIER, THE VOXEL CHAIN'S MARCH (the lead's ruling, 2026-10-27): every colour pass of a scene
     // that does not trace and binds its voxel chain - the lamp seen through the voxels' own shadow march
@@ -959,8 +971,9 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
     // Plus THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): one float4 after the chain (s, the sun's share).
     // Plus THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): one uint4 after it (the address, the capacity).
+    // Plus THE COLOUR PICK (BUGS-8): two uint4 after it (the ring's address, the pixel, the slot; the target, the frame).
     return PhotonPassBinding::passBufferSize(casterPass, sceneManager) +
-           (56u + kLampChainFloats + 4u + 4u) * sizeof(float);
+           (56u + kLampChainFloats + 4u + 4u + 8u) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1118,6 +1131,22 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
         }
         std::memcpy(passBufferPtr, escape, sizeof(escape));
         passBufferPtr += 4;
+        // THE COLOUR PICK (BUGS-8): the ring's address' bits, the pixel, the frame's slot; the pass's target size and the
+        // engine frame (zeros: no pick - the fragment records nothing)
+        Ogre::uint32 pick[8] = { 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };
+        if (!casterPass && b && b->pickRing) {
+            pick[0] = Ogre::uint32(b->pickRing & 0xFFFFFFFFull);
+            pick[1] = Ogre::uint32(b->pickRing >> 32u);
+            pick[2] = b->pickPixel;
+            pick[3] = b->pickSlot;
+            if (const Ogre::Viewport *vp = sceneManager->getCurrentViewport0()) {
+                pick[4] = Ogre::uint32(vp->getActualWidth());
+                pick[5] = Ogre::uint32(vp->getActualHeight());
+            }
+            pick[6] = b->pickFrame;
+        }
+        std::memcpy(passBufferPtr, pick, sizeof(pick));
+        passBufferPtr += 8;
     }
     return passBufferPtr;
 }

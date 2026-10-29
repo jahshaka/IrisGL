@@ -1,0 +1,101 @@
+// THE COLOUR PICK (BUGS-8, the instrument jahlab's `pick ... colour` and `colourpick` read; the arm colour.pick): while the
+// arm names a full-resolution pixel, every colour pass fragment AT that pixel writes what built it into the frame's slot
+// of a host-visible ring whose device address rides the pass buffer (jahPickAddr: the address xy, the pixel z = x | y
+// << 16, the slot w; jahPickTarget: the pass's target width and height, the engine frame) - the pass-buffer lights' sum
+// (the colour before the first Forward+ lamp), each Forward+ lamp's attenuation after its shadow ray and the colour
+// before it, the colour before the environment's BRDF with the diffuse and specular environment, the output before the
+// fog law and after it, the fog's lit share and the fragment's depth. The pass property `jah_colour_pick` (OgreFog.cpp)
+// exists only while the arm is on: every other permutation is the one it was.
+// THE AT-SIGN RULE: no directive mark in any comment of this file.
+@property( jah_colour_pick )
+@piece( JahColourPickDecl )
+	// a slot: word 0 the records appended, words 1-3 0; then four records of 31 words (JahColourPickTail's order)
+	layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer JahColourPickRing { uint w[]; };
+	float3 jahPickLampBase = float3( 0.0, 0.0, 0.0 );
+	float3 jahPickLamp1Base = float3( 0.0, 0.0, 0.0 );
+	float4 jahPickLampAtten = float4( -1.0, -1.0, -1.0, -1.0 );
+	uint jahPickLamps = 0u;
+	float3 jahPickPreEnv = float3( 0.0, 0.0, 0.0 );
+	float3 jahPickEnvD = float3( 0.0, 0.0, 0.0 );
+	float3 jahPickEnvS = float3( 0.0, 0.0, 0.0 );
+	float3 jahPickPreFog = float3( -1.0, -1.0, -1.0 );
+	float jahPickFogLit = -1.0;
+	bool jahPickHere()
+	{
+		return ( passBuf.jahPickAddr.x != 0u || passBuf.jahPickAddr.y != 0u ) &&
+			   uint( gl_FragCoord.x ) == ( passBuf.jahPickAddr.z & 0xFFFFu ) &&
+			   uint( gl_FragCoord.y ) == ( passBuf.jahPickAddr.z >> 16u );
+	}
+@end
+@end
+@property( jah_colour_pick && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !atom_hit_mode )
+// a Forward+ lamp's term, after its shadow ray (JahLampRay_piece_ps.any's custom_ps_fwdplus_lamp, which inserts this):
+// the colour before the lamp is added and its attenuation
+@piece( JahColourPickLamp )
+			if( jahPickLamps == 0u )
+				jahPickLampBase = float3( finalColour );
+			else if( jahPickLamps == 1u )
+				jahPickLamp1Base = float3( finalColour );
+			if( jahPickLamps < 4u )
+				jahPickLampAtten[jahPickLamps] = float( atten );
+			++jahPickLamps;
+@end
+// the colour before the environment's split DFG and the two environment terms (the fork's custom_ps_preEnvBrdf)
+@piece( custom_ps_preEnvBrdf )
+			jahPickPreEnv = float3( finalColour );
+			jahPickEnvD = float3( pixelData.envColourD );
+			jahPickEnvS = float3( pixelData.envColourS );
+@end
+// the output before the fog law (JahFog's custom_ps_posExecution inserts this first)
+@piece( JahColourPickPreFog )
+		jahPickPreFog = float3( outPs_colour0.xyz );
+		jahPickFogLit = jahFogLit;
+@end
+// THE RECORD (the last statement of the colour pass's custom_ps_posExecution): one per fragment at the pixel
+@piece( JahColourPickTail )
+	if( jahPickHere() )
+	{
+		JahColourPickRing jahPickRing = JahColourPickRing( passBuf.jahPickAddr.xy );
+		const uint jahPickBase = passBuf.jahPickAddr.w * 128u;
+		const uint jahPickK = atomicAdd( jahPickRing.w[jahPickBase], 1u );
+		if( jahPickK < 4u )
+		{
+			const uint o = jahPickBase + 4u + jahPickK * 31u;
+			uint tag = 1u;
+			@property( atomSlotsPerPool )
+				tag |= 2u;
+			@end
+			@property( hlms_fog )
+				tag |= 4u;
+			@end
+			@property( hlms_alphablend )
+				tag |= 8u;
+			@end
+			jahPickRing.w[o + 0u] = tag | ( min( jahPickLamps, 255u ) << 8u );
+			jahPickRing.w[o + 1u] = floatBitsToUint( gl_FragCoord.z );
+			jahPickRing.w[o + 2u] = passBuf.jahPickTarget.x | ( passBuf.jahPickTarget.y << 16u );
+			for( uint i = 0u; i < 3u; ++i )
+			{
+				jahPickRing.w[o + 3u + i] = floatBitsToUint( jahPickLampBase[i] );
+				jahPickRing.w[o + 10u + i] = floatBitsToUint( jahPickLamp1Base[i] );
+				jahPickRing.w[o + 13u + i] = floatBitsToUint( jahPickPreEnv[i] );
+				jahPickRing.w[o + 16u + i] = floatBitsToUint( jahPickEnvD[i] );
+				jahPickRing.w[o + 19u + i] = floatBitsToUint( jahPickEnvS[i] );
+				jahPickRing.w[o + 22u + i] = floatBitsToUint( jahPickPreFog[i] );
+				jahPickRing.w[o + 25u + i] = floatBitsToUint( float( outPs_colour0[i] ) );
+			}
+			for( uint i = 0u; i < 4u; ++i )
+				jahPickRing.w[o + 6u + i] = floatBitsToUint( jahPickLampAtten[i] );
+			jahPickRing.w[o + 28u] = floatBitsToUint( float( outPs_colour0.w ) );
+			jahPickRing.w[o + 29u] = passBuf.jahPickTarget.z;
+			jahPickRing.w[o + 30u] = floatBitsToUint( jahPickFogLit );
+		}
+	}
+@end
+@end
+// A COLOUR PASS NO OTHER LIBRARY ENDS (no fog, no blended pass's escape): the record is the hook's whole text
+@property( jah_colour_pick && !hlms_fog && !jah_glass_escape && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view && !atom_hit_mode )
+@piece( custom_ps_posExecution )
+	@insertpiece( JahColourPickTail )
+@end
+@end
