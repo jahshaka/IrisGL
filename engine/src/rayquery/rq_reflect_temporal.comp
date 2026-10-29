@@ -232,20 +232,21 @@ layout( std430, set = 0, binding = 53 ) buffer JahMovingSe { float movingSe[]; }
 layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
 /// THE REFINEMENT (binding 62, jah_reflect_rest.glsl: the no-pop hand-over of a card-only reach) - this pass runs it.
 layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
-/// THE DISPLAY CODES between two answers (the walk's delta): per channel, the slope integrated over four steps, the
-/// largest channel's.
-float refineDeltaCodes( vec3 a, vec3 b )
+/// THE CODE-A-FRAME SLEW (B2's refinement): the shown answer D moved toward the composed answer T by at most ONE display
+/// code per channel - the code distance from D to T integrated along the line (the display slope at four midpoints), and
+/// D moved that fraction of the way that is one code of it (all of it under a code). The same curve at every brightness.
+vec3 refineSlew( vec3 D, vec3 T )
 {
-	float most = 0.0;
+	vec3 r;
 	for( int c = 0; c < 3; ++c )
 	{
-		const float d = abs( b[c] - a[c] );
-		float sum = 0.0;
+		const float d = abs( T[c] - D[c] );
+		float codes = 0.0;
 		for( int k = 0; k < 4; ++k )
-			sum += jahDisplayCodes( mix( a[c], b[c], ( float( k ) + 0.5 ) * 0.25 ), 0.25 * d );
-		most = max( most, sum );
+			codes += jahDisplayCodes( mix( D[c], T[c], ( float( k ) + 0.5 ) * 0.25 ), 0.25 * d );
+		r[c] = codes <= 1.0 ? T[c] : D[c] + ( T[c] - D[c] ) / codes;
 	}
-	return most;
+	return r;
 }
 int jahPickSlotT( ivec2 tc )
 {
@@ -374,12 +375,19 @@ void main()
 	{
 		if( st.stop >= kReflectStopFrames && !st.resume )
 		{
-			// a stopped texel: its rest is held as it is - and a HANDOVER walks one step (B2: the word cleared at its last)
-			if( ( refine.w & kRefineHandover ) != 0u )
+			// a stopped texel: its rest is held as it is - and one still REFINING (B2) slews its shown answer a code toward
+			// its composed answer, the word cleared once it has arrived
+			if( ( refine.w & kRefineRefining ) != 0u )
 			{
-				const uint j = jahRefineStep( refine.w ) + 1u;
-				refine.w = j >= jahRefineSteps( refine.w ) ? 0u : ( refine.w & ~( 0xFFu << 8u ) ) | ( j << 8u );
-				imageStore( restRefine, ivec3( tc, gEye ), refine.w != 0u ? refine : uvec4( 0u ) );
+				const float Nr = max( p.stereo.w, 1.0 );
+				const vec4 Hq = imageLoad( historyPrev, ivec3( tc, gEye ) );
+				const bool hasHq = finite3( Hq.xyz ) && ownPrev.N > 0.0;
+				const vec4 Mq = imageLoad( historyCur, ivec3( tc, gEye ) );
+				const vec3 T = jahRestAnswer( hasHq ? clamp( Hq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 ), hasHq,
+											  clamp( Mq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), float( st.v ), Nr );
+				const vec3 D = refineSlew( uintBitsToFloat( refine.xyz ), T );
+				refine = all( equal( D, T ) ) ? uvec4( 0u ) : uvec4( floatBitsToUint( D ), kRefineRefining );
+				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			return;
 		}
@@ -478,11 +486,10 @@ void main()
 			const bool capped = st.v >= kReflectRestVCap;
 			st.stop = capped ? kReflectStopFrames
 							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
-			// B2: A REFINEMENT's NEW REST STOPPED - the walk from the held answer to it, a code a frame at most
-			if( ( refine.w & kRefineRefining ) != 0u && st.stop >= kReflectStopFrames )
+			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
+			if( ( refine.w & kRefineRefining ) != 0u )
 			{
-				const uint steps = uint( clamp( ceil( refineDeltaCodes( uintBitsToFloat( refine.xyz ), answer ) ), 1.0, 255.0 ) );
-				refine.w = kRefineHandover | ( steps << 16u );
+				refine.xyz = floatBitsToUint( refineSlew( uintBitsToFloat( refine.xyz ), answer ) );
 				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			}
 			{

@@ -177,10 +177,15 @@ Answer answerAt( ivec2 t )
 	// the rest began, set by the scene's rest timing and so by another view's state (the resize history's row: the glossy
 	// floor's reflection, 14,978 px) - so once the rest is past its hand-over length (the rest frame p.knobs2.x, one
 	// sample a frame) a texel still holding none answers nothing: the composite's weight 0, the probe or the sky answers.
-	if( !( v > 0.0 ) && p.knobs2.x >= jahRestHandOverLength( N ) )
+	// ...UNLESS IT RESUMED (PHOTON-7 8B, B2): a texel resumed at rest this frame (a per-texel break: its composed answer
+	// taken into its history, its rest restarted at v = 0) holds the answer it showed - not the path's - and one REFINING
+	// shows its slewed answer; dropping them to the probe or the sky flashed the mirror 98 codes for a frame
+	// (rtreflect.lamp_step_held's eref, frames 143-161, the first rest frames past 2N)
+	const uvec4 refineW = imageLoad( restRefine, ivec3( t, gEye ) );
+	if( !( v > 0.0 ) && p.knobs2.x >= jahRestHandOverLength( N ) && !sc.resume &&
+		( refineW.w & kRefineRefining ) == 0u )
 		return a;
-	const vec3 answer = jahRefineShown( jahRestAnswer( hasH ? Hr.xyz : vec3( 0.0 ), hasH, M.xyz, v, N ),
-										imageLoad( restRefine, ivec3( t, gEye ) ) );
+	const vec3 answer = jahRefineShown( jahRestAnswer( hasH ? Hr.xyz : vec3( 0.0 ), hasH, M.xyz, v, N ), refineW );
 	if( !finite3( answer ) )
 		return a;
 	a.ok = true;

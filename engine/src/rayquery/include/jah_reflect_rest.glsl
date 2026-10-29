@@ -53,26 +53,26 @@ float jahRestHandOverWeight( float v, float N )
 	const float x = 1.0 - min( v / jahRestHandOverLength( N ), 1.0 );
 	return 1.0 - x * x;
 }
-/// THE NO-POP HAND-OVER OF A CACHE REFINEMENT (PHOTON-7 8B, B2 - the gather's B3 in the reflection's form; the set's
-/// binding 62, OgreRayQuery.cpp kReflectRefineBinding: an rgba32ui a trace texel and eye, xyz the HELD answer's float
-/// bits, w the word). A texel reached at rest by a CARD region alone - a capture, a relight, a card-to-card round: the
-/// cache refined what its hit reads, the world did not change - stopped or still converging, RE-RESTS IN THE BACKGROUND: its rest restarts as a resume's, but every reader SHOWS the held answer (REFINING); when
-/// the new rest stops, the temporal pass takes delta = the display codes between the held answer and the new one and
-/// WALKS over M = ceil( delta / one code ) frames (HANDOVER, step j of M: mix( held, new, j / M )) - never more than a
-/// code a frame. A real change (a mover, a light, a slab, an edit, a brick) resumes it at once from what it shows. The
-/// word: kRefineReach = the trace found a card-only reach THIS frame (the temporal pass consumes it), then the state's
-/// two bits, j in [8:15], M in [16:23].
-const uint kRefineReach = 1u, kRefineRefining = 2u, kRefineHandover = 4u;
-uint jahRefineStep( uint w ) { return ( w >> 8u ) & 0xFFu; }
-uint jahRefineSteps( uint w ) { return max( ( w >> 16u ) & 0xFFu, 1u ); }
+/// THE NO-POP FOLLOW OF A CACHE REFINEMENT (PHOTON-7 8B, B2 - the gather's B3 in the reflection's form; the set's binding
+/// 62, OgreRayQuery.cpp kReflectRefineBinding: an rgba32ui a trace texel and eye, xyz the SHOWN answer D's float bits, w
+/// the word). A texel reached at rest by an ESTIMATE CONVERGING alone (rq_reflect.comp restHitKind 1: a card's capture,
+/// relight or card-to-card round, a scroll's slab, the store's bricks relighting on a close that lists no scene change -
+/// the caches refined what its hit reads, the world did not change), stopped or still converging, RE-RESTS AT A CODE A
+/// FRAME (a scene change - a mover, an edit, a lamp, a lamp's shadow range - resumes it at once): its
+/// rest restarts as a resume's, and every reader SHOWS D, which the temporal pass SLEWS each frame toward the texel's
+/// COMPOSED answer T (the accumulated estimate, never a frame's raw sample: D does not random-walk on the estimator's
+/// noise) by at most ONE DISPLAY CODE per channel - the code distance integrated along the step as the delta is, the
+/// same curve at every brightness. The picture follows the re-convergence and never steps by more than a code. (The
+/// first build HELD the old answer until the new rest stopped and then walked: a glossy texel's ~500-frame re-convergence
+/// frozen - the instrument's read, 2026-10-29.) The texel counts active until D has reached T on a stopped texel, when
+/// the word clears. A real change (a mover, a light, a slab, an edit, a brick) resumes it at once from what it shows.
+/// The word: kRefineReach = the trace found a card-only reach THIS frame (the temporal pass consumes it), kRefineRefining
+/// = D is shown.
+const uint kRefineReach = 1u, kRefineRefining = 2u;
 /// What a reader SHOWS of a texel's composed answer under its refinement word `r`.
 vec3 jahRefineShown( vec3 answer, uvec4 r )
 {
-	if( ( r.w & kRefineRefining ) != 0u )
-		return uintBitsToFloat( r.xyz );
-	if( ( r.w & kRefineHandover ) != 0u )
-		return mix( uintBitsToFloat( r.xyz ), answer, float( jahRefineStep( r.w ) ) / float( jahRefineSteps( r.w ) ) );
-	return answer;
+	return ( r.w & kRefineRefining ) != 0u ? uintBitsToFloat( r.xyz ) : answer;
 }
 /// THE COMPOSED ANSWER (G2): the hand-over from the frozen history H (`hasH`: the texel carried one) to the rest mean
 /// M of v samples, the rest mean after it.

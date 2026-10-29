@@ -119,7 +119,9 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// THE REST BREAKS PER TEXEL AGAINST THE CHANGED-REGION LIST (PHOTON-7 8B, B2; jah_rest_regions.glsl at the set's
 	/// kReflectRegionsBinding): x = the list's regions this frame (0: none, or no list closed), y = 1 = every resting
 	/// texel resumes (the list overflowed - the sun, the sky, a change with no box - or restarted), z = 1 = a brick mask
-	/// is this frame's. A resting texel resumes when a GEOMETRY region (a mover's swept box, an edit) crosses one of its
+	/// is this frame's, w = 1 = the close carries a SCENE CHANGE (a mover, an edit, an overflow, a restart, a missed close:
+	/// a brick changed with it is its consequence, a resume at once; else the store relighting, the slew - restHitKind).
+	/// A resting texel resumes when a GEOMETRY region (a mover's swept box) crosses one of its
 	/// segments (its ray, its lobe's mean segment, its hit's sun leg, its NEE ray, C2's secondary rays), or a LIGHT
 	/// region or a changed brick lies at one of its hits (rq_reflect.comp restSegmentMoved, restHitChanged).
 	vec4 restLists;
