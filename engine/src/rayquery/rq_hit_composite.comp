@@ -48,7 +48,7 @@ layout( set = 0, binding = 0 ) uniform Params
 	vec4 fog[8];
 } p;
 /// The list's buffer: [0] the records appended, then the records' words from
-/// word 12, ten a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
+/// word 12, eleven a record (jah_rq_hit_record.glsl kJahHitAuxBase, kJahHitAuxWords) —
 /// this job reads the weight (the gather's re-weight; the reflection's records carry
 /// their ray's share), the fog's two, a run record's screen share and the NEE delta (PHOTON-7 11-1b).
 layout( std430, set = 0, binding = 1 ) buffer JahHitBuf { uint jahHitBuf[]; };
@@ -92,7 +92,7 @@ float gExposure = 1.0;
 const uint kDestGather = 0x80000000u;
 /// jah_rq_hit_record.glsl kJahHitAuxBase and kJahHitAuxWords.
 const uint kAuxBase = 12u;
-const uint kAuxWords = 10u;
+const uint kAuxWords = 11u;   // (L9 (b1): word 10 the area lights' visibility, the decode's)
 
 void main()
 {

@@ -408,6 +408,73 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 	return sum * albedo + spec;
 }
 
+/// A DECODED HIT's AREA LIGHTS' VISIBILITY (PHOTON-7 11-2 L9 (b1), the lead's ruling): the record decode (HlmsAtom's hit
+/// mode) draws an area light by its analytic LTC form factor, which knows no wall - a decoded hit lit through one. Its
+/// visibility is traced HERE, at the hit, as a store hit's is (jahHitDirect: the same strata, jahAreaStratumAt): one
+/// stratum drawn by its form factor's share - the unshadowed f_k / sum f, so the ray's 0 / 1 is an unbiased estimate of
+/// the visible fraction the decode's LTC is multiplied by - for each table light that is in the decode pass's forward LTC
+/// set (its word 19: the set's index, 0-3), byte i of the record's word 10 (255 seen, 0 not; a light no stratum of
+/// which reaches the hit 0). `P` the hit, `N` its normal facing the ray's origin, `t` the distance P was carried, `far`
+/// a far copy's hit.
+uint jahHitAreaVisWord( vec3 P, vec3 N, float t, bool far )
+{
+	const uvec2 a = JAH_HIT_TABLE;
+	if( ( a.x | a.y ) == 0u )
+		return 0u;
+	JahHitTableRef T = JahHitTableRef( a );
+	const uint count = T.u[0];
+	const uint base = T.u[2];
+	const vec3 origin = jahRayOrigin( P, N, t, far ? JAH_HIT_FAR_LIFT : 0.0 );
+	const float lift = length( origin - P );
+	uint word = 0u;
+	for( uint i = 0u; i < count; ++i )
+	{
+		const uint o = base + i * kJahHitLightWords;
+		const vec4 v0 = uintBitsToFloat( uvec4( T.u[o], T.u[o + 1u], T.u[o + 2u], T.u[o + 3u] ) );
+		if( int( v0.w + 0.5 ) != 5 )
+			continue;
+		const float idx = uintBitsToFloat( T.u[o + 19u] );
+		if( !( idx >= 0.0 ) || idx > 3.5 )
+			continue;
+		const vec4 v2 = uintBitsToFloat( uvec4( T.u[o + 8u], T.u[o + 9u], T.u[o + 10u], T.u[o + 11u] ) );
+		const float twoSidedW = uintBitsToFloat( T.u[o + 15u] );
+		const vec3 c0 = uintBitsToFloat( uvec3( T.u[o + 16u], T.u[o + 17u], T.u[o + 18u] ) );
+		const vec3 eu = uintBitsToFloat( uvec3( T.u[o + 20u], T.u[o + 21u], T.u[o + 22u] ) ) - c0;
+		const vec3 ev = uintBitsToFloat( uvec3( T.u[o + 28u], T.u[o + 29u], T.u[o + 30u] ) ) - c0;
+		const uint n = kHitAreaStrata, key = jahAreaStrataKey( P );
+		const bool twoSided = twoSidedW > 0.5;
+		float f[kHitAreaStrata * kHitAreaStrata];
+		float sumF = 0.0;
+		vec3 dq, oq, rq;
+		float clr2, reach;
+		for( uint k = 0u; k < n * n; ++k )
+		{
+			f[k] = jahAreaStratumAt( P, N, N, lift, c0, eu, ev, v2.xyz, twoSided, n, k, key, kAreaLampEnd, dq, clr2, oq,
+									 rq, reach );
+			sumF += f[k];
+		}
+		float vis = 0.0;
+		if( sumF > 0.0 )
+		{
+			float u = float( jahAreaPcg( jahHitAreaSeq ^ jahAreaPcg( key ^ ( i * 0x9E3779B9u ) ) ) ) * 2.3283064e-10 * sumF;
+			uint pick = 0u;
+			for( ; pick + 1u < n * n; ++pick )
+			{
+				if( f[pick] > 0.0 && u < f[pick] )
+					break;
+				u -= f[pick];
+			}
+			while( !( f[pick] > 0.0 ) && pick > 0u )
+				--pick;
+			jahAreaStratumAt( P, N, N, lift, c0, eu, ev, v2.xyz, twoSided, n, pick, key, kAreaLampEnd, dq, clr2, oq, rq,
+							  reach );
+			vis = reach > 0.0 ? jahSunRay( oq, rq, JAH_HIT_SUN_MASK, reach, reach ) : 1.0;
+		}
+		word |= uint( clamp( vis, 0.0, 1.0 ) * 255.0 + 0.5 ) << ( 8u * uint( idx + 0.5 ) );
+	}
+	return word;
+}
+
 /// THE STORE'S BOUNCE PART TOWARD THE HIT'S VIEWER (PHOTON-4 stage 2). The store re-emits what a surface
 /// gathered by the lobes' HEMISPHERICAL albedos (LightVctBounceInject_piece_cs.any): rho Dd-bar( r ) for the
 /// diffuse lobe and F0 A-bar( r ) + w B-bar( r ) for the specular one, per channel. The diffuse share is sent

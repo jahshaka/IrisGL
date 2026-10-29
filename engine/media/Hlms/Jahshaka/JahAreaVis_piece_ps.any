@@ -14,6 +14,19 @@
 // THE GUARD is the declaration's (JahFog_piece_vs_piece_ps.any), and one more term: never in the hit decode (a hit has
 // no screen pixel - the hits' area visibility is 7-H's, after the photon-7r merge). A blended fragment never reads it
 // (the listener withdraws the property per renderable: the texel is the opaque surface's behind it).
+@property( atom_hit_mode && !hlms_shadowcaster )
+// THE HIT DECODE's (PHOTON-7 11-2 L9 (b1), the lead's ruling): a decoded hit has no screen pixel; its area lights'
+// visibility is TRACED at the hit by the record's writer (jah_rq_hit_direct.glsl jahHitAreaVisWord, one stratum drawn
+// by its form factor's share, the store hit's law) into the record's word 10, byte i the forward LTC light i's - the
+// decode multiplies both LTC terms by it (a light with no visibility gives nothing, never through a wall).
+@piece( custom_ps_areaLtcVisibility )
+	{
+		const midf jahHitAreaV = midf_c( unpackUnorm4x8( atomHitAreaVis )[min( i, 3 )] );
+		ltcDiffuse *= jahHitAreaV;
+		ltcSpecular *= jahHitAreaV;
+	}
+@end
+@end
 @property( jah_area_vis && hlms_screen_pos_int && !hlms_prepass && !hlms_shadowcaster && !atom_hit_mode )
 @piece( custom_ps_areaLtcVisibility )
 	{

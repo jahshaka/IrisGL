@@ -643,6 +643,7 @@ struct JahReflectSample
 	vec2 recBary;
 	float hitT, sampleT, screenT, blendVouch;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
+	uint areaVis;   // ...and its area lights' (L9 (b1): jahHitAreaVisWord, the list's word 10)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
 	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
@@ -669,6 +670,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.screenT = 0.0;
 	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
+	o.areaVis = 0u;
 	o.recGain = 1.0;
 	o.recTraced = false;
 	o.recPane = vec4( 0.0, 0.0, 0.0, 1.0 );
@@ -1171,6 +1173,12 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	if( record && recTraced )
 		o.c2 = recLobe;
 	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
+	if( record )
+	{
+		// (the area strata's draw: this sample's sequence, as a store hit's - jahHitAreaSeq above)
+		jahHitAreaSeq = jahAreaPcg( frame + uint( p.denoiser.z ) ) ^ seedPix.x * 73856093u ^ seedPix.y * 19349663u;
+		o.areaVis = jahHitAreaVisWord( origin + L * hitT, recN, hitT, recFar );
+	}
 }
 
 // THE PICK (binding 56, the reds' instrument: jahlab pick; OgreRayQuery.cpp kReflectPickBinding): while alpha.y's bits
@@ -1326,7 +1334,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
 											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain,
-											s.recPane, s.recTraced );
+											s.recPane, s.recTraced, s.areaVis );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
 			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
@@ -1822,7 +1830,7 @@ void main()
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
 										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
-										 s.recGain, s.recPane, s.recTraced );
+										 s.recGain, s.recPane, s.recTraced, s.areaVis );
 							fit = 1u;
 						}
 						else

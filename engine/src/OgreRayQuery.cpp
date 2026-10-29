@@ -391,7 +391,7 @@ constexpr unsigned kReflectCompactTexels = 16384u;
 /// (the NEE delta + the estimator's gain 6-7, PHOTON-7 11-1b / 11-2; a reflection's crossed panes 8-9, 10-4 F6).
 constexpr uint32_t kHitCounterWords = 12u;
 constexpr uint32_t kHitCounterBytes = kHitCounterWords * 4u;
-constexpr uint32_t kHitAuxWords = 10u;
+constexpr uint32_t kHitAuxWords = 11u;   // (L9 (b1): word 10 the decoded hit's area lights' visibility)
 /// THE HIT's AREA STRATA (jah_rq_hit_direct.glsl kHitAreaStrata = 4 a side): one full cycle of the rest's time-stratified
 /// area draw, the samples a rest texel's stop waits for where the hit table holds an area light (PHOTON-7 11-2 (2)).
 constexpr uint32_t kHitAreaStrataPerHit = 4u * 4u;
@@ -8003,6 +8003,8 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         SceneLightList::Selection sel;
         sceneLightListOf(sm).select(sm, consumer, sel);
         sa.hitAreaLights = 0u;
+        // (L9 (b1): an area light's place in the pass's forward LTC set - the decode's light i - word 19)
+        const std::vector<const Ogre::Light *> ltcSet = forwardLtcLights(sm);
         for (Ogre::Light *light : sel.lights) {
             if (!light || !light->getParentNode()) continue;
             if (light->getType() == Ogre::Light::LT_AREA_LTC) ++sa.hitAreaLights;
@@ -8041,6 +8043,11 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
                 for (int k = 0; k < 4; ++k) {
                     L[16 + 4 * k] = float(r[k].x); L[17 + 4 * k] = float(r[k].y); L[18 + 4 * k] = float(r[k].z);
                 }
+                // THE DECODE's LIGHT INDEX (PHOTON-7 11-2 L9 (b1)): its place in the pass's forward LTC set (HlmsPbs's
+                // order, forwardLtcLights) - a record's area visibility is byte i of its word 10 - or -1 past the set
+                L[19] = -1.0f;
+                for (size_t k = 0; k < ltcSet.size() && k < 4u; ++k)
+                    if (ltcSet[k] == light) L[19] = float(k);
             }
             if (punctual) {
                 Lamp lp;
