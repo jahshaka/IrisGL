@@ -6891,6 +6891,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             const uint32_t v = uint32_t(pv - 1.0);
             packed = (v % 4096u) | ((v / 4096u) % 4096u) << 12u | (frameNow() % kReflectPickSlots) << 24u | (1u << 30u);
             rv.pickFrames[frameNow() % kReflectPickSlots] = frameNow();
+            // (the slot this frame writes is zeroed first - its last writer retired 64 frames ago: a texel that writes
+            // nothing this frame - stopped, or not the trace's this frame - reads empty, never a 64-frame-old sample)
+            if (rv.pick.mapped)
+                std::memset(static_cast<char *>(rv.pick.mapped) + size_t(frameNow() % kReflectPickSlots) * kReflectPickWords * 4u,
+                            0, kReflectPickWords * 4u);
         }
         std::memcpy(&pp.alpha[1], &packed, sizeof(packed));
     }

@@ -112,6 +112,11 @@ vec3 jahHitRadianceStore( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, floa
 #include "jah_world_exit.glsl"
 #include "jah_reflect_draw.glsl"
 #include "jah_rq_emitters.glsl"
+/// THE PICK's VIEW OF C2 (the reds' instrument, rq_reflect.comp jahPickSample): the last secondary ray's - its hit slot
+/// (0xFFFFFFFF an exit), its distance, the BRDF draw's part and the portal draw's part (every caller may ignore them)
+uint jahC2PickSlot = 0xFFFFFFFFu;
+float jahC2PickT = 0.0;
+vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec = vec3( 0.0 );
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -165,12 +170,18 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 						   jahWorldExitT( o, L2, 1.0e4 ) );
 	JAH_RQ_PROCEED( q )
 	vec3 rad = vec3( 0.0 );
+	jahC2PickSlot = 0xFFFFFFFFu;
+	jahC2PickT = 0.0;
+	jahC2PickPortal = vec3( 0.0 );
+	jahC2PickSpec = vec3( 0.0 );
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
 	else
 	{
 		const float t2 = rayQueryGetIntersectionTEXT( q, true );
 		const uint slot2 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) );
+		jahC2PickSlot = slot2;
+		jahC2PickT = t2;
 		const uint prim2 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) );
 		const uint geom2 = uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) );
 		const vec2 bary2 = rayQueryGetIntersectionBarycentricsEXT( q, true );
@@ -191,14 +202,17 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			jahHitSurf = JahHitSurface( slot2, geom2, prim2, bary2, toWorld2, t2, false, known );
 			bool ok2 = false;
 			uint src2 = 0u;
+			jahHitDirectPickSpec = vec3( 0.0 );
 			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
 												 centre, ok2, src2 );
+			jahC2PickSpec = jahHitDirectPickSpec;   // (THE PICK: the secondary hit's own lamps' specular, inside r2)
 			jahHitSurf = first;
 			jahHitTracedLobe = tracedWas;
 			rad = ok2 && finite3( r2 ) ? r2 : vec3( 0.0 );
 		}
 	}
 	vec3 c = w * rad * gain;
+	jahC2PickBrdf = c;
 	// ...AND THE PORTALS' DRAW: its ray to the world's exit - the sky it sees at p_l / ( q + p_l ), 0 on geometry
 	if( sky.ok && dot( sky.L, N ) > 0.0 )
 	{
@@ -211,8 +225,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			const float qL = jahReflectFoldedPdf( N, N, V, sky.L, alpha );
 			const float ab = sa + sb;
 			if( ab > 1e-4 )
-				c += w * JAH_HIT_LOBE_SKY( sky.L, alpha, false ) *
-					 ( jahReflectFoldedTarget( N, N, V, sky.L, alpha ) / ( ab * max( qL + sky.pdfL, 1e-30 ) ) );
+			{
+				jahC2PickPortal = w * JAH_HIT_LOBE_SKY( sky.L, alpha, false ) *
+								  ( jahReflectFoldedTarget( N, N, V, sky.L, alpha ) / ( ab * max( qL + sky.pdfL, 1e-30 ) ) );
+				c += jahC2PickPortal;
+			}
 		}
 	}
 	return finite3( c ) ? clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
