@@ -2049,7 +2049,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // the world's)
     pp.fast[0] = kFastUpdateMovingShare;
     pp.fast[1] = kFastUpdateMost;
-    pp.fast[2] = in.fastSkinPosed ? 1.0f : 0.0f;
+    pp.fast[2] = in.lobePick ? -1.0f : in.fastSkinPosed ? 1.0f : 0.0f;   // MEASURING ARM: -1 = the lobe's pick on
     pp.fast[3] = 1.0f;
     for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
         const GatherRestInputs::Bricks &b = in.rest.bricks[c];

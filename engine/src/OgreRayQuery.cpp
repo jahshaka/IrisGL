@@ -8964,6 +8964,7 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         }
         r.fieldBusy = ph.fieldWideWorkOwed();
         in.fastSkinPosed = posedSlotsOf(scene, mRs->getVaoManager()->getFrameCount()) != nullptr;
+        in.lobePick = arm(ArmId::GatherLobePick, false);   // MEASURING ARM
     }
     in.demandDue = SurfaceCache::demandDueFrames();   // (the gather's demand span: its rest indices [1, N + this])
     in.restartKey = scene->gatherRestartKey();
