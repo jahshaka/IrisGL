@@ -182,20 +182,25 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 	// (...and a reader whose rest is per cell marks the FACES only from its rest span - or moving: the cards' one rest
 	// decision ranks the faces the RESTED picture reads, a set the pose fixes and no settle's timing does (PHOTON-7 8B,
 	// the lead's ruling); its settling cells' card stamps above still keep what they read resident: JAH_CARD_FACE_GATE)
-#ifdef JAH_CARD_FACE_GATE
-	if( stamps && JAH_CARD_FACE_GATE )
-#else
+	// THE TWO JOBS OF THE MARK (PHOTON-7 8B, the lead's ruling): every hit marks its reader's block - the ADMISSION path,
+	// the window's offers (a face the rays read is in the cache while they read it: a still view's settling cells
+	// admitted nothing through the gate alone - gi.card_closed_form's sixth face, a rest declared on a missing card) -
+	// and a gated reader marks the REST SPAN's block (2) too, the one the decision ranks: JAH_CARD_FACE_GATE
 	if( stamps )
-#endif
 	{
-		const uint w = 8u * reader + jahCardBucket( facing );
-		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );
+		const uint b = jahCardBucket( facing );
+		const uint w = 8u * reader + b;
+		jahCardDemandStamp( S + 8194u + 6u * slot + ( w >> 2u ), w & 3u, head.x );
+#ifdef JAH_CARD_FACE_GATE
+		if( JAH_CARD_FACE_GATE )
+			jahCardDemandStamp( S + 8194u + 6u * slot + 4u + ( b >> 2u ), b & 3u, head.x );
+#endif
 	}
 	if( head.y != 0u )
 	{
 		// THE FACE'S HITS (the measuring arm): EVERY read of the face, its card's or none's - the settle law's lambda
 		const uint w = 8u * reader + jahCardBucket( facing );
-		const uint e = S + 8194u + 4u * S + 4u * slot + ( w >> 2u );
+		const uint e = S + 8194u + 6u * S + 4u * slot + ( w >> 2u );
 		const uint k = w & 3u;
 		if( k == 0u )
 			atomicAdd( jahCardInstances[e].x, 1u );
