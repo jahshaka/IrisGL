@@ -47,15 +47,11 @@ const uint kReflectStopFrames = 8u;
 /// THE RESIDUAL, named: a tail event of probability p is missed by a fraction delta of such texels - 5 % at p = 0.01,
 /// more for rarer paths - which hold a biased mean until a region resumes them: a limit of any standard-error stop.
 const float kReflectStopSamples = 300.0;
-/// THE STOP's DRIFT TERM (B2, the halves form - the lead's ruling): at the window's END, the mean of its first half's
-/// samples against its second half's - apart by more than kReflectDriftK times the standard error of their difference
-/// (the samples' own spread, sigma = e sqrt( v ), over the two halves' counts) is a mean still MOVING (a light still
-/// rising), which the plain error test reads as a small variance: the window restarts, once at most per window. It
-/// measures drift, not variance: a stationary heavy tail's bright sample lands in one half and its spread with it (the
-/// per-frame form - the start's mean against each frame's - tripped on every such sample, and a texel whose bright
-/// paths come one in a hundred never stopped: lamp_step_held's sessions never held in 1200 frames). K 2: a stationary
-/// mean restarts 5 % of its windows.
-const float kReflectDriftK = 4.0;
+/// NO DRIFT TERM (B2, measured and ruled OUT): the stop's halves test (the window's first-half mean against its
+/// second-half's, apart by K times the SE of their difference) cannot tell a stationary heavy tail from a drift at this
+/// window: at one bright sample in ~100, each 150-sample half holds ~1.5 tail events, a Poisson count, and their
+/// difference (Skellam) trips the test at K 2 and still at K 4 - the glass's ~660-860 texels restarted their windows and
+/// never stopped (held from 828 with the test off). A light still rising must fool S = 300 samples in a row instead.
 /// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
 const uint kReflectRestVCap = 65535u;
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
@@ -73,8 +69,7 @@ float jahRestHandOverWeight( float v, float N )
 }
 /// THE NO-POP FOLLOW OF A CACHE REFINEMENT (PHOTON-7 8B, B2 - the gather's B3 in the reflection's form; the set's binding
 /// 62, OgreRayQuery.cpp kReflectRefineBinding: an rgba32ui a trace texel and eye - x, y.lo the SHOWN answer D in halves,
-/// y.hi the stop window's starting mean (its denoiser-space luma), z the window's start v (lo 16) and its middle's v (hi
-/// 16), w's hi 16 the middle's mean (a half), w
+/// z the stop window's start v, w
 /// the word). A texel reached at rest by an ESTIMATE CONVERGING alone (rq_reflect.comp restHitKind 1: a card's capture,
 /// relight or card-to-card round, a scroll's slab, the store's bricks relighting on a close that lists no scene change -
 /// the caches refined what its hit reads, the world did not change), stopped or still converging, RE-RESTS AT A CODE A
@@ -88,8 +83,8 @@ float jahRestHandOverWeight( float v, float N )
 /// the word clears. A real change (a mover, a light, a slab, an edit, a brick) resumes it at once from what it shows.
 /// The word: kRefineReach = the trace found a card-only reach THIS frame (the temporal pass consumes it), kRefineRefining
 /// = D is shown.
-/// kRefineWindow = the stop window's start (y.hi, z.lo) is held, kRefineMiddle = its middle (z.hi, w.hi) too.
-const uint kRefineReach = 1u, kRefineRefining = 2u, kRefineWindow = 4u, kRefineMiddle = 8u;
+/// kRefineWindow = the stop window's start (z) is held.
+const uint kRefineReach = 1u, kRefineRefining = 2u, kRefineWindow = 4u;
 vec3 jahRefineD( uvec4 r ) { return vec3( unpackHalf2x16( r.x ), unpackHalf2x16( r.y ).x ); }
 uvec4 jahRefineWithD( uvec4 r, vec3 D )
 {

@@ -486,67 +486,27 @@ void main()
 			const bool settled = v >= max( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ), p.alpha.w );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;
-			// THE STOP (B2's (e)): within the share for kReflectStopFrames frames AND across kReflectStopSamples samples,
-			// the window restarting where its mean DRIFTS (jah_reflect_rest.glsl kReflectStopSamples, kReflectDriftK)
+			// THE STOP (B2's (e)): within the share for its last kReflectStopFrames frames AND across a window of
+			// kReflectStopSamples samples since it first came within it (jah_reflect_rest.glsl) - the window's samples stand
+			// across a frame out of the share (its frame count restarts); it closes only while not settled
 			const uvec4 refineWas = refine;
 			if( capped )
 				st.stop = kReflectStopFrames;
 			else if( !( e <= share && settled && !reference ) )
 			{
-				// (out of its share this frame: the frame count restarts, the window's SAMPLES stand - a texel whose error
-				// sits at its share would otherwise restart a 300-sample window on every crossing and never stop: the
-				// glass's ~860 texels that never held)
 				st.stop = 0u;
 				if( !settled )
-					refine.w &= ~( kRefineWindow | kRefineMiddle );
+					refine.w &= ~kRefineWindow;
 			}
 			else
 			{
-				const bool open = ( refine.w & kRefineWindow ) != 0u;
-				// (the halves are taken in LINEAR luma - a mean's arithmetic - the rest mean's own; its spread the denoiser
-				// space's error carried back by the space's slope)
-				const float LL = jahDenoiseLuma( clamp( rs.M, vec3( 0.0 ), vec3( kMaxRadiance ) ) );
-				const float v0 = float( refine.z & 0xFFFFu );
-				if( !open )
+				if( ( refine.w & kRefineWindow ) == 0u )
 				{
-					// the window starts here: its mean and its sample count (its middle not yet)
-					refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LL ) ) & 0xFFFF0000u );
-					refine.z = uint( min( v, 65535.0 ) ) & 0xFFFFu;
-					refine.w = ( refine.w & 0xFFu & ~kRefineMiddle ) | kRefineWindow;
-					st.stop = 1u;
+					refine.z = uint( min( v, 65535.0 ) );
+					refine.w |= kRefineWindow;
 				}
-				else
-				{
-					// its middle, once: the mean when half its samples are in
-					if( ( refine.w & kRefineMiddle ) == 0u && v - v0 >= 0.5 * kReflectStopSamples )
-					{
-						refine.z = ( refine.z & 0xFFFFu ) | ( ( uint( min( v, 65535.0 ) ) & 0xFFFFu ) << 16u );
-						refine.w = ( refine.w & 0xFFu ) | kRefineMiddle | ( packHalf2x16( vec2( LL, 0.0 ) ) << 16u );
-					}
-					const bool enough = v - v0 >= kReflectStopSamples && ( refine.w & kRefineMiddle ) != 0u;
-					const uint next = min( st.stop + 1u, kReflectStopFrames );
-					if( enough && next >= kReflectStopFrames )
-					{
-						// THE WINDOW's END: its halves' means against the SE of their difference (the halves form)
-						const float vm = float( refine.z >> 16u );
-						const float L0 = unpackHalf2x16( refine.y ).y, Lm = unpackHalf2x16( refine.w >> 16u ).x;
-						const float n1 = max( vm - v0, 1.0 ), n2 = max( v - vm, 1.0 );
-						const float h1 = ( Lm * vm - L0 * v0 ) / n1, h2 = ( LL * v - Lm * vm ) / n2;
-						const float sigma = e * jahDenoiseSlopeAt( LD ) * sqrt( v );
-						const bool drift = abs( h2 - h1 ) > kReflectDriftK * sigma * sqrt( 1.0 / n1 + 1.0 / n2 );
-						if( drift )
-						{
-							refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LL ) ) & 0xFFFF0000u );
-							refine.z = uint( min( v, 65535.0 ) ) & 0xFFFFu;
-							refine.w = ( refine.w & 0xFFu & ~kRefineMiddle ) | kRefineWindow;
-							st.stop = 1u;
-						}
-						else
-							st.stop = kReflectStopFrames;
-					}
-					else
-						st.stop = min( next, kReflectStopFrames - 1u );
-				}
+				const bool enough = v - float( refine.z ) >= kReflectStopSamples;
+				st.stop = min( st.stop + 1u, enough ? kReflectStopFrames : kReflectStopFrames - 1u );
 			}
 			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
 			if( ( refine.w & kRefineRefining ) != 0u )
