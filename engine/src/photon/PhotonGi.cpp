@@ -9213,9 +9213,9 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // THE CARDS' REGIONS (PHOTON-7 stage 3): the instances the last frame's trace relit after its plan, then the
     // instances whose cards this frame's plan relights - one box per instance.
     {
-        std::vector<Ogre::Aabb> late;
+        std::vector<SurfaceCache::RelitBox> late;
         mSurfaceCache->takeLateRelitBoxes(late);
-        for (const Ogre::Aabb &b : late) appendRegion(GiRegionKind::Card, b);
+        for (const SurfaceCache::RelitBox &b : late) appendRegion(b.scene ? GiRegionKind::CardScene : GiRegionKind::Card, b.box);
     }
     mSurfaceCache->update(view);
     for (const Ogre::Aabb &b : mSurfaceCache->relitInstanceBoxes()) appendRegion(GiRegionKind::Card, b);

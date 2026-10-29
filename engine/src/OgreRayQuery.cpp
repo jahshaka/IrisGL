@@ -7015,7 +7015,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     bool listed = restIn.regionCount || restIn.overflow || restIn.restart || restMissed;
     pp.restLists[0] = restIn.regions ? float(std::min(restIn.regionCount, kGiRegionCap)) : 0.0f;
     pp.restLists[1] = restIn.overflow || restIn.restart || restMissed ? 1.0f : 0.0f;
-    // (a SCENE CHANGE in this close - a mover or an edit listed, an overflow, a restart, a missed close: a brick that
+    // (a SCENE CHANGE in this close - a mover, an edit, a lamp or a scene write's card relight listed, an overflow, a restart, a missed close: a brick that
     // changed with it is its consequence, a resume at once; on a close with none the store relights toward its fixed
     // point, an estimate converging, the readers' slew - rq_reflect.comp restHitKind)
     {
@@ -7023,7 +7023,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const GiChangedRegions &closed = scene->photon().changedRegions();
         if (!sceneChange && restIn.regionCount && closed.available)
             for (const GiChangedRegion &r : closed.regions)
-                if (r.kind == GiRegionKind::Mover || r.kind == GiRegionKind::Edit) { sceneChange = true; break; }
+                if (r.kind == GiRegionKind::Mover || r.kind == GiRegionKind::Edit || r.kind == GiRegionKind::Lamp ||
+                    r.kind == GiRegionKind::LampShadow || r.kind == GiRegionKind::CardScene) {
+                    sceneChange = true;   // (8B (A): a light write's or its relights' close - the store's bricks follow it)
+                    break;
+                }
         pp.restLists[3] = sceneChange ? 1.0f : 0.0f;
     }
     for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {

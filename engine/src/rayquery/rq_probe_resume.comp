@@ -654,7 +654,7 @@ void main()
 					reached = coneMeetsSphere( centre, d, cosCone, sinCone, 0.0, wayEnd, q, R + rho );
 				else if( !hits )
 					continue;
-				else if( kind == kRegionCard )
+				else if( kind == kRegionCard )   // (CardScene, a scene write's relight, falls through: an ordinary input - 8B (A))
 				{
 					// A CACHE REFINEMENT (B3): it changes what the cell reads but is no change of the world - a held cell
 					// re-rests in the background and hands over (the finalize, the integrate); never a resume by itself

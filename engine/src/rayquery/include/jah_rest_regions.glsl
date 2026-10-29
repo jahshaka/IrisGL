@@ -15,7 +15,7 @@ uint regionKind( uint k ) { return floatBitsToUint( regionLo( k ).w ); }
 /// The kinds (Types.h GiRegionKind): GEOMETRY changed in a Mover's (a moved or posed slot's swept box) or an Edit's
 /// box - it blocks or unblocks any ray across it; LIGHT changed in the others' - what a HIT inside reads.
 const uint kRegionSlab = 1u, kRegionCard = 2u, kRegionEdit = 3u, kRegionMover = 4u, kRegionMoverShadow = 5u,
-		   kRegionLampShadow = 6u, kRegionLamp = 7u;
+		   kRegionLampShadow = 6u, kRegionLamp = 7u, kRegionCardScene = 8u;
 
 /// A BRICK CHANGED AT ALL this frame, either of its two words (PhotonVoxelLighting's brick mask: the direct term's and
 /// the feedback's relative change; the feedback writes a voxel only when it moves a store step, so a converged store

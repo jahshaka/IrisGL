@@ -232,6 +232,12 @@ struct CardRec {
     /// re-injected), present at all in the cached layer, and when last marched.
     bool relightIndirect = false;
     bool indirectValid = false;
+    /// THE RELIGHT's CAUSE (PHOTON-7 stage 8B, (A), the lead's ruling): its next relight is a SCENE change's first round -
+    /// a lamp's or the sun's write reached its direct half (the stale set's LAMP / LampShadow region or the sun's
+    /// overflow; an Edit that a lamp reaches), or a material edit queued its recapture. That relight lists its instance as
+    /// CardScene (the readers resume at once: the world changed, carried through the cache); cleared when it is relit,
+    /// so the rounds after it (the card-to-card convergence relights) list as Card (an estimate converging: the slew).
+    bool sceneCause = false;
     /// THE e = 0 COUNTER PER CARD (PHOTON-7 stage 10): the sky rays of its last TLAS gather, as read back (-1 none yet).
     long long gatherSky = -1;
     unsigned long long lastIndirect = 0ull;
@@ -509,10 +515,16 @@ public:
     /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
     /// relights a card of, once per instance (planRelights; empty before the frame's update or after a freeze).
     const std::vector<Ogre::Aabb> &relitInstanceBoxes() const { return mRelitBoxes; }
+    /// A RELIT INSTANCE's BOX as the list takes it: `scene` = a relight a scene change caused (CardRec::sceneCause) -
+    /// listed CardScene, else Card
+    struct RelitBox {
+        Ogre::Aabb box;
+        bool scene = false;
+    };
     /// ...and the instances whose cards the frame's own sun and mover trace added to the relight AFTER the plan (inside
     /// photon_update, after the list closed): taken by the next frame's plan, which lists them (the frame their light
     /// is first read in).
-    void takeLateRelitBoxes(std::vector<Ogre::Aabb> &out) { out.swap(mLateRelitBoxes); mLateRelitBoxes.clear(); }
+    void takeLateRelitBoxes(std::vector<RelitBox> &out) { out.swap(mLateRelitBoxes); mLateRelitBoxes.clear(); }
 
     /// THE INDIRECT HALF'S ACCUMULATION (PHOTON-7 stage 5, 5-1; JahCardIndirect_cs.glsl): one cascade's moves this
     /// frame - its passed bricks' (state word 4, the passed bit) and its injections' (word 7) - into every resident card's
@@ -795,7 +807,7 @@ private:
     std::vector<unsigned> mRelight;          ///< this frame's relight list: indices into mCards
     std::vector<Ogre::Aabb> mRelitBoxes;     ///< relitInstanceBoxes(): the plan's instances, one box each
     std::vector<unsigned> mRelitInstances;   ///< ...their instance indices (the late relights' filter)
-    std::vector<Ogre::Aabb> mLateRelitBoxes; ///< takeLateRelitBoxes()
+    std::vector<RelitBox> mLateRelitBoxes;   ///< takeLateRelitBoxes()
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
     /// 0 read it back, 2 none yet.
     std::vector<unsigned> mRelightMode;
@@ -977,12 +989,12 @@ private:
         bool carriesMoves = false;              ///< it carries its frame's relight move words (the readers' threshold)
         /// ...and the instances those relights lit (PHOTON-7 stage 8B, B1): listed as the changed-region list's Card kind
         /// when the report reads them VISIBLE (a texel moved a code), dropped when every texel stayed under one
-        std::vector<Ogre::Aabb> boxes;
+        std::vector<RelitBox> boxes;
     };
     /// THE RELIT INSTANCES WHOSE VISIBILITY IS STILL OWED (PHOTON-7 stage 8B, B1; R3 (a)'s display quantum applied to the
     /// gather's cells): the plan's relit boxes wait for the report that measures their moves; listed at once wherever no
     /// report will measure them (unmeasured, dropped) - listPendingRelits.
-    std::vector<Ogre::Aabb> mPendingRelitBoxes;
+    std::vector<RelitBox> mPendingRelitBoxes;
     void listPendingRelits() {
         mLateRelitBoxes.insert(mLateRelitBoxes.end(), mPendingRelitBoxes.begin(), mPendingRelitBoxes.end());
         mPendingRelitBoxes.clear();

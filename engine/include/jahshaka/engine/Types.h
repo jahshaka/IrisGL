@@ -4456,8 +4456,13 @@ enum class GiRegionKind : uint32_t {
     MoverShadow = 5,
     LampShadow = 6,    ///< the range sphere's box of a lamp whose range meets a casting mover (its shadow cannot leave it)
     Lamp = 7,          ///< a lamp's old range sphere joined with its new one (its pose, colour or range changed; it came or went)
+    /// ...a relit card's instance box whose relight a SCENE change caused - its first round after a lamp's, the sun's or
+    /// a material edit's write (SurfaceCache CardRec::sceneCause; PHOTON-7 8B (A), the lead's ruling): the world changed,
+    /// carried through the cache - its readers resume at once. Card (2) is the cache refining (a capture, an eviction,
+    /// a convergence round): an estimate converging, the readers' slew.
+    CardScene = 8,
 };
-constexpr unsigned kGiRegionKindCount = 8u;   ///< indexed by the kind's value (0 unused)
+constexpr unsigned kGiRegionKindCount = 9u;   ///< indexed by the kind's value (0 unused)
 constexpr unsigned kGiRegionCap = 128u;       ///< regions a list holds; past it boxes MERGE (never an overflow)
 /// "CANNOT SAY WHERE" (GiChangedRegions::overflow, bits): the sun changed (a directional light, the cloud layer's
 /// shadow on it) or the sky did (the environment, the ambient, the fog) - every sun- or sky-lit cache changed - or a

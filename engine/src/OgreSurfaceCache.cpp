@@ -1231,6 +1231,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (unsigned c = 0; c < inst.cardCount; ++c) {
                 mCards[inst.firstCard + c].queued = true;
                 mCards[inst.firstCard + c].roots |= root;
+                mCards[inst.firstCard + c].sceneCause = true;   // (the edit's first round: CardScene)
             }
             ++mInvalidMaterial;
         }
@@ -2106,7 +2107,7 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
                 for (size_t k = 0; !n && k < view.indirectBoxes.size(); ++k) n = box.intersects(view.indirectBoxes[k]);
             }
             if ((d || n) && !regionRoot) regionRoot = 1ull << rootBit('r', mFrame);
-            if (d) { c.relight = true; direct = true; c.roots |= regionRoot; }
+            if (d) { c.relight = true; direct = true; c.roots |= regionRoot; c.sceneCause = true; }
             if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; c.roots |= regionRoot; }
         }
         if (direct && !mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
@@ -2212,15 +2213,24 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     }
     // 3. THE CHANGED-REGION LIST'S BOXES (PHOTON-7 stage 3): each instance this plan relights a card of, ONCE - its
     // world box (the transform signature's: where its cards were cut).
+    // (8B (A): an instance is listed CardScene when ANY card of it this plan relights carries a scene change's first
+    // round - CardRec::sceneCause, cleared here: its later rounds are Card)
+    const size_t pendingFrom = mPendingRelitBoxes.size(), relitFrom = mRelitInstances.size();
     for (unsigned idx : mRelight) {
         const unsigned inst = mCards[idx].instance;
-        if (inst >= mInstances.size() ||
-            std::find(mRelitInstances.begin(), mRelitInstances.end(), inst) != mRelitInstances.end())
+        const bool scene = mCards[idx].sceneCause;
+        mCards[idx].sceneCause = false;
+        if (inst >= mInstances.size()) continue;
+        const auto at = std::find(mRelitInstances.begin(), mRelitInstances.end(), inst);
+        if (at != mRelitInstances.end()) {
+            const size_t k = size_t(at - mRelitInstances.begin());
+            if (scene && k >= relitFrom) mPendingRelitBoxes[pendingFrom + (k - relitFrom)].scene = true;
             continue;
+        }
         mRelitInstances.push_back(inst);
         // (listed when its report reads the move VISIBLE - a texel moved a code - never for a sub-quantum relight:
         // PHOTON-7 stage 8B B1, R3 (a)'s display quantum at the gather's cells; mPendingRelitBoxes)
-        mPendingRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+        mPendingRelitBoxes.push_back(RelitBox{ Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize), scene });
     }
 }
 
@@ -2837,7 +2847,9 @@ void SurfaceCache::relightCards() {
         if (c.instance < mInstances.size() &&
             std::find(mRelitInstances.begin(), mRelitInstances.end(), c.instance) == mRelitInstances.end()) {
             mRelitInstances.push_back(c.instance);
-            mLateRelitBoxes.push_back(Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize));
+            mLateRelitBoxes.push_back(RelitBox{ Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize),
+                                                c.sceneCause });
+            c.sceneCause = false;
         }
         c.relight = lampsUntraced;   // its lamps unshadowed this once: relit again when the trace can run
         c.lastRelit = mFrame;
@@ -4310,6 +4322,7 @@ void SurfaceCache::noteMaterialChanged(MaterialId material) {
         for (unsigned c = 0; c < inst.cardCount; ++c) {
             mCards[inst.firstCard + c].queued = true;
             mCards[inst.firstCard + c].roots |= root;
+            mCards[inst.firstCard + c].sceneCause = true;   // (the edit's first round: CardScene)
         }
         any = true;
     }

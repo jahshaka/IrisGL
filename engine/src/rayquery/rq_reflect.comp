@@ -344,8 +344,8 @@ uint restHitKind( vec3 x, float r )
 		const vec3 lo = regionLo( k ).xyz - vec3( r ), hi = regionHi( k ).xyz + vec3( r );
 		if( !( all( greaterThanEqual( x, lo ) ) && all( lessThanEqual( x, hi ) ) ) )
 			continue;
-		if( kind == kRegionEdit || kind == kRegionLamp || kind == kRegionLampShadow )
-			return 2u;
+		if( kind == kRegionEdit || kind == kRegionLamp || kind == kRegionLampShadow || kind == kRegionCardScene )
+			return 2u;   // (a scene change: CardScene is a relight a scene write caused - 8B (A))
 		found = 1u;   // (Card, Slab)
 	}
 	if( p.restLists.z < 0.5 )
