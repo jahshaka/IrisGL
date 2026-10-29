@@ -42,6 +42,7 @@ float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
 			if( atten > _h( 0.0 ) &&
 				max( dot( float3( pixelData.normal ), lightDir ), dot( float3( pixelData.geomNormal ), lightDir ) ) > 0.0 )
 				atten *= midf_c( jahLampRayView( inPs.pos.xyz, posAndType.xyz, float3( pixelData.geomNormal ) ) );
+			@insertpiece( JahColourPickLamp )
 @end
 @end
 
@@ -128,5 +129,6 @@ float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
 			if( atten > _h( 0.0 ) &&
 				max( dot( float3( pixelData.normal ), lightDir ), dot( float3( pixelData.geomNormal ), lightDir ) ) > 0.0 )
 				atten *= midf_c( jahLampVoxelView( inPs.pos.xyz, posAndType.xyz, float3( pixelData.geomNormal ) ) );
+			@insertpiece( JahColourPickLamp )
 @end
 @end

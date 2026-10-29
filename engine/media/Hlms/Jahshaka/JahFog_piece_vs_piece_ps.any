@@ -189,6 +189,22 @@
 			@end
 			uint4 jahEscapeAddr;
 		@end
+		@property( jah_colour_pick )
+			// THE COLOUR PICK (BUGS-8; JahColourPick_piece_ps.any): the ring's address (xy), the pixel (z = x | y shifted
+			// 16), the frame's slot (w); the pass's target width and height and the engine frame. Only while the arm
+			// colour.pick is on (a pass that traces its lamps: the property follows the ring).
+			@property( !jah_glass_escape )
+				@property( !hlms_fog )
+					@property( !jah_lamp_voxels )
+						float4 jahPickPadChain[9];
+					@end
+					float4 jahPickPadInscatter;
+				@end
+				uint4 jahPickPadEscape;
+			@end
+			uint4 jahPickAddr;
+			uint4 jahPickTarget;
+		@end
 	@end
 @end
 
@@ -219,6 +235,7 @@
 @piece( custom_ps_uniformDeclaration )
 	// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9; JahLampRay_piece_ps.any): the library (jah_lamp_ray.glsl and
 	// its dependencies; the extensions it needs are the shader's head's, CustomGlslExtensions)
+	@insertpiece( JahColourPickDecl )
 	@property( jah_lamp_rays )
 		#define JAH_ALPHA_TABLE passBuf.jahLampAddr.zw
 		@insertpiece( JahLampRayLib )
@@ -680,6 +697,7 @@ midf jahCloudSunTransmittance( float3 viewPos )
 	@end
 	@property( !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !jah_photon_view )
 	@piece( custom_ps_posExecution )
+	@insertpiece( JahColourPickPreFog )
 	{
 		// THE FOG LAW on this pixel (jahFogMedia, the JahFogAlong piece above):
 		// upstream's distance block has already run (800.PixelShader, under
@@ -724,6 +742,7 @@ midf jahCloudSunTransmittance( float3 viewPos )
 			@insertpiece( JahGlassEscapeWeight )
 		@end
 	}
+	@insertpiece( JahColourPickTail )
 	@end
 	@end
 @end

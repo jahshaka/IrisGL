@@ -381,6 +381,10 @@ constexpr unsigned kReflectNeeBinding = kReflectDirectBackBinding + 1u;
 /// a frame a slot of a 64-slot host-visible ring (kReflectPickWords words a slot), while the arm reflect.pick names it.
 constexpr unsigned kReflectPickBinding = kReflectNeeBinding + 1u;
 constexpr unsigned kReflectPickSlots = 64u, kReflectPickWords = 64u;
+/// THE COLOUR PICK (BUGS-8, the arm colour.pick; JahColourPick_piece_ps.any): a host-visible ring with a device address,
+/// a frame a slot - word 0 the fragments recorded, then four records of 31 words - over 256 frames (a stillness window's
+/// 120 and its move's trail fit; the lab reads it back by each slot's engine frame).
+constexpr unsigned kColourPickSlots = 256u, kColourPickWords = 128u;
 static_assert(kReflectBindings == kReflectPickBinding + 1u, "the pick is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
@@ -1096,6 +1100,11 @@ private:
     /// carries no id pass (the shader reads it only under `motion.x`).
     ReflectImage mDummyIds;
     RawBuffer mDummyStorage;
+    /// THE COLOUR PICK's RING (BUGS-8, the arm colour.pick; kColourPickSlots x kColourPickWords): made at its first use,
+    /// each slot's engine frame beside it, and the Ogre frame whose slot was last zeroed (once a frame)
+    RawBuffer mColourPick;
+    uint32_t mColourPickFrames[kColourPickSlots] = {};
+    uint32_t mColourPickZeroed = 0xFFFFFFFFu;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
     /// `layers` 0 = a plain 2D image and view (the hit list's stand-ins); n >= 1 =
@@ -1373,6 +1382,10 @@ public:
     /// colour passes' fragments trace it (JahLampRay_piece_ps.any), so its build's barrier waits for and is waited on by
     /// the FRAGMENT stage too (buildTlas).
     uint64_t tlasAddressOf(const OgreScene *scene) const;
+    /// THE COLOUR PICK (BUGS-8): registers this frame's slot of the ring for `scene`'s colour passes while the arm
+    /// colour.pick names a pixel (the ring made at its first use, the frame's slot zeroed once), else takes it away;
+    /// `engineFrame` is the frame being drawn (the stillness door's engine_frame).
+    void registerColourPick(OgreScene *scene, unsigned long long engineFrame);
     /// The table's address a job hands its shader (0: none).
     uint64_t alphaTableOf(const OgreScene *scene) const;
 private:
@@ -2904,6 +2917,7 @@ void RayQueryTier::close() {
         *d = ReflectImage();
     }
     dropBuffer(mDummyStorage);
+    dropBuffer(mColourPick);
     mDummiesReady = false;
     mDummiesNeedClear = false;
     for (Retired &r : mRetireBin) {
@@ -5150,6 +5164,12 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     }
     RayQueryStatus st = sa->st;
     st.feedSlotVisits = sa->feed.visits.load(std::memory_order_relaxed);
+    // THE COLOUR PICK's RING (BUGS-8, the arm colour.pick): copied while the arm is on - the lab reads it back
+    if (mArms && mArms->value(ArmId::ColourPick) >= 1.0 && mColourPick.mapped) {
+        const uint32_t *pw = static_cast<const uint32_t *>(mColourPick.mapped);
+        st.colourPick.assign(pw, pw + size_t(kColourPickSlots) * kColourPickWords);
+        st.colourPickFrames.assign(mColourPickFrames, mColourPickFrames + kColourPickSlots);
+    }
     // THE GPU TIMES are the monitor's rows this scene filed (lane TEST-1): -1
     // outside a capture, and a still scene's last value held, as before.
     const void *owner = sa;
@@ -8377,6 +8397,36 @@ uint64_t RayQueryTier::tierCountersAddress() {
         std::memset(mTierCounters.mapped, 0, 16u);
     }
     return uint64_t(addressOf(mTierCounters.buffer));
+}
+
+void RayQueryTier::registerColourPick(OgreScene *scene, unsigned long long engineFrame) {
+    if (!scene) return;
+    const double pv = mArms ? mArms->value(ArmId::ColourPick) : 0.0;
+    if (pv < 1.0) {
+        FogHlmsListener::setColourPick(scene->sceneManager(), 0ull, 0u, 0u, 0u);
+        return;
+    }
+    const VkDeviceSize bytes = VkDeviceSize(kColourPickSlots) * kColourPickWords * 4u;
+    if (!mColourPick.buffer) {
+        std::string err;
+        if (!makeBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mColourPick, err) || !mColourPick.mapped) {
+            Ogre::LogManager::getSingleton().logMessage("Jahshaka: the colour pick's ring - " + err);
+            dropBuffer(mColourPick);
+            FogHlmsListener::setColourPick(scene->sceneManager(), 0ull, 0u, 0u, 0u);
+            return;
+        }
+        std::memset(mColourPick.mapped, 0, size_t(bytes));
+    }
+    const uint32_t now = frameNow(), slot = now % kColourPickSlots;
+    if (mColourPickZeroed != now) {
+        // (the slot's last writer retired 256 frames ago: a frame that draws nothing at the pixel reads empty)
+        std::memset(static_cast<char *>(mColourPick.mapped) + size_t(slot) * kColourPickWords * 4u, 0, kColourPickWords * 4u);
+        mColourPickFrames[slot] = uint32_t(engineFrame);
+        mColourPickZeroed = now;
+    }
+    const uint32_t v = uint32_t(pv - 1.0);
+    FogHlmsListener::setColourPick(scene->sceneManager(), uint64_t(addressOf(mColourPick.buffer)),
+                                   (v % 4096u) | ((v / 4096u) % 4096u) << 16u, slot, uint32_t(engineFrame));
 }
 
 uint64_t RayQueryTier::tlasAddressOf(const OgreScene *scene) const {
@@ -13135,6 +13185,8 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
         // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): this frame's TLAS, after its build (the property follows
         // the scene's tracing, the address may be 0)
         FogHlmsListener::setLampRays(s->sceneManager(), true, mRayTier->tlasAddressOf(s), mRayTier->alphaTableOf(s));
+        // THE COLOUR PICK (BUGS-8): the ring's slot for this frame's colour passes while the arm names a pixel
+        mRayTier->registerColourPick(s, mPublishedFrames + 1ull);
     }
 }
 

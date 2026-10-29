@@ -1302,6 +1302,11 @@ constexpr ArmDef kArms[] = {
       "THE PICK (PHOTON-7 11-2, the reds' instrument; jahlab pick): 1 + x + 4096 y names a full-resolution pixel - its "
       "trace texel's sample (the direction, the hit, the traced and C2 parts, the NEE, the record) and rest terms (the "
       "count, the stop, the standard error and its share) a frame, RayQueryStatus::reflectPick. 0 = off." },
+    { ArmId::ColourPick, 0.0, 0.0, 16777216.0,
+      "THE COLOUR PICK (BUGS-8; jahlab colourpick): 1 + x + 4096 y names a full-resolution pixel - every colour pass's "
+      "fragment there records what built it (the pass-buffer lights, each Forward+ lamp's attenuation, the environment, "
+      "the output before and after the fog law) a frame a slot of a 256-frame ring, RayQueryStatus::colourPick. The pass "
+      "property jah_colour_pick exists only while it is on. 0 = off." },
     { ArmId::ReflectAlphaTested, 1.0, 0.0, 1.0,
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "

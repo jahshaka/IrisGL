@@ -567,5 +567,6 @@
 		const float3 jahEscEyeT = float3( 1.0, 1.0, 1.0 );
 		@insertpiece( JahGlassEscapeWeight )
 	}
+	@insertpiece( JahColourPickTail )
 @end
 @end

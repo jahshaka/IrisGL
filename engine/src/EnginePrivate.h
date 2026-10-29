@@ -2183,6 +2183,7 @@ private:
     X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
     X(ReflectPick, "reflect.pick") /* THE PICK (the reds' instrument): 1 + x + 4096 y names a full-resolution pixel whose trace texel's sample and rest terms are kept a frame (0 off) */ \
+    X(ColourPick, "colour.pick") /* THE COLOUR PICK (BUGS-8): 1 + x + 4096 y names a full-resolution pixel whose colour passes' fragments record what built them, a frame a slot of a 256-frame ring (0 off; JahColourPick_piece_ps.any) */ \
     X(ReflectAlphaTested, "reflect.alphaTested") /* cut-out geometry traced as cut-out */ \
     X(ReflectMonoEyes, "reflect.monoEyes") /* a stereo trace with the mono basis */ \
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
@@ -3702,6 +3703,10 @@ public:
     static void setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis);
     /// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4; SceneBinds::escapePass): pass-scoped, `on` false takes it away.
     static void setGlassEscape(const Ogre::SceneManager *sm, bool on, unsigned long long list, unsigned capacity);
+    /// THE COLOUR PICK (BUGS-8; SceneBinds::pickRing): this frame's ring address (0: the arm off - no `jah_colour_pick`),
+    /// the picked pixel (x | y << 16), the frame's slot and the engine frame; written every frame by the ray tier.
+    static void setColourPick(const Ogre::SceneManager *sm, unsigned long long ring, unsigned pixel, unsigned slot,
+                              unsigned frame);
 
     /// THE PHOTON VIEW'S ISOLATION (PHOTON-VIEW-1): Diffuse (1) or Reflections (2)
     /// for the pass being executed, registered by the view's photon listener in
@@ -3817,6 +3822,10 @@ public:
         bool escapePass = false;
         unsigned long long escapeList = 0ull;
         unsigned escapeCapacity = 0u;
+        /// THE COLOUR PICK (BUGS-8): the ring's device address while the arm colour.pick is on (0 otherwise - the
+        /// property `jah_colour_pick` follows it), the pixel (x | y << 16), the frame's slot and the engine frame
+        unsigned long long pickRing = 0ull;
+        unsigned pickPixel = 0u, pickSlot = 0u, pickFrame = 0u;
     };
     /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);

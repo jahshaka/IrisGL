@@ -5539,6 +5539,10 @@ struct RayQueryStatus {
     /// trace's sample (rq_reflect.comp jahPickSample), 32-47 the temporal pass's rest terms (rq_reflect_temporal.comp)
     std::vector<uint32_t> reflectPick;
     std::vector<uint32_t> reflectPickFrames;   ///< ...each slot's dispatch frame
+    /// THE COLOUR PICK's RING (BUGS-8, the arm colour.pick): 256 slots of 128 words, a frame a slot - word 0 the fragments
+    /// recorded at the picked pixel, then four records of 31 words (JahColourPick_piece_ps.any's JahColourPickTail)
+    std::vector<uint32_t> colourPick;
+    std::vector<uint32_t> colourPickFrames;    ///< ...each slot's engine frame (the stillness door's engine_frame)
     std::vector<ReflectEmitter> reflectPortalTable;
     /// THE NEE's CONE HIT RATE (PHOTON-7 stage 11, 11-1b; the lead's condition on the cone strategy): the reflection's NEE
     /// rays and those whose first hit was the target drawn, summed over the views' retired frames (read several frames
