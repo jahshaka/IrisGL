@@ -131,9 +131,14 @@ uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
 /// mirror hit (its material is read here) and restores it. `P2` the mirror hit, `n2` its normal facing the ray, `L2`
 /// the ray that met it, `carried` the distance P2 was carried along, `alpha` and `centre` the C2 lobe's (the sky's
 /// cone and the footprint's spread).
+#ifndef JAH_HIT_MIRROR_ARM
+#define JAH_HIT_MIRROR_ARM false
+#endif
 vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float carried, float alpha, bool centre )
 {
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
+	if( JAH_HIT_MIRROR_ARM )   // MEASURING ARM (reverted)
+		return vec3( 0.0 );
 	vec3 alb2, emi2;
 	float rough2;
 	vec4 metal2;

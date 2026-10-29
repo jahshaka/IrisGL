@@ -6897,6 +6897,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                 std::memset(static_cast<char *>(rv.pick.mapped) + size_t(frameNow() % kReflectPickSlots) * kReflectPickWords * 4u,
                             0, kReflectPickWords * 4u);
         }
+        if (mArms && mArms->value(ArmId::ReflectMirrorContOff) > 0.5)
+            packed |= 1u << 31u;   // MEASURING ARM (11-2 (7), reverted)
         std::memcpy(&pp.alpha[1], &packed, sizeof(packed));
     }
     Ogre::TextureGpu *fogAerial = nullptr;             // PHOTON-I-1 fix 5: the media along the reflection
