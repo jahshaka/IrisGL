@@ -549,6 +549,8 @@ layout( set = 0, binding = 44 ) uniform sampler2D jahHitCloud;
 // C2's escape (jah_rq_hit_radiance.glsl jahHitSpecularLobeTraced): the sky this trace reads, at the secondary lobe's
 vec3 skyRadiance( vec3 dir, float lobeAlpha, bool centreRay );
 #define JAH_HIT_LOBE_SKY( d, alpha, centre ) skyRadiance( d, alpha, centre )
+#define JAH_C2_COUNT_SKY 6u   // (MEASURING ARM, reverted)
+#define JAH_C2_COUNT_ALL 7u
 #include "jah_rq_hit_radiance.glsl"
 #include "jah_rq_emitters.glsl"
 #include "jah_rq_panes.glsl"
