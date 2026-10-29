@@ -5158,6 +5158,8 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
     st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
     st.panesOverflow = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[0] : 0u;
+    for (int i = 0; i < 5; ++i)   // MEASURING ARM (reverted): the sky counters
+        st.skyCount[i] = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[1 + i] : 0u;
     return st;
 }
 
@@ -8279,8 +8281,8 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
 uint64_t RayQueryTier::tierCountersAddress() {
     if (!mTierCounters.buffer) {
         std::string err;
-        if (!makeBuffer(16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mTierCounters, err)) return 0u;
-        std::memset(mTierCounters.mapped, 0, 16u);
+        if (!makeBuffer(32u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, true, mTierCounters, err)) return 0u;   // (MEASURING ARM: 16 -> 32)
+        std::memset(mTierCounters.mapped, 0, 32u);
     }
     return uint64_t(addressOf(mTierCounters.buffer));
 }

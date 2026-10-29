@@ -179,8 +179,18 @@ void jahPanesOverflowCount()
 	if( ( a.x | a.y ) != 0u )
 		atomicAdd( JahTierCounters( a ).c[0], 1u );
 }
+/// MEASURING ARM (11-2, the sealed_sky teleport counter; reverted): [1] C2's secondary rays answered as the sky, [2] of
+/// them the ones a ray past the world's exit (to 1e4) would have hit, [3] C2's secondary rays, [4] the probe integrate's
+/// sky answers, [5] of them the ones past the exit that would have hit
+void jahTierCount( uint i )
+{
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) != 0u )
+		atomicAdd( JahTierCounters( a ).c[i], 1u );
+}
 #else
 void jahPanesOverflowCount() {}
+void jahTierCount( uint i ) {}
 #endif
 /// ...a pane to the overflow
 void jahPanesOverflow( inout JahPanes p, float t, uint w )

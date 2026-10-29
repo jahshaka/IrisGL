@@ -273,8 +273,17 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickSpec = vec3( 0.0 );
 	jahC2PickMirror = vec3( 0.0 );
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
+	jahTierCount( 3u );   // (MEASURING ARM, reverted)
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	{
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
+		jahTierCount( 1u );   // (MEASURING ARM, reverted: and would a ray past the world's exit have hit?)
+		rayQueryEXT qx;
+		rayQueryInitializeEXT( qx, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, L2, 1.0e4 );
+		while( rayQueryProceedEXT( qx ) ) {}
+		if( rayQueryGetIntersectionTypeEXT( qx, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			jahTierCount( 2u );
+	}
 	else
 	{
 		const float t2 = rayQueryGetIntersectionTEXT( q, true );
