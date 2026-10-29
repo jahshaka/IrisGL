@@ -133,10 +133,12 @@
 	// apply, and encoding into one would throw away the headroom it is there for
 	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
 	// the UNORM write clamps it -- which is the clip this patch removes).
+	// THE fp16 STORE ROUNDS FIRST (REDS-1 item 5): an rgba16f store truncates on NVIDIA 595.x (jah_half_round.glsl)
+	@insertpiece( JahHalfRound )
 	@property( uav0_orig_pf_srgb )
 		#define jahStoreLight( x ) toSRGB( x )
 	@else
-		#define jahStoreLight( x ) ( x )
+		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
 @end
 
@@ -266,6 +268,9 @@
 	// gathers: no bounce here gains more - inside an orbit the measured ratio reads ~1, which no contraction is); the
 	// operator bound alone before a measurement. Two rules take it: THE WRITE HOLD (a), and THE SCHEDULER's no-move (ii)
 	// below.
+	// THE ROUNDING IS THE STORE'S OWN, MADE SO (REDS-1 item 5): the rules above assume a ROUND-TO-NEAREST store, and an
+	// rgba16f store TRUNCATES on NVIDIA 595.x (measured: every value half a step low); every write of this light store
+	// goes through jahStoreLight's jahRoundHalf (jah_half_round.glsl), so the 0.5 / (1 - r) bound holds as written.
 	const uint jahIdxR = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
 	const float jahOperator = min( max( max( jahReemit.x, jahReemit.y ), jahReemit.z ), 0.999 );
 	const float jahRho = ( jahFbState[10u * jahIdxR] & 2048u ) != 0u
@@ -301,7 +306,7 @@
 	// the back into the chain's compact scratch at this brick's list slot (the declaration says why)
 	const int2 jahScratchAt = int2( int( ( jahCell.x & 7u ) + 8u * ( jahCell.y & 7u ) + 64u * ( jahCell.z & 7u ) ),
 									int( gl_WorkGroupID.y ) );
-	imageStore( backScratch, jahScratchAt, float4( backLight.xyz, currentLight.w ) );
+	imageStore( backScratch, jahScratchAt, jahRoundHalf( float4( backLight.xyz, currentLight.w ) ) );
 	// THE PASS'S MOVE (PHOTON-7 stage 3's word 1, stage 4's feedback): the total it gathered from (the current one, a
 	// linear read) against what the STORE now holds - read back by this invocation (program order: the store's own
 	// rounding, never a conversion of ours), so a voxel at the float store's fixed point moves by exactly 0. Per

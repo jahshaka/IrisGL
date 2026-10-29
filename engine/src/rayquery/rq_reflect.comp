@@ -51,6 +51,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
 /// THE COMPACT PASS (this module with constant 0 true): one subgroup a listed texel - its first lane the texel, the
 /// others its workers - instead of the 8 x 8 tile.
@@ -250,7 +251,7 @@ void photonHit( ivec2 tc, vec4 c )
 	const ivec2 hi = min( mix( lo + scale, full, greaterThanEqual( tc, traceRes - 1 ) ), full );
 	for( int y = lo.y; y < hi.y; ++y )
 		for( int x = lo.x; x < hi.x; ++x )
-			imageStore( photonOverlay, ivec3( ivec2( x, y ), gEye ), c );
+			imageStore( photonOverlay, ivec3( ivec2( x, y ), gEye ), jahRoundHalf( c ) );
 }
 #define JAH_HIT_INSTANCE( s, k ) jahHitInstances[( s ) * 10u + ( k )]
 #include "jah_rq_sun_ray.glsl"
@@ -643,13 +644,15 @@ struct JahReflectSample
 	vec2 recBary;
 	float hitT, sampleT, screenT, blendVouch;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
+	uint areaVis;   // ...and its area lights' (L9 (b1): jahHitAreaVisWord, the list's word 10)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
 	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
 	vec3 c2;        // THE PICK's (the reds' instrument): the hit's traced lobe (C2) inside `traced` / a record's lobe
 	uint c2Slot;    // ...its secondary ray's hit slot (0xFFFFFFFF an exit), distance, BRDF part and portal part
 	float c2T;
-	vec3 c2Brdf, c2Portal, c2Spec;
+	vec3 c2Brdf, c2Portal, c2Spec, c2Mirror, cut;
+	uint c2MirrorSlot;
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -668,6 +671,7 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.screenT = 0.0;
 	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
+	o.areaVis = 0u;
 	o.recGain = 1.0;
 	o.recTraced = false;
 	o.recPane = vec4( 0.0, 0.0, 0.0, 1.0 );
@@ -677,6 +681,9 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.c2Brdf = vec3( 0.0 );
 	o.c2Portal = vec3( 0.0 );
 	o.c2Spec = vec3( 0.0 );
+	o.c2Mirror = vec3( 0.0 );
+	o.cut = vec3( 0.0 );
+	o.c2MirrorSlot = 0xFFFFFFFFu;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -758,7 +765,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	if( neeArm && vndf )
 	{
 		nee = jahNeePick( world, geomN, reflect( -V, worldN ), lobeAlpha, L, true,
-						  jahNeeSample3( seedPix, frame + uint( p.denoiser.z ) ), false );
+						  jahNeeSample3( seedPix, frame + uint( p.denoiser.z ) ), kJahNeeKindEmitters );
 		if( nee.W > 0.0 )
 			neeQB = jahReflectFoldedPdf( worldN, geomN, V, L, lobeAlpha );
 	}
@@ -935,8 +942,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			if( !decodeAlways )
 			{
 				jahHitTracedLobe = c2;
+				jahCardPickCut = vec3( 0.0 );
 				traced = jahHitRadianceStore( recFar ? 0xFFFFFFFFu : recSlot, origin + L * t, hitN, L,
 												reflectFootprint( lobeAlpha, t ), centre, ok, photonSource );
+				o.cut = jahCardPickCut;   // (THE PICK: the store's lobe share C2 replaces, left out of `traced`)
 				jahHitTracedLobe = false;
 				vec3 hAlbedo, hEmissive;
 				float hRough;
@@ -952,6 +961,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 					o.c2Brdf = jahC2PickBrdf;
 					o.c2Portal = jahC2PickPortal;
 					o.c2Spec = jahC2PickSpec;
+					o.c2Mirror = jahC2PickMirror;
+					o.c2MirrorSlot = jahC2PickMirrorSlot;
 				}
 			}
 			record = decodeAlways || !ok || !finite3( traced );
@@ -1163,6 +1174,12 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	if( record && recTraced )
 		o.c2 = recLobe;
 	o.sunVis = record ? jahHitSunVisibility( origin + L * hitT, recN, hitT, recFar ) : 1.0;
+	if( record )
+	{
+		// (the area strata's draw: this sample's sequence, as a store hit's - jahHitAreaSeq above)
+		jahHitAreaSeq = jahAreaPcg( frame + uint( p.denoiser.z ) ) ^ seedPix.x * 73856093u ^ seedPix.y * 19349663u;
+		o.areaVis = jahHitAreaVisWord( origin + L * hitT, recN, hitT, recFar );
+	}
 }
 
 // THE PICK (binding 56, the reds' instrument: jahlab pick; OgreRayQuery.cpp kReflectPickBinding): while alpha.y's bits
@@ -1218,6 +1235,9 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 	jahPick[b + 26u] = floatBitsToUint( s.c2Brdf.x );
 	jahPick[b + 27u] = floatBitsToUint( s.c2Portal.x );
 	jahPick[b + 28u] = floatBitsToUint( s.c2Spec.x );
+	jahPick[b + 29u] = floatBitsToUint( s.c2Mirror.x );
+	jahPick[b + 30u] = s.c2MirrorSlot;
+	jahPick[b + 31u] = floatBitsToUint( s.cut.x );
 }
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,
@@ -1248,9 +1268,9 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	// THE BATCH'S FOLDS STORED (the rest half in place, and the residual where the frozen half is free for it).
 	if( folds > 0u )
 	{
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( rs.M, rs.m2 ) );
+		imageStore( historyCur, ivec3( tc, gEye ), jahRoundHalf( vec4( rs.M, rs.m2 ) ) );
 		if( jahRestHasResidual( float( vNow ), restHasH, restN ) )
-			imageStore( historyPrev, ivec3( tc, gEye ), rs.res );
+			imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( rs.res ) );
 	}
 	// THE STATE THIS FRAME STORES (jah_reflect_state.glsl): the surface's distance (the texel is live: the temporal pass
 	// decides whether it holds an answer), the throw this draw used (the resolve re-derives a neighbour's chance from it;
@@ -1271,7 +1291,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	// to, at this texel only (the temporal pass reads it, then writes the mean over it). Not at rest: that half holds
 	// the rest mean, and nothing moves under a resting texel (a crossing resumes it).
 	if( !atRest )
-		imageStore( historyCur, ivec3( tc, gEye ), vec4( prevSurf - world, ownMoving ? 1.0 : 0.0 ) );
+		imageStore( historyCur, ivec3( tc, gEye ), jahRoundHalf( vec4( prevSurf - world, ownMoving ? 1.0 : 0.0 ) ) );
 	// THE REST'S ACTIVE TEXELS, counted into the hit list's third counter word (read back several frames late): the
 	// view holds once a rest frame counted none (OgreRayQuery.cpp).
 	if( atRest && JAH_HIT_ON )
@@ -1280,8 +1300,8 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	// test on the rest mean as it now stands.
 	if( restBatch && !resume && !record && consumed == batchRays )
 	{
-		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
-		imageStore( reflectNee, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
+		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 		photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
 					   photonSource == 4u ? kPhotonScreen : kPhotonSky );
@@ -1292,8 +1312,8 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		// NO SAMPLE THIS FRAME - a non-finite answer is no evidence about this pixel, nor is a sample the screen alone
 		// left unanswered (noSample): the resolve reconstructs the texel from its neighbours' samples, else the temporal
 		// pass carries its history (or finds it holds no answer).
-		imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
-		imageStore( reflectNee, ivec3( tc, gEye ), vec4( 0.0 ) );
+		imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
+		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 		photonHit( tc, kPhotonDropped );
 		return;
@@ -1306,7 +1326,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		// (A BLENDED sample's record: the screen's share is written here, the write-back adds the ray's - the record's
 		// weight - or, unshaded, takes the screen's answer whole.)
 		imageStore( reflectSample, ivec3( tc, gEye ),
-					blend ? vec4( blendVouch * screenRadiance, blendVouch * screenT ) : vec4( 0.0 ) );
+					jahRoundHalf( blend ? vec4( blendVouch * screenRadiance, blendVouch * screenT ) : vec4( 0.0 ) ) );
 		const vec3 hitPos = origin + L * hitT;
 		// A FAR COPY'S HIT IS RECORDED AS ONE (READ_B finding 1, the gather's rule): the decode reads the coarsest
 		// level's triangle `prim` (bit 27) and the sun leg lifts by the far copy's hand-over - a near-flagged record
@@ -1315,19 +1335,19 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
 											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
 											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain,
-											s.recPane, s.recTraced );
+											s.recPane, s.recTraced, s.areaVis );
 		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
-			imageStore( reflectSample, ivec3( tc, gEye ), vec4( screenRadiance, screenT ) );
+			imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( screenRadiance, screenT ) ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
-		imageStore( reflectNee, ivec3( tc, gEye ), vec4( appended ? s.nee : vec3( 0.0 ), 0.0 ) );
+		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( appended ? s.nee : vec3( 0.0 ), 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 		photonHit( tc, appended ? kPhotonList : kPhotonDropped );
 		return;
 	}
 	// THE SAMPLE: the radiance and the hit's distance (an escape's is a length no hit has, so its virtual point lies
 	// beyond every surface: the sky's history moves with the camera's turn alone).
-	imageStore( reflectSample, ivec3( tc, gEye ), vec4( clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) ), sampleT ) );
-	imageStore( reflectNee, ivec3( tc, gEye ), vec4( clamp( s.nee, vec3( 0.0 ), vec3( kMaxRadiance ) ), 0.0 ) );
+	imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) ), sampleT ) ) );
+	imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( clamp( s.nee, vec3( 0.0 ), vec3( kMaxRadiance ) ), 0.0 ) ) );
 	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
 	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
 				   photonSource == 4u ? kPhotonScreen : kPhotonSky );
@@ -1498,7 +1518,7 @@ void main()
 			// RayQueryStatus::reflectRestCapped, the defect reading (commit 8).
 			if( inPlace.v >= kReflectRestVCap && JAH_HIT_ON )
 				atomicAdd( jahHitBuf[3], 1u );
-			imageStore( reflectSample, ivec3( tc, gEye ), vec4( 0.0 ) );
+			imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 			photonHit( tc, kPhotonRest );
 			live = false;
 		}
@@ -1811,7 +1831,7 @@ void main()
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
 										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
-										 s.recGain, s.recPane, s.recTraced );
+										 s.recGain, s.recPane, s.recTraced, s.areaVis );
 							fit = 1u;
 						}
 						else

@@ -45,6 +45,12 @@ const uint kJahHitLightWords = 32u;
 void jahSpecularAlbedo( float v, float r, out float a, out float b );
 #endif
 
+/// ONE LAMP ALONE (PHOTON-7 11-2 (8): the image draw's component is one lamp's lobe): >= 0 the light table's index the
+/// next call evaluates, every other skipped; -1 every light (the callers set it around their call and restore it)
+#ifndef JAH_LAMP_ONLY_DECLARED
+#define JAH_LAMP_ONLY_DECLARED
+int jahLampOnly = -1;
+#endif
 vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float sunVis, uvec4 lampBits,
 						uvec4 lampIds[12] )
 {
@@ -57,6 +63,8 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 	vec3 sum = vec3( 0.0 );
 	for( uint i = 0u; i < count; ++i )
 	{
+		if( jahLampOnly >= 0 && int( i ) != jahLampOnly )
+			continue;
 		const uint o = base + i * kJahHitLightWords;
 		const vec4 v0 = uintBitsToFloat( uvec4( T.u[o], T.u[o + 1u], T.u[o + 2u], T.u[o + 3u] ) );
 		const vec4 v1 = uintBitsToFloat( uvec4( T.u[o + 4u], T.u[o + 5u], T.u[o + 6u], T.u[o + 7u] ) );

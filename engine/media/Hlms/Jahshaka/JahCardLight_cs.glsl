@@ -356,39 +356,18 @@ layout( local_size_x = @value( threads_per_group_x ),
 	}
 @end
 
-// THE STORE ROUNDS TO NEAREST. The device converts a float into R11G11B10F by
-// TRUNCATION (measured: 0.50829 stored as 0.5), so a channel lost up to one
-// whole mantissa step — 6 mantissa bits on red and green, 5 on blue. Adding
-// HALF A STEP of the target format to the float's own bits first — bit 16 for
-// red and green (23 - 6 - 1), bit 17 for blue (23 - 5 - 1) — makes the
-// truncation a round to nearest in EVERY octave (a carry into the exponent is
-// the octave's own round-up): half a step at most. What stood here was a
-// constant pre-scale, v x (1 + 1/128, 1 + 1/128, 1 + 1/64): half a step only at
-// the BOTTOM of an octave, a whole step at its top — it read blue 1.1-1.5 %
-// HIGH on gi.card_lighting's crate top (a value at 1.6 x its octave's floor).
-// Below the format's smallest normal (2^-14) its step is absolute and this adds
-// less than half of it: a radiance under 6e-5, stated. Only on that format (the
-// host's property): the RGBA16F fallback stores unrounded.
-vec3 jahCardRound( vec3 v )
-{
-@property( jah_card_round_r11g11b10 )
-	// Clamped to [0, the format's largest finite value] (65024 on red and green,
-	// 64512 on blue) before the add: +Inf's bits plus half a step are a NaN
-	// pattern (audit F8), and so is the largest FLOAT's; the format's own maximum
-	// stays finite through the add and stores as itself.
-	const uvec3 bits = floatBitsToUint( clamp( v, vec3( 0.0, 0.0, 0.0 ),
-											   vec3( 65024.0, 65024.0, 64512.0 ) ) );
-	return uintBitsToFloat( bits + uvec3( 0x10000u, 0x10000u, 0x20000u ) );
-@else
-	return v;
-@end
-}
+// THE STORES ROUND TO NEAREST (REDS-1): the device converts a float into a half-float (and an R11G11B10F) texel by
+// TRUNCATION (measured: R11G11B10F 0.50829 stored as 0.5; RGBA16F every value half a step low), so every half-float
+// layer this job writes - the Radiance, the Indirect, the Flat and the Gather - takes jahRoundHalf (jah_half_round.glsl).
+// The Indirect and Flat layers are RGBA16F since REDS-1 (they were R11G11B10F: a 6-bit mantissa, 0.4-0.8 % a step, and
+// the radiance is REBUILT from them on a frame that does not march - gi.card_closed_form read +0.08..0.10 % from it).
 
 @insertpiece( JahBrdf )
 @insertpiece( DeclAreaLtcLightFuncs )
 @insertpiece( JahDiffuseAlbedo )
 @insertpiece( JahSpecularAlbedo )
 @insertpiece( JahCardView )
+@insertpiece( JahHalfRound )
 @property( jah_cloud_shadow )
 	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
 	@insertpiece( JahCloudShadow )
@@ -574,7 +553,14 @@ void main()
 		// job's re-emission).
 		const vec3 diffuseLobe = kD * 3.141592654 * jahDiffuseAlbedoHemi( perceptualRoughness );
 		vec3 specLobe = vec3( 0.0, 0.0, 0.0 );
-		if( specW > 0.0 )
+		// A NEAR-MIRROR STORES NO SPECULAR (PHOTON-7 11-2 (7), the lead's ruling; Lumen's surface cache keeps the same
+		// rule): a texel is a view-INDEPENDENT cache, and a near-delta lobe's re-emission is a view-DEPENDENT picture -
+		// what the mirror reflects toward one direction, served to every reader from every direction (a mirror's card
+		// answered 0.6 and 6.5 to C2's secondary rays at photon-glass). At the G-buffer's floor (alpha 0.0011, the
+		// reflection's kMirrorPackAlpha: a roughness-0 surface) the lobe re-emits nothing here: the texel keeps its
+		// diffuse half (about 0 for a metal), and the reflection it owes is traced by its readers (C2's continuation).
+		const bool nearMirror = alpha <= 0.0011;
+		if( specW > 0.0 && !nearMirror )
 		{
 			float sa, sb;
 			jahSpecularAlbedoHemi( perceptualRoughness, sa, sb );
@@ -612,17 +598,19 @@ void main()
 			indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
 			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
 			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
+			if( nearMirror )
+				specIndirect = vec3( 0.0, 0.0, 0.0 );   // (a near-mirror's cached lobe share is 0 by the rule above)
 		}
 		// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
 		flatTerm = ( texelFetch( cardEmissive, at, 0 ).xyz + specIndirect ) * openF;
 		radiance = ( direct * kD + indirect ) * openF + flatTerm;
 	}
 	if( ( mode & 3u ) != 0u )
-		imageStore( cardIndirect, at, vec4( jahCardRound( cached ), 1.0 ) );
-	imageStore( cardFlat, at, vec4( jahCardRound( flatTerm ), 1.0 ) );
+		imageStore( cardIndirect, at, vec4( jahRoundHalf( cached ), 1.0 ) );
+	imageStore( cardFlat, at, vec4( jahRoundHalf( flatTerm ), 1.0 ) );
 	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampThrough, lampMask, lampThroughMask ) );
-	// (RGBA16F, 10-2d: the store rounds to nearest itself - jahCardRound is the R11G11B10F layers')
-	imageStore( cardRadiance, at, vec4( radiance, 1.0 ) );
+	// (RGBA16F, 10-2d: the store TRUNCATES on NVIDIA 595.x - REDS-1, measured - so the value is rounded first: jahRoundHalf)
+	imageStore( cardRadiance, at, vec4( jahRoundHalf( radiance ), 1.0 ) );
 @property( jah_card_gather )
 	{
 		// THE MOVE (10-2c, the lead's ruling: accumulated from the LAST REPORTED value, never frame to frame): the texel's
@@ -651,7 +639,7 @@ void main()
 			atomicOr( cardMoves[16385u], 1u );
 		if( fresh || d > code )
 		{
-			imageStore( cardGather, at, vec4( g.xyz, S ) );
+			imageStore( cardGather, at, vec4( jahRoundHalf( g.xyz ), S ) );
 			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );
 			const uint slot = ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u );
 			if( mb > cardMoves[slot] )

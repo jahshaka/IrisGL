@@ -24,11 +24,21 @@
 /// The words a target (OgreRayQuery.cpp kEmitterWords) and the most a shader walks (the tier's cap is at most this:
 /// GiQualityFacts::reflectEmitters; a corrupt count is clamped here, the bounded-loop law).
 const uint kJahEmitterWords = 8u;
-const uint kJahEmitterMax = 80u;   // (the tier cap 64 emitters + RayQueryTier kMaxPortals 16 portals)
+const uint kJahEmitterMax = 96u;   // (the tier cap 64 emitters + kMaxPortals 16 portals + 16 lamp images, 11-2 (8))
 /// A PORTAL (PHOTON-7 11-2 (6), RayQueryTier::updatePortals): an opening to the sky in the table's emitter form, slot
 /// this word - the reflection's emitter NEE skips it, C2's sky NEE (jah_rq_hit_radiance.glsl) takes portals alone; each
 /// strategy's density p_l is its own kind's (`portals` below)
 const uint kJahPortalSlot = 0xFFFFFFFFu;
+/// A LAMP's IMAGE IN A PLANAR NEAR-MIRROR (PHOTON-7 11-2 (8); RayQueryTier::updateHitTable): the lamp reflected through
+/// the mirror's plane, its sphere the lamp's widened by the mirror's lobe - C2's image draw takes these alone; its words
+/// 5 / 6 hold the mirror's instance slot and the lamp's index in the light table (uint bits), word 4 its weight
+const uint kJahImageSlot = 0xFFFFFFFEu;
+/// THE KINDS a strategy draws (jahNeePick's `kind`): the emitters (the reflection's NEE), the sky's portals (C2's sky NEE)
+const uint kJahNeeKindEmitters = 0u, kJahNeeKindPortals = 1u, kJahNeeKindImages = 2u;
+uint jahEmitterKindOf( uint slot )
+{
+	return slot == kJahPortalSlot ? kJahNeeKindPortals : ( slot == kJahImageSlot ? kJahNeeKindImages : kJahNeeKindEmitters );
+}
 
 uint jahEmitterCount()
 {
@@ -120,7 +130,8 @@ bool jahEmitterGate( JahEmitterCone k, vec3 g, vec3 R, float alpha )
 /// THE PICK at x: W, the light density of the BRDF draw's direction Lb (p_l( Lb ) - its balance weight's), the chosen
 /// target and its draw's direction L (uniform in its set: u.x the pick, u.yz the direction), and p_l( L ) - over every
 /// target whose set holds L, not the chosen one's alone. ok false: no target reaches (W 0) - the texel takes the BRDF's
-/// draw alone (its weight 1). `portals`: this strategy's kind - the sky's portals alone, else the emitters alone.
+/// draw alone (its weight 1). `kind`: this strategy's kind - the emitters, or the sky's portals (never the images: theirs
+/// is jahImagePick's component-wise draw).
 struct JahNeePick
 {
 	bool ok;
@@ -130,7 +141,7 @@ struct JahNeePick
 	float pdfL;   // p_l( L )
 	uint slot;    // the chosen target's (the hit-rate counter's)
 };
-JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb, vec3 u, bool portals )
+JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb, vec3 u, uint kind )
 {
 	JahNeePick o;
 	o.ok = false;
@@ -148,7 +159,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( jahEmitterKindOf( e.slot ) != kind || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		o.W += e.lmax * k.omega;
 		if( haveLb && jahEmitterConeHolds( k, g, Lb ) )
@@ -167,7 +178,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( jahEmitterKindOf( e.slot ) != kind || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		acc += e.lmax * k.omega;
 		chosen = k;
@@ -194,7 +205,7 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	{
 		const JahEmitter e = jahEmitterAt( i );
 		const JahEmitterCone k = jahEmitterConeFrom( e, x );
-		if( ( e.slot == kJahPortalSlot ) != portals || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
+		if( jahEmitterKindOf( e.slot ) != kind || !( e.lmax > 0.0 ) || !jahEmitterGate( k, g, R, alpha ) )
 			continue;
 		if( jahEmitterConeHolds( k, g, o.L ) )
 			sumL += e.lmax;
@@ -202,6 +213,130 @@ JahNeePick jahNeePick( vec3 x, vec3 g, vec3 R, float alpha, vec3 Lb, bool haveLb
 	o.pdfL = sumL / o.W;
 	o.ok = o.pdfL > 0.0;
 	return o;
+}
+
+/// THE IMAGE DRAW (PHOTON-7 11-2 (8), the lead's ruling): C2's second strategy toward a lamp's image in a planar
+/// near-mirror. Its component is ONE pair's - that lamp's lobe at that mirror (jahCardLampLobe) - so its density for a
+/// direction of image k is P( k ) / Omega_k = lmax_k / W, never a sum over the other images (each estimates its own
+/// component). An image counts at x where its cone reaches above g and x lies on the mirror's front (the plane through
+/// the lamp and its image's midpoint, its normal toward the lamp). `u` the pick and the cone's two.
+struct JahImage
+{
+	vec3 c;
+	float r;
+	float lmax;
+	uint mirror;
+	uint lamp;
+};
+JahImage jahImageAt( uint i )
+{
+	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+	const uint b = T.u[5] + i * kJahEmitterWords;
+	JahImage m;
+	m.c = uintBitsToFloat( uvec3( T.u[b], T.u[b + 1u], T.u[b + 2u] ) );
+	m.r = uintBitsToFloat( T.u[b + 3u] );
+	m.lmax = uintBitsToFloat( T.u[b + 4u] );
+	m.mirror = T.u[b + 5u];
+	m.lamp = T.u[b + 6u];
+	return m;
+}
+/// ...the image's lamp's position (the light table's first vec4)
+vec3 jahImageLampPos( JahImage m )
+{
+	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+	const uint o = T.u[2] + m.lamp * kJahHitLightWords;
+	return uintBitsToFloat( uvec3( T.u[o], T.u[o + 1u], T.u[o + 2u] ) );
+}
+bool jahImageCounts( JahImage m, JahEmitterCone k, vec3 x, vec3 g )
+{
+	if( !( m.lmax > 0.0 ) || !( k.omega > 0.0 ) || k.inside )
+		return false;
+	const vec3 lp = jahImageLampPos( m );
+	const vec3 n = lp - m.c;
+	if( !( dot( x - 0.5 * ( lp + m.c ), n ) > 0.0 ) )
+		return false;
+	const float sinMax = sqrt( max( 1.0 - k.cosMax * k.cosMax, 0.0 ) );
+	return dot( k.axis, g ) >= -sinMax;
+}
+struct JahImagePick
+{
+	bool ok;
+	float W;      // sum over the counting images of lmax Omega
+	uint index;   // the chosen image's table index
+	vec3 L;
+	float pdf;    // its component's density at L: lmax / W
+};
+JahImagePick jahImagePick( vec3 x, vec3 g, vec3 u )
+{
+	JahImagePick o;
+	o.ok = false;
+	o.W = 0.0;
+	o.index = 0u;
+	o.L = g;
+	o.pdf = 0.0;
+	const uint n = jahEmitterCount();
+	for( uint i = 0u; i < n; ++i )
+	{
+		JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+		if( T.u[T.u[5] + i * kJahEmitterWords + 7u] != kJahImageSlot )
+			continue;
+		const JahImage m = jahImageAt( i );
+		JahEmitter e;
+		e.c = m.c;
+		e.r = m.r;
+		const JahEmitterCone k = jahEmitterConeFrom( e, x );
+		if( jahImageCounts( m, k, x, g ) )
+			o.W += m.lmax * k.omega;
+	}
+	if( !( o.W > 0.0 ) || !( o.W < 3.0e38 ) )
+		return o;
+	const float target = u.x * o.W;
+	float acc = 0.0;
+	bool picked = false;
+	JahEmitterCone chosen;
+	float lmax = 0.0;
+	for( uint i = 0u; i < n && !picked; ++i )
+	{
+		JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
+		if( T.u[T.u[5] + i * kJahEmitterWords + 7u] != kJahImageSlot )
+			continue;
+		const JahImage m = jahImageAt( i );
+		JahEmitter e;
+		e.c = m.c;
+		e.r = m.r;
+		const JahEmitterCone k = jahEmitterConeFrom( e, x );
+		if( !jahImageCounts( m, k, x, g ) )
+			continue;
+		acc += m.lmax * k.omega;
+		chosen = k;
+		lmax = m.lmax;
+		o.index = i;
+		o.ok = true;
+		picked = target < acc;
+	}
+	if( !o.ok )
+		return o;
+	const float ct = 1.0 - u.y * ( 1.0 - chosen.cosMax );
+	const float st = sqrt( max( 1.0 - ct * ct, 0.0 ) );
+	const float phi = 6.2831853 * u.z;
+	vec3 T, B;
+	jahReflectFrame( chosen.axis, T, B );
+	o.L = normalize( ( cos( phi ) * st ) * T + ( sin( phi ) * st ) * B + ct * chosen.axis );
+	o.pdf = lmax / o.W;
+	return o;
+}
+/// ...image i's component density at a BRDF draw's direction Lb from x (its cone's: lmax_i / W where Lb lies in it, else
+/// 0); `W` jahImagePick's at the same x.
+float jahImagePdfAt( uint i, vec3 x, vec3 g, vec3 Lb, float W )
+{
+	if( !( W > 0.0 ) )
+		return 0.0;
+	const JahImage m = jahImageAt( i );
+	JahEmitter e;
+	e.c = m.c;
+	e.r = m.r;
+	const JahEmitterCone k = jahEmitterConeFrom( e, x );
+	return jahImageCounts( m, k, x, g ) && jahEmitterConeHolds( k, g, Lb ) ? m.lmax / W : 0.0;
 }
 
 /// THE NEE's THREE DRAWS (the pick, the direction's two), keyed on the sample's seed pixel and index like the lobe's draw

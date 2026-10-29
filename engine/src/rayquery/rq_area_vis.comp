@@ -21,6 +21,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
 #define JAH_AREA_VIS_PARAMS_BINDING 1
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_area_vis_params.glsl"
 
 layout( set = 0, binding = 2 ) uniform sampler2D gBufNormals;
@@ -74,10 +75,10 @@ float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 #define JAH_AREA_PREV_G( pc ) imageLoad( histGPrev, pc )
 #define JAH_AREA_STORE_CUR( tc, S, U, S2, U2, G )                                                                       \
 	{                                                                                                                  \
-		imageStore( histSCur, tc, S );                                                                                 \
-		imageStore( histUCur, tc, U );                                                                                 \
-		imageStore( histS2Cur, tc, S2 );                                                                               \
-		imageStore( histU2Cur, tc, U2 );                                                                               \
+		imageStore( histSCur, tc, jahRoundHalf( S ) );                                                                                 \
+		imageStore( histUCur, tc, jahRoundHalf( U ) );                                                                                 \
+		imageStore( histS2Cur, tc, jahRoundHalf( S2 ) );                                                                               \
+		imageStore( histU2Cur, tc, jahRoundHalf( U2 ) );                                                                               \
 		imageStore( histGCur, tc, G );                                                                                 \
 	}
 #define JAH_AREA_REST_LOAD( tc, S, U, S2, U2 )                                                                          \
@@ -89,10 +90,10 @@ float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 	}
 #define JAH_AREA_REST_STORE( tc, S, U, S2, U2 )                                                                         \
 	{                                                                                                                  \
-		imageStore( restS, tc, S );                                                                                    \
-		imageStore( restU, tc, U );                                                                                    \
-		imageStore( restS2, tc, S2 );                                                                                  \
-		imageStore( restU2, tc, U2 );                                                                                  \
+		imageStore( restS, tc, jahRoundHalf( S ) );                                                                                    \
+		imageStore( restU, tc, jahRoundHalf( U ) );                                                                                    \
+		imageStore( restS2, tc, jahRoundHalf( S2 ) );                                                                                  \
+		imageStore( restU2, tc, jahRoundHalf( U2 ) );                                                                                  \
 	}
 #define JAH_AREA_VISIBLE( originQ, wq, reachQ ) jahAreaRayVisible( originQ, wq, reachQ )
 // THE CLEARANCE AND ITS NORMAL (the ray origin's one law, jah_ray_origin.glsl - the sun contact's terms, rq_sun_contact.comp):

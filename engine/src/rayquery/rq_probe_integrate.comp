@@ -132,6 +132,7 @@
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 #define JAH_PROBE_PARAMS_BINDING 0
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_probe_params.glsl"
 
 layout( std430, set = 0, binding = 1 ) readonly buffer Records { JahProbeRecord r[]; } records;
@@ -792,7 +793,7 @@ void main()
 	}
 	if( p.knobs4.w > 0.5 )
 		imageStore( photonOverlay, at,
-					photonDisc( pix, lx, cell, cellOff, gridEye, grid, thisEye, eyeW, full, stride ) );
+					jahRoundHalf( photonDisc( pix, lx, cell, cellOff, gridEye, grid, thisEye, eyeW, full, stride ) ) );
 
 	// The pixel's own surface, from the same prepass the probes were placed on:
 	// `uv` over the target (the textures), `local` over the eye's own image (the
@@ -831,8 +832,8 @@ void main()
 		// The sky, or a pixel the prepass never drew. No probe answers for it —
 		// and nothing should: it has no hemisphere. Its history is "no surface"
 		// (a zero word fails every distance test).
-		imageStore( probeIrradiance, at, vec4( 0.0 ) );
-		imageStore( roughSpec, at, vec4( 0.0 ) );
+		imageStore( probeIrradiance, at, jahRoundHalf( vec4( 0.0 ) ) );
+		imageStore( roughSpec, at, jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( skyVis, at, vec4( 1.0 ) );
 		if( temporal )
 		{
@@ -840,8 +841,8 @@ void main()
 			imageStore( roughHistoryCur, at, uvec4( 0u ) );
 			if( gRestK >= 1.0 )
 			{
-				imageStore( restMean, at, vec4( 0.0 ) );
-				imageStore( roughRest, at, vec4( 0.0 ) );
+				imageStore( restMean, at, jahRoundHalf( vec4( 0.0 ) ) );
+				imageStore( roughRest, at, jahRoundHalf( vec4( 0.0 ) ) );
 			}
 		}
 		return;
@@ -1116,12 +1117,12 @@ void main()
 							   ( answer.w < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - answer.w )
 												: vec3( 0.0 ) ),
 						   1.0 );
-		imageStore( probeIrradiance, at, answer );
+		imageStore( probeIrradiance, at, jahRoundHalf( answer ) );
 		const vec3 diffuseNow = answer.xyz * answer.w;
 		imageStore( roughSpec, at,
-					roughTexel( roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor,
+					jahRoundHalf( roughTexel( roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor,
 											  diffuseNow ),
-								diffuseNow, roughness ) );
+								diffuseNow, roughness ) ) );
 		return;
 	}
 
@@ -1211,7 +1212,7 @@ void main()
 		// (stored through the half's stochastic rounding: round to nearest drops the increment under half an ulp, and
 		// drops it unevenly - the stage 7 read's F5; w, the count's sentinel, is exact)
 		if( restTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye, restK );
-		imageStore( restMean, at, rest );
+		imageStore( restMean, at, jahRoundHalf( rest ) );
 		// AT THE HOLD A PIXEL WITH NO REST SAMPLE IS NO SAMPLE (PHOTON-7 stage 10-3; L8 R2; L1): its pre-rest EMA is an
 		// estimate of the PATH - which frames the view traced before its rest began, set by the scene's rest timing and so
 		// by another view's state - and the hold froze it (the resize history's row: 14,961 px; a one-pixel sliver, the
@@ -1297,7 +1298,7 @@ void main()
 												: mix( stored, vec4( lobe, 1.0 ), 1.0 / restK );
 			// (the diffuse rest mean's stochastic store, its own draws: R1, F5)
 			if( lobeTakes ) rest.xyz = jahRestStoreMean( rest.xyz, pix, eye + 2, restK );
-			imageStore( roughRest, at, rest );
+			imageStore( roughRest, at, jahRoundHalf( rest ) );
 			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
 			// probe or the sky answers the lobe)
 			roughStarved = rest.w < -0.5 && restK >= p.knobs6.y;
@@ -1309,13 +1310,13 @@ void main()
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		imageStore( roughHistoryCur, at,
 					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
-		imageStore( roughSpec, at, roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) );
+		imageStore( roughSpec, at, jahRoundHalf( roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) ) );
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
 	if( p.stereo.z > 0.5 )
 		outV = float( prevCount ) < p.stereo.z ? vec4( 0.5, 0.0, 0.5, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
-	imageStore( probeIrradiance, at, outV );
+	imageStore( probeIrradiance, at, jahRoundHalf( outV ) );
 	// THE CELL's CONVERGENCE (PHOTON-7 stage 8B, B1; the lead's ruling on the rest's start): this frame's SAMPLE and the
 	// HISTORY's answer at each pixel, summed in display codes (x 16, the irradiance's display curve L / (1 + L)) -
 	// rq_probe_resume.comp says a settling cell has converged when its history's answer has caught up with its samples'

@@ -1061,7 +1061,7 @@ void ScreenProbeGather::readPending(View &v) {
                     g.cellX = (unsigned short)(pr % v.gridW);
                     g.cellY = (unsigned short)(pr / v.gridW);
                     g.ray = (unsigned char)r;
-                    const uint32_t *w = rec + (size_t(pr) * 64u + r) * 4u;
+                    const uint32_t *w = rec + (size_t(pr) * 64u + r) * 8u;   // two uvec4 a ray (rq_probe_gather.comp)
                     if (!(w[0] & (1u << 24u))) continue;   // no probe traced it
                     g.source = (unsigned char)(w[0] & 0xFu);
                     g.cascade = (unsigned char)((w[0] >> 4u) & 0xFu);
@@ -1071,10 +1071,10 @@ void ScreenProbeGather::readPending(View &v) {
                     g.hitNormal[2] = float(int8_t(uint8_t((w[1] >> 24u) & 0xFFu))) / 127.0f;
                     const float reweight = half(w[1], 0);
                     g.weight = reweight;
-                    g.hitPos[0] = half(w[2], 0);
-                    g.hitPos[1] = half(w[2], 1);
-                    g.hitPos[2] = half(w[3], 0);
-                    g.distance = half(w[3], 1);
+                    // the hit's position and distance as FLOATS (the second uvec4: REDS-1 - half precision, +-2 mm at a
+                    // few metres, could not name the 1/64 m card texel a hit answered from)
+                    std::memcpy(g.hitPos, w + 4, 3 * sizeof(float));
+                    std::memcpy(&g.distance, w + 7, sizeof(float));
                     // the ray's texel in the atlas: the probe's 8 x 8 block, the octahedral texel
                     const unsigned bx = (pr % v.atlasCols) * 8u + r % v.octRes;
                     const unsigned by = (pr / v.atlasCols) * 8u + r / v.octRes;
@@ -1929,10 +1929,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.knobs4[1] = kWeightFloor;
     pp.knobs4[2] = in.tuning.filterOff ? 0.0f : float(filterRadiusOf(in.tuning));
     pp.knobs4[3] = in.photonOverlay && !in.photonOverlayGatherHits ? 1.0f : 0.0f;   // THE PHOTON VIEW's discs (PHOTON-VIEW-1)
-    // THE GATHER-HITS RECORDS (FAR-SUN-1): one uvec4 per ray of every uniform probe, made on
+    // THE GATHER-HITS RECORDS (FAR-SUN-1): two uvec4 per ray of every uniform probe (REDS-1), made on
     // the first frame the arm asks (and freed with the view's targets), BEFORE the parameters say
     // the shader may write them: a failed allocation leaves p.hits.x 0 (the stand-in bound at 31
-    // is 256 bytes, and the records are uniformProbes x 1 KiB - no write may reach it).
+    // is 256 bytes, and the records are uniformProbes x 2 KiB - no write may reach it).
     if (in.hitsReadback && !v.rays) {
         std::string rerr;
         if (!mHost.gatherMakeBuffer(v.raysSlotBytes(),

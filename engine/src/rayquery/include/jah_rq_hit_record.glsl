@@ -55,6 +55,8 @@
 //                        reflection's decoded light along (PHOTON-I-1: the
 //                        record, not a full-resolution image, carries them; the
 //                        gather's records write them too and nothing reads them),
+//                        [10] (PHOTON-7 11-2 L9 (b1)) the decoded hit's AREA LIGHTS' VISIBILITY, byte i that of the
+//                        pass's forward LTC light i (jahHitAreaVisWord: one traced stratum, 255 seen),
 //                        [4] packHalf2x16( vouch x the screen's answer's r, g )
 //                        and [5] packHalf2x16( ...its b, vouch x the screen's
 //                        distance ): THE SCREEN'S SHARE of a BLENDED sample
@@ -126,9 +128,8 @@ const uint kJahHitTracedLobeBit = 1u << 29u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 12u;
-const uint kJahHitAuxWords = 10u;
-/// GpuScene.h GpuInstanceFlag: kGpuMover | kGpuSkinned | kGpuPlanar.
-const uint kJahHitGpuMover = 1u << 2u;
+const uint kJahHitAuxWords = 11u;
+/// GpuScene.h GpuInstanceFlag: kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuSkinned = 1u << 5u;
 const uint kJahHitGpuPlanar = 1u << 10u;
 /// GpuScene.h kGpuTwoSided (a CULL_NONE macroblock: both faces are the surface) - a cache ray's back-face rule
@@ -142,14 +143,15 @@ uint jahHitFlags( uint slot )
 	return JAH_HIT_INSTANCE( slot, 7u ).w;   // boundsMax.w: the flags word
 }
 
-/// A mover or a rigged item: the caches cannot hold it, the decode always shades it.
+/// A RIGGED item: the caches hold its bind pose (the ray tier's skin cache is not theirs), the decode always shades it.
 /// A PLANAR MIRROR (D3-HIT-SHADE-2): the caches hold only its diffuse (black for a
 /// metal mirror), and a second ray from every such hit is a second bounce; the
 /// decode shades its own material with the pass' specular environment (the voxel
 /// cone, the sky) — a mirror seen in a reflection, never a black one.
+/// (A MOVER is not decoded: it answers from the store like any hit since PHOTON-7 8A A1 - the store holds it at its pose.)
 bool jahHitAlwaysDecodes( uint slot )
 {
-	return ( jahHitFlags( slot ) & ( kJahHitGpuMover | kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
+	return ( jahHitFlags( slot ) & ( kJahHitGpuSkinned | kJahHitGpuPlanar ) ) != 0u;
 }
 
 
@@ -185,7 +187,7 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// other record); `pane` = a reflection's crossed panes (their own light, their throughput; (0, 1) none).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare, vec3 delta, float gain, vec4 pane, bool tracedLobe )
+				  vec4 screenShare, vec3 delta, float gain, vec4 pane, bool tracedLobe, uint areaVis )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -205,6 +207,7 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 7u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), clamp( gain, 0.0, 65504.0 ) ) );
 	jahHitBuf[aux + 8u] = packHalf2x16( clamp( pane.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
 	jahHitBuf[aux + 9u] = packHalf2x16( clamp( pane.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 10u] = areaVis;   // (L9 (b1): the decoded hit's area lights' visibility, byte i the LTC set's light i)
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -213,7 +216,7 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 /// write-back's "unshaded" case.
 bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				   float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				   vec3 delta, float gain, vec4 pane, bool tracedLobe )
+				   vec3 delta, float gain, vec4 pane, bool tracedLobe, uint areaVis )
 {
 	if( !( JAH_HIT_ON ) || JAH_HIT_CAPACITY == 0u )
 		return false;
@@ -224,7 +227,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ), delta, gain, pane, tracedLobe );
+				 vec4( 0.0 ), delta, gain, pane, tracedLobe, areaVis );
 	return true;
 }
 

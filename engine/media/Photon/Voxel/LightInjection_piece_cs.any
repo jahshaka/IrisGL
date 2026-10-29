@@ -104,10 +104,12 @@
 	// apply, and encoding into one would throw away the headroom it is there for
 	// (the encode saturates nothing, but toSRGB of a value above 1 is above 1 and
 	// the UNORM write clamps it -- which is the clip this patch removes).
+	// THE fp16 STORE ROUNDS FIRST (REDS-1 item 5): an rgba16f store truncates on NVIDIA 595.x (jah_half_round.glsl)
+	@insertpiece( JahHalfRound )
 	@property( uav0_orig_pf_srgb )
 		#define jahStoreLight( x ) toSRGB( x )
 	@else
-		#define jahStoreLight( x ) ( x )
+		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
 	// Jahshaka (CONTACT-OCCLUSION-1): the DIRECT volumes are float like the total (an
 	// emissive surface brighter than the brightest lamp exceeds the multiplier's ceiling,
@@ -116,7 +118,7 @@
 	@property( uav1_orig_pf_srgb )
 		#define jahStoreDirect( x ) toSRGB( x )
 	@else
-		#define jahStoreDirect( x ) ( x )
+		#define jahStoreDirect( x ) jahRoundHalf( x )
 	@end
 @end
 
@@ -453,14 +455,14 @@
 	const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
 	const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
 	OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
-	OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
+	OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, jahStoreDirect( backVoxelVal ) );
 	const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
 	const float4 dbNew = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
 	if( any( notEqual( floatBitsToUint( dNew ), floatBitsToUint( dOld ) ) ) ||
 		any( notEqual( floatBitsToUint( dbNew ), floatBitsToUint( dbOld ) ) ) )
 	{
-		OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, OGRE_imageLoad3D( lightVoxel, voxelCelUvw ) + ( dNew - dOld ) );
-		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, OGRE_imageLoad3D( backVoxel, voxelCelUvw ) + ( dbNew - dbOld ) );
+		OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( OGRE_imageLoad3D( lightVoxel, voxelCelUvw ) + ( dNew - dOld ) ) );
+		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, jahStoreLight( OGRE_imageLoad3D( backVoxel, voxelCelUvw ) + ( dbNew - dbOld ) ) );
 		const bool kept = all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) );
 		atomicAdd( jahCommitCount[kept ? 1u : 0u], 1u );
 	}
@@ -489,9 +491,9 @@
 		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
 	@end
 
-	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, backVoxelVal );
+	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, jahStoreLight( backVoxelVal ) );
 	@property( vct_keep_direct )
-		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, backVoxelVal );
+		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, jahStoreDirect( backVoxelVal ) );
 	@end
 	@property( vct_keep_direct )
 		const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
@@ -576,11 +578,11 @@
 		if( ( dir & 1u ) != 0u )
 			outIUvw.x += p_higherMipHalfWidth;
 		if( axis == 0u )
-			OGRE_imageWrite3D4( dirOut0, outIUvw, accumVal );
+			OGRE_imageWrite3D4( dirOut0, outIUvw, jahRoundHalf( accumVal ) );
 		else if( axis == 1u )
-			OGRE_imageWrite3D4( dirOut1, outIUvw, accumVal );
+			OGRE_imageWrite3D4( dirOut1, outIUvw, jahRoundHalf( accumVal ) );
 		else
-			OGRE_imageWrite3D4( dirOut2, outIUvw, accumVal );
+			OGRE_imageWrite3D4( dirOut2, outIUvw, jahRoundHalf( accumVal ) );
 	}
 	// THE BRICK MASK, word 0 of this group's brick (PHOTON-7 stage 3): the group's most (shared, after the barrier above
 	// made its zero visible), then one atomic per group - a 4^3 group lies inside one 8^3 brick (the dispatch's regions are

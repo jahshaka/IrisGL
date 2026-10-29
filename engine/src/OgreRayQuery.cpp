@@ -391,7 +391,7 @@ constexpr unsigned kReflectCompactTexels = 16384u;
 /// (the NEE delta + the estimator's gain 6-7, PHOTON-7 11-1b / 11-2; a reflection's crossed panes 8-9, 10-4 F6).
 constexpr uint32_t kHitCounterWords = 12u;
 constexpr uint32_t kHitCounterBytes = kHitCounterWords * 4u;
-constexpr uint32_t kHitAuxWords = 10u;
+constexpr uint32_t kHitAuxWords = 11u;   // (L9 (b1): word 10 the decoded hit's area lights' visibility)
 /// THE HIT's AREA STRATA (jah_rq_hit_direct.glsl kHitAreaStrata = 4 a side): one full cycle of the rest's time-stratified
 /// area draw, the samples a rest texel's stop waits for where the hit table holds an area light (PHOTON-7 11-2 (2)).
 constexpr uint32_t kHitAreaStrataPerHit = 4u * 4u;
@@ -7622,6 +7622,11 @@ constexpr uint32_t kEmitterWords = 8u;
 constexpr uint32_t kPortalSlot = 0xFFFFFFFFu;
 /// the most portals a scene's table holds (the largest openings by power first)
 constexpr size_t kMaxPortals = 16u;
+/// A LAMP's IMAGE's slot word (PHOTON-7 11-2 (8); jah_rq_emitters.glsl kJahImageSlot): words 4 its weight, 5 the mirror's
+/// instance slot, 6 the lamp's index in the light table (uint bits)
+constexpr uint32_t kImageSlot = 0xFFFFFFFEu;
+/// ...the lamp's widening's constant (JahBrdf's kJahSphereLobeK: the same function the read widens the lobe by)
+constexpr double kSphereLobeK = 0.777;
 }   // namespace
 
 /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the instances the reflection's next-event estimation aims at. An
@@ -7713,7 +7718,7 @@ PortalScanOut scanPortals(const PortalScanIn &in) {
         }
     }
     // THE OPENINGS: the connected opening cells (6-neighbours), each one's principal axes
-    struct Portal { float c[3]; float r; float n[3]; double power; float L[3]; };
+    struct Portal { float c[3]{}; float r = 0.f; float n[3]{}; double power = 0.0; float L[3]{}; };
     std::vector<Portal> portals;
     const float *sh = in.sh;
     const bool haveSh = in.haveSh;
@@ -7990,12 +7995,16 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     auto bits = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof u); return u; };
     Ogre::SceneManager *sm = scene->sceneManager();
     uint32_t nLights = 0u;
+    struct Lamp { uint32_t index = 0u; double p[3] = {}; double radius = 0.0, range = 0.0, power = 0.0; };
+    std::vector<Lamp> lamps;   // (8): the point and spot lights, by their index in the table
     if (sm) {
         SceneLightList::Consumer consumer;
         consumer.budget = 0u;             // unbounded: the union of every cascade's selection
         SceneLightList::Selection sel;
         sceneLightListOf(sm).select(sm, consumer, sel);
         sa.hitAreaLights = 0u;
+        // (L9 (b1): an area light's place in the pass's forward LTC set - the decode's light i - word 19)
+        const std::vector<const Ogre::Light *> ltcSet = forwardLtcLights(sm);
         for (Ogre::Light *light : sel.lights) {
             if (!light || !light->getParentNode()) continue;
             if (light->getType() == Ogre::Light::LT_AREA_LTC) ++sa.hitAreaLights;
@@ -8034,6 +8043,20 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
                 for (int k = 0; k < 4; ++k) {
                     L[16 + 4 * k] = float(r[k].x); L[17 + 4 * k] = float(r[k].y); L[18 + 4 * k] = float(r[k].z);
                 }
+                // THE DECODE's LIGHT INDEX (PHOTON-7 11-2 L9 (b1)): its place in the pass's forward LTC set (HlmsPbs's
+                // order, forwardLtcLights) - a record's area visibility is byte i of its word 10 - or -1 past the set
+                L[19] = -1.0f;
+                for (size_t k = 0; k < ltcSet.size() && k < 4u; ++k)
+                    if (ltcSet[k] == light) L[19] = float(k);
+            }
+            if (punctual) {
+                Lamp lp;
+                lp.index = nLights;
+                for (int k = 0; k < 3; ++k) lp.p[k] = L[k];
+                lp.radius = L[11];
+                lp.range = L[7];
+                lp.power = std::max({ double(d.r), double(d.g), double(d.b) });
+                lamps.push_back(lp);
             }
             for (float f : L) w.push_back(bits(f));
             // THE LAMP'S WORLD ID (PHOTON-7 stage 5, 5-3), word 31: a card's lamp table names its lamps by it
@@ -8062,13 +8085,84 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     // THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a): the reflection's NEE targets, as updateEmitterTable derived them.
     const uint32_t emitterWords = uint32_t(w.size());
     w.insert(w.end(), sa.emitterWords.begin(), sa.emitterWords.end());
+    // ...AND THE LAMPS' IMAGES IN PLANAR NEAR-MIRRORS (PHOTON-7 11-2 (8), the lead's ruling): a (point or spot lamp, planar
+    // specular instance) pair enters where the LAMP's widening dominates the material's roughness, alpha_m <= k asin( r_l /
+    // d_l ) - there the lamp's angular size sets the lobe, the reflection is a glint only an image draw finds; above it the
+    // roughness sets the lobe and the BRDF draw covers it (its worst sample falls as 1 / alpha_m^2). No constant but the
+    // geometry's own; the MIS is unbiased for any set, so the gate is efficiency alone. Planar: the instance's bounds
+    // thinner along one axis than a tenth of the other two; its plane the face toward the lamp. The image: the lamp
+    // reflected through it, its sphere the cone of the widened lobe, alpha_w^2 = alpha_m^2 + ( k asin( r_l / d_l ) )^2,
+    // the half-angle 2 atan( 3 alpha_w ) seen from the mirror. Each pair's decision printed once (alpha_m, the widening,
+    // S_max at mu_v 0.1 and W_p 1: S_max = F I / ( 4 pi alpha_w^2 d_l^2 mu_v )).
+    uint32_t images = 0u;
+    {
+        const detail::GpuScene &gs = scene->gpuScene();
+        const detail::GpuInstance *mi = gs.mirrorData();
+        const uint32_t slots = gs.live() ? gs.slotCount() : 0u;
+        static std::set<unsigned long long> printed;
+        if (mi && store && !lamps.empty()) {
+            const auto &rows = store->getRowWords();
+            const uint32_t nR = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
+            for (uint32_t i = 0; i < slots && images < 16u; ++i) {
+                uint32_t f;
+                std::memcpy(&f, &mi[i].boundsMax[3], sizeof(f));
+                if (!(f & detail::kGpuRayTraced)) continue;
+                const uint32_t word = mi[i].ids[1];
+                if (word == detail::GpuScene::kNoMaterialWord) continue;
+                const uint32_t row = (word >> 16u) * Ogre::PhotonVoxelMaterial::kRowsPerBucket + (word & 0xFFFFu);
+                if (row >= nR) continue;
+                const uint32_t *rw = &rows[size_t(row) * Ogre::PhotonVoxelMaterial::kRowWords];
+                float specW, rough;
+                std::memcpy(&specW, &rw[13], sizeof(float));
+                std::memcpy(&rough, &rw[14], sizeof(float));
+                if (!(specW > 0.0f) || !std::isfinite(rough)) continue;
+                double ext[3], ctr[3];
+                for (int k = 0; k < 3; ++k) {
+                    ext[k] = double(mi[i].boundsMax[k]) - double(mi[i].boundsMin[k]);
+                    ctr[k] = 0.5 * (double(mi[i].boundsMax[k]) + double(mi[i].boundsMin[k]));
+                }
+                const int ax = ext[0] <= ext[1] ? (ext[0] <= ext[2] ? 0 : 2) : (ext[1] <= ext[2] ? 1 : 2);
+                const double other = std::min(ext[(ax + 1) % 3], ext[(ax + 2) % 3]);
+                if (!(ext[ax] <= 0.1 * other) || !std::isfinite(other)) continue;
+                const double alphaM = double(rough) * double(rough);
+                for (const Lamp &lp : lamps) {
+                    double dv[3], dl2 = 0.0;
+                    for (int k = 0; k < 3; ++k) { dv[k] = lp.p[k] - ctr[k]; dl2 += dv[k] * dv[k]; }
+                    const double dl = std::sqrt(dl2);
+                    if (!(dl > lp.radius) || (lp.range > 0.0 && dl > lp.range)) continue;
+                    const double widen = kSphereLobeK * std::asin(std::min(1.0, lp.radius / dl));
+                    const bool enters = alphaM <= widen;
+                    const double alphaW2 = alphaM * alphaM + widen * widen;
+                    const double sMax = lp.power / (4.0 * 3.14159265358979 * std::max(alphaW2, 1e-12) * dl2 * 0.1);
+                    const unsigned long long key = (unsigned long long)i << 32u | lp.index;
+                    if (printed.insert(key).second)
+                        std::fprintf(stderr, "rayquery: (8) image pair (instance slot %u, lamp %u): alpha_m %.6f, the lamp's "
+                                     "widening %.6f, S_max %.4g at mu_v 0.1 -> %s\n", i, lp.index, alphaM, widen, sMax,
+                                     enters ? "ENTERS" : "the BRDF draw's");
+                    if (!enters) continue;
+                    // the face toward the lamp, the lamp reflected through it
+                    const double plane = dv[ax] >= 0.0 ? double(mi[i].boundsMax[ax]) : double(mi[i].boundsMin[ax]);
+                    double img[3] = { lp.p[0], lp.p[1], lp.p[2] };
+                    img[ax] = 2.0 * plane - lp.p[ax];
+                    const double alphaW = std::sqrt(alphaW2);
+                    const double theta = std::min(2.0 * std::atan(3.0 * alphaW), 1.2);
+                    const float r = float(dl * std::tan(theta) + lp.radius);
+                    const float weight = float(lp.power / std::max(dl2, 1e-4));
+                    const uint32_t e[kEmitterWords] = { bits(float(img[0])), bits(float(img[1])), bits(float(img[2])), bits(r),
+                                                        bits(weight), i, lp.index, kImageSlot };
+                    w.insert(w.end(), e, e + kEmitterWords);
+                    ++images;
+                }
+            }
+        }
+    }
     w[0] = nLights;
     w[1] = nRows;
     w[2] = kHitHeaderWords;
     w[3] = lightWords;
     w[4] = specWords;
     w[5] = emitterWords;
-    w[6] = uint32_t(sa.emitterWords.size() / kEmitterWords);
+    w[6] = uint32_t(sa.emitterWords.size() / kEmitterWords) + images;
     const uint32_t nowFrame = frameNow();
     if (w == sa.hitWords && sa.hitTableAddress) {
         if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame;

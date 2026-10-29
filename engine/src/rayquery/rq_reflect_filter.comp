@@ -37,6 +37,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 
+#include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
 
 int gEye = 0;
@@ -255,7 +256,7 @@ void main()
 	const ivec2 own = min( px / scale, traceRes - 1 );
 	if( !c.ok || r > roughGate + feather )
 	{
-		imageStore( ssrReflection, ivec3( px, gEye ), vec4( 0.0 ) );
+		imageStore( ssrReflection, ivec3( px, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		return;
 	}
 	// ---- THE CENTRE: the pixel's own trace texel (full resolution), or the joint-bilateral upsample (half) ----
@@ -321,7 +322,7 @@ void main()
 	}
 	if( !( sumW > 0.0 ) || !finite3( cd ) )
 	{
-		imageStore( ssrReflection, ivec3( px, gEye ), vec4( 0.0 ) );   // no answer here: the probe's
+		imageStore( ssrReflection, ivec3( px, gEye ), jahRoundHalf( vec4( 0.0 ) ) );   // no answer here: the probe's
 		return;
 	}
 	const JahReflectState os = jahStateUnpack( imageLoad( stateCur, ivec3( own, gEye ) ).xy );
@@ -424,5 +425,5 @@ void main()
 	float gate = 1.0 - smoothstep( roughGate - feather, roughGate + feather, r );
 	const float young = min( ( p.stereo.y + 1.0 ) / kYoungViewFrames, 1.0 );
 	gate *= mix( young, 1.0, centreChance );
-	imageStore( ssrReflection, ivec3( px, gEye ), finite3( outRgb ) && gate > 0.0 ? vec4( outRgb, gate ) : vec4( 0.0 ) );
+	imageStore( ssrReflection, ivec3( px, gEye ), jahRoundHalf( finite3( outRgb ) && gate > 0.0 ? vec4( outRgb, gate ) : vec4( 0.0 ) ) );
 }
