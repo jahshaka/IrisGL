@@ -8093,7 +8093,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
         const detail::GpuInstance *mi = gs.mirrorData();
         const uint32_t slots = gs.live() ? gs.slotCount() : 0u;
         static std::set<unsigned long long> printed;
-        if (mi && store && !lamps.empty()) {
+        if (mi && store && !lamps.empty() && !arm(ArmId::ReflectImagesOff, false)) {   // (MEASURING ARM, reverted)
             const auto &rows = store->getRowWords();
             const uint32_t nR = uint32_t(rows.size() / Ogre::PhotonVoxelMaterial::kRowWords);
             for (uint32_t i = 0; i < slots && images < 16u; ++i) {
