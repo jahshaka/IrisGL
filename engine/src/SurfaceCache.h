@@ -246,6 +246,9 @@ struct CardRec {
     /// trace past the frame's budget (since `stillPendingSince`), and the lift
     /// its last trace started at (CardSample::sunLift).
     bool stillPending = false;
+    /// THE OPEN LAYER HOLDS THIS CAPTURE'S (PHOTON-7 11-2 (5)): false from the capture until its still trace lands - every
+    /// reader then reads the texel open (f 1, no offset), never the atlas slot's previous occupant's
+    bool openValid = false;
     unsigned long long stillPendingSince = 0ull;
     float sunLift = 0.0f;
     /// THE ROOTS OF ITS PENDING WORK (PHOTON-7 stage 10, R3 (c), the lead's ruling: each round names its parent move):
@@ -408,6 +411,8 @@ struct CardMoverTrace {
     /// still mode's).
     Ogre::UavBufferPacked *lights = nullptr;
     Ogre::TextureGpu *sunVis = nullptr;
+    /// ...THE OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl): written by the still mode, read by the other two
+    Ogre::TextureGpu *open = nullptr;
     Ogre::Vector3 toSun;
     float range = 0.0f;
     bool still = false;
@@ -431,6 +436,8 @@ struct CardGatherTrace {
     Ogre::TextureGpu *gather = nullptr;
     /// ...and THE READ LISTS (10-2c): the cards each gathered card's rays read, its blocks zeroed and rewritten.
     Ogre::UavBufferPacked *reads = nullptr;
+    /// ...and THE OPEN FRACTION (PHOTON-7 11-2 (5)): the gather starts at each texel's open centroid
+    Ogre::TextureGpu *open = nullptr;
 };
 enum class CardGatherResult : unsigned { Traced, Wait, NoRays };
 
@@ -813,6 +820,9 @@ private:
     /// ray tier's trace (rq_card_movers.comp), read by the relight where the card
     /// is `moverTraced`. +4 MB at 2048 square.
     Ogre::TextureGpu *mMoverVis = nullptr;
+    /// THE OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl): RGBA8 over the atlas - ( 1 - f, the open centroid's
+    /// offset u, v, written ) - the still trace writes it at each capture, the traces, the gather and the relight read it
+    Ogre::TextureGpu *mOpen = nullptr;
     /// THE GATHER LAYER (PHOTON-7 stage 10, 10-2a): the cards' indirect irradiance by TLAS rays (rq_card_gather.comp),
     /// RGBA16F at the atlas's size, made the first time the ray tier gathers (none at the no-ray route: +32 MB there
     /// only) and read by the relight's mode bit 4.

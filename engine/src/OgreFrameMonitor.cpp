@@ -1298,6 +1298,10 @@ constexpr ArmDef kArms[] = {
       "The POSED identification (SKINNED-VELOCITY-1): the trace and the march's velocity take "
       "the posed geometry rows. 0 = the id image alone, the pre-lane motion for a character. "
       "gi.reflect_mover --cost-posed. Was JAH_R7_NO_POSED (two per-frame reads)." },
+    { ArmId::ReflectPick, 0.0, 0.0, 16777216.0,
+      "THE PICK (PHOTON-7 11-2, the reds' instrument; jahlab pick): 1 + x + 4096 y names a full-resolution pixel - its "
+      "trace texel's sample (the direction, the hit, the traced and C2 parts, the NEE, the record) and rest terms (the "
+      "count, the stop, the standard error and its share) a frame, RayQueryStatus::reflectPick. 0 = off." },
     { ArmId::ReflectAlphaTested, 1.0, 0.0, 1.0,
       "Alpha-tested (cut-out) geometry traced as cut-out by the reflection, the gather and the "
       "sun contact (REFLECT-MOVERS-2's alpha table). 0 = every cut-out traced opaque. "

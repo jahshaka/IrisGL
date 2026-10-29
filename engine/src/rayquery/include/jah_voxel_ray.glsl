@@ -344,17 +344,43 @@ vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirL
 	}
 	float along = dot( nv, -dirLS );
 	{
-		const float oP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 )[na];
-		const float oN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 )[na];
-		if( oP + oN > 0.0 )
+		// THE AXIS THE SIDE IS DECIDED ON (PHOTON-7 11-2, gi.small_emitter): the face the ray MEETS - of the axes the cell
+		// holds faces on, the one whose coverage-weighted plane the ray reaches first from its entry (a face it travels
+		// parallel to, or has already passed, is not met); none met: the canonical normal's axis, as before. A wall's
+		// column, faces on one axis, is decided on it as before (gi.voxel_ray_wall (3)); a cube's EDGE cell is decided on
+		// the face toward the ray, never on the side face it meets edge-on (that read its x face's BACK for a ray
+		// hitting the +z face: three store steps dark at the far emitter's peak).
+		const vec4 cP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), cN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 );
+		int a = na;
+		float tMeet = 1e30;
+		for( int k = 0; k < 3; ++k )
 		{
-			const float pP = oP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[na] / oP : 0.0;
-			const float pN = oN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[na] / oN : 0.0;
-			const float m = ( float( iv[na] ) +
+			const float okP = cP[k], okN = cN[k];
+			if( !( okP + okN > 0.0 ) || !( abs( dirLS[k] ) > 1e-6 ) )
+				continue;
+			const float qP = okP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[k] / okP : 0.0;
+			const float qN = okN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[k] / okN : 0.0;
+			const float mk = ( float( iv[k] ) + ( okP * clamp( qP, 0.0, 1.0 ) + okN * clamp( qN, 0.0, 1.0 ) ) /
+											( okP + okN ) ) * invRes[k];
+			const float ek = pJ[k] + dirLS[k] * s0j * tIn;
+			const float tk = ( mk - ek ) / ( dirLS[k] * s0j );
+			if( tk >= 0.0 && tk < tMeet )
+			{
+				tMeet = tk;
+				a = k;
+			}
+		}
+		const float oP = cP[a];
+		const float oN = cN[a];
+		if( oP + oN > 0.0 && nv[a] != 0.0 )
+		{
+			const float pP = oP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[a] / oP : 0.0;
+			const float pN = oN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[a] / oN : 0.0;
+			const float m = ( float( iv[a] ) +
 							  ( oP * clamp( pP, 0.0, 1.0 ) + oN * clamp( pN, 0.0, 1.0 ) ) / ( oP + oN ) ) *
-							invRes[na];
-			const float e = pJ[na] + dirLS[na] * s0j * tIn;
-			const float side = ( e - m ) * ( nv[na] >= 0.0 ? 1.0 : -1.0 );
+							invRes[a];
+			const float e = pJ[a] + dirLS[a] * s0j * tIn;
+			const float side = ( e - m ) * ( nv[a] > 0.0 ? 1.0 : -1.0 );
 			if( side != 0.0 )
 				along = side;
 		}

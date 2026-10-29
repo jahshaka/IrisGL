@@ -5549,6 +5549,10 @@ struct RayQueryStatus {
     /// THE SKY's PORTALS (PHOTON-7 11-2 (6)): the openings the voxel sides' escape shares show, as C2's sky NEE targets
     /// (the emitter form: the quad's bounding sphere, the sky's weight; slot 0xFFFFFFFF) - their count and the table
     int reflectPortals = 0;
+    /// THE PICK's RING (PHOTON-7 11-2, the arm reflect.pick): 64 slots of 64 words, slot = the frame % 64 - words 0-31 the
+    /// trace's sample (rq_reflect.comp jahPickSample), 32-47 the temporal pass's rest terms (rq_reflect_temporal.comp)
+    std::vector<uint32_t> reflectPick;
+    std::vector<uint32_t> reflectPickFrames;   ///< ...each slot's dispatch frame
     std::vector<ReflectEmitter> reflectPortalTable;
     /// THE NEE's CONE HIT RATE (PHOTON-7 stage 11, 11-1b; the lead's condition on the cone strategy): the reflection's NEE
     /// rays and those whose first hit was the target drawn, summed over the views' retired frames (read several frames

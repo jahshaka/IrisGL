@@ -401,6 +401,15 @@ bool SurfaceCache::makeAtlas(std::string &err) {
     mMoverVis->setPixelFormat(Ogre::PFG_R8_UNORM);
     mMoverVis->setNumMipmaps(1u);
     mMoverVis->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // ...and THE OPEN FRACTION (PHOTON-7 11-2 (5), jah_card_open.glsl): RGBA8 over the atlas, a UAV - ( 1 - f, the open
+    // sub-points' centroid offset u, v, written ) - the still trace writes it at each capture (four buried tests a
+    // texel), the traces, the gather and the relight read it. +16 MB at 2048^2.
+    mOpen = tm->createTexture(processUniqueName("cardOpen"), Ogre::GpuPageOutStrategy::Discard,
+                              Ogre::TextureFlags::ManualTexture | Ogre::TextureFlags::Uav, Ogre::TextureTypes::Type2D);
+    mOpen->setResolution(kCardAtlasSize, kCardAtlasSize, 1u);
+    mOpen->setPixelFormat(Ogre::PFG_RGBA8_UNORM);
+    mOpen->setNumMipmaps(1u);
+    mOpen->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
 
     const unsigned pagesPerSide = kCardAtlasSize / kCardPageSize;
     const size_t pages = size_t(pagesPerSide) * pagesPerSide;
@@ -656,6 +665,7 @@ void SurfaceCache::destroyAll() {
         if (mFlat) { tm->destroyTexture(mFlat); mFlat = nullptr; }
         if (mSunVis) { tm->destroyTexture(mSunVis); mSunVis = nullptr; }
         if (mMoverVis) { tm->destroyTexture(mMoverVis); mMoverVis = nullptr; }
+        if (mOpen) { tm->destroyTexture(mOpen); mOpen = nullptr; }
         if (mGather) { tm->destroyTexture(mGather); mGather = nullptr; }
     }
 }
@@ -1935,6 +1945,7 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         card.queued = false;
         if (!card.lastUpdated) mTableDirty = true;   // its first capture: readable now
         card.lastUpdated = mFrame;
+        card.openValid = false;   // (its still trace writes the open layer: until then it reads open)
         ++mPhotonGeneration;
         ++mCaptures;
         ++mCapturesLastFrame;
@@ -2228,7 +2239,8 @@ void SurfaceCache::relightCards() {
         r[0] = float(c.atlasX); r[1] = float(c.atlasY); r[2] = float(c.size);
         // (mode bit 8: captured this frame - the card-to-card re-listing's arrival, 10-2c)
         const bool captured = std::find(mFreshCards.begin(), mFreshCards.end(), mRelight[i]) != mFreshCards.end();
-        r[3] = float(mRelightMode[i] | (captured ? 8u : 0u));
+        // (mode bit 16: the open layer holds this capture's - PHOTON-7 11-2 (5); else the relight reads the texel open)
+        r[3] = float(mRelightMode[i] | (captured ? 8u : 0u) | (c.openValid ? 16u : 0u));
         r[4] = cam.x; r[5] = cam.y; r[6] = cam.z;
         // THE MOVERS' TERM IS MULTIPLIED IN where the card carries a trace.
         r[7] = c.moverTraced ? 1.0f : 0.0f;
@@ -2443,6 +2455,7 @@ void SurfaceCache::relightCards() {
             for (size_t i = 0; i < mRelight.size(); ++i) {
                 std::memcpy(&mLampCpu[i * kRelightFloats], &mRelightCpu[i * kRelightFloats], kRelightFloats * sizeof(float));
                 mLampCpu[i * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[i]]);   // the lift, as the still mode's
+                mLampCpu[i * kRelightFloats + 7u] = mCards[mRelight[i]].openValid ? 1.0f : 0.0f;   // (the open layer's, 11-2 (5))
             }
             CardMoverTrace job;
             job.records = mLampCpu.data();
@@ -2453,6 +2466,7 @@ void SurfaceCache::relightCards() {
             job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];
             job.lights = mLightBuffer;
             job.sunVis = mSunVis;
+            job.open = mOpen;
             job.lamps = true;
             job.areaStrata = mAreaStrata;
             traced = mMoverHooks.trace(job);
@@ -2550,6 +2564,7 @@ void SurfaceCache::relightCards() {
                 std::memcpy(&mGatherCpu[k * kRelightFloats], &mRelightCpu[marched[k] * kRelightFloats],
                             kRelightFloats * sizeof(float));
                 mGatherCpu[k * kRelightFloats + 3u] = sunLiftOf(mCards[mRelight[marched[k]]]);   // the still trace's lift
+                mGatherCpu[k * kRelightFloats + 7u] = mCards[mRelight[marched[k]]].openValid ? 1.0f : 0.0f;   // (11-2 (5))
             }
             CardGatherTrace job;
             job.records = mGatherCpu.data();
@@ -2558,6 +2573,7 @@ void SurfaceCache::relightCards() {
             job.reach = mRayLastShell;
             job.gather = mGather;
             job.reads = mCardReads;
+            job.open = mOpen;
             const CardGatherResult res = mMoverHooks.gather(job);
             if (res == CardGatherResult::Traced) {
                 for (size_t i : marched)
@@ -2589,7 +2605,7 @@ void SurfaceCache::relightCards() {
     const bool gatherBound = mGather != nullptr;
     if (mLightJob->getProperty("jah_card_gather") != (gatherBound ? 1 : 0))
         mLightJob->setProperty("jah_card_gather", gatherBound ? 1 : 0);
-    mLightJob->setNumUavUnits(gatherBound ? 12u : 11u);
+    mLightJob->setNumUavUnits(gatherBound ? 13u : 12u);   // (11: the open fraction, 12: the gather layer)
     // THE STORE'S ROUNDING follows the layer's format (jahCardRound): the
     // pre-scale is R11G11B10F's, and the RGBA16F fallback stores unrounded.
     {
@@ -2699,11 +2715,16 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavTexture(10u, uav);
         // THE GATHER LAYER (10-2a): the TLAS gather's irradiance, read - and its a, the texels' reported radiance
         // (10-2c), read and written
+        // THE OPEN FRACTION (PHOTON-7 11-2 (5)): read - the texel lit at its open centroid, its light x f
+        uav.texture = mOpen;
+        uav.access = Ogre::ResourceAccess::Read;
+        uav.pixelFormat = mOpen->getPixelFormat();
+        mLightJob->_setUavTexture(11u, uav);
         if (gatherBound) {
             uav.texture = mGather;
             uav.access = Ogre::ResourceAccess::ReadWrite;
             uav.pixelFormat = mGather->getPixelFormat();
-            mLightJob->_setUavTexture(11u, uav);
+            mLightJob->_setUavTexture(12u, uav);
         }
     }
     mLightJob->_setUavBuffer(2u, bufSlot(mGiBuffer, Ogre::ResourceAccess::Read));
@@ -2791,9 +2812,9 @@ void SurfaceCache::relightCards() {
         mLightJob->_setUavBuffer(1u, empty);
         mLightJob->_setUavBuffer(2u, empty);
         mLightJob->_setUavBuffer(3u, empty);
-        for (Ogre::uint8 k = 4u; k <= 10u; ++k)
+        for (Ogre::uint8 k = 4u; k <= 11u; ++k)
             mLightJob->_setUavTexture(k, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
-        if (gatherBound) mLightJob->_setUavTexture(11u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
+        if (gatherBound) mLightJob->_setUavTexture(12u, Ogre::DescriptorSetUav::TextureSlot::makeEmpty());
         mLightJob->setConstBuffer(0u, nullptr);
         mLightJob->setNumTexUnits(0u);
     }
@@ -3753,6 +3774,7 @@ void SurfaceCache::traceSun() {
             job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];
             job.lights = ensureLightBuffer();   // bound, not read, in this mode
             job.sunVis = mSunVis;
+            job.open = mOpen;
             job.toSun = toSun;   // ZERO without a sun: every texel lit
             job.range = kMoverRayRange;
             job.still = true;
@@ -3760,6 +3782,7 @@ void SurfaceCache::traceSun() {
                 for (unsigned idx : still) {
                     CardRec &c = mCards[idx];
                     c.stillPending = false;
+                    c.openValid = true;   // (the still trace wrote this capture's open layer)
                     ++mStillTraces;
                     ++mStillTracedLastFrame;
                     mStillTexelsLastFrame += c.size * c.size;
@@ -3967,6 +3990,7 @@ void SurfaceCache::traceSun() {
         r[8] = c.u.x; r[9] = c.u.y; r[10] = c.u.z; r[11] = std::max(2.0f * c.halfU, 1e-4f);
         r[12] = c.v.x; r[13] = c.v.y; r[14] = c.v.z; r[15] = std::max(2.0f * c.halfV, 1e-4f);
         r[16] = c.d.x; r[17] = c.d.y; r[18] = c.d.z;
+        r[7] = c.openValid ? 1.0f : 0.0f;   // (the open layer holds this capture's: 11-2 (5))
     }
     CardMoverTrace job;
     job.records = mMoverCpu.data();
@@ -3977,6 +4001,7 @@ void SurfaceCache::traceSun() {
     job.shadowRough = mAtlas[unsigned(CardLayer::ShadowRough)];   // bound, not written, in this mode
     job.lights = ensureLightBuffer();   // bound, not read, in this mode
     job.sunVis = mSunVis;
+    job.open = mOpen;
     job.toSun = toSun;
     job.range = kMoverRayRange;
     step4Timer.reset();
@@ -4324,6 +4349,7 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
     bytes += bytesOf(mFlat);
     bytes += bytesOf(mSunVis);
     bytes += bytesOf(mMoverVis);
+    bytes += bytesOf(mOpen);
     if (mRadiance)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mRadiance->getPixelFormat());
     if (mIndirect)
@@ -4334,6 +4360,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mSunVis->getPixelFormat());
     if (mMoverVis)
         out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mMoverVis->getPixelFormat());
+    if (mOpen)
+        out.bytesPerTexel += Ogre::PixelFormatGpuUtils::getBytesPerPixel(mOpen->getPixelFormat());
     out.bytes = bytes;
     out.emissiveFormat = mEmissiveFormatName;
     out.radianceFormat = mRadianceFormatName;
