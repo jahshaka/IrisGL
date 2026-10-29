@@ -425,8 +425,12 @@ vec3 jahHitBounceToward( vec3 bounce, vec3 albedo, float roughness, vec4 metal, 
 		jahSpecularAlbedoHemi( roughness, sa, sb );
 	const vec3 specLobe = metal.xyz * sa + metal.w * sb;
 	const vec3 whole = albedo * jahDiffuseAlbedoHemi( roughness ) + specLobe;
-	// (C2: where the reader traces the lobe itself the bounce's specular share is left out - the traced lobe replaces it)
-	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) + ( jahHitTracedLobe ? vec3( 0.0 ) : specLobe );
+	// (C2: where the reader traces the lobe itself the bounce's specular share is left out - the traced lobe replaces it;
+	// and a NEAR-MIRROR sends none of it - a view-independent store holds no near-delta lobe, PHOTON-7 11-2 (7): its
+	// reflection is traced by the reader, C2's continuation)
+	const bool nearMirror = roughness * roughness <= 0.0011;
+	const vec3 toward = albedo * jahDiffuseAlbedo( NdotV, roughness ) +
+						( jahHitTracedLobe || nearMirror ? vec3( 0.0 ) : specLobe );
 	return mix( bounce, bounce * toward / max( whole, vec3( 1e-12 ) ), greaterThan( whole, vec3( 0.0 ) ) );
 }
 

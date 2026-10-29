@@ -649,7 +649,8 @@ struct JahReflectSample
 	vec3 c2;        // THE PICK's (the reds' instrument): the hit's traced lobe (C2) inside `traced` / a record's lobe
 	uint c2Slot;    // ...its secondary ray's hit slot (0xFFFFFFFF an exit), distance, BRDF part and portal part
 	float c2T;
-	vec3 c2Brdf, c2Portal, c2Spec;
+	vec3 c2Brdf, c2Portal, c2Spec, c2Mirror;
+	uint c2MirrorSlot;
 	uint recSlot, recPrim, recGeom, photonSource;
 	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
 };
@@ -677,6 +678,8 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.c2Brdf = vec3( 0.0 );
 	o.c2Portal = vec3( 0.0 );
 	o.c2Spec = vec3( 0.0 );
+	o.c2Mirror = vec3( 0.0 );
+	o.c2MirrorSlot = 0xFFFFFFFFu;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
 	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
 	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false;
@@ -952,6 +955,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 					o.c2Brdf = jahC2PickBrdf;
 					o.c2Portal = jahC2PickPortal;
 					o.c2Spec = jahC2PickSpec;
+					o.c2Mirror = jahC2PickMirror;
+					o.c2MirrorSlot = jahC2PickMirrorSlot;
 				}
 			}
 			record = decodeAlways || !ok || !finite3( traced );
@@ -1218,6 +1223,8 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 	jahPick[b + 26u] = floatBitsToUint( s.c2Brdf.x );
 	jahPick[b + 27u] = floatBitsToUint( s.c2Portal.x );
 	jahPick[b + 28u] = floatBitsToUint( s.c2Spec.x );
+	jahPick[b + 29u] = floatBitsToUint( s.c2Mirror.x );
+	jahPick[b + 30u] = s.c2MirrorSlot;
 }
 
 // THE TEXEL'S FRAME, FINISHED (main, once per live texel, inside the rest's deal): the batch's folds stored, the state,

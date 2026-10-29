@@ -236,6 +236,9 @@ vec3 jahCardLightsLobe( vec3 P, vec3 N, vec3 V, float r, vec3 F0, float w, float
 /// which cards each texel's rays read (rq_card_gather.comp: the card-to-card re-listing, PHOTON-7 stage 10).
 uint jahCardPicked = 0xFFFFFFFFu;
 
+/// THE NEAR-MIRROR BOUND (PHOTON-7 11-2 (7)): the G-buffer's floor, jah_reflect_draw.glsl's kMirrorPackAlpha - at or
+/// under it the relight stores no specular (JahCardLight_cs.glsl takes the same 0.0011).
+const float kJahCardNearMirrorAlpha = 0.0011;
 vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out bool ok )
 {
 	const JahCardPick pick = jahCardPick( slot, hitPos, facingDir );
@@ -275,8 +278,10 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	// integral): where kD = 0 the cached texel IS that share; where kD > 0 it is the cached diffuse half times the lobes'
 	// ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's own recovery. Cut from the radiance and the flat term
 	// alike, so the direct half is untouched. (The movers' gate's half of this cut is deleted: PHOTON-7 8A A3.)
+	// (A NEAR-MIRROR's texel holds no lobe share - JahCardLight_cs.glsl, PHOTON-7 11-2 (7): nothing to cut. The lights'
+	// lobe below is not a cache: it is evaluated toward this ray, a near-mirror's glint included.)
 	vec3 cutLobe = vec3( 0.0 );
-	if( jahHitTracedLobe )
+	if( jahHitTracedLobe && alpha > kJahCardNearMirrorAlpha )
 	{
 		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
 		if( spec.w > 0.0 )

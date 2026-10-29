@@ -574,7 +574,14 @@ void main()
 		// job's re-emission).
 		const vec3 diffuseLobe = kD * 3.141592654 * jahDiffuseAlbedoHemi( perceptualRoughness );
 		vec3 specLobe = vec3( 0.0, 0.0, 0.0 );
-		if( specW > 0.0 )
+		// A NEAR-MIRROR STORES NO SPECULAR (PHOTON-7 11-2 (7), the lead's ruling; Lumen's surface cache keeps the same
+		// rule): a texel is a view-INDEPENDENT cache, and a near-delta lobe's re-emission is a view-DEPENDENT picture -
+		// what the mirror reflects toward one direction, served to every reader from every direction (a mirror's card
+		// answered 0.6 and 6.5 to C2's secondary rays at photon-glass). At the G-buffer's floor (alpha 0.0011, the
+		// reflection's kMirrorPackAlpha: a roughness-0 surface) the lobe re-emits nothing here: the texel keeps its
+		// diffuse half (about 0 for a metal), and the reflection it owes is traced by its readers (C2's continuation).
+		const bool nearMirror = alpha <= 0.0011;
+		if( specW > 0.0 && !nearMirror )
 		{
 			float sa, sb;
 			jahSpecularAlbedoHemi( perceptualRoughness, sa, sb );
@@ -612,6 +619,8 @@ void main()
 			indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
 			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
 			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
+			if( nearMirror )
+				specIndirect = vec3( 0.0, 0.0, 0.0 );   // (a near-mirror's cached lobe share is 0 by the rule above)
 		}
 		// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
 		flatTerm = ( texelFetch( cardEmissive, at, 0 ).xyz + specIndirect ) * openF;
