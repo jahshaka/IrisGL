@@ -5,6 +5,7 @@
 // live in EnginePrivate.h, which documents the invariants this backend rests on.
 #include "EnginePrivate.h"
 #include "GpuCheckpoints.h"
+#include "jahshaka/engine/ProcessExit.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/voxel/PhotonVoxelScroll.h"
@@ -60,6 +61,11 @@ namespace {
 /// The one live engine in this process. Ogre::Root is a Singleton: a second
 /// `new Root` asserts, so create() refuses while this is set.
 OgreEngine *gLiveEngine = nullptr;
+
+/// THE EXIT-ONLY TEARDOWN's mark (markProcessExit, ProcessExit.h, URGENT #102) and the Root it keeps: held here so it stays
+/// reachable (a leak checker reads it as live, which it is, until the process's _Exit).
+std::atomic<bool> gProcessExit{false};
+Ogre::Root *gKeptRoot = nullptr;
 
 /// "Lowest latency vsync" — MAILBOX rather than FIFO — is encoded by Ogre in
 /// the SIGN BIT of the vsync interval (VulkanWindowSwapChainBased::setVSync
@@ -4090,7 +4096,20 @@ void OgreEngine::teardown() {
     mInRecordFaultAttached = false;
     if (mRoot && mSplitPublishAttached) mRoot->removeFrameListener(mSplitPublish.get());
     mSplitPublishAttached = false;
-    delete mRoot;
+    if (gProcessExit.load(std::memory_order_acquire)) {
+        // THE EXIT-ONLY TEARDOWN (markProcessExit, ProcessExit.h, URGENT #102): everything above ran — the caches are on
+        // disk and their writer joined — and Root, with the device and the instance, is left to the OS. Deleting it
+        // waits in vkDestroyDevice for the driver's background compile thread (10-20 s cold, measured); the caller
+        // _Exits next. The line goes to Ogre's log file (flushed per line), the bridge is already off.
+        try {
+            if (Ogre::LogManager::getSingletonPtr())
+                Ogre::LogManager::getSingleton().logMessage(
+                    "Engine: process exit - Root, the Vulkan device and instance left to the OS (no vkDestroyDevice)");
+        } catch (...) {}
+        gKeptRoot = mRoot;
+    } else {
+        delete mRoot;
+    }
     mRoot = nullptr;
     gLiveEngine = nullptr;
 }
@@ -4660,6 +4679,7 @@ ValidationStatus OgreEngine::validation() const {
 
 }  // namespace detail
 
+void markProcessExit() { detail::gProcessExit.store(true, std::memory_order_release); }
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
 unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }
 
