@@ -58,7 +58,7 @@ namespace Ogre
     protected:
         TextureGpu *mAlbedoVox;
         TextureGpu *mEmissiveVox;
-        /// Jahshaka (METAL-BOUNCE-1): THE METAL - its F0 (rgb) and Fresnel-90 weight (alpha), RGBA8, level 0
+        /// Jahshaka (METAL-BOUNCE-1): THE METAL - its F0 (rgb) and Fresnel-90 weight (alpha), RGBA16_UNORM, level 0
         /// only (VoxelMerge_piece_cs.any, voxelMergeMetal).
         TextureGpu *mMetalVox;
         TextureGpu *mNormalVox;
