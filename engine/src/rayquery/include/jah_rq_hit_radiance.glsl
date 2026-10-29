@@ -302,8 +302,10 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 			bool ok2 = false;
 			uint src2 = 0u;
 			jahHitDirectPickSpec = vec3( 0.0 );
+			jahVoxForceFinest = true;   // (MEASURING ARM, reverted)
 			const vec3 r2 = jahHitRadianceStore( slot2, o + L2 * t2, n2, L2, max( 2.0 * t2 * sqrt( alpha ), 1e-4 ),
 												 centre, ok2, src2 );
+			jahVoxForceFinest = false;
 			jahC2PickSpec = jahHitDirectPickSpec;   // (THE PICK: the secondary hit's own lamps' specular, inside r2)
 			// (a near-mirror's reflection is continued inside the read: 11-2 (7), the one law)
 			jahC2PickMirror = w * jahHitMirrorPart * gain;
