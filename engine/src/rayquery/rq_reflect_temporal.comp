@@ -494,27 +494,51 @@ void main()
 			else if( !( e <= share && settled && !reference ) )
 			{
 				st.stop = 0u;
-				refine.w &= ~kRefineWindow;
+				refine.w &= ~( kRefineWindow | kRefineMiddle );
 			}
 			else
 			{
 				const bool open = ( refine.w & kRefineWindow ) != 0u;
-				const float LDref = unpackHalf2x16( refine.y ).y;
-				const float eRef = unpackHalf2x16( refine.z >> 16u ).x;
-				const float sigmaDiff = sqrt( max( eRef * eRef - e * e, 0.0 ) );
-				const bool drift = open && abs( LD - LDref ) > kReflectDriftK * sigmaDiff + 1e-7;
-				if( !open || drift )
+				const float v0 = float( refine.z & 0xFFFFu );
+				if( !open )
 				{
-					// the window starts (again) here: its mean, its error and its sample count
+					// the window starts here: its mean and its sample count (its middle not yet)
 					refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LD ) ) & 0xFFFF0000u );
-					refine.z = ( uint( min( v, 65535.0 ) ) & 0xFFFFu ) | ( packHalf2x16( vec2( e, 0.0 ) ) << 16u );
-					refine.w |= kRefineWindow;
+					refine.z = uint( min( v, 65535.0 ) ) & 0xFFFFu;
+					refine.w = ( refine.w & 0xFFu & ~kRefineMiddle ) | kRefineWindow;
 					st.stop = 1u;
 				}
 				else
 				{
-					const bool enough = v - float( refine.z & 0xFFFFu ) >= kReflectStopSamples;
-					st.stop = min( st.stop + 1u, enough ? kReflectStopFrames : kReflectStopFrames - 1u );
+					// its middle, once: the mean when half its samples are in
+					if( ( refine.w & kRefineMiddle ) == 0u && v - v0 >= 0.5 * kReflectStopSamples )
+					{
+						refine.z = ( refine.z & 0xFFFFu ) | ( ( uint( min( v, 65535.0 ) ) & 0xFFFFu ) << 16u );
+						refine.w = ( refine.w & 0xFFu ) | kRefineMiddle | ( packHalf2x16( vec2( LD, 0.0 ) ) << 16u );
+					}
+					const bool enough = v - v0 >= kReflectStopSamples && ( refine.w & kRefineMiddle ) != 0u;
+					const uint next = min( st.stop + 1u, kReflectStopFrames );
+					if( enough && next >= kReflectStopFrames )
+					{
+						// THE WINDOW's END: its halves' means against the SE of their difference (the halves form)
+						const float vm = float( refine.z >> 16u );
+						const float L0 = unpackHalf2x16( refine.y ).y, Lm = unpackHalf2x16( refine.w >> 16u ).x;
+						const float n1 = max( vm - v0, 1.0 ), n2 = max( v - vm, 1.0 );
+						const float h1 = ( Lm * vm - L0 * v0 ) / n1, h2 = ( LD * v - Lm * vm ) / n2;
+						const float sigma = e * sqrt( v );
+						const bool drift = abs( h2 - h1 ) > kReflectDriftK * sigma * sqrt( 1.0 / n1 + 1.0 / n2 );
+						if( drift )
+						{
+							refine.y = ( refine.y & 0xFFFFu ) | ( packHalf2x16( vec2( 0.0, LD ) ) & 0xFFFF0000u );
+							refine.z = uint( min( v, 65535.0 ) ) & 0xFFFFu;
+							refine.w = ( refine.w & 0xFFu & ~kRefineMiddle ) | kRefineWindow;
+							st.stop = 1u;
+						}
+						else
+							st.stop = kReflectStopFrames;
+					}
+					else
+						st.stop = min( next, kReflectStopFrames - 1u );
 				}
 			}
 			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
