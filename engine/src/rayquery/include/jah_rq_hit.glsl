@@ -229,7 +229,6 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 /// blurred. `ok` is false when no bound cascade holds anything there: the hit
 /// is then a record for the visibility-buffer decode (jah_rq_hit_record.glsl,
 /// PHOTON-HIT-SHADE-1) in both callers.
-bool jahVoxForceFinest = false;   // MEASURING ARM (11-2, reverted): C2's secondary reads the finest cascade holding its hit
 vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint, bool mirror, out bool ok )
 {
 	// THE READ IS ANCHORED TO THE HIT'S NORMAL, NEVER TO THE RAY (PHOTON-7 stage 10, the lead's ruling on card_residency
@@ -277,10 +276,10 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 		// units); the read maps it to its own level (jahVoxelKernelMip).
 		const float texel = max( invSize.w, 1e-6 );
 		float lod = 0.0;
-		if( !mirror && !jahVoxForceFinest )
+		if( !mirror )
 			lod = jahVoxelFootprintLod( footprint, texel );
 		float wLevel = -1.0;
-		if( JAH_VOX_LEVEL_ON && c < count - 1 && !jahVoxForceFinest )
+		if( JAH_VOX_LEVEL_ON && c < count - 1 )
 		{
 			const vec3 dv = abs( hitPos - JAH_VOX_LEVEL_CAM );
 			const float d = max( max( dv.x, dv.y ), dv.z );
