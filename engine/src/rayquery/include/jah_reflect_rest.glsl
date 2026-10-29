@@ -55,7 +55,7 @@ const float kReflectStopSamples = 300.0;
 /// per-frame form - the start's mean against each frame's - tripped on every such sample, and a texel whose bright
 /// paths come one in a hundred never stopped: lamp_step_held's sessions never held in 1200 frames). K 2: a stationary
 /// mean restarts 5 % of its windows.
-const float kReflectDriftK = 2.0;
+const float kReflectDriftK = 4.0;
 /// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
 const uint kReflectRestVCap = 65535u;
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
