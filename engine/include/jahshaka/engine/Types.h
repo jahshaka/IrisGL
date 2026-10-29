@@ -5601,7 +5601,7 @@ struct RayQueryStatus {
     unsigned long long panesOverflow = 0;
     /// MEASURING ARM (reverted): C2's sky answers, of them past-the-exit hits, C2's rays, the probes' sky answers, of them
     /// past-the-exit hits (jah_rq_alpha.glsl jahTierCount [1..5]), cumulative
-    unsigned long long skyCount[7] = { 0, 0, 0, 0, 0, 0, 0 };   // ...[5] [6]: the REFLECTION pass's C2 sky answers, its C2 rays
+    unsigned long long skyCount[5] = { 0, 0, 0, 0, 0 };
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append

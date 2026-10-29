@@ -214,10 +214,6 @@ vec3 jahC2PickBrdf = vec3( 0.0 ), jahC2PickPortal = vec3( 0.0 ), jahC2PickSpec =
 vec3 jahC2PickMirror = vec3( 0.0 );
 uint jahC2PickMirrorSlot = 0xFFFFFFFFu;
 
-#ifndef JAH_C2_COUNT_SKY
-#define JAH_C2_COUNT_SKY 1u   // (MEASURING ARM, reverted: the reflection pass counts in 6 / 7)
-#define JAH_C2_COUNT_ALL 3u
-#endif
 vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roughness, vec4 metal, vec2 u )
 {
 	const float mu = clamp( dot( N, V ), 0.0, 1.0 );
@@ -277,11 +273,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickSpec = vec3( 0.0 );
 	jahC2PickMirror = vec3( 0.0 );
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
-	jahTierCount( JAH_C2_COUNT_ALL );   // (MEASURING ARM, reverted)
+	jahTierCount( 3u );   // (MEASURING ARM, reverted)
 	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 	{
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
-		jahTierCount( JAH_C2_COUNT_SKY );   // (MEASURING ARM, reverted: and would a ray past the world's exit have hit?)
+		jahTierCount( 1u );   // (MEASURING ARM, reverted: and would a ray past the world's exit have hit?)
 		rayQueryEXT qx;
 		rayQueryInitializeEXT( qx, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, o, 0.0, L2, 1.0e4 );
 		while( rayQueryProceedEXT( qx ) ) {}

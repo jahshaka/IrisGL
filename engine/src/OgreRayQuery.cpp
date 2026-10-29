@@ -5158,7 +5158,7 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     st.skinMs = monitor::lastGpuMs("rq.skin.dispatch", owner);
     st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
     st.panesOverflow = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[0] : 0u;
-    for (int i = 0; i < 7; ++i)   // MEASURING ARM (reverted): the sky counters
+    for (int i = 0; i < 5; ++i)   // MEASURING ARM (reverted): the sky counters
         st.skyCount[i] = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[1 + i] : 0u;
     return st;
 }
