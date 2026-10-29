@@ -1610,13 +1610,18 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (size_t k = 0; k < per[i].size(); ++k) {
                 CardRec &c = per[i][k];
                 if (!c.size || keep[i][k] || (view.forcedCardMode > 0 && heldCard(i, c))) continue;
-                // READ IN MOTION (8B, the lead's check): the decision ranks the rest span's faces alone, so a card only cells
-                // that never rest read (a mover resuming them every frame - K 0, no face marks) is outside the prefix; while
-                // they still read it (fresh, the moving residency's window) it stays - it leaves when they stop reading it
-                bool readNow = false;
-                for (unsigned r = 0; r < kDemandReaders && !readNow; ++r)
-                    readNow = c.readBy[r] && c.readBy[r] + mDemandWindow >= mDemandNewest[r];
-                if (readNow) continue;
+                // READ IN MOTION (8B, the lead's check; its SCOPE, the lead's ruling on lab.card_set_binds and
+                // gi.card_residency_crowded (4)): the decision ranks the rest span's faces alone, so a card only cells that
+                // never rest read (a mover resuming them every frame - K 0, no face marks) is outside the prefix; it stays
+                // while a reader that reads it (fresh, the moving residency's window) is MOVING - that reader's rest not
+                // begun - and leaves the moment that reader rests or stops reading it. At a rest decision every reader
+                // rests, so the set is the prefix exactly (one set at one pose by any path); the keep blocks eviction
+                // alone - compaction moves a kept card like any resident.
+                bool readMoving = false;
+                for (unsigned r = 0; r < kDemandReaders && !readMoving; ++r)
+                    readMoving = view.readerActive[r] && view.readerRestFrames[r] == 0u && c.readBy[r] &&
+                                 c.readBy[r] + mDemandWindow >= mDemandNewest[r];
+                if (readMoving) continue;
                 freeRect(c.atlasX, c.atlasY, c.size);
                 c.size = 0u;
                 ++mEvicted;
