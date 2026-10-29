@@ -338,7 +338,7 @@ constexpr unsigned kCellStateWords = 12u;   // jah_probe_rest.glsl kCellWords (B
 constexpr unsigned kCellStoreWords = 130u;
 constexpr unsigned kClockWords = 8u;
 /// THE READ-BACK RING'S SLOT: the placement's and the integrate's four words, then the clock's eight.
-constexpr unsigned kReadbackSlotBytes = 16u + 4u * kClockWords;
+constexpr unsigned kReadbackSlotBytes = 20u + 4u * kClockWords;   // (+ word 4: the longest hand-over begun, B3)
 /// THE BLOCKS' SIDE, the least (the ring's least reach 2: 2 (2 + 1) + 1) - the clock buffer is sized for it.
 constexpr unsigned kLeastBlockSide = 7u;
 VkDeviceSize clockWordsOf(unsigned gridW, unsigned gridH) {
@@ -991,7 +991,10 @@ void ScreenProbeGather::readPending(View &v) {
             v.starvedRough = starved[1];
             // ...AND THE CELLS' REST of that frame (PHOTON-7 stage 8B, B1): its clock as the finalize and the ring left it
             uint32_t clock[kClockWords] = {};
-            std::memcpy(clock, static_cast<const char *>(v.readbackMapped) + i * kReadbackSlotBytes + 16u, sizeof(clock));
+            std::memcpy(clock, static_cast<const char *>(v.readbackMapped) + i * kReadbackSlotBytes + 20u, sizeof(clock));
+            uint32_t handoverM = 0u;   // (B3: the longest hand-over the frame began)
+            std::memcpy(&handoverM, static_cast<const char *>(v.readbackMapped) + i * kReadbackSlotBytes + 16u,
+                        sizeof(handoverM));
             if (!v.clockKnown || int32_t(v.pending[i].gatherFrame - v.clockFrame) > 0) {
                 v.clockKnown = true;
                 v.clockFrame = v.pending[i].gatherFrame;
@@ -1010,6 +1013,7 @@ void ScreenProbeGather::readPending(View &v) {
                 rec.everyHeld = clock[5] == 0u && clock[4] > 0u;
                 rec.movingProbes = clock[1] & 0xFFFFu;   // (B5: the trace's counts, read below 65,536 probes)
                 rec.fastProbes = clock[1] >> 16u;
+                rec.handoverM = handoverM;
                 v.restLog.push_back(rec);
                 if (v.restLog.size() > 32u) v.restLog.erase(v.restLog.begin());
             }
@@ -2815,11 +2819,11 @@ void ScreenProbeGather::finish(const void *key) {
         VkBufferCopy region{};
         region.srcOffset = 4u;
         region.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * kReadbackSlotBytes + 4u;
-        region.size = 12u;
+        region.size = 16u;   // (words 1-4: the foliage rule, the two starved counts, the longest hand-over begun)
         vkCmdCopyBuffer(cmd, v.counter, v.readback, 1, &region);
         // ...and THE CELLS' CLOCK as the finalize and the ring left it (PHOTON-7 stage 8B, B1: GatherStatus's cells)
         VkBufferCopy clockRegion{};
-        clockRegion.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * kReadbackSlotBytes + 16u;
+        clockRegion.dstOffset = VkDeviceSize(v.frame % kFramesInFlight) * kReadbackSlotBytes + 20u;
         clockRegion.size = kClockWords * 4u;
         vkCmdCopyBuffer(cmd, v.clock, v.readback, 1, &clockRegion);
         VkMemoryBarrier h{};

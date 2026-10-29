@@ -842,6 +842,8 @@ void main()
 			const uint hw = jahCellState[kCellWords * index + 10u];
 			const uint j = hw & 0xFFFFu, M = max( hw >> 16u, 1u );
 			const float step = 1.0 / float( max( M + 1u - min( j, M ), 1u ) );
+			if( j == 1u )
+				atomicMax( gatherCounter.words[4], M );   // (the hand-overs that began this frame: their longest, for the door)
 			const vec4 tgt = imageLoad( restMean, at );
 			if( tgt.w > 1.5 )
 			{

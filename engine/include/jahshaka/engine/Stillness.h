@@ -163,6 +163,9 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
+    /// B3 (PHOTON-7 stage 8B): the longest hand-over a held cell began this frame, in frames - a hold's completion
+    /// includes it (the picture walks at a code a frame)
+    unsigned           handoverM = 0;
     /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7; PHOTON-7 stage 8B, B1): an input REACHED a cell of the gather's
     /// this frame (its rest clock restarted: GatherRestRecord::reached, the frame's own record).
     bool               holdKey = false;

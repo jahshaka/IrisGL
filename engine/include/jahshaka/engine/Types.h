@@ -3778,6 +3778,9 @@ struct GatherRestRecord {
     /// THE FAST UPDATE (PHOTON-7 stage 8B, B5): the probes that frame with a ray whose hit moved, and those whose own
     /// amount F passed one half (rq_probe_gather.comp's instrument)
     unsigned movingProbes = 0u, fastProbes = 0u;
+    /// ...and B3's hand-over: the longest a held cell's picture began to walk that frame, in frames (M = ceil(delta /
+    /// one code)); 0 none began
+    unsigned handoverM = 0u;
 };
 
 struct GatherStatus {
