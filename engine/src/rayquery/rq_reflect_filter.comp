@@ -52,20 +52,16 @@ layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm, rest.y): composited UNFILTERED at rest under the arm.
 layout( rgba32f, set = 0, binding = 46 ) uniform readonly image2DArray restReference;
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
-layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
 
 /// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): at rest every pixel lowers, to its own share, the share of
 /// each trace texel among its fixed rest taps that carries a variance - the denoiser-space standard error the texel
 /// may keep for THIS pixel's displayed SE to stay under one code - by an atomic MIN of the float's bits (positive
 /// floats order as their bits); the temporal pass read and reset it (all ones: no pixel measured the texel) before
 /// this pass. A statistic, never colour fed back.
-layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
-/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl jahRefineShown): a card-only reach's held answer and its walk.
-layout( rgba32ui, set = 0, binding = 62 ) uniform readonly uimage2DArray restRefine;
-/// THE PREVIOUS FRAME'S PICTURE (binding 47, the screen trace's `jahSsrPrev`: the scene's linear colour at the frame's end,
-/// full size) - the stop's share is the slope of the pixel's FINAL displayed colour (PHOTON-7 stage 11, the lead's ruling
-/// (a)); bound only where the chain screen-traces (p.screen.x), a 1 x 1 stand-in otherwise.
-layout( set = 0, binding = 47 ) uniform sampler2D ssrPrevColour;
+layout( r32ui, set = 0, binding = 48 ) uniform uimage2DArray restShare;
+/// THE REFINEMENT (binding 59, jah_reflect_rest.glsl jahRefineShown): a card-only reach's held answer and its walk.
+layout( rgba32ui, set = 0, binding = 59 ) uniform readonly uimage2DArray restRefine;
 
 #include "jah_rq_finite.glsl"
 #include "jah_reflect_draw.glsl"
@@ -402,15 +398,9 @@ void main()
 		// DISPLAYED pixel's, whose colour is the reflection times its weight plus everything else - brighter or equal, so
 		// its display slope is shallower or equal: the slope at the reflection term alone asked a near-black slit's
 		// texel (a strip's seam on photon-rough) for 1/3,300 of white where its pixel shows more. The previous frame's
-		// picture is that colour at rest (within a code by the stillness laws); where the chain has none (no screen
-		// trace: Rays, a stereo chain) the reflection term alone, as before - stricter, never looser.
-		float finalLuma = jahDenoiseLuma( outRgb );
-		if( p.screen.x > 0.5 )
-		{
-			const vec3 prev = textureLod( ssrPrevColour, ( vec2( px ) + 0.5 ) / vec2( fullRes ), 0.0 ).xyz;
-			if( finite3( prev ) )
-				finalLuma = max( finalLuma, dot( max( prev, vec3( 0.0 ) ), vec3( 0.2126, 0.7152, 0.0722 ) ) );
-		}
+		// picture was that colour at rest, read where the chain carried it (the screen sources, deleted with the Both
+		// estimator, PHOTON-7-9A); the chain carries none now, so the reflection term alone - stricter, never looser.
+		const float finalLuma = jahDenoiseLuma( outRgb );
 		const float perD = jahDisplayCodes( finalLuma, jahDenoiseSlopeAt( jahDenoiseLuma( sum / wsum ) ) );
 		const float shareD = wsum / sqrt( shareQ ) / perD;
 		if( finite1( shareD ) && shareD > 0.0 )

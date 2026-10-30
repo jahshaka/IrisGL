@@ -1,13 +1,11 @@
-// THE SCREEN TRACE'S CORE (PHOTON-7 stage 6, THE ONE ESTIMATOR) - one text for its two hosts, pure functions.
+// THE SCREEN MARCH'S CORE (SSR-1, PHOTON-7 stage 6) - pure functions, for its one host since PHOTON-7-9A.
 //
-// The reflection's screen trace walks a reflected ray through the DEPTH BUFFER: its range on screen solved exactly,
-// fixed steps with a phase jitter, the crossing test against the surface's front, the bisection that refines a
-// crossing, and the fades that say how much the screen can vouch for what it found. Two hosts run it:
-//   * the RAY TIER's trace (rq_reflect.comp, glslang): along the pixel's ONE reflection direction (the VNDF sample or
-//     the lobe's centre), the first source of the one estimator - a crossing the screen vouches for is answered from
-//     the previous frame's picture, everything else continues as a ray (the TLAS, the far copies, the sky);
-//   * the NO-RAY chain's raster march (JahSsrRayMarch_ps.glsl, staged raw into media as JahSsrMarch.glsl by
-//     engine/CMakeLists.txt, the fog law's pattern), which marches the mirror direction for its resolve.
+// The march walks a reflected ray through the DEPTH BUFFER: its range on screen solved exactly, fixed steps with a
+// phase jitter, the crossing test against the surface's front, the bisection that refines a crossing, and the fades
+// that say how much the screen can vouch for what it found. Its host is the NO-RAY chain's raster march
+// (JahSsrRayMarch_ps.glsl, staged raw into media as JahSsrMarch.glsl by engine/CMakeLists.txt, the fog law's pattern),
+// which marches the mirror direction for its resolve. (The ray tier's screen trace - the "Both" estimator's first
+// source, rq_reflect.comp - is deleted with its secant and its vouch: a ray chain reflects by its rays alone.)
 // Extracted VERBATIM from the raster march (SSR-1, SSR-EDGE-1, SSR-RINGS-1: every rule's reasoning is in that file's
 // history and in the comments kept below); only the projection became an argument and the depth read a macro.
 //
@@ -76,7 +74,6 @@ struct JahSsrMarch
 	float hit;
 	vec2  hitUv;
 	float travelled;
-	float travelledFront;   // the bisection's last bracket's front end (in front of the surface): jahSsrSecant's
 	float hitDiff;
 	float range;
 	float stepLen;
@@ -101,7 +98,6 @@ JahSsrMarch jahSsrMarch( mat4 viewToTex, vec3 origin, vec3 rayDir, float maxDist
 
 	float hit		= 0.0;
 	float travelled = maxDistance;
-	float travelledFront = 0.0;
 	vec2  hitUv		= vec2( 0.0 );
 	float prevT		= 0.0;
 	float hitDiff	= 0.0;			// the crossing's depth error, as a fraction of the tolerance
@@ -186,7 +182,6 @@ JahSsrMarch jahSsrMarch( mat4 viewToTex, vec3 origin, vec3 rayDir, float maxDist
 				}
 				hitUv	  = refined;
 				travelled = hi;
-				travelledFront = lo;
 				hit		  = 1.0;
 				break;
 			}
@@ -199,40 +194,10 @@ JahSsrMarch jahSsrMarch( mat4 viewToTex, vec3 origin, vec3 rayDir, float maxDist
 	m.hit = hit;
 	m.hitUv = hitUv;
 	m.travelled = travelled;
-	m.travelledFront = travelledFront;
 	m.hitDiff = hitDiff;
 	m.range = range;
 	m.stepLen = stepLen;
 	return m;
-}
-
-// THE CROSSING CLOSED BY THE SECANT: the bisection leaves the crossing between its bracket's front end (the ray in front
-// of the surface) and its back end (behind it), and the march answers with the BACK end - up to 1/32 of a step past the
-// surface, which on a face the ray meets steeply is a point of the face as far above or beside the true crossing as the
-// overshoot projects (a 0.26 m step: ~8 mm along the ray, ~10 px at 1 m). The line through the two ends' depth
-// differences closes it - exact where the surface is a plane over the bracket. A host that answers the crossing's own
-// point (the ray tier's trace: one estimator, its hit is the pixel's reflection) takes this; the raster march's resolve
-// keeps its own reading. Returns the image coordinate and, in `tHit`, the distance along the ray; the back end where
-// the two ends do not straddle a surface the depth buffer shows.
-vec2 jahSsrSecant( mat4 viewToTex, vec3 origin, vec3 rayDir, JahSsrMarch m, out float tHit )
-{
-	tHit = m.travelled;
-	const vec3 a = origin + rayDir * m.travelledFront, b = origin + rayDir * m.travelled;
-	const vec4 ha = viewToTex * vec4( a, 1.0 ), hb = viewToTex * vec4( b, 1.0 );
-	if( !( ha.w > 0.0 ) || !( hb.w > 0.0 ) )
-		return m.hitUv;
-	const vec2 ua = ha.xy / ha.w, ub = hb.xy / hb.w;
-	if( any( lessThan( ua, vec2( 0.0 ) ) ) || any( greaterThan( ua, vec2( 1.0 ) ) ) )
-		return m.hitUv;
-	const float ra = JAH_SSR_SCENE_DEPTH( ua ), rb = JAH_SSR_SCENE_DEPTH( ub );
-	if( !( ra > 0.0 && ra < 1.0 && rb > 0.0 && rb < 1.0 ) )
-		return m.hitUv;
-	const float da = a.z - JAH_SSR_VIEW_DISTANCE( ra ), db = b.z - JAH_SSR_VIEW_DISTANCE( rb );
-	if( !( da < 0.0 && db > 0.0 ) )
-		return m.hitUv;
-	tHit = mix( m.travelledFront, m.travelled, -da / ( db - da ) );
-	const vec4 h = viewToTex * vec4( origin + rayDir * tHit, 1.0 );
-	return h.w > 0.0 ? h.xy / h.w : m.hitUv;
 }
 
 // THE ENVELOPE (lane SSR-2's split; SSR-EDGE-1's two): how gracefully the screen has to stop at a hit - the places
@@ -259,29 +224,6 @@ float jahSsrEnvelope( JahSsrMarch m, vec3 rayDir, vec3 toSurface, float maxDista
 	const float rangeLeft  = ( m.range - m.travelled ) / m.stepLen;
 	const float rangeFade  = smoothstep( 0.0, kEdgeSteps, rangeLeft );
 	return distFade * edgeFade * camFade * rangeFade * thickFade;
-}
-
-// THE ONE ESTIMATOR'S TRUST in a screen answer (PHOTON-7 stage 6; the lead's ruling after the rest's tail): inside the
-// ray trace a screen answer is the hit surface's own displayed radiance and its VALIDITY is the on-surface test's (a
-// wrong surface is refused at any distance), so the screen's vouch keeps ONLY the terms with a measured reason - where
-// the screen's information ENDS, so the blend with the ray avoids a hard line: THE FRAME'S EDGE (12 % of it), THE END
-// OF THE MARCH'S RANGE (its last kEdgeSteps steps) and THE CAMERA REVERSAL (a ray turning back toward the eye meets,
-// more and more, surfaces the camera's depth does not hold - the information ends there too; measured: with this term
-// deleted rtreflect.mirror_blend read 7 hard steps of the whole screen-ray difference on photon-glass's mirror, with it
-// 0). The raster envelope's other two are not here: the DISTANCE fade (a 25 m linear ramp, the screen-only march's
-// hand-over to the probe - it made the vouch < 1 almost everywhere: 78.9 % of the rays traced both halves and the
-// rest's record rule throttled its batch; deleted, 24.6 %) and the THICKNESS margin (the on-surface test refuses the
-// crossings it faded). The raster march keeps jahSsrEnvelope whole: it is the screen-only estimator, with no ray to hand
-// over to. `toSurface` is the unit view vector at the origin (the march space's), `rayDir` the unit ray.
-float jahSsrVouchRays( JahSsrMarch m, vec3 rayDir, vec3 toSurface, float rangeGrad )
-{
-	const vec2	edge	  = min( m.hitUv, vec2( 1.0 ) - m.hitUv );
-	const float edgeFade  = smoothstep( 0.0, 0.12, min( edge.x, edge.y ) );
-	const float towardEye = clamp( -dot( rayDir, toSurface ), 0.0, 1.0 );
-	const float camFade	  = 1.0 - smoothstep( 0.25, 0.85, towardEye );
-	const float kEdgeSteps = max( 2.0, rangeGrad / m.stepLen );
-	const float rangeLeft  = ( m.range - m.travelled ) / m.stepLen;
-	return edgeFade * camFade * smoothstep( 0.0, kEdgeSteps, rangeLeft );
 }
 
 // THE TRUST (lane SSR-1): the ARRIVAL angle at the surface the ray hit, -dot( ray, the hit's normal ) - a backface or a

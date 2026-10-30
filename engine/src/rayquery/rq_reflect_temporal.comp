@@ -29,7 +29,7 @@
 //   under a texel - its centre ray is the integral, and the reflected direction changes with the view.
 //   A TEXEL WITH NO HISTORY (a disocclusion, a new surface) shows its current answer, N = 0 - no fade, no warm seed: the
 //   spatial filter widens over it (DRAG-1, PAN-SMEAR-1 (a) and (b) deleted: Lumen's N = 0 covers them). A texel with no
-//   answer this frame (a dropped or unshaded record, the screen alone's miss) keeps its history as it is.
+//   answer this frame (a dropped or unshaded record) keeps its history as it is.
 //   DELETED with the old pass: the distrust of an arriving mover's hit, the two-miss departure, a moving reflector's
 //   1/8 floor (the clamp and the confidence and MaxFrames 12 cover them - Lumen has none), and the moving hit's
 //   reflected-image history with its mover age (rq_reflect.comp).
@@ -74,7 +74,7 @@ layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSa
 /// running mean in 32 bits (rgb) and their count (w) - 1 x 1 and never touched unless the arm is on.
 layout( rgba32f, set = 0, binding = 46 ) uniform image2DArray restReference;
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
-layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
 
 #include "jah_reproject.glsl"
 /// kMaxRadiance, finite1, finite3: the one copy.
@@ -88,7 +88,7 @@ float gExposure = 1.0;
 /// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): the filter's, last frame - the MIN over the pixels that read
 /// this texel of each one's share, a denoiser-space standard error (a float's bits; all ones = no pixel measured it).
 /// Read here, then reset to all ones for this frame's filter.
-layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
+layout( r32ui, set = 0, binding = 48 ) uniform uimage2DArray restShare;
 /// THE HIT LIST'S BUFFER (binding 28, the hit set's): its words 8-9 take THE REST's BOUND at rest frame 2N (PHOTON-7
 /// stage 11, 11-1c) - the samples the converging texels still need and the most one needs.
 layout( std430, set = 0, binding = 28 ) buffer JahHitBuf { uint jahHitBuf[]; };
@@ -224,14 +224,14 @@ History historyOfPoint( vec3 point, EyeImage before, bool depthTest, float thres
 	return historyAt( puv, pz, depthTest, threshold, traceRes );
 }
 
-/// THE MOVING SE INSTRUMENT (binding 53, OgreRayQuery.cpp kReflectMovingSeBinding; the arm reflect.historyReadback):
+/// THE MOVING SE INSTRUMENT (binding 50, OgreRayQuery.cpp kReflectMovingSeBinding; the arm reflect.historyReadback):
 /// a float a texel - the moving mean's standard error in display codes. Unarmed it is a 16-byte stand-in and nothing is
 /// written past its length.
-layout( std430, set = 0, binding = 53 ) buffer JahMovingSe { float movingSe[]; };
-// THE PICK (binding 56, rq_reflect.comp jahPickSlot): the picked texel's rest terms into its slot's words 32-47
-layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
-/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl: the no-pop hand-over of a card-only reach) - this pass runs it.
-layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
+layout( std430, set = 0, binding = 50 ) buffer JahMovingSe { float movingSe[]; };
+// THE PICK (binding 53, rq_reflect.comp jahPickSlot): the picked texel's rest terms into its slot's words 32-47
+layout( std430, set = 0, binding = 53 ) buffer JahPick { uint jahPick[]; };
+/// THE REFINEMENT (binding 59, jah_reflect_rest.glsl: the no-pop hand-over of a card-only reach) - this pass runs it.
+layout( rgba32ui, set = 0, binding = 59 ) uniform uimage2DArray restRefine;
 /// THE CODE-A-FRAME SLEW (B2's refinement): the shown answer D moved toward the composed answer T by at most ONE display
 /// code per channel - the code distance from D to T integrated along the line (the display slope at four midpoints), and
 /// D moved that fraction of the way that is one code of it (all of it under a code). The same curve at every brightness.
@@ -576,7 +576,7 @@ void main()
 	}
 	if( !hasCurrent )
 	{
-		// NO ANSWER THIS FRAME (a dropped or unshaded record, the screen alone's miss): the history kept as it is - the
+		// NO ANSWER THIS FRAME (a dropped or unshaded record): the history kept as it is - the
 		// surface's, else none (and no history at all: the texel holds no answer).
 		if( !hs.ok )
 		{
