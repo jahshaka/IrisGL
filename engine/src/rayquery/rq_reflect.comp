@@ -572,7 +572,7 @@ struct JahReflectSample
 	vec2 recBary;
 	float hitT, sampleT;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
-	uint areaVis;   // ...and its area lights' (L9 (b1): jahHitAreaVisWord, the list's word 10)
+	uint areaVis;   // ...and its area lights' (L9 (b1): jahHitAreaVisWord, the list's word 8)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
 	bool recTraced; // a RECORD whose lobe the trace traced (C2, 11-2 (3)): its environment specular rides the delta
 	vec4 recPane;   // ...and the panes it was seen through: their own light, their throughput ((0, 1) none; the one read's F6)
@@ -1756,7 +1756,7 @@ void main()
 										 -1.0,
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
-										 vec4( 0.0 ), s.recDelta,
+										 s.recDelta,
 										 s.recGain, s.recPane, s.recTraced, s.areaVis );
 							fit = 1u;
 						}

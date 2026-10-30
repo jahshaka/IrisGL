@@ -413,7 +413,7 @@ vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 me
 /// visibility is traced HERE, at the hit, as a store hit's is (jahHitDirect: the same strata, jahAreaStratumAt): one
 /// stratum drawn by its form factor's share - the unshadowed f_k / sum f, so the ray's 0 / 1 is an unbiased estimate of
 /// the visible fraction the decode's LTC is multiplied by - for each table light that is in the decode pass's forward LTC
-/// set (its word 19: the set's index, 0-3), byte i of the record's word 10 (255 seen, 0 not; a light no stratum of
+/// set (its word 19: the set's index, 0-3), byte i of the record's word 8 (255 seen, 0 not; a light no stratum of
 /// which reaches the hit 0). `P` the hit, `N` its normal facing the ray's origin, `t` the distance P was carried, `far`
 /// a far copy's hit.
 uint jahHitAreaVisWord( vec3 P, vec3 N, float t, bool far )

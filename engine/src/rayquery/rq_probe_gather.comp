@@ -516,7 +516,7 @@ void main()
 			{
 				const vec3 hitPos = origin + dir * tHit;
 				const float sunVis = jahHitSunVisibility( hitPos, hitN, tHit, far );
-				const uint areaVis = jahHitAreaVisWord( hitPos, hitN, tHit, far );   // (L9 (b1): the record's word 10)
+				const uint areaVis = jahHitAreaVisWord( hitPos, hitN, tHit, far );   // (L9 (b1): the record's word 8)
 				const ivec2 dest = block + texel;
 				recorded = jahHitAppend( hitSlot, far, hitPrim,
 										 hitBary, dir, sunVis, max( tHit * spread, 1e-4 ), reweight * through,

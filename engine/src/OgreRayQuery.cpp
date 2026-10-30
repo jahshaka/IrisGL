@@ -406,11 +406,13 @@ constexpr unsigned kCompactListHeaderWords = 8u;
 constexpr unsigned kCompactListDispatchWord = 2u;
 constexpr unsigned kCompactListRecordsWord = 5u;
 /// THE HIT LIST'S BUFFER LAYOUT (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords, 800.Atom_piece_ps.any's read):
-/// twelve counter words (PHOTON-7 11-1b/c added four: the rest bound's two, the NEE's two), then ten words a record
-/// (the NEE delta + the estimator's gain 6-7, PHOTON-7 11-1b / 11-2; a reflection's crossed panes 8-9, 10-4 F6).
+/// twelve counter words (PHOTON-7 11-1b/c added four: the rest bound's two, the NEE's two), then nine words a record
+/// (the NEE delta + the estimator's gain 4-5, PHOTON-7 11-1b / 11-2; a reflection's crossed panes 6-7, 10-4 F6; the
+/// area lights' visibility 8, L9 (b1)) - the screen's share of a blended sample (4-5) deleted with the Both estimator,
+/// PHOTON-7-9A: 8 bytes a record, 2.3 MB at the list's 1080p capacity.
 constexpr uint32_t kHitCounterWords = 12u;
 constexpr uint32_t kHitCounterBytes = kHitCounterWords * 4u;
-constexpr uint32_t kHitAuxWords = 11u;   // (L9 (b1): word 10 the decoded hit's area lights' visibility)
+constexpr uint32_t kHitAuxWords = 9u;   // (L9 (b1): word 8 the decoded hit's area lights' visibility)
 /// THE HIT's AREA STRATA (jah_rq_hit_direct.glsl kHitAreaStrata = 4 a side): one full cycle of the rest's time-stratified
 /// area draw, the samples a rest texel's stop waits for where the hit table holds an area light (PHOTON-7 11-2 (2)).
 constexpr uint32_t kHitAreaStrataPerHit = 4u * 4u;
@@ -8055,7 +8057,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
                     L[16 + 4 * k] = float(r[k].x); L[17 + 4 * k] = float(r[k].y); L[18 + 4 * k] = float(r[k].z);
                 }
                 // THE DECODE's LIGHT INDEX (PHOTON-7 11-2 L9 (b1)): its place in the pass's forward LTC set (HlmsPbs's
-                // order, forwardLtcLights) - a record's area visibility is byte i of its word 10 - or -1 past the set
+                // order, forwardLtcLights) - a record's area visibility is byte i of its word 8 - or -1 past the set
                 L[19] = -1.0f;
                 for (size_t k = 0; k < ltcSet.size() && k < 4u; ++k)
                     if (ltcSet[k] == light) L[19] = float(k);
@@ -11751,9 +11753,9 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
     if (!instances) return false;
     Ogre::VaoManager *vao = mRs->getVaoManager();
-    // THE LIST'S BUFFER, sized to the list: the twelve counter words, then ten per
-    // record (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords: a blended run record's screen share is words 4-5,
-    // the NEE delta 6-7, a reflection's crossed panes 8-9). Re-made when the list grows (Ogre's destroy is delayed past every
+    // THE LIST'S BUFFER, sized to the list: the twelve counter words, then nine per
+    // record (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords: the NEE delta and the gain 4-5, a reflection's
+    // crossed panes 6-7, the area lights' visibility 8). Re-made when the list grows (Ogre's destroy is delayed past every
     // frame in flight; every reader re-reads `hv.buf` before it binds).
     {
         const size_t words = kHitCounterWords + kHitAuxWords * size_t(hv.ids->getWidth()) * hv.ids->getHeight();

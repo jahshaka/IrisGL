@@ -36,7 +36,7 @@
 //                        [8] / [9] the reflection's rest BOUND's two (PHOTON-7
 //                        11-1c), [10] the reflection's NEE rays and [11] those
 //                        whose first hit was the target drawn (11-1b: the cone's
-//                        hit rate); then kJahHitAuxWords (TEN) WORDS PER RECORD
+//                        hit rate); then kJahHitAuxWords (NINE) WORDS PER RECORD
 //                        from word kJahHitAuxBase (12):
 //                        [0] packHalf2x16( the SUN'S VISIBILITY at the hit (a
 //                        shadow ray, jah_rq_sun_ray.glsl — replacing the shadow
@@ -46,8 +46,7 @@
 //                        reflection's sample weight — the trace's blend floor and
 //                        its surface-only flag, PHOTON-2 1b; the gather's texel
 //                        re-weight; NEGATIVE marks a reflection RUN record,
-//                        its magnitude the RAY'S SHARE of the sample: 1 -
-//                        the screen's vouch, 1 unblended), [2] the ray's
+//                        magnitude 1), [2] the ray's
 //                        ORIGIN HEIGHT's float bits (world Y) and [3]
 //                        packHalf2x16( the ray's LENGTH to the hit, the EYE'S
 //                        DISTANCE to the ray's origin ), both in metres and held
@@ -55,15 +54,11 @@
 //                        reflection's decoded light along (PHOTON-I-1: the
 //                        record, not a full-resolution image, carries them; the
 //                        gather's records write them too and nothing reads them),
-//                        [10] (PHOTON-7 11-2 L9 (b1)) the decoded hit's AREA LIGHTS' VISIBILITY, byte i that of the
+//                        [8] (PHOTON-7 11-2 L9 (b1)) the decoded hit's AREA LIGHTS' VISIBILITY, byte i that of the
 //                        pass's forward LTC light i (jahHitAreaVisWord: one traced stratum, 255 seen),
-//                        [4] packHalf2x16( vouch x the screen's answer's r, g )
-//                        and [5] packHalf2x16( ...its b, vouch x the screen's
-//                        distance ): THE SCREEN'S SHARE of a BLENDED sample
-//                        whose ray rides a rest run (the write-back folds the
-//                        whole sample, screen and ray, as ONE: the moments are
-//                        not linear in the parts); 0 on every other record;
-//                        [6] packHalf2x16( THE NEE DELTA's r, g ) and [7]
+//                        (the screen's share of a blended sample, words 4-5, is deleted with the Both estimator,
+//                        PHOTON-7-9A: 8 bytes a record, 2.3 MB at the list's 1080p capacity)
+//                        [4] packHalf2x16( THE NEE DELTA's r, g ) and [5]
 //                        packHalf2x16( its b, THE ESTIMATOR's GAIN - the
 //                        reflection's factor on the decoded ray share,
 //                        PHOTON-7 11-2 (1); 1 on the gather's records )
@@ -71,8 +66,8 @@
 //                        write-back adds to the shaded sample - the NEE part less
 //                        the BRDF's share ( 1 - v ) ( 1 - w_b ) E T of the
 //                        emission its hit holds, signed; 0 on every other record;
-//                        [8] packHalf2x16( the crossed PANES' own light r, g )
-//                        and [9] packHalf2x16( ...its b, the panes' THROUGHPUT ):
+//                        [6] packHalf2x16( the crossed PANES' own light r, g )
+//                        and [7] packHalf2x16( ...its b, the panes' THROUGHPUT ):
 //                        a REFLECTION's record seen through panes (the one
 //                        read's F6) - the write-back's ray share is the panes'
 //                        light plus the throughput x the decoded light, and the
@@ -80,8 +75,8 @@
 //                        the hit, beyond the panes); (0, 1) on every other
 //                        record (the gather carries its throughput in its weight
 //                        and writes its panes' light).
-//                        Words 6-9 = 16 B a record: +4.7 MB at the list's
-//                        capacity at 1080p (291,840 records; 40 B a record).
+//                        Words 4-7 = 16 B a record; 36 B a record in all (10.5 MB at
+//                        the list's capacity at 1080p, 291,840 records).
 // WHY A BUFFER AND NOT A THIRD IMAGE: the decode is a PBS pixel shader, and its
 // pass textures number into the fork's absolute-index table (NUM_BIND_TEXTURES;
 // the budget per family is OgreFog.cpp's). The read-only buffer slot it takes
@@ -128,7 +123,7 @@ const uint kJahHitTracedLobeBit = 1u << 29u;
 const uint kJahHitDestGather = 0x80000000u;
 /// The first per-record word of `jahHitBuf`, and the words per record.
 const uint kJahHitAuxBase = 12u;
-const uint kJahHitAuxWords = 11u;
+const uint kJahHitAuxWords = 9u;
 /// GpuScene.h GpuInstanceFlag: kGpuSkinned | kGpuPlanar.
 const uint kJahHitGpuSkinned = 1u << 5u;
 const uint kJahHitGpuPlanar = 1u << 10u;
@@ -182,12 +177,10 @@ float jahHitSunVisibility( vec3 hitPos, vec3 liftDir, float t, bool far )
 /// THE RECORD'S WORDS at list slot i (reserved by the caller, < the capacity). A
 /// NEGATIVE weight marks a reflection FOLD record (rq_reflect.comp's record runs:
 /// its texel's rest mean takes it in the write-back, in its run's order), its
-/// magnitude the ray's share; `screenShare` = the screen's share of that sample
-/// (vouch x the screen's radiance, vouch x its distance; 0 unblended and on every
-/// other record); `pane` = a reflection's crossed panes (their own light, their throughput; (0, 1) none).
+/// magnitude 1; `pane` = a reflection's crossed panes (their own light, their throughput; (0, 1) none).
 void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, float sunVis,
 				  float footprint, float weight, uint dest, float originY, float rayLength, float eyeDistance,
-				  vec4 screenShare, vec3 delta, float gain, vec4 pane, bool tracedLobe, uint areaVis )
+				  vec3 delta, float gain, vec4 pane, bool tracedLobe, uint areaVis )
 {
 	const ivec2 at = ivec2( int( i % JAH_HIT_LIST_W ), int( i / JAH_HIT_LIST_W ) );
 	const uint slotLevel = ( slot & 0x00FFFFFFu ) | ( far ? kJahHitFarBit : 0u ) |
@@ -201,13 +194,11 @@ void jahHitWrite( uint i, uint slot, bool far, uint prim, vec2 bary, vec3 dir, f
 	jahHitBuf[aux + 1u] = floatBitsToUint( weight );
 	jahHitBuf[aux + 2u] = floatBitsToUint( originY );
 	jahHitBuf[aux + 3u] = packHalf2x16( clamp( vec2( rayLength, eyeDistance ), vec2( 0.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 4u] = packHalf2x16( clamp( screenShare.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 5u] = packHalf2x16( clamp( screenShare.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 6u] = packHalf2x16( clamp( delta.xy, vec2( -65504.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 7u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), clamp( gain, 0.0, 65504.0 ) ) );
-	jahHitBuf[aux + 8u] = packHalf2x16( clamp( pane.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 9u] = packHalf2x16( clamp( pane.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
-	jahHitBuf[aux + 10u] = areaVis;   // (L9 (b1): the decoded hit's area lights' visibility, byte i the LTC set's light i)
+	jahHitBuf[aux + 4u] = packHalf2x16( clamp( delta.xy, vec2( -65504.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 5u] = packHalf2x16( vec2( clamp( delta.z, -65504.0, 65504.0 ), clamp( gain, 0.0, 65504.0 ) ) );
+	jahHitBuf[aux + 6u] = packHalf2x16( clamp( pane.xy, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 7u] = packHalf2x16( clamp( pane.zw, vec2( 0.0 ), vec2( 65504.0 ) ) );
+	jahHitBuf[aux + 8u] = areaVis;   // (L9 (b1): the decoded hit's area lights' visibility, byte i the LTC set's light i)
 	imageStore( jahHitDest, at, uvec4( dest, 0u, 0u, 0u ) );
 }
 
@@ -227,7 +218,7 @@ bool jahHitAppend( uint slot, bool far, uint prim, vec2 bary, vec3 dir, float su
 		return false;
 	}
 	jahHitWrite( i, slot, far, prim, bary, dir, sunVis, footprint, weight, dest, originY, rayLength, eyeDistance,
-				 vec4( 0.0 ), delta, gain, pane, tracedLobe, areaVis );
+				 delta, gain, pane, tracedLobe, areaVis );
 	return true;
 }
 
