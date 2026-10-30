@@ -132,6 +132,8 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>   // MEASURING ARM (DETERMINISM-1 arm 2)
+#include <string>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -1311,6 +1313,10 @@ private:
             bool     se = false;          ///< the moving SE instrument was copied beside it
         };
         HistPending histPending[kReflectRing];
+        /// MEASURING ARM (DETERMINISM-1 arm 2, to be reverted): the frame's own images copied at its end, read at a lag.
+        struct DiagRefl { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull;
+                          unsigned w = 0u, h = 0u, layers = 1u; size_t hitBytes = 0u; };
+        DiagRefl diagRefl[6];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
         /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
@@ -8866,6 +8872,124 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
+    // MEASURING ARM (DETERMINISM-1 arm 2, to be reverted; JAH_DIAG_REFL): the reflection's own images at the frame's end -
+    // the rest mean (both halves), the state, this frame's sample, the hand-over (refine), the stop share - and the hit
+    // list's buffer, copied after every write of the frame (the readReflectHistory barrier's place: no barrier in front of
+    // any trace), read at a fixed lag, one hash each a frame; JAH_DIAG_REFL_DUMP=<dir>:<from rf>:<to rf> writes the bytes.
+    static const bool diagRefl = std::getenv("JAH_DIAG_REFL") != nullptr;
+    if (diagRefl && rv.traceW && rv.traceH && rv.state[rv.curIdx].image) {
+        const auto mix = [](unsigned long long x) {
+            x += 0x9E3779B97F4A7C15ull;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+            return x ^ (x >> 31);
+        };
+        const auto hashBytes = [&](const unsigned char *b, size_t n) {
+            unsigned long long h = 0x51ED270B27u;
+            for (size_t i = 0; i + 8u <= n; i += 8u) {
+                unsigned long long v = 0ull;
+                std::memcpy(&v, b + i, 8u);
+                h = mix(h ^ v);
+            }
+            return h;
+        };
+        // the images, in order, and their bytes a texel
+        const ReflectImage *imgs[6] = { &rv.hist[rv.curIdx], &rv.hist[rv.prevIdx], &rv.state[rv.curIdx], &rv.sample,
+                                        &rv.refine, &rv.share };
+        const unsigned bpt[6] = { 8u, 8u, 8u, 8u, 16u, 4u };
+        const char *names[6] = { "meanCur", "meanPrev", "state", "sample", "refine", "share" };
+        const uint32_t now = frameNow(), inFlight = framesInFlight();
+        static const std::string dump = std::getenv("JAH_DIAG_REFL_DUMP") ? std::getenv("JAH_DIAG_REFL_DUMP") : "";
+        for (ReflectView::DiagRefl &d : rv.diagRefl) {
+            if (!d.live || uint32_t(now - d.frame) < inFlight) continue;
+            d.live = false;
+            const unsigned char *m = static_cast<const unsigned char *>(d.host.mapped);
+            const size_t texels = size_t(d.w) * d.h * d.layers;
+            char line[1024];
+            int n = std::snprintf(line, sizeof(line), "DIAG REFL rf %llu", d.rf);
+            size_t at = 0u;
+            for (int k = 0; k < 6; ++k) {
+                const size_t bytes = texels * bpt[k];
+                n += std::snprintf(line + n, sizeof(line) - size_t(n), " %s %016llx", names[k], hashBytes(m + at, bytes));
+                at += bytes;
+            }
+            // the hit list: its count, and an order-free hash of its records' aux words
+            const uint32_t *words = reinterpret_cast<const uint32_t *>(m + at);
+            const uint32_t count = d.hitBytes >= 4u ? std::min<uint32_t>(words[0], uint32_t((d.hitBytes / 4u - kHitCounterWords) / kHitAuxWords)) : 0u;
+            unsigned long long hs = 0ull;
+            for (uint32_t i = 0; i < count; ++i)
+                hs += mix(hashBytes(reinterpret_cast<const unsigned char *>(words + kHitCounterWords + size_t(kHitAuxWords) * i),
+                                    kHitAuxWords * 4u) ^ words[kHitCounterWords + size_t(kHitAuxWords) * i + 10u]);
+            n += std::snprintf(line + n, sizeof(line) - size_t(n), " hits %u %016llx", count, hs);
+            std::fprintf(stderr, "%s\n", line);
+            if (!dump.empty()) {
+                const size_t a = dump.find(':'), b = dump.rfind(':');
+                const unsigned long long from = std::strtoull(dump.c_str() + a + 1, nullptr, 10),
+                                         to = std::strtoull(dump.c_str() + b + 1, nullptr, 10);
+                if (d.rf >= from && d.rf <= to)
+                    if (FILE *f = std::fopen((dump.substr(0, a) + "/refl-" + std::to_string(d.rf) + ".bin").c_str(), "wb")) {
+                        const unsigned hdr[3] = { d.w, d.h, d.layers };
+                        std::fwrite(hdr, sizeof(hdr), 1, f);
+                        std::fwrite(m, 1, at, f);
+                        std::fclose(f);
+                    }
+            }
+        }
+        ReflectView::DiagRefl *slot = nullptr;
+        for (ReflectView::DiagRefl &d : rv.diagRefl)
+            if (!d.live) { slot = &d; break; }
+        auto hit = mHits.find(key);
+        Ogre::UavBufferPacked *hitBuf = hit != mHits.end() ? hit->second.buf : nullptr;
+        if (slot) {
+            const unsigned w = rv.traceW, h = rv.traceH, layers = rv.layers;
+            const size_t texels = size_t(w) * h * layers;
+            size_t imgBytes = 0u;
+            for (int k = 0; k < 6; ++k) imgBytes += texels * bpt[k];
+            const VkDescriptorBufferInfo hb = hitBuf ? rawBufferInfo(hitBuf) : VkDescriptorBufferInfo{};
+            const size_t hitBytes = hitBuf ? size_t(hitBuf->getTotalSizeBytes()) : 0u;
+            const VkDeviceSize need = VkDeviceSize(imgBytes + std::max<size_t>(hitBytes, 4u));
+            if (slot->host.buffer && slot->host.size < need) retire(slot->host);
+            std::string err;
+            if (slot->host.buffer || makeBuffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err)) {
+                VkMemoryBarrier toCopy{};
+                toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0,
+                                     nullptr, 0, nullptr);
+                VkDeviceSize off = 0u;
+                for (int k = 0; k < 6; ++k) {
+                    VkBufferImageCopy region{};
+                    region.bufferOffset = off;
+                    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                    region.imageSubresource.layerCount = layers;
+                    region.imageExtent = { w, h, 1u };
+                    vkCmdCopyImageToBuffer(cmd, imgs[k]->image, VK_IMAGE_LAYOUT_GENERAL, slot->host.buffer, 1, &region);
+                    off += VkDeviceSize(texels) * bpt[k];
+                }
+                if (hitBuf) {
+                    VkBufferCopy bc{};
+                    bc.srcOffset = hb.offset;
+                    bc.dstOffset = off;
+                    bc.size = hitBytes;
+                    vkCmdCopyBuffer(cmd, hb.buffer, slot->host.buffer, 1, &bc);
+                }
+                VkMemoryBarrier toHost{};
+                toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+                toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     0, 1, &toHost, 0, nullptr, 0, nullptr);
+                slot->live = true;
+                slot->frame = now;
+                slot->rf = Ogre::Root::getSingleton().getNextFrameNumber();
+                slot->w = w;
+                slot->h = h;
+                slot->layers = layers;
+                slot->hitBytes = hitBytes;
+            }
+        }
+    }
 }
 
 // THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, the arm "reflect.historyReadback") — the stillness
