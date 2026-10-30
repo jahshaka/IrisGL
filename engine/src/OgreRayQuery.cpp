@@ -5962,6 +5962,7 @@ void restInputsOf(const detail::OgreScene *scene, GatherRestInputs &r) {
         b.brickMetres = 8.0f * std::max(std::max(cl.x, cl.y), cl.z);
         if (mask) {
             auto *bi = static_cast<Ogre::VulkanBufferInterface *>(mask->getBufferInterface());
+            b.mask = mask;
             b.buffer = bi->getVboName();
             b.offset = VkDeviceSize(mask->_getFinalBufferStart()) * mask->getBytesPerElement();
             b.range = mask->getTotalSizeBytes();
@@ -7470,8 +7471,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         if (exposureTex)
             solver.resolveTransition(trans, exposureTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
-        // THE HIT SET (the one order: hitSetTransitions)
+        // THE HIT SET (the one order: hitSetTransitions), and the rest's brick masks
         hitSetTransitions(solver, trans, hs);
+        brickMaskTransitions(solver, trans, restIn);
         if (fogAerial)
             solver.resolveTransition(trans, fogAerial, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);

@@ -364,6 +364,9 @@ private:
 /// THE HIT SET's ORDER: every input it reads resolved for a compute read (the card instance table read AND written:
 /// the hits' demand stamps), into the caller's transitions before its command buffer is taken.
 void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const HitSetSources &src);
+struct GatherRestInputs;
+/// THE BRICK MASKS a raw reader binds (the rest's inputs): read by the compute stage after the light pass that wrote them.
+void brickMaskTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const GatherRestInputs &rest);
 
 /// THE GATHER'S RESUME INPUTS (PHOTON-7 stage 8B, B1; RayQueryTier::gatherFrame fills them, rq_probe_resume.comp reads
 /// them): the frame's CHANGED-REGION LIST (PhotonComponent's one buffer, closed before the render), each cascade's BRICK
@@ -386,6 +389,9 @@ struct GatherRestInputs {
     struct Bricks {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceSize offset = 0u, range = 0u;
+        /// ...the same buffer as Ogre's (Photon's Hlms light passes write it): every raw reader names it to the
+        /// solver (brickMaskTransitions), never ordered by another resource's barrier (DETERMINISM-1)
+        Ogre::UavBufferPacked *mask = nullptr;
         uint32_t dims[3] = { 0u, 0u, 0u };
         float origin[3] = { 0.0f, 0.0f, 0.0f };
         float brickMetres = 0.0f;

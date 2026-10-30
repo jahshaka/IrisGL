@@ -2552,8 +2552,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         for (Ogre::TextureGpu *t : { in.normals, in.depth, in.shadowRough })
             solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
-        // THE HIT SET (the one order: hitSetTransitions)
+        // THE HIT SET (the one order: hitSetTransitions), and the rest's brick masks
         hitSetTransitions(solver, trans, in.hits);
+        brickMaskTransitions(solver, trans, in.rest);
         // THE IRRADIANCE FIELD'S ATLASES (7-2), sampled by the integrate (the field writes them at the frame's head)
         if (in.fieldIrradiance && in.fieldDepth)
             for (Ogre::TextureGpu *t : { in.fieldIrradiance, in.fieldDepth })

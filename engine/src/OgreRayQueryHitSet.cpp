@@ -295,6 +295,15 @@ void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArra
     if (src.geomRows) solver.resolveTransition(trans, src.geomRows, Ogre::ResourceAccess::Read, computeStage);
 }
 
+// THE BRICK MASKS (DETERMINISM-1): Photon's light passes write them through Hlms (the solver sees a compute WRITE); the
+// reflection and the gather read them by raw descriptor. Unnamed, they were ordered only by accident - the card-instance
+// buffer's own read-write transition in the same call emitting a global memory barrier - and by nothing in a frame with
+// no cards bound: a read-after-write race on the GPU's pace (the download race's class).
+void brickMaskTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const GatherRestInputs &rest) {
+    for (const GatherRestInputs::Bricks &b : rest.bricks)
+        if (b.mask) solver.resolveTransition(trans, b.mask, Ogre::ResourceAccess::Read, 1u << Ogre::GPT_COMPUTE_PROGRAM);
+}
+
 }   // namespace engine
 }   // namespace jahshaka
 
