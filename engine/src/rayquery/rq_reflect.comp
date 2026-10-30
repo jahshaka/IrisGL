@@ -135,7 +135,7 @@ layout( rgba16f, set = 0, binding = 7 ) uniform image2DArray historyCur;
 /// and this frame's estimator - explicit integer fields.
 layout( rg32ui, set = 0, binding = 8 ) uniform readonly  uimage2DArray statePrev;
 layout( rg32ui, set = 0, binding = 9 ) uniform uimage2DArray stateCur;
-layout( set = 0, binding = 10 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 10 ) uniform sampler3D voxelHalf[kMaxCascades];   // VOXEL-R13: the half store
 layout( set = 0, binding = 11 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 12 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 13 ) uniform sampler3D voxelZ[kMaxCascades];
@@ -146,15 +146,15 @@ layout( set = 0, binding = 22 ) uniform sampler3D voxelCovN[kMaxCascades];
 layout( set = 0, binding = 23 ) uniform sampler3D voxelPosP[kMaxCascades];
 layout( set = 0, binding = 24 ) uniform sampler3D voxelPosN[kMaxCascades];
 // PHOTON-VOXEL-5: level 0's back side and the voxeliser's normal (the side a hit meets).
-layout( set = 0, binding = 29 ) uniform sampler3D voxelBack[kMaxCascades];
-layout( set = 0, binding = 30 ) uniform sampler3D voxelNrm[kMaxCascades];
+layout( set = 0, binding = 29 ) uniform sampler3D voxelHalfDirect[kMaxCascades];   // VOXEL-R13: its direct terms
+layout( set = 0, binding = 30 ) uniform sampler3D voxelHalfNrmX[kMaxCascades];   // VOXEL-R13: the halves' normals, x
 // MOVER-OCCLUSION-1: the lamps' direct term per cascade (its own chain), the share a
 // hit keeps when a mover occludes the rest (jah_rq_hit.glsl) — the set's last binding.
-layout( set = 0, binding = 40 ) uniform sampler3D voxelDirect[kMaxCascades];
-#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
+layout( set = 0, binding = 40 ) uniform sampler3D voxelHalfNrmY[kMaxCascades];   // ...y
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelHalfDirect[c], u, l )
 // ...and its BACK side (48, PHOTON-7 stage 7: the direct store holds the two sides; the hit's share reads their mean)
-layout( set = 0, binding = 54 ) uniform sampler3D voxelDirectBack[kMaxCascades];   // (the last binding: OgreRayQuery.cpp kReflectDirectBackBinding)
-#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
+layout( set = 0, binding = 54 ) uniform sampler3D voxelHalfNrmZ[kMaxCascades];   // (the last binding: OgreRayQuery.cpp kReflectDirectBackBinding)
+#define JAH_VOX_SAMPLE_HALF_NRM( c, a, h, u, l ) jahHalfNrmPick( ( a ) == 0 ? textureLod( voxelHalfNrmX[c], u, l ) : ( ( a ) == 1 ? textureLod( voxelHalfNrmY[c], u, l ) : textureLod( voxelHalfNrmZ[c], u, l ) ), h )
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
 layout( set = 0, binding = 41 ) uniform sampler3D fogAerial;

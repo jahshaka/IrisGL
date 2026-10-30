@@ -5,7 +5,7 @@
 
 @insertpiece( PreBindingsHeaderCS )
 
-@pset( vctTexUnit, 2 )
+@pset( vctTexUnit, 1 )
 
 /// Enable uses_array_bindings when there is more than one cascade
 /// (hlms_num_vct_cascades can't be 0)
@@ -13,7 +13,6 @@
 @psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
 
 vulkan_layout( ogre_t0 ) uniform texture3D voxelAlbedoTex;
-vulkan_layout( ogre_t1 ) uniform texture3D voxelNormalTex;
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbes[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
 
@@ -39,41 +38,33 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value(
 @add( vctTexUnit, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
-// PHOTON-7 stage 7: every cascade's BACK SIDE, after the surface position (VctLighting::setupBounceTextures' order): the
-// store holds the two sides (vctProbes the front); a ray's hit reads the side facing it (stage 10, jah_voxel_ray.glsl).
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
-@add( vctTexUnit, hlms_num_vct_cascades )
-// PHOTON-7 stage 10, 10-1: every cascade's NORMAL (the voxeliser's: the canonical normal of a two-sided voxel says which
-// side is the front), after the backs - the side a ray's hit reads.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeNrm[@value( hlms_num_vct_cascades )];
-@add( vctTexUnit, hlms_num_vct_cascades )
-
-// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, at the unit after every probe array (the
-// same order VctLighting::setupBounceTextures binds them in). It is read with a
-// plain Load3D at the voxel this invocation writes -- the D of the fixed point
-// L = D + rho * G( L ) -- so it needs no sampler and no mip chain.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directVoxel;
-@add( vctTexUnit, 1 )
-
-// JAHSHAKA (PHOTON-WRITER-1): THE VOXELISER'S EMISSIVE VOLUME, right after
-// `directVoxel` (VctLighting::setupBounceTextures): its alpha is the voxel's merged
-// roughness, which the bounce's re-emission reads. A plain Load3D, no sampler.
+// JAHSHAKA (PHOTON-WRITER-1): THE VOXELISER'S EMISSIVE VOLUME after the arrays (VctLighting::setupBounceTextures): its
+// alpha is the voxel's merged roughness, which the bounce's re-emission reads. A plain Load3D, no sampler.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelEmissiveTex;
 @add( vctTexUnit, 1 )
-
-// Jahshaka (PHOTON-VOXEL-5): THE BACK SIDE'S DIRECT TERM on the anisotropic tiers, after the
-// emissive volume (VctLighting::setupBounceTextures): a two-sided voxel's back is its own fixed
-// point, L_back = D_back + rho * G_back.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
-@add( vctTexUnit, 1 )
-
-// Jahshaka (METAL-BOUNCE-1): THE METAL after the back side's direct term (VctLighting::setupBounceTextures):
-// the F0 and Fresnel-90 weight of the specular lobe (every surface's, a dielectric's 0.04 too), re-emitted by the lobe's hemispherical
-// integral. A plain Load3D, no sampler.
+// Jahshaka (METAL-BOUNCE-1): THE METAL: the F0 and Fresnel-90 weight of the specular lobe (every surface's, a
+// dielectric's 0.04 too), re-emitted by the lobe's hemispherical integral. A plain Load3D, no sampler.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 @add( vctTexUnit, 1 )
+// VOXEL-R13: THE HALF STORE's DIRECT TERMS: each half's fixed point L_q = D_q + rho G_q (plain Load3Ds at the voxel
+// written); and THE HALVES' OWN FACES per axis - their centroid across the axis and their normal (PhotonVoxelizerSource
+// Base.h): a half's gather at the no-ray tier starts on its own faces along their normal.
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D halfStoreDirect;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideX;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideY;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideZ;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmX;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmY;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmZ;
+@add( vctTexUnit, 1 )
 
-// JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after `directVoxel`
+// JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after the halves' faces
 // (VctLighting::setupBounceTextures binds it last, and only while the host set a
 // cube - the job property jah_env). Sampled with vctProbeSampler.
 @property( jah_env )
@@ -84,29 +75,23 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 vulkan( layout( ogre_s2 ) uniform sampler vctProbeSampler );
 
 // PHOTON-7 stage 4: READ-WRITE - the pass reads back what it wrote (the store's own rounding), so a voxel at the
-// float store's fixed point moves by exactly 0 and its brick can stop (PhotonBrickFeedback_cs.glsl).
+// float store's fixed point moves by exactly 0 and its brick can stop (PhotonBrickFeedback_cs.glsl). VOXEL-R13 stage 2:
+// THE PASS'S TARGET is the half store's layout (six halves side by side), copied back over the listed bricks.
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict image3D lightVoxel;
-// PHOTON-7 stage 7: THE BACK SIDE'S NEW VALUE, into the chain's COMPACT SCRATCH (PhotonVoxelLighting::ensureBackScratch:
-// one row a listed brick - this group's list slot - and one texel a voxel of it, x + 8 y + 64 z): never in place, since
-// this pass's own gather reads the back (the sides' mean) and a neighbour's back rewritten in the same dispatch would be
-// a race. The copy-back moves it over the listed bricks with the front's (PhotonBrickFeedback_cs.glsl). READ too: the
-// pass reads back what it wrote (the store's own rounding: an image of the store's format, never a packed buffer).
-layout( vulkan( ogre_u1 ) vk_comma rgba16f )
-uniform restrict image2D backScratch;
 // PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most this frame's pass
 // moved a voxel's total (relative), max-reduced per 8^3 brick - the feedback's per-brick change (stage 4).
-layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
+layout( std430, ogre_U1 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
 // PHOTON-7 stage 4, THE FEEDBACK (PhotonBrickFeedback_cs.glsl): the ACTIVE bricks this pass covers (8 groups of 4^3 a
 // brick, an indirect dispatch), and their state - words 4 (the most a voxel's total moved, absolute) and 5 (the brick's
 // sensitivity: its voxels' re-emission over their own code) written here.
-layout( std430, ogre_U3 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
-layout( std430, ogre_U4 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
+layout( std430, ogre_U2 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
+layout( std430, ogre_U3 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
 @property( jah_vct_tlas )
 // PHOTON-7 stage 10, 10-2b: THE SIDES' GATHER BY TLAS RAYS (rayquery/rq_voxel_sides.comp, dispatched before this job over the
 // same list): per listed brick slot, per voxel of it (x + 8 y + 64 z), per side, the gathered radiance as two
 // packHalf2x16 words - read at the ray tier in place of the voxel rays.
-layout( std430, ogre_U5 ) restrict readonly buffer jahSideGatherLayout { uint jahSideGather[]; };
+layout( std430, ogre_U4 ) restrict readonly buffer jahSideGatherLayout { uint jahSideGather[]; };
 @end
 
 layout( local_size_x = @value( threads_per_group_x ),

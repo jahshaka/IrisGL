@@ -83,11 +83,10 @@ struct HostBinds {
 HostBinds sHost[Ogre::HLMS_MAX];   // render thread only
 
 /// The voxel cascades' light-volume registers, in the order the voxel lighting lists them: the total (level 0), the
-/// three directional axes, the coverage per half-axis, the surface position per half, then level 0's back side and
-/// the voxeliser's normal. propertiesMerged numbers them; the door names them.
+/// three directional axes, the coverage per half-axis and the surface position per half. propertiesMerged numbers
+/// them; the door names them.
 const char *const kVolumeRegisters[] = { "vctProbes",    "vctProbeX",    "vctProbeY",    "vctProbeZ",
-                                         "vctProbeCovP", "vctProbeCovN", "vctProbePosP", "vctProbePosN",
-                                         "vctProbeBack", "vctProbeNrm" };
+                                         "vctProbeCovP", "vctProbeCovN", "vctProbePosP", "vctProbePosN" };
 static_assert(sizeof(kVolumeRegisters) / sizeof(kVolumeRegisters[0]) ==
                   size_t(Ogre::PhotonVoxelLighting::kVolumesPerCascade),
               "one register name per light volume the voxel lighting lists");

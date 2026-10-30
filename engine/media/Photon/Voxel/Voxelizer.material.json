@@ -6,13 +6,13 @@
             "threads_per_group" : [4, 4, 4],
 
             "source" : "Voxelizer_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "JahVoxelHalves_piece_all.any", "VoxelMerge_piece_cs.any", "Voxelizer_piece_cs.any"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 14,
+            "uav_units" : 19,
 
-            "gl_tex_slot_start" : 14,
+            "gl_tex_slot_start" : 19,
 			
 			"params" :
             [
@@ -21,17 +21,22 @@
 			"params_glsl" :
             [
                 ["voxelAlbedoTex",      	[1], "int"],
-                ["voxelNormalTex",  		[2], "int"],
-                ["voxelEmissiveTex",		[3], "int"],
-                ["voxelAccumVal",			[4], "int"],
-                ["voxelMergeAccum",			[5], "int"],
-                ["voxelCoveragePTex",		[6], "int"],
-                ["voxelCoverageNTex",		[7], "int"],
-                ["voxelPositionPTex",		[8], "int"],
-                ["voxelPositionNTex",		[9], "int"],
-                ["voxelMetalTex",			[10], "int"],
-                ["voxelEmitPTex",			[11], "int"],
-                ["voxelEmitNTex",			[12], "int"]
+                ["voxelEmissiveTex",		[2], "int"],
+                ["voxelAccumVal",			[3], "int"],
+                ["voxelMergeAccum",			[4], "int"],
+                ["voxelCoveragePTex",		[5], "int"],
+                ["voxelCoverageNTex",		[6], "int"],
+                ["voxelPositionPTex",		[7], "int"],
+                ["voxelPositionNTex",		[8], "int"],
+                ["voxelMetalTex",			[9], "int"],
+                ["voxelEmitPTex",			[10], "int"],
+                ["voxelEmitNTex",			[11], "int"],
+                ["voxelHalfSideXTex",		[12], "int"],
+                ["voxelHalfSideYTex",		[13], "int"],
+                ["voxelHalfSideZTex",		[14], "int"],
+                ["voxelHalfNrmXTex",		[15], "int"],
+                ["voxelHalfNrmYTex",		[16], "int"],
+                ["voxelHalfNrmZTex",		[17], "int"]
 			],
 
 			"properties" :
@@ -47,7 +52,7 @@
             "threads_per_group" : [4, 4, 4],
 
             "source" : "LightInjection_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "AreaLights_LTC_piece_ps.any", "sRGB.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "JahBrdf_piece_all.any", "JahCloudShadow_piece_all.any", "JahVoxelSample_piece_all.any", "JahVoxelFaces_piece_all.any", "JahInjectVisibility_piece_all.any", "JahDirectionalComposite_piece_cs.any", "JahHalfRound_piece_all.any", "LightInjection_piece_cs.any"],
+            "pieces" : ["CrossPlatformSettings_piece_all", "AreaLights_LTC_piece_ps.any", "sRGB.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "JahBrdf_piece_all.any", "JahCloudShadow_piece_all.any", "JahVoxelSample_piece_all.any", "JahVoxelFaces_piece_all.any", "JahInjectVisibility_piece_all.any", "JahDirectionalComposite_piece_cs.any", "JahHalfRound_piece_all.any", "JahVoxelHalves_piece_all.any", "LightInjection_piece_cs.any"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
@@ -118,7 +123,7 @@
             "threads_per_group" : [4, 4, 4],
 
             "source" : "AnisotropicMipVctStep0_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "sRGB.any", "JahDirectionalComposite_piece_cs.any", "JahHalfRound_piece_all.any", "AnisotropicMipVctStep0_piece_cs.any"],
+            "pieces" : ["CrossPlatformSettings_piece_all", "sRGB.any", "JahDirectionalComposite_piece_cs.any", "JahHalfRound_piece_all.any", "JahVoxelHalves_piece_all.any", "AnisotropicMipVctStep0_piece_cs.any"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
@@ -128,7 +133,7 @@
 
             "textures" :
             [
-                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}, {}
             ],
 
             "params" :
@@ -139,16 +144,13 @@
 
             "params_glsl" :
             [
-                ["inLightFront",            [0], "int"],
-                ["inLightBack",             [1], "int"],
-                ["inDirectFront",           [2], "int"],
-                ["inDirectBack",            [3], "int"],
-                ["inNormal",                [4], "int"],
-                ["inCoveragePTex",          [5], "int"],
-                ["inCoverageNTex",          [6], "int"],
-                ["inDirectDir0",            [7], "int"],
-                ["inDirectDir1",            [8], "int"],
-                ["inDirectDir2",            [9], "int"],
+                ["inHalfLight",             [0], "int"],
+                ["inHalfDirect",            [1], "int"],
+                ["inCoveragePTex",          [2], "int"],
+                ["inCoverageNTex",          [3], "int"],
+                ["inDirectDir0",            [4], "int"],
+                ["inDirectDir1",            [5], "int"],
+                ["inDirectDir2",            [6], "int"],
                 ["outLightHigherMip0",       [0], "int"],
                 ["outLightHigherMip1",       [1], "int"],
                 ["outLightHigherMip2",       [2], "int"]
@@ -197,7 +199,7 @@
             "threads_per_group" : [4, 4, 4],
 
             "source" : "LightVctBounceInject_cs",
-            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "JahHalfRound_piece_all.any", "LightVctBounceInject_piece_cs.any"],
+            "pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all", "sRGB.any", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahEnvironment_piece_all.any", "JahVoxelCones_piece_all.any", "JahDiffuseAlbedo_piece_all.any", "JahSpecularAlbedo_piece_all.any", "JahHalfRound_piece_all.any", "JahVoxelHalves_piece_all.any", "LightVctBounceInject_piece_cs.any"],
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
@@ -225,8 +227,6 @@
             "params_glsl" :
             [
                 ["voxelAlbedoTex",          [0], "int"],
-                ["voxelNormalTex",          [1], "int"],
-
                 ["lightVoxel",              [0], "int"]
             ]
         },
@@ -257,7 +257,7 @@
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 5,
+            "uav_units" : 3,
 
             "properties" :
             {

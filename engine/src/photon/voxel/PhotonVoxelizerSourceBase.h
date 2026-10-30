@@ -61,7 +61,6 @@ namespace Ogre
         /// Jahshaka (METAL-BOUNCE-1): THE METAL - its F0 (rgb) and Fresnel-90 weight (alpha), RGBA16_UNORM, level 0
         /// only (VoxelMerge_piece_cs.any, voxelMergeMetal).
         TextureGpu *mMetalVox;
-        TextureGpu *mNormalVox;
         TextureGpu *mAccumValVox;
         /// Jahshaka (PHOTON-VOXEL-3/-4): THE PER-HALF-AXIS COVERAGE (RGB10A2 each: O_x, O_y,
         /// O_z) - [0] of the faces looking +a, [1] of those looking -a: the fraction of each
@@ -80,6 +79,15 @@ namespace Ogre
         /// coverage (VoxelMerge_piece_cs.any, THE SURFACE POSITION): the origin plane's
         /// test. The list's last two entries.
         TextureGpu *mPositionVox[2] = {};
+        /// VOXEL-R13 stage 1: THE HALF'S OWN FACES - where each half-axis's faces lie ACROSS its axis and which way they
+        /// look, level 0 only (VoxelMerge_piece_cs.any, THE HALF'S OWN FACES). Per axis a, one volume holding both halves:
+        /// [a] of mHalfSideVox (RGBA16_UNORM) the coverage-weighted mean of the faces' centroids on the two other axes,
+        /// in the cell's own [0, 1] (rg the +a half's, ba the -a half's; the other axes in increasing order); [a] of
+        /// mHalfNrmVox (RGBA8_UNORM) the coverage-weighted mean of the faces' normals as a hemisphere octahedron about
+        /// the half's own direction (rg the +a half's, ba the -a half's; 0.5 0.5 the axis itself). A half's gather and
+        /// its lamp march start on its own faces with its own normal from them (the light injection, the bounce).
+        TextureGpu *mHalfSideVox[3] = {};
+        TextureGpu *mHalfNrmVox[3] = {};
 
         RenderSystem      *mRenderSystem = nullptr;
         VaoManager        *mVaoManager = nullptr;
@@ -112,13 +120,15 @@ namespace Ogre
         Vector3 getVoxelResolution() const;
 
         TextureGpu *getAlbedoVox() { return mAlbedoVox; }
-        TextureGpu *getNormalVox() { return mNormalVox; }
         TextureGpu *getEmissiveVox() { return mEmissiveVox; }
         TextureGpu *getMetalVox() { return mMetalVox; }
         /// `half`: 0 the faces looking +a, 1 those looking -a.
         TextureGpu *getCoverageVox( size_t half ) { return mCoverageVox[half]; }
         TextureGpu *getPositionVox( size_t half ) { return mPositionVox[half]; }
         TextureGpu *getEmitVox( size_t half ) { return mEmitVox[half]; }
+        /// VOXEL-R13: `axis` 0..2 - both halves of that axis (mHalfSideVox / mHalfNrmVox).
+        TextureGpu *getHalfSideVox( size_t axis ) { return mHalfSideVox[axis]; }
+        TextureGpu *getHalfNrmVox( size_t axis ) { return mHalfNrmVox[axis]; }
 
         TextureGpuManager *getTextureGpuManager();
         RenderSystem      *getRenderSystem();

@@ -101,11 +101,12 @@ namespace Ogre
             TextureGpu *albedo = nullptr;
             TextureGpu *emissive = nullptr;
             TextureGpu *metal = nullptr;   ///< METAL-BOUNCE-1: the metal's F0 and Fresnel-90 weight
-            TextureGpu *normal = nullptr;
             TextureGpu *accumVal = nullptr;
             TextureGpu *coverage[2] = {};
             TextureGpu *position[2] = {};
             TextureGpu *emit[2] = {};   ///< JUNCTION-NORMAL-1: the emissive factor per half-axis
+            TextureGpu *halfSide[3] = {};   ///< VOXEL-R13: the halves' faces across their axis, per axis
+            TextureGpu *halfNrm[3] = {};    ///< VOXEL-R13: the halves' faces' mean normal, per axis
         };
         /// A box of the volume's cells: [x, x + w) x [y, y + h) x [z, z + d) - and where its voxels are STORED
         /// (PHOTON-7 stage 2): the cell permuted by `storeAxis` (0: (x, y, z); 1: (y, x, z); 2: (z, x, y)) plus

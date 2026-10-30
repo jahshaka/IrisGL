@@ -18,11 +18,9 @@
 // HOW A CALLER BINDS IT. The shader's bindings are its own; this file reads the
 // volumes through macros the caller defines before it:
 //
-//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's FRONT side at uvw u (PHOTON-7 stage 7: the
-//                                store holds the two SIDES; the total is their mean, taken at
-//                                the read) - level 0 the only level a light read takes from it
-//                                (its coarse levels exist only for the specular SDF skip, which
-//                                reads their opacity w alone, jah_voxel_march.glsl)
+//     JAH_VOX_SAMPLE_ISO(c,u,l)  vec4: cascade c's HALF STORE at uvw u (VOXEL-R13: level 0's six half lights, one
+//                                volume six times the voxels wide - jah_voxel_halves.glsl; a read takes the half
+//                                facing it through jahHalfUvw) - level 0 only
 //     JAH_VOX_SAMPLE_X(c,u,l)    vec4: the X-axis directional volume (both
 //     JAH_VOX_SAMPLE_Y(c,u,l)    signs packed side by side along u.x, so u.x
 //     JAH_VOX_SAMPLE_Z(c,u,l)    runs over [0, 1) and the halves are 0.5 apart) - every
@@ -36,20 +34,10 @@
 //                                every placement), every coarser level p absolute in the cascade's
 //                                normalised space; the readers below add a level-0 texel's cell
 //     JAH_VOX_INVRES(c)          vec3: 1 / cascade c's resolution, per axis
-//     JAH_VOX_SAMPLE_BACK(c,u,l) vec4: level 0's BACK side (premultiplied like the front, the same
-//                                opacity w); VctLighting::backIndex(). Bound by EVERY reader.
-//     JAH_VOX_PER_SIDE           0 or 1, a PREPROCESSOR constant (PHOTON-VOXEL-5): 1, a level-0 read
-//                                takes the SIDE its travel meets (the normal below is bound); 0, it
-//                                takes the sides' MEAN (the bounce's gather, whose isotropic read the
-//                                per-side physics leaves to VOXEL-LEAK-1)
-//     JAH_VOX_SAMPLE_NRM(c,u,l)  vec4: the voxeliser's normal (xyz biased, the canonical normal of a
-//                                two-sided voxel: the front is the side it points to); normalIndex()
-//                                - bound where JAH_VOX_PER_SIDE is 1
-// WHY THE SIDES ARE STORED AND THE MEAN DERIVED (PHOTON-7 stage 7, gi.field_oracle (1)): a side derived as
-// twice the stored mean minus the stored back, both half floats, cancels catastrophically where it is dim
-// beside a bright other side (its absolute precision ~2^-10 of the mean): a lamp step's rest read the
-// derived fronts up to 9 codes apart between two paths to the same world (50 in cascade 1) with every
-// stored value within a code. A mean of two positives never amplifies a relative error.
+// A LEVEL-0 READ TAKES THE HALF FACING IT (VOXEL-R13 stage 2): the half of the plane's axis whose faces look back at the
+// travel - the faces a ray along that axis meets, lit and gathered from their own faces (the two-side store paired the
+// halves by the sign of one normal and pooled a sky-lit outer face with an inner one in every cell holding a box's
+// corner: VOXEL-R13 stage 0). The caller includes jah_voxel_halves.glsl first.
 //
 // THE VOLUME'S DIRECTIONAL READ IS THE ONLY RULE HERE — ONE RULE AT EVERY MIP AND EVERY TIER
 // (PHOTON-VOXEL-3; PHOTON-MARCH-1): a step takes the opacity of what it crosses, per axis,
@@ -66,9 +54,6 @@
 #ifndef JAH_VOXEL_SAMPLE_GLSL
 #define JAH_VOXEL_SAMPLE_GLSL
 
-#ifndef JAH_VOX_PER_SIDE
-#define JAH_VOX_PER_SIDE 0
-#endif
 
 /// THE LEVEL A READ TAKES FOR A FOOTPRINT 2^lod CELLS WIDE: the level whose TRILINEAR
 /// KERNEL is the footprint. A trilinear fetch weighs the texels within one texel of the
@@ -345,32 +330,15 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	}
 	else
 	{
-		// LEVEL 0 (the only level a light read takes from the sides; `mip` is 0 here): the front and the back,
-		// stored (the header's why)
-		vec4 s = JAH_VOX_SAMPLE_ISO( c, posLS, 0.0 );
-		const vec4 bk = JAH_VOX_SAMPLE_BACK( c, posLS, 0.0 );
-#if JAH_VOX_PER_SIDE
-		// LEVEL 0 PER SIDE (PHOTON-VOXEL-5): a voxel holding both faces of a slab thinner than the
-		// cell keeps two lights, and the travel meets the side its canonical normal FACES (BUGS-1 item
-		// 4: the sign of n . -dir, the whole normal against the whole direction; the normal's component
-		// along the travel's dominant axis alone read a +y normal met along x as the MEAN): facing the
-		// travel the front, facing away the back, edge-on their mean. A one-sided voxel holds its light
-		// on both sides, so every answer is its light. The normal is read filtered like the light (the
-		// canonical normal of a two-sided voxel agrees between neighbours: VoxelMerge_piece_cs.any).
-		// Three fetches and selects, no branch (a dependent fetch would cost every plane of every march).
-		{
-			const float along = dot( JAH_VOX_SAMPLE_NRM( c, posLS, 0.0 ).xyz * 2.0 - 1.0, -dir );
-			s.xyz = along < 0.0 ? bk.xyz : ( along > 0.0 ? s.xyz : 0.5 * ( s.xyz + bk.xyz ) );
-		}
-#else
-		// THE SIDES' MEAN (the bounce's isotropic gather)
-		s.xyz = 0.5 * ( s.xyz + bk.xyz );
-#endif
+		// LEVEL 0 (`mip` is 0 here): THE HALF FACING THE TRAVEL along the plane's axis (VOXEL-R13 stage 2; the header) -
+		// its light (radiance x k, k) through the half store's own filtered read, the radiance carried at the opacity the
+		// plane crosses below
+		const vec4 s = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( posLS, ha, axis, invRes.x ), 0.0 );
 		// a ray takes both halves (any face it crosses stops it), a cone the one looking back
 		const float oBack = jahVoxelCov( c, ha, posLS, 0.0 )[axis];
 		const float o = ray ? min( 1.0, oBack + jahVoxelCov( c, 1 - ha, posLS, 0.0 )[axis] ) : oBack;
 		aA = o;
-		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );
+		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );   // (the half's radiance at the plane's opacity)
 		if( n == axis || w < 1.0 )
 		{
 			// (level 0: the plane's own texel along the axis, its cell added - jahVoxelPos0Centred)

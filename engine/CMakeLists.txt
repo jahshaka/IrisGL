@@ -948,6 +948,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_area_vis_law.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_half_round.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ssr_march.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl"
                              "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl")
@@ -977,7 +978,8 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelSample
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelSample_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
-            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
@@ -1147,6 +1149,12 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHalfRound_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_half_round.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
+    # THE HALF-AXES OF A LEVEL-0 VOXEL (VOXEL-R13): the voxeliser's, the light injection's, the bounce's and the
+    # directional step's one text of a half's store texel, its own faces' point and normal (jah_voxel_halves.glsl)
+    COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelHalves
+            -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelHalves_piece_all.any
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl
+            -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahHalfStochastic
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahHalfStochastic_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_half_stochastic.glsl
@@ -1162,13 +1170,14 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelReaderParity_ps.glsl
             -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl
             -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
-            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
-            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
-            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
-            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
-            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
-            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
-            -DIN8=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl
+            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
+            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -DIN8=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
+            -DIN9=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"

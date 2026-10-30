@@ -84,10 +84,6 @@
 	#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], probeSampler, u, l )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], probeSampler, u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], probeSampler, u, l )
-	// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
-	#define JAH_VOX_PER_SIDE 1
-	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], probeSampler, u, l )
-	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], probeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) p.vctInvResMaxLod[c].xyz
 	#define JAH_VOX_MAXLOD( c ) p.vctInvResMaxLod[c].w
 	#define JAH_VOX_FROM_PREV_SCALE( c ) p.vctFromPrev[( (c) - 1 ) * 2]
@@ -344,7 +340,9 @@
 		// cells (PHOTON-READER-1): gi.ddgi_ambient's floor 0.914 / 0.915 / 0.915 of its
 		// truth, the sealed room 1 / 1 / 3 codes, gi.leak_room's thin walls within
 		// 0.004 of each other at 0 and 1 - nothing overrules the pixel's geometry.
-		float3 startBias = dirLS * JAH_VOX_INVRES( 0 );
+		// (VOXEL-R13 stage 3: never past a face looking back at the probe - a probe 8 mm before a wall biased a cell into
+		// it read the wall's far side: gi.sealed_sky_noray's field, 1.76 % of the roof inside a sealed room)
+		float3 startBias = dirLS * max( jahVoxelFreeLift( posLS, dirLS, JAH_VOX_INVRES( 0 ).x ), 0.0 );
 		// THE PROBE'S RAY IS THE CACHES' OCCUPANCY RAY (PHOTON-7 stage 10, 10-1; L9: jah_voxel_ray.glsl): a cell
 		// holding any geometry stops it from every direction, its hit reads the side facing the ray, and the sky
 		// enters only at an EARNED MISS - the ray left the last cascade (its world shell, worldToVolumeDir.w, or its

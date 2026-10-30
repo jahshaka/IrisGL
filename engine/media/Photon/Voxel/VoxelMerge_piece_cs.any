@@ -39,7 +39,15 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY-EIGHT ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// ONE VOXEL'S FORTY ACCUMULATOR TEXELS ARE ADJACENT IN Z (VOXEL-R13 stage 3: the halves' depth bins at +34..+39, THE
+	/// HALF'S DEPTHS below; stage 2's layout before them - the voxel's two normal
+	/// sums are deleted with the two-side store): albedo sum at +0..2 (rgb), the metal's Fresnel-90 weight at +3, the
+	/// emissive sum at +4..6, the roughness sum at +7, the per-half-axis coverage sums packed into +8 (the faces looking
+	/// +x, +y, +z) and +9 (looking -a), the matching position-weighted sums +10 and +11, the casters' coverage +12 and +13,
+	/// the metal's F0 at +14..16, the emitters' coverage per half +17 and +18, the emitters' weight +19, the emissive's
+	/// shared exponent +20, the kinds of faces +21, and the halves' own faces at +22..+33, two a half (THE HALF'S OWN
+	/// FACES, below). (Before: the history of each, PHOTON-VOXEL-3/-4, FAR-SUN-1, METAL-BOUNCE-1, JUNCTION-NORMAL-1,
+	/// PHOTON-7 10-3 R2 and 10-4 R7, VOXEL-R13 stage 1.): albedo sum at
 	/// z*28+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
 	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
 	/// RAW normal sum at +4..6 (xyz, two's complement),
@@ -76,9 +84,100 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 28u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 40u + chan );
 	}
 
+
+	/// THE HALF'S OWN FACES (VOXEL-R13 stage 1; jah_voxel_halves.glsl says why). Per half q = h x 3 + a, two sums over
+	/// its pieces, each weighted by the piece's coverage contribution w to that half (the coverage's own sum, so a face the
+	/// half barely sees barely counts): WHERE ITS FACES LIE ACROSS THE AXIS - the sums of w c_b and w c_c, c the piece's
+	/// centroid in the cell's own [0, 1] on the two other axes - and WHICH WAY THEY LOOK - the sum of w |n_a| along the
+	/// half's direction and the sums of w ( n_b + 1 ) / 2 and w ( n_c + 1 ) / 2 across it, n the face's geometric normal as
+	/// the half sees it (its a component looks the half's way; a two-sided sheet's other side is the other half's). The
+	/// across-axis normal sums are BIASED so every field is a non-negative integer: the mean's components are recovered
+	/// against the half's coverage sum S, n_b ~ 2 B_b - S. Two accumulator texels a half (+28 + 2 q, +29 + 2 q):
+	///   the centroid word: w c_b in bits 0-15, w c_c in 16-31, on the coverage's 1/512 grid (at most S, under 4: far
+	///   below the field's cap);
+	///   the normal word: B_b in bits 0-10, B_c in 11-21 (the 1/512 grid, at most S), w |n_a| in 22-31 on a 1/256 grid
+	///   (at most S: 4.0 within the field).
+	/// Each takes, like the position, the share of its coverage add the coverage field accepted (THE POSITION TAKES WHAT
+	/// THE COVERAGE TAKES), so its fields stay at most the coverage they are recovered against; each field saturates on its
+	/// own (commutative and associative: the merge stays order-independent).
+	/// THE HALF'S DEPTHS (VOXEL-R13 stage 3, the lead's ruling (B')): per half q, a word of 32 bins along the half's own
+	/// axis in its cell, each piece setting the run of bins its triangle spans there (accumulator +34 + q, OR-ed). A half
+	/// is TWO-DEPTH where its bins have a GAP - faces at two depths of the cell, the room's floor top and the ground's top
+	/// outside one coarse cell under the wall, one +y half: one value cannot be both - and a reader's hit on such a half
+	/// asks the finer cascade which face the ray meets (jah_voxel_ray.glsl). A tilted face fills a contiguous run (single
+	/// depth). Faces closer than one bin (1/32 of the cell) read single-depth. The flag rides the low bit of the half's own
+	/// surface-position channel (voxelMergeDepthFlag): every reader of the position reads it at the cell, level 0.
+	INLINE uint voxelMergeDepthBins( float lo, float hi )
+	{
+		const uint a = uint( clamp( floor( min( lo, hi ) * 32.0f ), 0.0f, 31.0f ) );
+		const uint b = uint( clamp( floor( max( lo, hi ) * 32.0f ), 0.0f, 31.0f ) );
+		const uint upTo = b == 31u ? 0xFFFFFFFFu : ( ( 1u << ( b + 1u ) ) - 1u );
+		return upTo & ~( ( 1u << a ) - 1u );
+	}
+	INLINE uint voxelMergeTwoDepth( uint m )
+	{
+		if( m == 0u )
+			return 0u;
+		const uint low = m & ( 0u - m );
+		const uint t = m / low;
+		return ( t & ( t + 1u ) ) != 0u ? 1u : 0u;
+	}
+	/// the resolved position (O x p per axis, [0, 1]) with each axis's two-depth flag in its 16-bit channel's low bit
+	INLINE float3 voxelMergeDepthFlag( float3 pos, uint m0, uint m1, uint m2 )
+	{
+		const uint3 flag = uint3( voxelMergeTwoDepth( m0 ), voxelMergeTwoDepth( m1 ), voxelMergeTwoDepth( m2 ) );
+		const uint3 code = uint3( floor( saturate( pos ) * 65535.0f + 0.5f ) );
+		return float3( ( code & uint3( 0xFFFEu, 0xFFFEu, 0xFFFEu ) ) | flag ) * ( 1.0f / 65535.0f );
+	}
+	/// THE HALF'S TWO SIDES (VOXEL-R13 stage 3): a half holding a two-sided piece's faces (the kinds word's bit 12 + q,
+	/// OR-ed) - its coplanar face looking the other way is its own back, not a surface pressed against it (the bounce's
+	/// hidden-face rule, jah_voxel_ray.glsl jahVoxelFreeLift) - carried in the low bit of its first centroid channel
+	/// (RGBA16_UNORM: the centroid loses at most 1.5e-5 of the cell)
+	INLINE float4 voxelMergeTwoSidedFlag( float4 side, uint twoP, uint twoN )
+	{
+		uint2 cp = uint2( floor( saturate( side.xz ) * 65535.0f + 0.5f ) );
+		cp = ( cp & uint2( 0xFFFEu, 0xFFFEu ) ) | uint2( twoP, twoN );
+		return float4( float( cp.x ) * ( 1.0f / 65535.0f ), side.y, float( cp.y ) * ( 1.0f / 65535.0f ), side.w );
+	}
+	INLINE uint voxelMergeHalfTaken( uint add, uint addAxis, uint taken )
+	{
+		return addAxis > 0u ? ( add * taken + ( addAxis >> 1u ) ) / addAxis : 0u;
+	}
+	INLINE uint voxelMergeHalfAddCentroid( uint packed, uint addB, uint addC )
+	{
+		const uint b = min( ( packed & 0xFFFFu ) + addB, 0xFFFFu );
+		const uint c = min( ( packed >> 16u ) + addC, 0xFFFFu );
+		return b | ( c << 16u );
+	}
+	INLINE uint voxelMergeHalfAddNormal( uint packed, uint addAlong, uint addB, uint addC )
+	{
+		const uint b = min( ( packed & 0x7FFu ) + addB, 0x7FFu );
+		const uint c = min( ( ( packed >> 11u ) & 0x7FFu ) + addC, 0x7FFu );
+		const uint along = min( ( packed >> 22u ) + addAlong, 0x3FFu );
+		return b | ( c << 11u ) | ( along << 22u );
+	}
+	/// THE RESOLVE of one half from its two words and its coverage sum S (the field, on the 1/512 grid): the centroid
+	/// across the axis in the cell's [0, 1] (the cell's centre with no coverage), and the normal's hemisphere octahedron
+	/// (jahHalfNormalEncode: the axis with none).
+	INLINE float2 voxelMergeHalfCentroid( uint packed, uint coverageSum )
+	{
+		if( coverageSum == 0u )
+			return float2( 0.5f, 0.5f );
+		return min( float2( float( packed & 0xFFFFu ), float( packed >> 16u ) ) / float( coverageSum ),
+					float2( 1.0f, 1.0f ) );
+	}
+	INLINE float2 voxelMergeHalfNormal( uint packed, uint coverageSum )
+	{
+		if( coverageSum == 0u )
+			return float2( 0.5f, 0.5f );
+		const float s = float( coverageSum );
+		const float along = 2.0f * float( packed >> 22u );
+		const float2 across = float2( 2.0f * float( packed & 0x7FFu ) - s, 2.0f * float( ( packed >> 11u ) & 0x7FFu ) - s );
+		return jahHalfNormalEncode( along, across );
+	}
 
 	/// THE PANE FACES (PHOTON-7 10-4 R7; the lead's cell rule, 2026-10-27). A PANE - a face whose material blends with
 	/// what is behind it - transmits a ray, attenuated by its coverage (its projected area x its alpha: the coverage's own
@@ -95,49 +194,6 @@
 	{
 		const uint pane = ( kinds >> ( 3u * h ) ) & 7u, occluder = ( kinds >> ( 6u + 3u * h ) ) & 7u;
 		return pane & ~occluder;
-	}
-
-	/// THE TWO NORMAL SUMS, AND WHY THERE ARE TWO.
-	///
-	/// Upstream decided "this voxel holds surfaces facing opposite ways" WHILE
-	/// summing: it compared each triangle's normal against the sum SO FAR, and if
-	/// the angle exceeded 120 degrees it set the double-sided flag and dropped
-	/// that triangle from the sum. That is first-one-wins — the answer depends on
-	/// which triangle the thread reached first, which is the instance order in
-	/// the dispatch, which is the attach order. It is the LAST order dependence
-	/// in the voxelisation once the merge itself is exact, and it is worth 6/255
-	/// on gi.cascade_determinism's room.
-	///
-	/// So the decision moves to the resolve pass, where it is made from two sums
-	/// that do not care about order: the RAW sum of every normal, and the sum of
-	/// every normal FOLDED into one half-space. `voxelMergeCanonical` folds by
-	/// the sign of the normal's largest component, which is arbitrary but has the
-	/// one property the test needs — ANTIPODAL NORMALS ALWAYS FOLD TOGETHER, since
-	/// sign(-n) = -sign(n). Two surfaces facing opposite ways therefore cancel in
-	/// the raw sum and reinforce in the folded one.
-	///
-	/// AND THE TWO SUMS GIVE BACK THE TWO GROUPS. Folded = U - F and raw = U + F,
-	/// where U is the sum of the normals the fold left alone and F the sum, in
-	/// their ORIGINAL directions, of the ones it turned round — so
-	/// U = (raw + folded)/2 and F = (raw - folded)/2, both exact. The voxel's
-	/// normal is the LARGER of the two, which is the majority group's mean, which
-	/// is what the pin stored (it dropped the opposing triangles from the sum and
-	/// divided by the whole count); the double-sided flag is "the other group is
-	/// not empty", which is what the pin's exclusion meant. No threshold, no
-	/// epsilon: both tests are integer comparisons of the two sums.
-	///
-	/// The one place this is NOT the pin's answer: upstream dropped a triangle at
-	/// more than 120 degrees from the RUNNING sum, while the fold separates at 90,
-	/// so a voxel whose normals span 90 to 120 degrees is two groups here and one
-	/// there. Measured on gi.field_follows' sub-voxel walls that is worth under
-	/// 3 % of the far bounce — the price of not asking the question one triangle
-	/// at a time, and of the answer no longer depending on which triangle a thread
-	/// reached first.
-	INLINE float3 voxelMergeCanonical( float3 n )
-	{
-		float3 a = abs( n );
-		float s = (a.x >= a.y && a.x >= a.z) ? n.x : ((a.y >= a.z) ? n.y : n.z);
-		return s < 0.0f ? -n : n;
 	}
 
 	/// A contribution in [0, VOXEL_MERGE_CLAMP], on the grid, rounded to nearest.
@@ -157,13 +213,6 @@
 	INLINE uint voxelMergeAddSat( uint sum, uint x )
 	{
 		return ( sum > ( 0xFFFFFFFFu - x ) ) ? 0xFFFFFFFFu : ( sum + x );
-	}
-	/// A unit vector's component, on the same grid, as two's complement. `floor`
-	/// and not a cast: a cast truncates towards zero and would round -0.5 the
-	/// wrong way.
-	INLINE int3 voxelMergeQuantizeSigned3( float3 v )
-	{
-		return int3( floor( clamp( v, -1.0f, 1.0f ) * VOXEL_MERGE_SCALE + 0.5f ) );
 	}
 
 	/// THE COVERAGE (PHOTON-VOXEL-3). THE STORE IS A DENSITY FIELD: a voxel a
@@ -195,12 +244,6 @@
 	INLINE uint3 voxelMergeWeigh3( uint3 q, uint w )
 	{
 		return ( q * w + 2048u ) >> 12u;
-	}
-	/// Signed: the arithmetic shift rounds towards minus infinity on both signs,
-	/// the same rule as the quantisation's floor.
-	INLINE int3 voxelMergeWeighSigned3( int3 q, uint w )
-	{
-		return ( q * int( w ) + 2048 ) >> 12;
 	}
 
 
@@ -408,89 +451,6 @@
 		return voxelMergeAxisResolve( packedAxis ) * local;
 	}
 
-	INLINE float4 voxelMergeNormal( uint4 sumNormal, uint4 sumFolded, uint totalWeight )
-	{
-		float invAccum = voxelMergeInvMean( totalWeight );
-		// THE TWO GROUPS, RECOVERED. Write the folded sum as U - F and the raw one
-		// as U + F, where U is the sum of the normals the fold left alone and F
-		// the sum, IN THEIR ORIGINAL DIRECTIONS, of the ones it turned round: then
-		// U = (raw + folded)/2 and F = (raw - folded)/2, both exact.
-		int3 iRaw	= int3( sumNormal.xyz );
-		int3 iFolded	= int3( sumFolded.xyz );
-		int3 iU		= iRaw + iFolded;
-		int3 iF		= iRaw - iFolded;
-		bool emptyU	= ( iU.x == 0 ) && ( iU.y == 0 ) && ( iU.z == 0 );
-		bool emptyF	= ( iF.x == 0 ) && ( iF.y == 0 ) && ( iF.z == 0 );
-
-		float3 nU = float3( iU ) * ( 0.5f * invAccum );
-		float3 nF = float3( iF ) * ( 0.5f * invAccum );
-
-		// AND THE DECISION IS GEOMETRY, NOT MEMBERSHIP. "Both groups are
-		// non-empty" is NOT the question: the fold's seam runs along the six arcs
-		// where the largest component changes (x = -y, x = -z, y = -z), and a
-		// smooth surface crosses those arcs all the time — (0.72, 0, -0.69) and
-		// (0.69, 0, -0.72) are 6.5 degrees apart and land one in each group. A
-		// membership test calls that voxel double-sided, and the injection then
-		// takes abs(NdotL) and lights it FROM BEHIND: the leak class, on every
-		// sphere, cylinder, character and curved wall (about 5 % of the surface
-		// voxels of a 32-voxel sphere), and on flat walls built from several
-		// instances whose matrices differ in the last bit.
-		//
-		// So ask the pin's own question of the two group MEANS instead: are they
-		// more than 120 degrees apart? `dot(U, F) < -0.5 |U| |F|`, compared
-		// squared to keep it to one multiply and no roots. The seam pair reads
-		// dot > 0 and is one surface; a plate thinner than a voxel reads
-		// dot = -|U||F| and is two. Both groups' sums are exact integers, so the
-		// answer is still order-independent.
-		float dUF	= dot( nU, nF );
-		float lenU2	= dot( nU, nU );
-		float lenF2	= dot( nF, nF );
-		bool doubleSided = !emptyU && !emptyF && dUF < 0.0f &&
-						   ( dUF * dUF ) > ( 0.25f * lenU2 * lenF2 );
-
-		// WHAT THE VOXEL'S NORMAL IS. One surface: the RAW mean, U + F, which is
-		// exactly what the pin stored when its 120-degree test excluded nothing.
-		// Two surfaces: the majority group's mean, which is what the pin's
-		// exclusion left behind (it dropped the opposing triangles and divided by
-		// the whole count).
-		//
-		// Taking the LARGER of the two and not U is load-bearing: a voxel whose
-		// normals ALL lie in the half-space the fold turns round (a wall facing
-		// -X, say) has U = 0, and storing that would leave it black. Measured: it
-		// costs gi.leak_room four assertions.
-		//
-		// RESIDUAL, and it is the mirror of the seam: two normals about 170
-		// degrees apart CAN both land in U (their largest components on different
-		// axes, both positive), and then F is empty, the raw mean cancels and the
-		// voxel is stored with a near-zero normal instead of the pin's majority
-		// cluster. It needs the pair to straddle the |x| = |y| tie within about a
-		// degree, and the answer it gives — a voxel that receives almost no light
-		// — is the dark side, not the leaking one.
-		float3 normalOut = nU + nF;
-		if( doubleSided )
-		{
-			normalOut = lenU2 >= lenF2 ? nU : nF;
-			// A TWO-SIDED VOXEL'S NORMAL IS CANONICAL (PHOTON-VOXEL-5): the light is stored per SIDE
-			// (LightInjection: the front, the side this normal points to, and the back), and a read
-			// FILTERS the two sides' volumes across neighbouring voxels - so neighbours must agree
-			// which physical side is the front. The majority group flips between voxels of one slab
-			// on a tie (equal faces both sides), so the side is fixed by a generic direction instead:
-			// the front is the one facing it. A slab whose normal is perpendicular to it sits on its
-			// SEAM and may flip between neighbours, so no normal content favours may lie there: the
-			// direction maximises the angle from the seam to all 26 vectors with components in
-			// {-1, 0, 1} (the axes, the face diagonals, the body diagonals) - each is 9.9 degrees or
-			// more off it; the nearest integer normals with components up to 2 are 1.5 degrees off,
-			// up to 5 are 0.19 degrees off. (The earlier (1,2,3)/sqrt(14) had the body diagonal
-			// (1,1,-1) exactly on its seam: a slab tilted so could flip voxel by voxel.)
-			if( dot( normalOut, float3( 0.8925f, 0.4166f, 0.1726f ) ) < 0.0f )
-				normalOut = -normalOut;
-		}
-
-		// Stored unnormalized and biased, exactly as before, so the injection's
-		// `xyz * 2 - 1` keeps meaning what it meant; .a is the double-sided flag
-		// (the injection lights both sides of such a voxel).
-		return float4( normalOut * 0.5f + 0.5f, doubleSided ? 1.0f : 0.0f );
-	}
 	// Jahshaka (PHOTON-WRITER-1): .w carries the voxel's MEAN ROUGHNESS (the
 	// fourteenth sum, the materials' perceptual roughness per triangle), which the
 	// light injection and the bounce read to make the voxel emit what its surface

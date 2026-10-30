@@ -96,8 +96,8 @@ inline bool isCameraCut(const float *prevPos, const float *prevRight, const floa
 /// the two must agree.
 constexpr unsigned kGatherMaxCascades = 4u;
 
-/// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the front, X, Y, Z, coverage +/-,
-/// position +/-, the back, the normal, the direct term's front and its back (PHOTON-7 stage 7).
+/// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the half store (VOXEL-R13), X, Y, Z,
+/// coverage +/-, position +/-, the half store's direct terms, the halves' normals per axis (three).
 constexpr unsigned kGatherVoxelKinds = 12u;
 /// The octahedral probe map is at most 8x8, because one ray is one thread of
 /// the trace's 8x8 workgroup (the shaders' `kOctResMax`).
@@ -209,11 +209,11 @@ struct HitListBinding {
 /// (hitSetLayout), writes it (HitSetWrite) and orders it (hitSetTransitions) at ITS OWN binding numbers (HitSetSlots).
 struct HitSetSources {
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
-    /// The cascade chain's light volumes: [cascade][kind], the kinds in kGatherVoxelKinds' order - 0 the total
-    /// (level 0), 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7 the surface position per
-    /// half (RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 level 0's back side, 9 the voxelizer's normal (PHOTON-VOXEL-5), 10 the
-    /// direct term's front (MOVER-OCCLUSION-1), 11 its back (PHOTON-7 stage 7: the stores hold two sides). Innermost
-    /// first; past `cascadeCount` the slots bind the last cascade's (a shader indexes kGatherMaxCascades).
+    /// The cascade chain's light volumes: [cascade][kind], the kinds in kGatherVoxelKinds' order - 0 the half store
+    /// (level 0's six half lights, VOXEL-R13), 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7
+    /// the surface position per half (RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 the half store's direct terms (MOVER-OCCLUSION-1's
+    /// share), 9..11 the halves' normals per axis (the share's ring). Innermost first; past `cascadeCount` the slots bind
+    /// the last cascade's (a shader indexes kGatherMaxCascades).
     Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
     /// THE WORLD's BOX (PHOTON-7 10-3 R4; L9: "ran out of distance" is not a miss): the union of the traced instances'
     /// world AABBs - where a ray EXITS the world, the only place the sky is. `worldOn` false: no instance.

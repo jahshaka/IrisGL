@@ -50,10 +50,6 @@ vulkan_layout( ogre_t2 ) uniform texture2D gBufShadowRoughness;
 	@add( vctTexUnit, hlms_num_vct_cascades )
 	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 	@add( vctTexUnit, hlms_num_vct_cascades )
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
-	@add( vctTexUnit, hlms_num_vct_cascades )
-	vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeNrm[@value( hlms_num_vct_cascades )];
-	@add( vctTexUnit, hlms_num_vct_cascades )
 	@set( siTexUnit, vctTexUnit )
 @end
 @property( jah_env )
@@ -166,9 +162,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 	#define JAH_VOX_SAMPLE_X( c, u, l ) textureLod( sampler3D( vctProbeX[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) textureLod( sampler3D( vctProbeY[c], vSmp ), u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) textureLod( sampler3D( vctProbeZ[c], vSmp ), u, l )
-	#define JAH_VOX_PER_SIDE 1
-	#define JAH_VOX_SAMPLE_BACK( c, u, l ) textureLod( sampler3D( vctProbeBack[c], vSmp ), u, l )
-	#define JAH_VOX_SAMPLE_NRM( c, u, l ) textureLod( sampler3D( vctProbeNrm[c], vSmp ), u, l )
 	#define JAH_VOX_INVRES( c ) p.chainInvRes[c].xyz
 	#define JAH_VOX_MAXLOD( c ) p.chainInvRes[c].w
 	#define JAH_VOX_FROM_PREV_SCALE( c ) p.chainFromPrev[( (c) - 1 ) * 2]

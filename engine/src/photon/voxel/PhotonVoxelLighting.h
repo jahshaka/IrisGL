@@ -61,6 +61,10 @@ namespace Ogre
         uint32 rays = 16u;
         float reach = 0.0f;
         float lift = 0.0f;
+        /// VOXEL-R13 stage 1: the cascade's halves' own faces per axis (PhotonVoxelizerSourceBase.h) - each half's gather
+        /// starts on its faces along their normal
+        TextureGpu *halfSide[3] = { nullptr, nullptr, nullptr };
+        TextureGpu *halfNrm[3] = { nullptr, nullptr, nullptr };
     };
 
     class PhotonVoxelizerSourceBase;
@@ -158,14 +162,11 @@ namespace Ogre
         /// position, so they ride the same list and every reader that binds
         /// getNumVoxelTextures() volumes per cascade binds them too.
         ///
-        /// Jahshaka (PHOTON-VOXEL-5): two more follow - mLightVoxel[8],
-        /// level 0's BACK side (owned; backIndex()), and mLightVoxel[9], the voxelizer's NORMAL
-        /// (not owned; normalIndex()): level 0 holds a voxel's two SIDES - its front (mLightVoxel[0]; PHOTON-7 stage 7,
-        /// which stopped deriving a side from a stored mean) and its back - the total their mean taken at the read,
-        /// and the normal says which side a half-axis's faces look
-        /// to. The directional volumes' level 0 is composited by the light injection itself from
-        /// each voxel's light PER HALF-AXIS (the fused step 0).
-        TextureGpu             *mLightVoxel[10];
+        /// VOXEL-R13 stage 2: entry 0 is THE HALF STORE (mHalfLight: level 0's six half lights, jah_voxel_halves.glsl) and
+        /// entry 8 (halfDirectIndex()) its DIRECT TERMS (mHalfDirect; the half store itself without a bounce) - list
+        /// entries only, the half store's members own them (destroyTextures). The two sides, their direct copies and the
+        /// voxeliser's normal a reader chose a side by are deleted.
+        TextureGpu             *mLightVoxel[9];
         HlmsSamplerblock const *mSamplerblockTrilinear;
 
         PhotonVoxelizerSourceBase *mVoxelizer;
@@ -198,15 +199,8 @@ namespace Ogre
         /// copied back into mLightVoxel[0] - the textures' identities never change (the old ping-pong swapped them and
         /// every reader had to be rebound).
         TextureGpu     *mLightBounce;
-        /// PHOTON-7 stage 7: THE BACK SIDE'S BOUNCE SCRATCH, owned by the chain's INNERMOST cascade and shared by the
-        /// chain (each cascade's bounce and its copy-back run in turn): a 2D RGBA16F image, 512 texels wide (a brick's
-        /// voxels, x + 8 y + 64 z) and one row per brick a cascade's pass can list - the frame's brick-pass count
-        /// (GiQualityFacts::lightWorkFrames' budget), at most a cascade's own bricks (ensureBackScratch). The back cannot
-        /// be written in place: the bounce's gather reads the backs (the sides' mean).
-        TextureGpu     *mBackScratch = nullptr;
-        uint32          mBackScratchBricks = 0u;
-        /// THE SIDES' TLAS GATHER (PHOTON-7 stage 10, 10-2b): the chain's scratch (on its innermost cascade, the back
-        /// scratch's rows: 512 voxels x 2 sides x two packHalf2x16 words a listed brick) and the ray tier's trace.
+        /// THE SIDES' TLAS GATHER (PHOTON-7 stage 10, 10-2b): the chain's scratch (on its innermost cascade: 512 voxels x 6
+        /// halves x two packHalf2x16 words a listed brick, VOXEL-R13) and the ray tier's trace.
         UavBufferPacked *mSideGather = nullptr;
         uint32           mSideGatherBricks = 0u;
         std::function<int( const PhotonVoxelSideTrace & )> mSideTracer;
@@ -279,20 +273,24 @@ namespace Ogre
         /// mLightVoxel[0]), so D cannot be recovered from the total after the
         /// first pass.
         ///
-        /// This is that third volume: mip 0 only (the bounce reads it with a
-        /// Load3D at its own voxel, never filtered), same resolution and format as
-        /// mLightVoxel[0], written by the light-injection job's second UAV in the
+        /// That is mHalfDirect below (VOXEL-R13: the half store's direct terms) and,
+        /// per axis, the directional level 0's direct part (mLightDirectDir: half
+        /// resolution, both signs packed along x like mLightVoxel[1..3]): mip 0 only
+        /// (the bounce reads them with a Load3D at its own voxel, never filtered),
+        /// written by the light-injection job's second UAV in the
         /// same dispatch that writes the total -- so keeping it costs one image
         /// store per voxel and no copy, no readback and no CPU path. It lives
         /// exactly as long as mLightBounce does (see setAllowMultipleBounces): a
         /// volume that cannot bounce has no use for it.
-        TextureGpu *mLightDirect;
-        /// Jahshaka (PHOTON-VOXEL-5), with a bounce: the BACK side's direct
-        /// term and the directional level 0's direct part per axis (float like mLightDirect and
-        /// the total since CONTACT-OCCLUSION-1 - an emitter exceeds the lamps' ceiling; level 0 only; both signs packed along x like mLightVoxel[1..3]) - what
-        /// the bounce's fixed point and step 0 need per side and per half.
-        TextureGpu *mLightDirectBack;
         TextureGpu *mLightDirectDir[3];
+        /// VOXEL-R13: THE HALF STORE - level 0's six HALF LIGHTS (jah_voxel_halves.glsl): ONE volume six times the voxels
+        /// wide - axis a's -a half's light in [2a W, (2a + 1) W), its +a half's in [(2a + 1) W, (2a + 2) W) - RGBA16F
+        /// (radiance x k, k) with k the half's capped coverage, each half lit and gathered from its own faces; one volume so
+        /// every reader binds it in one slot a cascade (the light list's entry 0). The directional chain's level 0 is
+        /// composited from it (AnisotropicMipVctStep0). mHalfDirect: its direct terms, the same layout (born with the
+        /// bounce: the fixed point per half, a delta's old term, a hit's bounce share). 48 B a voxel each.
+        TextureGpu *mHalfLight = nullptr;
+        TextureGpu *mHalfDirect = nullptr;
         ShaderParams::Param *mInjectHigherMipHalfWidth;
         /// Jahshaka (PHOTON-7 stage 1): the injection's chain - this cascade's entry and, per entry, its box
         /// corner relative to this one's with its cell and its resolution with its shell's end (setChainIndex).
@@ -516,7 +514,7 @@ namespace Ogre
         /// 1 traced, 0 the scene does not trace (the voxel rays: the no-ray route), 2 the scene traces but its structure
         /// is not there (the voxel rays this pass, counted by the tracer).
         void setSideTracer( std::function<int( const PhotonVoxelSideTrace & )> tracer ) { mSideTracer = std::move( tracer ); }
-        /// the chain's side-gather scratch for at least `bricks` listed bricks (the back scratch's count; grown once a
+        /// the chain's side-gather scratch for at least `bricks` listed bricks (the frame's brick-pass count; grown once a
         /// frame BEFORE the selections, on the innermost cascade)
         void ensureSideGather( uint32 bricks );
         /// true once after a pass whose route (the TLAS rays or the voxel rays) differs from the last pass's: the caller
@@ -596,19 +594,8 @@ namespace Ogre
             bounce belongs to the frame of its geometry - the last one's moves folded into the frame's injection words so
             the stopped bricks' and the cards' accumulations see them (PhotonBrickFeedback_cs.glsl's REGION mode). No
             budget word, no cursor, no stop rule: the frame's own feedback runs after it as ever. `chain` the innermost
-            cascade (its back scratch holds the rows: the host grows it to the region's bricks first). */
+            cascade (at the ray tier its sides' gather holds the rows: the host grows it to the region's bricks first). */
         void feedbackRegionPasses( const PhotonFeedbackActivation &boxes, uint32 passes, PhotonVoxelLighting *chain );
-        /// THE CHAIN'S BACK SCRATCH (PHOTON-7 stage 7; on the innermost cascade): rows for at least `bricks` listed bricks
-        /// (the host's frame count, at most the largest cascade's bricks), created or grown once a frame BEFORE the
-        /// selections - never resized between a cascade's dispatches.
-        void ensureBackScratch( uint32 bricks );
-        /// the scratch this cascade's pass writes: the chain's (its innermost cascade's)
-        TextureGpu *backScratch() const
-        {
-            return mFeedbackChain && mFeedbackChain->mBackScratch ? mFeedbackChain->mBackScratch : mBackScratch;
-        }
-        /// its rows (a test door's reading: the memory stated)
-        uint32 backScratchBricks() const { return mBackScratchBricks; }
         void feedbackAccumulate( const PhotonVoxelLighting *source );
         void feedbackEnd( uint64 frame );
         /** A SCROLL COMMIT'S STATE (PHOTON-7 stage 4): the store moved so that the new cell n holds the old cell n +
@@ -754,9 +741,11 @@ namespace Ogre
         /// 7-6: the screen job marches from cascade 0).
         void chainMarchParams( float *chainOrigin, float *chainRes ) const;
         /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
-        /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
-        /// coverage and position per half and its direct pair (front, back), six arrays of getChainLength().
-        uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 6u * getChainLength() ); }
+        /// one at this unit): the albedo, emissive, metal and emissive factor per half (0..4), the halves' own faces
+        /// (VOXEL-R13: 5..10, LightInjection_cs.glsl), then from kInjectChainUnit the chain's coverage and position per
+        /// half and its half store's direct terms - five arrays of getChainLength().
+        static constexpr uint32 kInjectChainUnit = 11u;
+        uint8 injectionTexUnits() const { return static_cast<uint8>( kInjectChainUnit + 5u * getChainLength() ); }
 
         /** THE CASCADE CHAIN'S PARAMETERS, the one definition every reader of the chain
             takes them from (Jahshaka, PHOTON-READER-1): the pixel shader's pass buffer
@@ -815,33 +804,30 @@ namespace Ogre
 
         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
         /** THE SCROLL'S LIGHT (PHOTON-7 stage 2, AB S4): the level-0 textures a scroll's commit shifts in place with the
-            geometry - the total, its back side, the direct term, its back side, and the directional level 0's direct
-            part per axis (half resolution, both signs packed along x: `halfRes` true). The directional volumes are not
-            among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch. Fills `out`
-            and returns 7, or 0 on a lighting that cannot bounce (no direct term to shift).
+            geometry - the half store and its direct terms (VOXEL-R13: full resolution, the six halves packed along x:
+            `blocks` 6) and the directional level 0's direct part per axis (half resolution, both signs packed along x:
+            `cellsPerTexel` 2, `blocks` 2). The directional
+            volumes are not among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch.
+            Fills `out` and returns kScrollLightTextures, or 0 on a lighting that cannot bounce (no direct term to shift).
         */
-        size_t scrollLightTextures( TextureGpu *out[7], bool halfRes[7] ) const;
-        /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (fork ae2ed529f+155a56bf8 (was 0076)'s D term), or null
-        /// on a PhotonVoxelLighting that cannot bounce. Read-only, and it exists so a host
-        /// can MEASURE the store -- the normalisation's own self-check is "the
-        /// direct term is <= the ceiling by construction", and nothing outside this
-        /// class could see the volume to check it.
-        TextureGpu  *getLightDirectTexture() const { return mLightDirect; }
-        /// ...and the back side's direct term (PHOTON-7 stage 2: the store door's `directBack`).
-        TextureGpu  *getLightDirectBackTexture() const { return mLightDirectBack; }
+        static constexpr size_t kScrollLightTextures = 5u;
+        size_t scrollLightTextures( TextureGpu *out[kScrollLightTextures], uint32 cellsPerTexel[kScrollLightTextures],
+                                    uint32 blocks[kScrollLightTextures] ) const;
+        /// VOXEL-R13: the half store and its direct terms (null without a bounce) - a host's door measures the store by them
+        TextureGpu  *getHalfLightTexture() const { return mHalfLight; }
+        TextureGpu  *getHalfDirectTexture() const { return mHalfDirect; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
-        /// The light volumes a reader binds per cascade: the total (level 0) and its three
-        /// directional axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),
-        /// then the surface position per half (PHOTON-VOXEL-4), then (PHOTON-VOXEL-5) level
-        /// 0's back side and the voxelizer's normal, the last two (backIndex / normalIndex).
+        /// The light volumes a reader binds per cascade: the half store (level 0, VOXEL-R13) and the three directional
+        /// axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4), then the surface position per half
+        /// (PHOTON-VOXEL-4). The half store's direct terms follow in the list (halfDirectIndex) but no cone reader binds
+        /// them: the ray jobs' hit set and the door take them by index.
         uint32       getNumVoxelTextures() const { return kVolumesPerCascade; }
         /// Jahshaka (OWN-GI-1): the same count without an instance — what the PBS
         /// pass claims per cascade (PhotonPassBinding) and the pass budget is sized on.
-        static constexpr uint32 kVolumesPerCascade = 10u;
-        /// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side (the front = 2 x mLightVoxel[0] - it)
-        /// and the voxelizer's normal (the side a half-axis looks to).
-        uint32       backIndex() const { return 8u; }
-        uint32       normalIndex() const { return 9u; }
+        static constexpr uint32 kVolumesPerCascade = 8u;
+        /// VOXEL-R13: where the half store's direct terms sit in getLightVoxelTextures() (the half store itself, no
+        /// bounce) - past the readers' count.
+        uint32       halfDirectIndex() const { return 8u; }
         /// Where the coverage of half `h` (0: the faces looking +a, 1: -a) sits in
         /// getLightVoxelTextures().
         uint32       coverageIndex( uint32 h ) const { return 4u + h; }

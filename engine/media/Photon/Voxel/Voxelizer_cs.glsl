@@ -26,10 +26,11 @@
 
 // Jahshaka (ENGINE-UPGRADE-U5 stage 2): THE GROUP'S PER-VOXEL SUMS (Voxelizer_piece_cs.any, the work
 // partition): 36 integers for each of the 64 voxels - albedo 3 and the metal's Fresnel-90 weight, the raw
-// and the folded normal 3 + 3, the emissive 3, the roughness, the area weight, the coverage per half 3 + 3,
+// (VOXEL-R13 stage 2: the raw and the folded normal deleted) the emissive 3, the roughness, the area weight, the coverage per half 3 + 3,
 // the position per half 3 + 3, the casters' coverage per half 3 + 3, the metal's F0 3 (METAL-BOUNCE-1), the
-// emitters' coverage per half 3 + 3 and their weight (JUNCTION-NORMAL-1) - indexed sum x 64 + voxel. 11 KB.
-shared uint g_voxelSums[44 * 64];
+// emitters' coverage per half 3 + 3 and their weight (JUNCTION-NORMAL-1), the kinds of faces (PHOTON-7 10-4 R7), and the
+// halves' own faces 6 x 5 (VOXEL-R13) - indexed sum x 64 + voxel. 17 KB.
+shared uint g_voxelSums[74 * 64];
 // Jahshaka (PHOTON-7 stage 10-3, R2): THE EMISSIVE'S SHARED EXPONENT - each of the 64 voxels' brightest emissive
 // contribution (float bits: a non-negative float orders as its bits). The max pre-pass (voxel_emissive_max) gathers it
 // into the merge accumulator's channel 26; the sum pass reads it back here and quantises the emissive relative to it.
@@ -65,37 +66,49 @@ layout( std430, ogre_U1 ) readonly restrict buffer rangesLayout
 layout( vulkan( ogre_u2 ) vk_comma @insertpiece(uav2_pf_type) )
 uniform restrict image3D voxelAlbedoTex;
 layout( vulkan( ogre_u3 ) vk_comma @insertpiece(uav3_pf_type) )
-uniform restrict image3D voxelNormalTex;
-layout( vulkan( ogre_u4 ) vk_comma @insertpiece(uav4_pf_type) )
 uniform restrict image3D voxelEmissiveTex;
-layout( vulkan( ogre_u5 ) vk_comma @insertpiece(uav5_pf_type) )
+layout( vulkan( ogre_u4 ) vk_comma @insertpiece(uav4_pf_type) )
 uniform restrict uimage3D voxelAccumVal;
 // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge sums into.
-layout( vulkan( ogre_u6 ) vk_comma @insertpiece(uav6_pf_type) )
+layout( vulkan( ogre_u5 ) vk_comma @insertpiece(uav5_pf_type) )
 uniform restrict uimage3D voxelMergeAccum;
 // Jahshaka (PHOTON-VOXEL-3/-4): THE PER-HALF-AXIS COVERAGE - O_a+ (the faces looking +a)
 // and O_a- (looking -a), written by the resolve (VoxelMerge_piece_cs.any, THE DIRECTIONAL
 // COVERAGE); the light injection, the anisotropic mip step 0 and every read sample it.
-layout( vulkan( ogre_u7 ) vk_comma @insertpiece(uav7_pf_type) )
+layout( vulkan( ogre_u6 ) vk_comma @insertpiece(uav6_pf_type) )
 uniform restrict writeonly image3D voxelCoveragePTex;
-layout( vulkan( ogre_u8 ) vk_comma @insertpiece(uav8_pf_type) )
+layout( vulkan( ogre_u7 ) vk_comma @insertpiece(uav7_pf_type) )
 uniform restrict writeonly image3D voxelCoverageNTex;
 // Jahshaka (PHOTON-VOXEL-4; PHOTON-7 stage 1): THE SURFACE POSITION per half-axis, O-premultiplied,
 // RELATIVE TO THE VOXEL'S OWN CELL (VoxelMerge_piece_cs.any, THE SURFACE POSITION).
-layout( vulkan( ogre_u9 ) vk_comma @insertpiece(uav9_pf_type) )
+layout( vulkan( ogre_u8 ) vk_comma @insertpiece(uav8_pf_type) )
 uniform restrict writeonly image3D voxelPositionPTex;
-layout( vulkan( ogre_u10 ) vk_comma @insertpiece(uav10_pf_type) )
+layout( vulkan( ogre_u9 ) vk_comma @insertpiece(uav9_pf_type) )
 uniform restrict writeonly image3D voxelPositionNTex;
 // Jahshaka (METAL-BOUNCE-1): THE METAL - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, area means written by the resolve beside the albedo (VoxelMerge_piece_cs.any).
-layout( vulkan( ogre_u11 ) vk_comma @insertpiece(uav11_pf_type) )
+layout( vulkan( ogre_u10 ) vk_comma @insertpiece(uav10_pf_type) )
 uniform restrict writeonly image3D voxelMetalTex;
 // Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS - what each half's faces emit over the
 // voxel's area mean, written by the resolve (VoxelMerge_piece_cs.any, THE EMISSIVE PER HALF-AXIS).
-layout( vulkan( ogre_u12 ) vk_comma @insertpiece(uav12_pf_type) )
+layout( vulkan( ogre_u11 ) vk_comma @insertpiece(uav11_pf_type) )
 uniform restrict writeonly image3D voxelEmitPTex;
-layout( vulkan( ogre_u13 ) vk_comma @insertpiece(uav13_pf_type) )
+layout( vulkan( ogre_u12 ) vk_comma @insertpiece(uav12_pf_type) )
 uniform restrict writeonly image3D voxelEmitNTex;
+// VOXEL-R13 stage 1: THE HALVES' OWN FACES per axis - the centroid across the axis (14..16) and the normal (17..19)
+// of both halves, written by the resolve (VoxelMerge_piece_cs.any, THE HALF'S OWN FACES).
+layout( vulkan( ogre_u13 ) vk_comma @insertpiece(uav13_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideXTex;
+layout( vulkan( ogre_u14 ) vk_comma @insertpiece(uav14_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideYTex;
+layout( vulkan( ogre_u15 ) vk_comma @insertpiece(uav15_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideZTex;
+layout( vulkan( ogre_u16 ) vk_comma @insertpiece(uav16_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmXTex;
+layout( vulkan( ogre_u17 ) vk_comma @insertpiece(uav17_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmYTex;
+layout( vulkan( ogre_u18 ) vk_comma @insertpiece(uav18_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmZTex;
 
 
 
@@ -104,7 +117,6 @@ layout( local_size_x = @value( threads_per_group_x ),
 		local_size_z = @value( threads_per_group_z ) ) in;
 
 //layout (rgba8) uniform restrict writeonly image3D voxelAlbedoTex;
-//layout (rgb10_a2) uniform restrict writeonly image3D voxelNormalTex;
 //layout (rgba8) uniform restrict writeonly image3D voxelEmissiveTex;
 
 //layout( local_size_x = 4,
@@ -123,6 +135,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 @end
 
 
+// VOXEL-R13 stage 1: the half-axes' one text (jah_voxel_halves.glsl), before the merge's resolve that encodes a half's normal
+@insertpiece( JahVoxelHalves )
 @insertpiece( DeclVoxelMerge )
 
 @insertpiece( HeaderCS )

@@ -8426,21 +8426,18 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) continue;
         const unsigned c = out.cascadeCount;
-        // BY NAME (RQ-COV-SLOT-1): the total, the three directional volumes (every tier keeps them, PHOTON-MARCH-1),
-        // the coverage and the position from PhotonVoxelLighting's own index, level 0's back side and the voxelizer's
-        // normal; MOVER-OCCLUSION-1: the direct term's volume, or the light store (no share to gate) - its front and
-        // its back.
+        // BY NAME (RQ-COV-SLOT-1): the readers' list (the half store, the three directional volumes - every tier keeps
+        // them, PHOTON-MARCH-1 - the coverage and the position from PhotonVoxelLighting's own index).
         out.voxel[c][0] = tex[0];
         for (int i = 1; i < 4; ++i) out.voxel[c][i] = tex[i];
         for (unsigned h = 0; h < 2u; ++h) {
             out.voxel[c][4 + h] = tex[lighting->coverageIndex(h)];
             out.voxel[c][6 + h] = tex[lighting->positionIndex(h)];
         }
-        out.voxel[c][8] = tex[lighting->backIndex()];
-        out.voxel[c][9] = tex[lighting->normalIndex()];
-        out.voxel[c][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
-        out.voxel[c][11] = lighting->getLightDirectBackTexture() ? lighting->getLightDirectBackTexture()
-                                                                  : tex[lighting->backIndex()];
+        // VOXEL-R13 stage 2: kind 0 the half store, 8 its direct terms (the readers' list), 9..11 the halves' normals per
+        // axis (the share's "same surface" ring, jah_rq_hit.glsl)
+        out.voxel[c][8] = tex[lighting->halfDirectIndex()];
+        for (unsigned a = 0; a < 3u; ++a) out.voxel[c][9 + a] = voxelizer->getHalfNrmVox(a);
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();
         const Ogre::Vector3 cl = voxelizer->getVoxelCellSize();
@@ -11245,9 +11242,13 @@ struct VoxelSideParams {
 };
 /// The job's own four (the params, the list, the scratch, the counts), the hit set at 0 and 5..36 (the cards'
 /// gather's slots) and the escape shares at 37 (PHOTON-7 11-2 (6)).
-constexpr unsigned kVoxelSideBindings = 38u;
+constexpr unsigned kVoxelSideBindings = 44u;
 constexpr unsigned kVoxelSideShareBinding = 37u;
-static_assert(kVoxelSideBindings == kHitSetBindings + 5u, "the sides' gather set is the hit set, its own four and the shares");
+/// VOXEL-R13 stage 1: THE CASCADE'S HALVES' OWN FACES (38..40 their centroids across the axis, 41..43 their normals, per
+/// axis): each half's gather starts on its own faces (rq_voxel_sides.comp)
+constexpr unsigned kVoxelSideHalfBinding = 38u;
+static_assert(kVoxelSideBindings == kHitSetBindings + 5u + 6u,
+              "the sides' gather set is the hit set, its own four, the shares and the halves' six");
 constexpr unsigned kVoxelSideCounts = 9u;
 }   // namespace
 
@@ -11271,6 +11272,12 @@ bool RayQueryTier::makeVoxelSidePipelineNow(std::string &err) {
     b[kVoxelSideShareBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     b[kVoxelSideShareBinding].descriptorCount = 1u;
     b[kVoxelSideShareBinding].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    for (unsigned i = 0; i < 6u; ++i) {
+        b[kVoxelSideHalfBinding + i].binding = kVoxelSideHalfBinding + i;
+        b[kVoxelSideHalfBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        b[kVoxelSideHalfBinding + i].descriptorCount = 1u;
+        b[kVoxelSideHalfBinding + i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
     DescriptorPoolPlan plan;
     if (!plan.makeLayout(mVk, b, kVoxelSideBindings, kMaxTimedScenes * kVoxelSideRing, mVsSetLayout, err,
                          "rayquery/voxel-sides"))
@@ -11475,6 +11482,21 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     shb.buffer = v.shares.buffer;
     shb.range = v.shares.size;
     own(kVoxelSideShareBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &shb;
+    // VOXEL-R13 stage 1: the cascade's halves' own faces (views uncached and retired, the hit set's rule)
+    VkDescriptorImageInfo halfImg[6] = {};
+    for (unsigned i = 0; i < 6u; ++i) {
+        Ogre::TextureGpu *t = i < 3u ? job.halfSide[i] : job.halfNrm[i - 3u];
+        if (!t) return wait();
+        Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
+        ts.texture = t;
+        const VkImageView view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(ts, false);
+        if (!view) return wait();
+        gatherRetireView(view);
+        halfImg[i].sampler = gatherLinearSampler();
+        halfImg[i].imageView = view;
+        halfImg[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        own(kVoxelSideHalfBinding + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &halfImg[i];
+    }
     vkUpdateDescriptorSets(mVk, kVoxelSideBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS through Ogre's solver, before the command buffer is taken: the hit set read, the list and the
@@ -11489,6 +11511,14 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
         solver.resolveTransition(trans, job.list, Ogre::ResourceAccess::Read, computeStage);
         solver.resolveTransition(trans, job.args, Ogre::ResourceAccess::Read, computeStage);
         solver.resolveTransition(trans, job.scratch, Ogre::ResourceAccess::Write, computeStage);
+        for (unsigned i = 0; i < 3u; ++i) {   // VOXEL-R13 stage 1: the halves' own faces, read
+            if (job.halfSide[i])
+                solver.resolveTransition(trans, job.halfSide[i], Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+            if (job.halfNrm[i])
+                solver.resolveTransition(trans, job.halfNrm[i], Ogre::ResourceLayout::Texture,
+                                         Ogre::ResourceAccess::Read, computeStage);
+        }
         mRs->executeResourceTransition(trans);
     }
     VkCommandBuffer cmd = frameCmd();

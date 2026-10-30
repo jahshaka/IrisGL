@@ -3,18 +3,15 @@
 #define OGRE_imageWrite3D4( outImage, iuv, value ) imageStore( outImage, int3( iuv ), value )
 
 // Jahshaka (PHOTON-VOXEL-5): the bounce's part of the directional level 0 (AnisotropicMipVctStep0_
-// piece_cs.any) - the level-0 sides (the front and the back, PHOTON-7 stage 7), their direct terms, the
-// normal (its side), the coverage per half, and the injection's composited direct part per axis.
-vulkan_layout( ogre_t0 ) uniform texture3D inLightFront;
-vulkan_layout( ogre_t1 ) uniform texture3D inLightBack;
-vulkan_layout( ogre_t2 ) uniform texture3D inDirectFront;
-vulkan_layout( ogre_t3 ) uniform texture3D inDirectBack;
-vulkan_layout( ogre_t4 ) uniform texture3D inNormal;
-vulkan_layout( ogre_t5 ) uniform texture3D inCoveragePTex;
-vulkan_layout( ogre_t6 ) uniform texture3D inCoverageNTex;
-vulkan_layout( ogre_t7 ) uniform texture3D inDirectDir0;
-vulkan_layout( ogre_t8 ) uniform texture3D inDirectDir1;
-vulkan_layout( ogre_t9 ) uniform texture3D inDirectDir2;
+// piece_cs.any) - VOXEL-R13 stage 1: the level-0 HALF STORE and its direct terms (one volume, the six halves side by side:
+// jah_voxel_halves.glsl), the coverage per half, and the injection's composited direct part per axis.
+vulkan_layout( ogre_t0 ) uniform texture3D inHalfLight;
+vulkan_layout( ogre_t1 ) uniform texture3D inHalfDirect;
+vulkan_layout( ogre_t2 ) uniform texture3D inCoveragePTex;
+vulkan_layout( ogre_t3 ) uniform texture3D inCoverageNTex;
+vulkan_layout( ogre_t4 ) uniform texture3D inDirectDir0;
+vulkan_layout( ogre_t5 ) uniform texture3D inDirectDir1;
+vulkan_layout( ogre_t6 ) uniform texture3D inDirectDir2;
 
 layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
 uniform restrict writeonly image3D outLightHigherMip0;

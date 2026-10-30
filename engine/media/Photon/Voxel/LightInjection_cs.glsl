@@ -12,62 +12,31 @@
 @psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
 
 vulkan_layout( ogre_t0 ) uniform texture3D voxelAlbedoTex;
-vulkan_layout( ogre_t1 ) uniform texture3D voxelNormalTex;
-vulkan_layout( ogre_t2 ) uniform texture3D voxelEmissiveTex;
+vulkan_layout( ogre_t1 ) uniform texture3D voxelEmissiveTex;
 
 vulkan( layout( ogre_s0 ) uniform sampler voxelAlbedoSampler );
 
-// PHOTON-7 stage 2: AT A SCROLL'S COMMIT THE DIRECT TERM IS RE-INJECTED AS A DELTA (jah_inject_delta): the total, its
-// back side and the direct terms are READ as well (total += D_new - D_old), so they are read-write. PHOTON-7 stage 3: so
-// they are at every injection - the brick mask compares each voxel's direct term with the one it replaces.
-layout( vulkan( ogre_u0 ) vk_comma @insertpiece(uav0_pf_type) )
-uniform restrict image3D lightVoxel;
-
-// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the DIRECT term's own volume, written by the same dispatch.
-// The bounce's fixed point is L = D + rho * G( L ) and needs D at every pass; the
-// total's two textures ping-pong, so D cannot be recovered from them after the first
-// pass. Declared only when the host has a volume to write it to (a VctLighting with
-// no bounce texture has no use for it): VctLighting::update() sets the property and
-// binds the slot per injection, because this job is shared by name process-wide.
+// VOXEL-R13: THE HALF STORE - level 0's six half lights (jah_voxel_halves.glsl: one volume, the six halves side by side
+// along x), each (radiance x k, k) with k the half's capped coverage - and, with a bounce, their direct terms (the
+// bounce's fixed point per half, the delta's old terms); then the directional volumes' level 0 per axis, composited here
+// from the same half lights (with a bounce the direct part, into its own volumes: step 0 adds the bounce's part). PHOTON-7
+// stages 2-3: READ-WRITE - a delta (a scroll's commit) and the brick mask read each half's old term back.
+layout( vulkan( ogre_u0 ) vk_comma rgba16f )
+uniform restrict image3D halfStore;
 @pset( jahInjUav, 1 )
 @property( vct_keep_direct )
-	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
-	uniform restrict image3D directVoxel;
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D halfStoreDirect;
 	@add( jahInjUav, 1 )
 @end
-
-// Jahshaka (PHOTON-VOXEL-5): THE ANISOTROPIC TIERS' SIDES AND HALVES. `backVoxel` is level 0's
-// BACK side (PHOTON-7 stage 7: `lightVoxel` holds the FRONT - the store keeps both sides, their mean the total);
-// `dirOut0..2` the directional volumes' level 0 per axis, composited here from each voxel's
-// light PER HALF-AXIS - or, with a bounce, the direct part of it (`vct_keep_direct`: the bounce
-// pass adds its own part in the anisotropic mip step 0); `directBackVoxel` the back side's
-// direct term for the bounce's fixed point. The slots follow u0 and the direct term in this
-// order (VctLighting::update binds them so).
 layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-uniform restrict image3D backVoxel;
+uniform restrict writeonly image3D dirOut0;
 @add( jahInjUav, 1 )
-@property( vct_keep_direct )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict image3D directBackVoxel;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut0;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut1;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut2;
-@else
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut0;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut1;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict writeonly image3D dirOut2;
-@end
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict writeonly image3D dirOut1;
+@add( jahInjUav, 1 )
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict writeonly image3D dirOut2;
 @add( jahInjUav, 1 )
 // PHOTON-7 stage 2, THE WORK LAW'S DOOR: a delta injection counts the voxels it lit, cumulatively - word 0 those inside
 // the scroll's slab (outside the box the scroll kept), word 1 those outside it (the voxels whose direct term changed:
@@ -87,19 +56,28 @@ layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahBrickLayou
 // the cards' accumulation reads it beside a pass's move.
 layout( std430, ogre_U@value(jahInjUav) ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
 
-// Jahshaka (METAL-BOUNCE-1): THE METAL at t3 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
+// Jahshaka (METAL-BOUNCE-1): THE METAL at t2 - the F0 (rgb) and Fresnel-90 weight (alpha) of every surface's
 // specular lobe, re-emitted by the lobe's directional integral (JahSpecularAlbedo).
-vulkan_layout( ogre_t3 ) uniform texture3D voxelMetalTex;
-// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t4 (the faces looking +a) and t5
+vulkan_layout( ogre_t2 ) uniform texture3D voxelMetalTex;
+// Jahshaka (JUNCTION-NORMAL-1): THE EMISSIVE FACTOR PER HALF-AXIS at t3 (the faces looking +a) and t4
 // (looking -a): what each half's faces emit over the voxel's area mean (VoxelMerge_piece_cs.any).
-vulkan_layout( ogre_t4 ) uniform texture3D voxelEmitPTex;
-vulkan_layout( ogre_t5 ) uniform texture3D voxelEmitNTex;
+vulkan_layout( ogre_t3 ) uniform texture3D voxelEmitPTex;
+vulkan_layout( ogre_t4 ) uniform texture3D voxelEmitNTex;
+// VOXEL-R13: THE HALVES' OWN FACES at t5..t7 (where each half's faces lie across its axis) and t8..t10 (their mean
+// normal), both halves an axis (PhotonVoxelizerSourceBase.h): a half's lamp march starts on its own faces and its cosine
+// takes its own normal.
+vulkan_layout( ogre_t5 ) uniform texture3D voxelHalfSideX;
+vulkan_layout( ogre_t6 ) uniform texture3D voxelHalfSideY;
+vulkan_layout( ogre_t7 ) uniform texture3D voxelHalfSideZ;
+vulkan_layout( ogre_t8 ) uniform texture3D voxelHalfNrmX;
+vulkan_layout( ogre_t9 ) uniform texture3D voxelHalfNrmY;
+vulkan_layout( ogre_t10 ) uniform texture3D voxelHalfNrmZ;
 
 // Jahshaka (PHOTON-7 stage 1, L1: LIGHT IS A WORLD FUNCTION): THE CHAIN'S GEOMETRY - every cascade's coverage per
 // half-axis (the faces looking +a, -a) and surface position per half, level 0, as four arrays over the WHOLE tier
 // chain (one permutation per chain length; this cascade is entry chainSelf, the ones inside it bound but never read):
 // the shadow march runs through the chain on fixed shells (JahInjectionReader's jahInjectVisibility).
-@pset( jahInjTex, 6 )
+@pset( jahInjTex, 11 )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovP[@value( hlms_num_vct_cascades )];
 @add( jahInjTex, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovN[@value( hlms_num_vct_cascades )];
@@ -108,11 +86,9 @@ vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosP[@value( hlm
 @add( jahInjTex, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainPosN[@value( hlms_num_vct_cascades )];
 @add( jahInjTex, hlms_num_vct_cascades )
-// PHOTON-7 stage 5 (5-4): every cascade's DIRECT term, both sides (its total and back where it keeps none) - what a
-// reader read at a cleared voxel's world point before, the next cascade out's (the absolute move's reference, below).
-vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainDirect[@value( hlms_num_vct_cascades )];
-@add( jahInjTex, hlms_num_vct_cascades )
-vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainDirectBack[@value( hlms_num_vct_cascades )];
+// PHOTON-7 stage 5 (5-4): every cascade's HALF STORE DIRECT TERMS (VOXEL-R13; the half store where it keeps none) - what
+// a reader read at a cleared voxel's world point before, the next cascade out's (the absolute move's reference).
+vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainHalfDirect[@value( hlms_num_vct_cascades )];
 @add( jahInjTex, hlms_num_vct_cascades )
 
 // JAHSHAKA (CLOUDS-2D-2): THE CLOUD LAYER'S FIELD -- the host binds it at the unit after the chain's geometry

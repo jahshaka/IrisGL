@@ -51,28 +51,37 @@ namespace Ogre
         }
 
         /// The live store's volumes, in one fixed order: the shift, the copy-in and the clear walk it.
-        constexpr size_t kVolumes = 11u;
+        constexpr size_t kVolumes = 16u;
         void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
             out[0] = v.albedo;
             out[1] = v.emissive;
-            out[2] = v.normal;
-            out[3] = v.accumVal;
-            out[4] = v.coverage[0];
-            out[5] = v.coverage[1];
-            out[6] = v.position[0];
-            out[7] = v.position[1];
-            out[8] = v.metal;     // METAL-BOUNCE-1
-            out[9] = v.emit[0];   // JUNCTION-NORMAL-1
-            out[10] = v.emit[1];
+            out[2] = v.accumVal;
+            out[3] = v.coverage[0];
+            out[4] = v.coverage[1];
+            out[5] = v.position[0];
+            out[6] = v.position[1];
+            out[7] = v.metal;     // METAL-BOUNCE-1
+            out[8] = v.emit[0];   // JUNCTION-NORMAL-1
+            out[9] = v.emit[1];
+            for( size_t a = 0u; a < 3u; ++a )   // VOXEL-R13: the halves' own faces
+            {
+                out[10u + a] = v.halfSide[a];
+                out[13u + a] = v.halfNrm[a];
+            }
         }
-        const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "Normal",
-                                                      "AccumVal",  "CoverageP", "CoverageN",
-                                                      "PositionP", "PositionN", "Metal",
-                                                      "EmitP",     "EmitN" };
-        /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the normal's 0.5 bias.
+        const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "AccumVal",  "CoverageP",
+                                                      "CoverageN", "PositionP", "PositionN", "Metal",
+                                                      "EmitP",     "EmitN",     "HalfSideX", "HalfSideY",
+                                                      "HalfSideZ", "HalfNrmX",  "HalfNrmY",  "HalfNrmZ" };
+        /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the halves' normals 0.5
+        /// (a half's own axis, VOXEL-R13).
         const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        const float kNormalClear[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
+        const float kHalfNrmClear[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        const float *clearOf( size_t i )
+        {
+            return i >= 13u && i < 16u ? kHalfNrmClear : kZero;
+        }
 
         /// The copy job's parameters, EVERY one each dispatch (a clone keeps its last values): `clear` null = a copy,
         /// else the box is written with that value (PhotonScrollCopy_cs.glsl's clear).
@@ -147,15 +156,19 @@ namespace Ogre
         }
         mVolumes.albedo = dst[0];
         mVolumes.emissive = dst[1];
-        mVolumes.normal = dst[2];
-        mVolumes.accumVal = dst[3];
-        mVolumes.coverage[0] = dst[4];
-        mVolumes.coverage[1] = dst[5];
-        mVolumes.position[0] = dst[6];
-        mVolumes.position[1] = dst[7];
-        mVolumes.metal = dst[8];
-        mVolumes.emit[0] = dst[9];
-        mVolumes.emit[1] = dst[10];
+        mVolumes.accumVal = dst[2];
+        mVolumes.coverage[0] = dst[3];
+        mVolumes.coverage[1] = dst[4];
+        mVolumes.position[0] = dst[5];
+        mVolumes.position[1] = dst[6];
+        mVolumes.metal = dst[7];
+        mVolumes.emit[0] = dst[8];
+        mVolumes.emit[1] = dst[9];
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            mVolumes.halfSide[a] = dst[10u + a];
+            mVolumes.halfNrm[a] = dst[13u + a];
+        }
 
         // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a headset
         // is shown, and a scroll is what the first head movement does): every format's shift and copy dispatched once
@@ -164,7 +177,7 @@ namespace Ogre
         const uint32 zero[3] = { 0u, 0u, 0u };
         for( size_t i = 0u; i < kVolumes; ++i )
         {
-            shiftVolume( mHlmsManager, mRenderSystem, dst[i], 0u, 0, false, kZero );
+            shiftVolume( mHlmsManager, mRenderSystem, dst[i], 0u, 0, 1u, kZero );
             copyBox( mHlmsManager, mRenderSystem, dst[i], dst[i], zero, zero, zero );
         }
     }
@@ -205,7 +218,7 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelScroll::shiftVolume( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *volume,
-                                         uint32 axis, int32 texels, bool packedHalves, const float clear[4] )
+                                         uint32 axis, int32 texels, uint32 blocks, const float clear[4] )
     {
         HlmsComputeJob *job = scrollJob( hlmsManager, 0, volume->getPixelFormat() );
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
@@ -214,12 +227,12 @@ namespace Ogre
         uavSlot.access = ResourceAccess::ReadWrite;
         job->_setUavTexture( 0u, uavSlot );
         const uint32 dims[3] = { volume->getWidth(), volume->getHeight(), volume->getDepth() };
-        const bool halves = packedHalves && axis == 0u;
-        // THE COLUMNS: the two other axes in increasing order, and the halves of a packed volume along x.
+        const uint32 n = axis == 0u ? std::max( blocks, 1u ) : 1u;
+        // THE COLUMNS: the two other axes in increasing order, and the blocks of a packed volume along x.
         const uint32 b = axis == 0u ? 1u : 0u, c = axis == 2u ? 1u : 2u;
-        const uint32 len = halves ? dims[0] / 2u : dims[axis];
-        const uint32 shiftAxis[4] = { axis, uint32( texels ), len, halves ? dims[0] / 2u : 0u };
-        const uint32 columns[4] = { dims[b], dims[c], halves ? 2u : 1u, 0u };
+        const uint32 len = axis == 0u ? dims[0] / n : dims[axis];
+        const uint32 shiftAxis[4] = { axis, uint32( texels ), len, n > 1u ? dims[0] / n : 0u };
+        const uint32 columns[4] = { dims[b], dims[c], n, 0u };
         const uint32 *tpg = job->getThreadsPerGroup();
         job->setNumThreadGroups( std::max( 1u, ( columns[0] + tpg[0] - 1u ) / tpg[0] ),
                                  std::max( 1u, ( columns[1] + tpg[1] - 1u ) / tpg[1] ),
@@ -298,7 +311,7 @@ namespace Ogre
         volumeList( live, to );
         for( size_t i = 0u; i < kVolumes; ++i )
             if( to[i] )
-                clearBox( hlmsManager, renderSystem, to[i], origin, size, i == 2u ? kNormalClear : kZero );
+                clearBox( hlmsManager, renderSystem, to[i], origin, size, clearOf( i ) );
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelScroll::begin()
@@ -306,7 +319,7 @@ namespace Ogre
         OgreProfileGpuBegin( "Photon scroll begin" );
         mRenderSystem->endRenderPassDescriptor();
         // CLEARED AS A WHOLE BUILD CLEARS (PhotonVoxelizer::clearVoxels): every value zero but the
-        // normal's 0.5 bias. The entering slab's cells keep these until its chunks write them.
+        // halves' normals' 0.5 (clearOf). The entering slab's cells keep these until its chunks write them.
         TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
         mResourceTransitions.clear();
@@ -319,8 +332,7 @@ namespace Ogre
             if( PixelFormatGpuUtils::isInteger( dst[i]->getPixelFormat() ) )
                 jahshaka::engine::detail::photonClearUavUint( mComputeTools, dst[i], uZero );
             else
-                jahshaka::engine::detail::photonClearUavFloat( mComputeTools, dst[i],
-                                                               i == 2u ? kNormalClear : kZero );
+                jahshaka::engine::detail::photonClearUavFloat( mComputeTools, dst[i], clearOf( i ) );
         }
         OgreProfileGpuEnd( "Photon scroll begin" );
     }
@@ -351,15 +363,14 @@ namespace Ogre
             {
                 if( i < kVolumes )
                 {
-                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], false,
-                                 i == 2u ? kNormalClear : kZero );
+                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], 1u, clearOf( i ) );
                 }
                 else
                 {
                     const LightVolume &l = light[i - kVolumes];
                     OGRE_ASSERT_LOW( shift[a] % int32( l.cellsPerTexel ) == 0 );
                     shiftVolume( mHlmsManager, mRenderSystem, l.texture, a, shift[a] / int32( l.cellsPerTexel ),
-                                 l.packedHalves, kZero );
+                                 l.blocks, kZero );
                 }
                 if( fault && ++shifted == half )
                 {

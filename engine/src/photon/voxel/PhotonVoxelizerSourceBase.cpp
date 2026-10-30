@@ -44,7 +44,6 @@ namespace Ogre
         mAlbedoVox( 0 ),
         mEmissiveVox( 0 ),
         mMetalVox( 0 ),
-        mNormalVox( 0 ),
         mAccumValVox( 0 ),
         mCoverageVox{ 0, 0 },
         mPositionVox{ 0, 0 },
@@ -78,7 +77,8 @@ namespace Ogre
             trackedTex = mAlbedoVox;
             break;
         case DebugVisualizationNormal:
-            trackedTex = mNormalVox;
+            // (VOXEL-R13: the voxel's one normal is deleted - the halves' own faces' normals, the y axis's pair)
+            trackedTex = mHalfNrmVox[1] ? mHalfNrmVox[1] : mAlbedoVox;
             break;
         case DebugVisualizationEmissive:
             trackedTex = mEmissiveVox;
@@ -107,7 +107,6 @@ namespace Ogre
             mTextureGpuManager->destroyTexture( mAlbedoVox );
             mTextureGpuManager->destroyTexture( mEmissiveVox );
             mTextureGpuManager->destroyTexture( mMetalVox );
-            mTextureGpuManager->destroyTexture( mNormalVox );
             mTextureGpuManager->destroyTexture( mAccumValVox );
             for( size_t h = 0u; h < 2u; ++h )
             {
@@ -121,11 +120,19 @@ namespace Ogre
                 mPositionVox[h] = 0;
                 mEmitVox[h] = 0;
             }
+            for( size_t a = 0u; a < 3u; ++a )
+            {
+                if( mHalfSideVox[a] )
+                    mTextureGpuManager->destroyTexture( mHalfSideVox[a] );
+                if( mHalfNrmVox[a] )
+                    mTextureGpuManager->destroyTexture( mHalfNrmVox[a] );
+                mHalfSideVox[a] = 0;
+                mHalfNrmVox[a] = 0;
+            }
 
             mAlbedoVox = 0;
             mEmissiveVox = 0;
             mMetalVox = 0;
-            mNormalVox = 0;
             mAccumValVox = 0;
 
             if( mDebugVoxelVisualizer )
