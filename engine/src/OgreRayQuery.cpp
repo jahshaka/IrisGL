@@ -1319,6 +1319,8 @@ private:
                        unsigned long long ubo = 0ull; std::vector<std::pair<std::string, size_t>> parts;
                        unsigned hitW = 0u, idsBpp = 0u, destBpp = 0u, radBpp = 0u; };
         DiagT diagTemp[8];
+        struct DiagP { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull; size_t texels = 0u; };
+        DiagP diagP[3][6];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
         /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
@@ -1349,6 +1351,9 @@ private:
     void readReflectHistory(ReflectView &rv, VkCommandBuffer cmd);
     /// MEASURING ARM (DETERMINISM-1 arm T, to be reverted): the temporal pass's every input (outputs = false) or output
     void diagTemporal(ReflectView &rv, const ReflectPassListener *key, VkCommandBuffer cmd, unsigned ring, bool outputs);
+    /// MEASURING ARM (DETERMINISM-1 arm P, to be reverted): the reflection's own images at point 0 (after the tile
+    /// pass), 1 (after the compact pass) or 2 (after the composite)
+    void diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned point, unsigned w, unsigned h, unsigned layers);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
     /// THE SHOT-VIEW FOLD (PHOTON-7 stage 10-3): a screenshot's shot view is destroyed right after its readback, and
@@ -7545,6 +7550,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                 &rv.sets[ring], 0, nullptr);
         JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
+        diagPoint(rv, cmd, 0u, traceW, traceH, eyeLayers);   // MEASURING ARM P: after the tile pass
         // THE COMPACT PASS (kReflectCompactTexels): one warp a listed texel, after the tile pass listed them
         if (compactArmed && mReflectCompactPipeline) {
             VkMemoryBarrier lb{};
@@ -7556,7 +7562,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectCompactPipeline);
             const unsigned perGroup = std::max(1u, 64u / mSubgroupSize);   // the 8 x 8 group's warps: a texel each
             vkCmdDispatch(cmd, (kReflectCompactTexels + perGroup - 1u) / perGroup, 1u, 1u);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1, &rv.sets[ring], 0, nullptr);
         }
+        diagPoint(rv, cmd, 1u, traceW, traceH, eyeLayers);   // MEASURING ARM P: after the compact pass
         // The overlay holds this frame's picture from here; the photon listener takes it
         // to the texture layout in front of its composite.
         if (photon) view->notePhotonOverlayWritten();
@@ -8880,6 +8888,91 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
+}
+
+// MEASURING ARM (DETERMINISM-1 arm P, to be reverted; JAH_DIAG_TEMP's window): the reflection's own images (all GENERAL,
+// no layout touched) at a point of the frame, copied after a compute->transfer barrier, the copies ordered before every later
+// compute by a transfer->compute one, read behind the fork's frame fence; one hash each.
+void RayQueryTier::diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned point, unsigned w, unsigned h, unsigned layers) {
+    static const std::string win = std::getenv("JAH_DIAG_TEMP") ? std::getenv("JAH_DIAG_TEMP") : "";
+    if (win.empty() || !cmd || point > 2u) return;
+    const auto mix = [](unsigned long long x) {
+        x += 0x9E3779B97F4A7C15ull;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+        return x ^ (x >> 31);
+    };
+    const auto hashBytes = [&](const unsigned char *b, size_t n) {
+        unsigned long long hh = 0x51ED270B27u;
+        for (size_t i = 0; i + 8u <= n; i += 8u) {
+            unsigned long long v = 0ull;
+            std::memcpy(&v, b + i, 8u);
+            hh = mix(hh ^ v);
+        }
+        return hh;
+    };
+    const char *names[6] = { "sample", "stateCur", "refine", "histCur", "histPrev", "statePrev" };
+    const unsigned bpt[6] = { 8u, 8u, 16u, 8u, 8u, 8u };
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (ReflectView::DiagP &d : rv.diagP[point]) {
+        if (!d.live || uint32_t(now - d.frame) < inFlight) continue;
+        if (mDev && mDev->mVaoManager) mDev->mVaoManager->waitForSpecificFrameToFinish(d.frame);
+        d.live = false;
+        const unsigned char *m = static_cast<const unsigned char *>(d.host.mapped);
+        std::string line = "DIAG P" + std::to_string(point) + " rf " + std::to_string(d.rf);
+        size_t at = 0u;
+        for (int k = 0; k < 6; ++k) {
+            char hx[24];
+            std::snprintf(hx, sizeof(hx), "%016llx", hashBytes(m + at, d.texels * bpt[k]));
+            line += std::string(" ") + names[k] + " " + hx;
+            at += d.texels * bpt[k];
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+    const unsigned long long rfNow = Ogre::Root::getSingleton().getNextFrameNumber();
+    const unsigned long long from = std::strtoull(win.c_str(), nullptr, 10),
+                             to = std::strtoull(win.c_str() + win.find(':') + 1, nullptr, 10);
+    if (rfNow < from || rfNow > to || !w || !h) return;
+    ReflectView::DiagP *slot = nullptr;
+    for (ReflectView::DiagP &d : rv.diagP[point])
+        if (!d.live) { slot = &d; break; }
+    if (!slot) return;
+    const ReflectImage *imgs[6] = { &rv.sample, &rv.state[rv.curIdx], &rv.refine, &rv.hist[rv.curIdx], &rv.hist[rv.prevIdx],
+                                    &rv.state[rv.prevIdx] };
+    for (const ReflectImage *i : imgs)
+        if (!i->image) return;
+    const size_t texels = size_t(w) * h * layers;
+    size_t total = 0u;
+    for (int k = 0; k < 6; ++k) total += texels * bpt[k];
+    if (slot->host.buffer && slot->host.size < total) retire(slot->host);
+    std::string err;
+    if (!slot->host.buffer && !makeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err)) return;
+    VkMemoryBarrier toCopy{};
+    toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr, 0,
+                         nullptr);
+    VkDeviceSize off = 0u;
+    for (int k = 0; k < 6; ++k) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = off;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = layers;
+        region.imageExtent = { w, h, 1u };
+        vkCmdCopyImageToBuffer(cmd, imgs[k]->image, VK_IMAGE_LAYOUT_GENERAL, slot->host.buffer, 1, &region);
+        off += VkDeviceSize(texels) * bpt[k];
+    }
+    VkMemoryBarrier after{};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         1, &after, 0, nullptr, 0, nullptr);
+    slot->live = true;
+    slot->frame = now;
+    slot->rf = rfNow;
+    slot->texels = texels;
 }
 
 // MEASURING ARM (DETERMINISM-1 arm T, to be reverted; JAH_DIAG_TEMP=<from rf>:<to rf>): the temporal pass's every input
@@ -12797,6 +12890,8 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              0, 1, &b, 0, nullptr, 0, nullptr);
     }
+    if (auto rit = mReflects.find(key); rit != mReflects.end() && rit->second.finishPending)   // MEASURING ARM P: after the composite
+        diagPoint(rit->second, cmd, 2u, rit->second.traceW, rit->second.traceH, rit->second.layers);
     // THE COUNTERS, on their way to the host (read several frames late).
     {
         VkMemoryBarrier b{};
