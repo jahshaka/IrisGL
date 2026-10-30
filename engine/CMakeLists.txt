@@ -947,7 +947,8 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelSample
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelSample_piece_all.any
             -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
-            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahVoxelMarch
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelMarch_piece_all.any
@@ -1138,13 +1139,14 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahVoxelReaderParity_ps.glsl
             -DIN0=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_head.glsl
             -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
-            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
-            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
-            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
-            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
-            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
-            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
-            -DIN8=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_halves.glsl
+            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_sample.glsl
+            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_march.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_ray_set.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_faces.glsl
+            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_ray.glsl
+            -DIN8=${JAH_VOXEL_READER_INCLUDE}/jah_voxel_parity.glsl
+            -DIN9=${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/parity/jah_voxel_parity_ps_main.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_COMMON_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/Common"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${OGRE_NEXT_HDR_MATERIALS_DIR}" "${JAHSHAKA_MEDIA_DIR}/2.0/scripts/materials/HDR"

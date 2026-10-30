@@ -134,7 +134,7 @@
 
             "textures" :
             [
-                {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
+                {}, {}, {}, {}, {}, {}, {}
             ],
 
             "params" :
@@ -145,17 +145,13 @@
 
             "params_glsl" :
             [
-                ["inHalfLightX",            [0], "int"],
-                ["inHalfLightY",            [1], "int"],
-                ["inHalfLightZ",            [2], "int"],
-                ["inHalfDirectX",           [3], "int"],
-                ["inHalfDirectY",           [4], "int"],
-                ["inHalfDirectZ",           [5], "int"],
-                ["inCoveragePTex",          [6], "int"],
-                ["inCoverageNTex",          [7], "int"],
-                ["inDirectDir0",            [8], "int"],
-                ["inDirectDir1",            [9], "int"],
-                ["inDirectDir2",            [10], "int"],
+                ["inHalfLight",             [0], "int"],
+                ["inHalfDirect",            [1], "int"],
+                ["inCoveragePTex",          [2], "int"],
+                ["inCoverageNTex",          [3], "int"],
+                ["inDirectDir0",            [4], "int"],
+                ["inDirectDir1",            [5], "int"],
+                ["inDirectDir2",            [6], "int"],
                 ["outLightHigherMip0",       [0], "int"],
                 ["outLightHigherMip1",       [1], "int"],
                 ["outLightHigherMip2",       [2], "int"]
@@ -264,7 +260,7 @@
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 5,
+            "uav_units" : 3,
 
             "properties" :
             {

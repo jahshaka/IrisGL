@@ -182,7 +182,7 @@ namespace Ogre
         const uint32 zero[3] = { 0u, 0u, 0u };
         for( size_t i = 0u; i < kVolumes; ++i )
         {
-            shiftVolume( mHlmsManager, mRenderSystem, dst[i], 0u, 0, false, kZero );
+            shiftVolume( mHlmsManager, mRenderSystem, dst[i], 0u, 0, 1u, kZero );
             copyBox( mHlmsManager, mRenderSystem, dst[i], dst[i], zero, zero, zero );
         }
     }
@@ -223,7 +223,7 @@ namespace Ogre
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelScroll::shiftVolume( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *volume,
-                                         uint32 axis, int32 texels, bool packedHalves, const float clear[4] )
+                                         uint32 axis, int32 texels, uint32 blocks, const float clear[4] )
     {
         HlmsComputeJob *job = scrollJob( hlmsManager, 0, volume->getPixelFormat() );
         DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
@@ -232,12 +232,12 @@ namespace Ogre
         uavSlot.access = ResourceAccess::ReadWrite;
         job->_setUavTexture( 0u, uavSlot );
         const uint32 dims[3] = { volume->getWidth(), volume->getHeight(), volume->getDepth() };
-        const bool halves = packedHalves && axis == 0u;
-        // THE COLUMNS: the two other axes in increasing order, and the halves of a packed volume along x.
+        const uint32 n = axis == 0u ? std::max( blocks, 1u ) : 1u;
+        // THE COLUMNS: the two other axes in increasing order, and the blocks of a packed volume along x.
         const uint32 b = axis == 0u ? 1u : 0u, c = axis == 2u ? 1u : 2u;
-        const uint32 len = halves ? dims[0] / 2u : dims[axis];
-        const uint32 shiftAxis[4] = { axis, uint32( texels ), len, halves ? dims[0] / 2u : 0u };
-        const uint32 columns[4] = { dims[b], dims[c], halves ? 2u : 1u, 0u };
+        const uint32 len = axis == 0u ? dims[0] / n : dims[axis];
+        const uint32 shiftAxis[4] = { axis, uint32( texels ), len, n > 1u ? dims[0] / n : 0u };
+        const uint32 columns[4] = { dims[b], dims[c], n, 0u };
         const uint32 *tpg = job->getThreadsPerGroup();
         job->setNumThreadGroups( std::max( 1u, ( columns[0] + tpg[0] - 1u ) / tpg[0] ),
                                  std::max( 1u, ( columns[1] + tpg[1] - 1u ) / tpg[1] ),
@@ -368,14 +368,14 @@ namespace Ogre
             {
                 if( i < kVolumes )
                 {
-                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], false, clearOf( i ) );
+                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], 1u, clearOf( i ) );
                 }
                 else
                 {
                     const LightVolume &l = light[i - kVolumes];
                     OGRE_ASSERT_LOW( shift[a] % int32( l.cellsPerTexel ) == 0 );
                     shiftVolume( mHlmsManager, mRenderSystem, l.texture, a, shift[a] / int32( l.cellsPerTexel ),
-                                 l.packedHalves, kZero );
+                                 l.blocks, kZero );
                 }
                 if( fault && ++shifted == half )
                 {

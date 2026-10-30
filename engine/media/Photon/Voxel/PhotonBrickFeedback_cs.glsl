@@ -72,14 +72,9 @@
 	uniform restrict readonly image3D fbFrom;
 	layout( vulkan( ogre_u1 ) vk_comma @insertpiece(uav1_pf_type) )
 	uniform restrict writeonly image3D fbTo;
-	// PHOTON-7 stage 7: THE BACK SIDE'S NEW VALUE, from the chain's compact scratch (the bounce pass's u1: one row a
-	// listed brick, its list slot - one texel a voxel, x + 8 y + 64 z) onto the back over the same bricks. (The images
-	// take the slots before the list: the job's root layout keeps each kind of UAV contiguous.)
-	layout( vulkan( ogre_u2 ) vk_comma rgba16f )
-	uniform restrict readonly image2D fbBackScratch;
-	layout( vulkan( ogre_u3 ) vk_comma rgba16f )
-	uniform restrict writeonly image3D fbBackTo;
-	layout( std430, ogre_U4 ) restrict readonly buffer fbListLayout { uint fbList[]; };
+	// (VOXEL-R13 stage 2: both in the half store's layout - the six halves side by side along x; the images take the slots
+	// before the list: the job's root layout keeps each kind of UAV contiguous)
+	layout( std430, ogre_U2 ) restrict readonly buffer fbListLayout { uint fbList[]; };
 @else
 	layout( std430, ogre_U0 ) restrict coherent buffer fbStateLayout { uint fbState[]; };
 	layout( std430, ogre_U1 ) restrict coherent buffer fbMaskLayout { uint fbMask[]; };
@@ -152,15 +147,17 @@ uint fbU( float f ) { return floatBitsToUint( f ); }
 void main()
 {
 @property( jah_brick_copy )
-	// THE COPY-BACK: what the pass wrote into its target becomes the total over the listed bricks (8 groups of 4^3 a
-	// brick, the brick group y; the texture identities never change).
+	// THE COPY-BACK: what the pass wrote into its target becomes the half store over the listed bricks (8 groups of 4^3
+	// a brick, the brick group y; the texture identities never change) - the six halves of each voxel (VOXEL-R13 stage 2)
 	const uint3 brick = fbUnpack( fbList[gl_WorkGroupID.y] );
 	const uint sub = gl_WorkGroupID.x;
 	const uint3 cell = brick * 8u + uint3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
-	imageStore( fbTo, int3( cell ), imageLoad( fbFrom, int3( cell ) ) );
-	imageStore( fbBackTo, int3( cell ),
-				imageLoad( fbBackScratch, int2( int( ( cell.x & 7u ) + 8u * ( cell.y & 7u ) + 64u * ( cell.z & 7u ) ),
-												int( gl_WorkGroupID.y ) ) ) );
+	const int halfW = imageSize( fbTo ).x / 6;
+	for( int k = 0; k < 6; ++k )
+	{
+		const int3 t = int3( int( cell.x ) + k * halfW, int( cell.y ), int( cell.z ) );
+		imageStore( fbTo, t, imageLoad( fbFrom, t ) );
+	}
 @else
 	const uint mode = fbDims.w;
 	const uint numBricks = fbDims.x * fbDims.y * fbDims.z;

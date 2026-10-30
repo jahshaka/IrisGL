@@ -69,28 +69,16 @@ uniform restrict image3D backVoxel;
 	uniform restrict writeonly image3D dirOut2;
 @end
 @add( jahInjUav, 1 )
-// VOXEL-R13 stage 1: THE HALF STORE - level 0's six half lights (jah_voxel_halves.glsl: one volume an axis, the -a half
-// in [0, W), the +a half in [W, 2W)), each (radiance x k, k) with k the half's capped coverage; with a bounce their
-// direct terms beside them (the bounce's fixed point per half, the delta's old terms). Read-write: the delta and the
-// brick mask compare each half's direct term with the one it replaces.
+// VOXEL-R13: THE HALF STORE - level 0's six half lights (jah_voxel_halves.glsl: one volume, the six halves side by side
+// along x), each (radiance x k, k) with k the half's capped coverage; with a bounce their direct terms beside them (the
+// bounce's fixed point per half, the delta's old terms). Read-write: the delta and the brick mask compare each half's
+// direct term with the one it replaces.
 layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-uniform restrict image3D halfLightX;
-@add( jahInjUav, 1 )
-layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-uniform restrict image3D halfLightY;
-@add( jahInjUav, 1 )
-layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-uniform restrict image3D halfLightZ;
+uniform restrict image3D halfStore;
 @add( jahInjUav, 1 )
 @property( vct_keep_direct )
 	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict image3D halfDirectX;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict image3D halfDirectY;
-	@add( jahInjUav, 1 )
-	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
-	uniform restrict image3D halfDirectZ;
+	uniform restrict image3D halfStoreDirect;
 	@add( jahInjUav, 1 )
 @end
 // PHOTON-7 stage 2, THE WORK LAW'S DOOR: a delta injection counts the voxels it lit, cumulatively - word 0 those inside

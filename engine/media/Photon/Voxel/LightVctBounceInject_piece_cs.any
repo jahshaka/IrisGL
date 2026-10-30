@@ -140,26 +140,12 @@
 	@else
 		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
-	// VOXEL-R13 stage 1: THE HALF STORE (written in place, read-write) and its direct terms (read), per axis
+	// VOXEL-R13: THE HALF STORE's direct terms (read; the store itself is the gather's own vctProbes[0], the pass writes
+	// its target lightVoxel)
 	@insertpiece( JahVoxelHalves )
-	INLINE float4 jahHalfLightLoad( int a, int3 t )
+	INLINE float4 jahHalfDirectLoad( int3 t )
 	{
-		return a == 0 ? imageLoad( halfLightX, t ) : ( a == 1 ? imageLoad( halfLightY, t ) : imageLoad( halfLightZ, t ) );
-	}
-	/// (the store rounds the half float to nearest itself - REDS-1's rule: callers pass the f32)
-	INLINE void jahHalfLightStore( int a, int3 t, float4 v )
-	{
-		if( a == 0 )
-			imageStore( halfLightX, t, jahStoreLight( v ) );
-		else if( a == 1 )
-			imageStore( halfLightY, t, jahStoreLight( v ) );
-		else
-			imageStore( halfLightZ, t, jahStoreLight( v ) );
-	}
-	INLINE float4 jahHalfDirectLoad( int a, int3 t )
-	{
-		return a == 0 ? OGRE_Load3D( halfDirectX, t, 0 )
-					  : ( a == 1 ? OGRE_Load3D( halfDirectY, t, 0 ) : OGRE_Load3D( halfDirectZ, t, 0 ) );
+		return OGRE_Load3D( halfStoreDirect, t, 0 );
 	}
 @end
 
@@ -181,27 +167,10 @@
 
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahCell, 0 );
 	float4 normalVal = OGRE_Load3D( voxelNormalTex, jahCell, 0 );
-	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION.
-	//
-	// What this pass writes is  new = direct + rho * G( total )  -- the fixed point
-	// of the radiance in the volume, iterated once. The base term is therefore the
-	// DIRECT injection, read from its own volume; the GATHER below still reads the
-	// running total (`vctProbes`), which is what makes the second pass see the first
-	// bounce and the chain see the cascades outside it.
-	//
-	// What stood here was `OGRE_Load3D( vctProbes[0], ... )`: the running TOTAL as
-	// the base, so the pass computed  new = total + rho * G( total )  and the series
-	// was S_n = (1 + rho*G)^n * D -- binomial. It never contracts; every pass
-	// re-amplifies the first bounce's energy, which is why upstream needed a 1/pi
-	// dampening (and a commented-out per-pass one, and "more bounces for coarser
-	// cascades") to keep the picture from running away. With this line the series
-	// contracts by rho * f per pass on its own, and the dampening is 1.
-	//
-	// The alpha channel is the voxel's COVERAGE, identical in both volumes (the
-	// injection writes albedoVal.w to each), so reading it here keeps it exactly as
-	// the accumulating form did.
-	float4 currentLight = OGRE_Load3D( directVoxel, jahCell, 0 );
-	float4 backLight = OGRE_Load3D( directBackVoxel, jahCell, 0 );
+	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION. What this pass writes is  new = direct +
+	// rho * G( total )  -- the fixed point of the radiance in the volume, iterated once: the base term the DIRECT injection,
+	// read from its own volume, the GATHER reading the running total. (The running total as the base made the series
+	// binomial in (1 + rho*G): it never contracts; upstream's 1/pi dampening was that.) VOXEL-R13: per half (below).
 	// what this voxel re-emits of what it gathers (0 where nothing is): the feedback's sensitivity, below
 	float3 jahReemit = float3( 0, 0, 0 );
 
@@ -210,13 +179,17 @@
 	// over the same list); stored in place, (radiance x k, k) - no gather of this pass reads a half (the ray tier's ran
 	// before it; the voxel rays read the two sides and the directional chain). The two sides are DERIVED from the stored
 	// halves (this stage only; jahHalfSideWeight), so they move only when a half moves.
-	const int jahHalfW = imageSize( halfLightX ).x >> 1;
+	const int jahHalfW = imageSize( lightVoxel ).x / 6;
 	const float3 jahCovP = OGRE_Load3D( vctProbeCovP[0], jahCell, 0 ).xyz;
 	const float3 jahCovN = OGRE_Load3D( vctProbeCovN[0], jahCell, 0 ).xyz;
 	// each half's target, (radiance x k, k): its direct term, and below what it re-emits of its own gather
 	float4 jahHalfTarget[6];
+	float4 jahHalfDirectAt[6];
 	for( int q = 0; q < 6; ++q )
-		jahHalfTarget[q] = jahHalfDirectLoad( q % 3, jahHalfTexel( int3( jahCell ), q / 3, jahHalfW ) );
+	{
+		jahHalfDirectAt[q] = jahHalfDirectLoad( jahHalfTexel( int3( jahCell ), q / 3, q % 3, jahHalfW ) );
+		jahHalfTarget[q] = jahHalfDirectAt[q];
+	}
 	const bool twoSided = normalVal.a > 0.0f;
 	normalVal.xyz = normalize( normalVal.xyz * 2.0f - 1.0f );
 
@@ -314,14 +287,20 @@
 							 : jahOperator;
 	const float jahOrbitSteps = 0.5 / ( 1.0 - jahRho );
 	const float3 jahFloor = float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 );   // the half float's smallest normal
-	// THE HALVES: held (a), written in place, read back (the store's own rounding), their move under (ii)'s no-move rule
-	float4 jahHalfStored[6];
+	// THE HALVES: held (a) against the store, written into the pass's TARGET (never in place: the voxel rays of this pass
+	// read other cells' halves - the copy-back moves the listed bricks' after it), read back (the store's own rounding),
+	// their move under (ii)'s no-move rule. A CLEARED half (its brick's bit 10 - the shift brought it in, a whole injection
+	// wrote it - and still its direct term alone, bit for bit: no pass has reached it) moves by its whole new light: what a
+	// reader read there before was another cascade's (the absolute move's reference, PHOTON-7 stage 5's 5-4), a bound.
+	const bool jahBrickCleared =
+		( jahFbState[10u * ( jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z ) )] & 1024u ) != 0u;
 	float jahHalfMoved = 0.0;
 	float3 jahHalfAbs = float3( 0.0, 0.0, 0.0 );
+	float jahHalfMaxNew = 0.0;
 	for( int q = 0; q < 6; ++q )
 	{
-		const int3 t = jahHalfTexel( int3( jahCell ), q / 3, jahHalfW );
-		const float4 stored = jahHalfLightLoad( q % 3, t );
+		const int3 t = jahHalfTexel( int3( jahCell ), q / 3, q % 3, jahHalfW );
+		const float4 stored = OGRE_Load3D( vctProbes[0], t, 0 );
 		float4 target = jahHalfTarget[q];
 		const float3 step = exp2( floor( log2( max( max( abs( target.xyz ), abs( stored.xyz ) ), jahFloor ) ) ) - 10.0 );
 		// (a) THE WRITE HOLD: max( 1, 0.5 / (1 - r) ) steps, CAPPED at 0.8 of a code at the value's own level (a code: 1 %
@@ -334,9 +313,8 @@
 			if( abs( target[k] - stored[k] ) < hold[k] )
 				target[k] = stored[k];
 		}
-		jahHalfLightStore( q % 3, t, target );
-		const float4 now = jahHalfLightLoad( q % 3, t );
-		jahHalfStored[q] = now;
+		imageStore( lightVoxel, t, jahStoreLight( target ) );
+		const float4 now = imageLoad( lightVoxel, t );
 		// (ii) THE SCHEDULER's NO-MOVE, per half (below, the rule's text): within 0.5 / (1 - r) steps no move
 		float3 moved = now.xyz;
 		const float3 stepN = exp2( floor( log2( max( max( abs( now.xyz ), abs( stored.xyz ) ), jahFloor ) ) ) - 10.0 );
@@ -347,100 +325,18 @@
 		}
 		const float invK = now.w > 0.0 ? 1.0 / now.w : 0.0;
 		jahHalfMoved = max( jahHalfMoved, jahBrickChange( stored.xyz * invK, moved * invK ) );
-		jahHalfAbs = max( jahHalfAbs, abs( moved - stored.xyz ) * invK );
+		const bool cleared =
+			jahBrickCleared && all( equal( floatBitsToUint( stored ), floatBitsToUint( jahHalfDirectAt[q] ) ) );
+		jahHalfAbs = max( jahHalfAbs, ( cleared ? abs( moved ) : abs( moved - stored.xyz ) ) * invK );
+		jahHalfMaxNew = max( jahHalfMaxNew, max( max( abs( moved.x ), abs( moved.y ) ), abs( moved.z ) ) * invK );
 	}
-	// THE TWO SIDES FROM THE STORED HALVES (VOXEL-R13 stage 1 only: the level-0 readers read them until stage 2) - each the
-	// coverage-weighted mean of its halves' radiance, times the voxel's opacity c, as the store held it
-	{
-		float3 f = float3( 0.0, 0.0, 0.0 ), b = float3( 0.0, 0.0, 0.0 );
-		float wf = 0.0, wb = 0.0;
-		for( int q = 0; q < 6; ++q )
-		{
-			const float sf = jahHalfSideWeight( normalVal.xyz, twoSided, q / 3, q % 3, 0 );
-			const float sb = jahHalfSideWeight( normalVal.xyz, twoSided, q / 3, q % 3, 1 );
-			f += sf * jahHalfStored[q].xyz;
-			wf += sf * jahHalfStored[q].w;
-			b += sb * jahHalfStored[q].xyz;
-			wb += sb * jahHalfStored[q].w;
-		}
-		const float c = albedoVal.w;
-		currentLight = float4( ( wf > 0.0 ? f / wf : float3( 0.0, 0.0, 0.0 ) ) * c, currentLight.w );
-		backLight = float4( twoSided && wb > 0.0 ? ( b / wb ) * c : float3( 0.0, 0.0, 0.0 ), backLight.w );
-	}
-	float3 jahBackOld = OGRE_Load3D( vctProbeBack[0], jahCell, 0 ).xyz;   // the back as the store held it (THE PASS'S MOVE)
-	wshort3 voxelCelUvw = wshort3( jahCell );
-	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( currentLight ) );  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
-	// the back into the chain's compact scratch at this brick's list slot (the declaration says why)
-	const int2 jahScratchAt = int2( int( ( jahCell.x & 7u ) + 8u * ( jahCell.y & 7u ) + 64u * ( jahCell.z & 7u ) ),
-									int( gl_WorkGroupID.y ) );
-	imageStore( backScratch, jahScratchAt, jahRoundHalf( float4( backLight.xyz, currentLight.w ) ) );
-	// THE PASS'S MOVE (PHOTON-7 stage 3's word 1, stage 4's feedback): the total it gathered from (the current one, a
-	// linear read) against what the STORE now holds - read back by this invocation (program order: the store's own
-	// rounding, never a conversion of ours), so a voxel at the float store's fixed point moves by exactly 0. Per
-	// brick the most relative move (the mask, codes), the most absolute move and the sensitivity - the re-emission over
-	// the voxel's own code, per channel (the state) - each the group's most, then one atomic per group. Every invocation
-	// of a group is in one brick and reaches the barriers (the list's bricks are whole).
-	const float3 jahOld = OGRE_Load3D( vctProbes[0], jahCell, 0 ).xyz;
-	const float3 jahNewStored = imageLoad( lightVoxel, int3( jahCell ) ).xyz;
-	// ...and the back, read back from the scratch in program order (the store's own rounding): the series and the stop
-	// take EITHER side's move (PHOTON-7 stage 7: both sides are stored and read; a brick stopped on its front alone
-	// would rest with its back still moving)
-	const float3 jahBackNewStored = imageLoad( backScratch, jahScratchAt ).xyz;
-	// (ii) THE SCHEDULER's NO-MOVE (the lead's ruling): a channel's move within max( the hold, 0.5 / (1 - r) ) steps at
-	// its own level is NO MOVE for the stop, the resume and every accumulation that reads the moves - the store may hold
-	// it (it is written), but nothing is told: the brick stops, its move resumes nobody, and with nothing recomputing it
-	// an orbit ends. This is the store's ACHIEVABLE QUANTUM under the iteration (round-to-nearest cannot do better), not
-	// a loosened bar: about 1.5e-7 radiance at the floor at r 0.8 (2.5 steps of 2^-24); in the normal range 0.5 / (1 - r)
-	// steps of 2^-10 of the value. The rows' floor comparisons take their tolerance from it.
-	float3 jahNew = jahNewStored;
-	float3 jahBackNew = jahBackNewStored;
-	{
-		const float3 jahFloorS = float3( 6.1035156e-5, 6.1035156e-5, 6.1035156e-5 );
-		const float3 jahStepN = exp2( floor( log2( max( max( abs( jahNew ), abs( jahOld ) ), jahFloorS ) ) ) - 10.0 );
-		const float3 jahStepNB =
-			exp2( floor( log2( max( max( abs( jahBackNew ), abs( jahBackOld ) ), jahFloorS ) ) ) - 10.0 );
-		for( int k = 0; k < 3; ++k )
-		{
-			if( abs( jahNew[k] - jahOld[k] ) <= jahOrbitSteps * jahStepN[k] )
-				jahNew[k] = jahOld[k];
-			if( abs( jahBackNew[k] - jahBackOld[k] ) <= jahOrbitSteps * jahStepNB[k] )
-				jahBackNew[k] = jahBackOld[k];
-		}
-	}
-	const float jahMoved = max( max( jahBrickChange( jahOld, jahNew ), jahBrickChange( jahBackOld, jahBackNew ) ),
-								jahHalfMoved );
-	// THE ABSOLUTE MOVE'S REFERENCE (PHOTON-7 stage 5, 5-4): what a reader read at this world point before. A CLEARED
-	// voxel (its brick's bit 10 - the shift brought it in, a whole injection wrote it - and its total still its direct
-	// term alone, bit for bit: no pass has reached it) was read from the next cascade out, so its first pass's move is
-	// against that cascade's total there (the outermost's against nothing: no reader read radiance there); the series
-	// (the mask's relative move, the stop) keeps the store's own move. The cards' and the field's accumulation read it.
-	float3 jahRef = jahOld;
-	float3 jahRefBack = jahBackOld;
-	{
-		const uint jahIdx0 = jahBrick.x + p_brickMark.y * ( jahBrick.y + p_brickMark.z * jahBrick.z );
-		const float3 jahStoredDirect = OGRE_Load3D( directVoxel, jahCell, 0 ).xyz;
-		if( ( jahFbState[10u * jahIdx0] & 1024u ) != 0u &&
-			all( equal( floatBitsToUint( jahOld ), floatBitsToUint( jahStoredDirect ) ) ) )
-		{
-			jahRef = float3( 0.0, 0.0, 0.0 );
-			jahRefBack = float3( 0.0, 0.0, 0.0 );
-			@property( hlms_num_vct_cascades > 1 )
-				const float3 jahUvw1 = voxelUvwPos * JAH_VOX_FROM_PREV_SCALE( 1 ).xyz + JAH_VOX_FROM_PREV_OFFSET( 1 ).xyz;
-				if( all( greaterThanEqual( jahUvw1, float3( 0.0, 0.0, 0.0 ) ) ) &&
-					all( lessThanEqual( jahUvw1, float3( 1.0, 1.0, 1.0 ) ) ) )
-				{
-					jahRef = OGRE_SampleLevel( vctProbes[1], vctProbeSampler, jahUvw1, 0.0 ).xyz;
-					jahRefBack = OGRE_SampleLevel( vctProbeBack[1], vctProbeSampler, jahUvw1, 0.0 ).xyz;
-				}
-			@end
-		}
-	}
-	// THE ABSOLUTE MOVE IS EITHER SIDE'S (PHOTON-7 stage 7): a reader reads the side its travel meets, so what a reader
-	// read moved by the larger of the two sides' moves - the front (the target, read back) and the back (the scratch,
-	// read back above). Measured on the front alone, a wall voxel whose canonical normal looks out of a room moved its
-	// BACK under a lamp step inside and nothing was reported.
-	// (VOXEL-R13: and every half's own move - the directional chain the coarser readers read is composited from them)
-	const float3 jahAbs3 = max( max( abs( jahNew - jahRef ), abs( jahBackNew - jahRefBack ) ), jahHalfAbs );
+	// THE PASS'S MOVE (PHOTON-7 stage 3's word 1, stage 4's feedback; VOXEL-R13 stage 2: the halves' - the store's state):
+	// per brick the most relative move (the mask, codes), the most absolute move and the sensitivity - the re-emission over
+	// the voxel's own code (its brightest half at its opacity), per channel (the state) - each the group's most, then one
+	// atomic per group. Every invocation of a group is in one brick and reaches the barriers (the list's bricks are whole).
+	const float jahMoved = jahHalfMoved;
+	const float3 jahAbs3 = jahHalfAbs;
+	const float3 jahNew = float3( jahHalfMaxNew * albedoVal.w );
 	float jahAbs = max( max( jahAbs3.x, jahAbs3.y ), jahAbs3.z );
 	if( ( floatBitsToUint( jahAbs ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbs = 1.0e30;

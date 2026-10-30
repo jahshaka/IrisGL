@@ -170,6 +170,12 @@ namespace Ogre
         /// to. The directional volumes' level 0 is composited by the light injection itself from
         /// each voxel's light PER HALF-AXIS (the fused step 0).
         TextureGpu             *mLightVoxel[10];
+        /// VOXEL-R13 stage 2: THE READERS' LIST (getLightVoxelTextures; refreshReaderVolumes) - what every reader of the
+        /// store binds per cascade: [0] THE HALF STORE (level 0's six half lights), [1..3] the directional volumes, [4..7]
+        /// the coverage and the surface position per half, [8] the half store's direct terms (the store itself without a
+        /// bounce), [9] the voxeliser's normal. Level 0's two sides (mLightVoxel[0] and [backIndex()]) are no reader's.
+        TextureGpu             *mReaderVolumes[10] = {};
+        void                    refreshReaderVolumes();
         HlmsSamplerblock const *mSamplerblockTrilinear;
 
         PhotonVoxelizerSourceBase *mVoxelizer;
@@ -297,13 +303,14 @@ namespace Ogre
         /// the bounce's fixed point and step 0 need per side and per half.
         TextureGpu *mLightDirectBack;
         TextureGpu *mLightDirectDir[3];
-        /// VOXEL-R13 stage 1: THE HALF STORE - level 0's six HALF LIGHTS (jah_voxel_halves.glsl): per axis one volume
-        /// twice the voxels wide (the -a half's light in [0, W), the +a half's in [W, 2W)), RGBA16F (radiance x k, k) with
-        /// k the half's capped coverage - each half lit and gathered from its own faces; the directional chain's level 0
-        /// is composited from them (AnisotropicMipVctStep0). mHalfDirect[a] their direct terms (born with the bounce,
-        /// like mLightDirect: the fixed point per half, a delta's old term). 48 B a voxel each set.
-        TextureGpu *mHalfLight[3] = { nullptr, nullptr, nullptr };
-        TextureGpu *mHalfDirect[3] = { nullptr, nullptr, nullptr };
+        /// VOXEL-R13: THE HALF STORE - level 0's six HALF LIGHTS (jah_voxel_halves.glsl): ONE volume six times the voxels
+        /// wide - axis a's -a half's light in [2a W, (2a + 1) W), its +a half's in [(2a + 1) W, (2a + 2) W) - RGBA16F
+        /// (radiance x k, k) with k the half's capped coverage, each half lit and gathered from its own faces; one volume so
+        /// every reader binds it in one slot a cascade (the light list's entry 0). The directional chain's level 0 is
+        /// composited from it (AnisotropicMipVctStep0). mHalfDirect: its direct terms, the same layout (born with the
+        /// bounce, like mLightDirect: the fixed point per half, a delta's old term, a hit's bounce share). 48 B a voxel each.
+        TextureGpu *mHalfLight = nullptr;
+        TextureGpu *mHalfDirect = nullptr;
         ShaderParams::Param *mInjectHigherMipHalfWidth;
         /// Jahshaka (PHOTON-7 stage 1): the injection's chain - this cascade's entry and, per entry, its box
         /// corner relative to this one's with its cell and its resolution with its shell's end (setChainIndex).
@@ -820,17 +827,21 @@ namespace Ogre
         TextureGpu  *getEnvironmentCube() const { return mEnvCube; }
         const float *getEnvironmentSh() const { return mEnvSh; }
 
-        TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
+        /// THE READERS' LIST (VOXEL-R13 stage 2: mReaderVolumes) - never the internal stores' order.
+        TextureGpu **getLightVoxelTextures() { return mReaderVolumes; }
+        /// ...and level 0's two sides as stored (the door's; no reader binds them).
+        TextureGpu  *getLightFrontTexture() const { return mLightVoxel[0]; }
+        TextureGpu  *getLightBackTexture() const { return mLightVoxel[8]; }
         /** THE SCROLL'S LIGHT (PHOTON-7 stage 2, AB S4): the level-0 textures a scroll's commit shifts in place with the
             geometry - the total, its back side, the direct term, its back side, and the directional level 0's direct
-            part per axis (half resolution, both signs packed along x: `cellsPerTexel` 2, `packed` true), and (VOXEL-R13
-            stage 1) the half store and its direct terms (full resolution, both halves packed along x). The directional
+            part per axis (half resolution, both signs packed along x: `cellsPerTexel` 2, `blocks` 2), and (VOXEL-R13) the
+            half store and its direct terms (full resolution, the six halves packed along x: `blocks` 6). The directional
             volumes are not among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch.
             Fills `out` and returns kScrollLightTextures, or 0 on a lighting that cannot bounce (no direct term to shift).
         */
-        static constexpr size_t kScrollLightTextures = 13u;
+        static constexpr size_t kScrollLightTextures = 9u;
         size_t scrollLightTextures( TextureGpu *out[kScrollLightTextures], uint32 cellsPerTexel[kScrollLightTextures],
-                                    bool packed[kScrollLightTextures] ) const;
+                                    uint32 blocks[kScrollLightTextures] ) const;
         /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (fork ae2ed529f+155a56bf8 (was 0076)'s D term), or null
         /// on a PhotonVoxelLighting that cannot bounce. Read-only, and it exists so a host
         /// can MEASURE the store -- the normalisation's own self-check is "the
@@ -840,13 +851,12 @@ namespace Ogre
         /// ...and the back side's direct term (PHOTON-7 stage 2: the store door's `directBack`).
         TextureGpu  *getLightDirectBackTexture() const { return mLightDirectBack; }
         /// VOXEL-R13: the half store's axis-a volume and its direct terms' (null without a bounce)
-        TextureGpu  *getHalfLightTexture( size_t a ) const { return mHalfLight[a]; }
-        TextureGpu  *getHalfDirectTexture( size_t a ) const { return mHalfDirect[a]; }
+        TextureGpu  *getHalfLightTexture() const { return mHalfLight; }
+        TextureGpu  *getHalfDirectTexture() const { return mHalfDirect; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
-        /// The light volumes a reader binds per cascade: the total (level 0) and its three
-        /// directional axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),
-        /// then the surface position per half (PHOTON-VOXEL-4), then (PHOTON-VOXEL-5) level
-        /// 0's back side and the voxelizer's normal, the last two (backIndex / normalIndex).
+        /// The light volumes a reader binds per cascade: the half store (level 0, VOXEL-R13) and the three directional
+        /// axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4), then the surface position per half
+        /// (PHOTON-VOXEL-4), then the half store's direct terms and the voxelizer's normal (backIndex / normalIndex).
         uint32       getNumVoxelTextures() const { return kVolumesPerCascade; }
         /// Jahshaka (OWN-GI-1): the same count without an instance — what the PBS
         /// pass claims per cascade (PhotonPassBinding) and the pass budget is sized on.

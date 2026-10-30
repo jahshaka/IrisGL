@@ -8300,21 +8300,18 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         Ogre::TextureGpu **tex = lighting->getLightVoxelTextures();
         if (!tex || !tex[0]) continue;
         const unsigned c = out.cascadeCount;
-        // BY NAME (RQ-COV-SLOT-1): the total, the three directional volumes (every tier keeps them, PHOTON-MARCH-1),
-        // the coverage and the position from PhotonVoxelLighting's own index, level 0's back side and the voxelizer's
-        // normal; MOVER-OCCLUSION-1: the direct term's volume, or the light store (no share to gate) - its front and
-        // its back.
+        // BY NAME (RQ-COV-SLOT-1): the readers' list (the half store, the three directional volumes - every tier keeps
+        // them, PHOTON-MARCH-1 - the coverage and the position from PhotonVoxelLighting's own index).
         out.voxel[c][0] = tex[0];
         for (int i = 1; i < 4; ++i) out.voxel[c][i] = tex[i];
         for (unsigned h = 0; h < 2u; ++h) {
             out.voxel[c][4 + h] = tex[lighting->coverageIndex(h)];
             out.voxel[c][6 + h] = tex[lighting->positionIndex(h)];
         }
+        // VOXEL-R13 stage 2: kind 0 the half store, 8 its direct terms (the readers' list), 9..11 the halves' normals per
+        // axis (the share's "same surface" ring, jah_rq_hit.glsl)
         out.voxel[c][8] = tex[lighting->backIndex()];
-        out.voxel[c][9] = tex[lighting->normalIndex()];
-        out.voxel[c][10] = lighting->getLightDirectTexture() ? lighting->getLightDirectTexture() : tex[0];
-        out.voxel[c][11] = lighting->getLightDirectBackTexture() ? lighting->getLightDirectBackTexture()
-                                                                  : tex[lighting->backIndex()];
+        for (unsigned a = 0; a < 3u; ++a) out.voxel[c][9 + a] = voxelizer->getHalfNrmVox(a);
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();
         const Ogre::Vector3 cl = voxelizer->getVoxelCellSize();

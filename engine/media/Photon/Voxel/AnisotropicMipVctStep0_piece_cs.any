@@ -19,18 +19,8 @@
 	@else
 		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
-	// VOXEL-R13 stage 1: the half store's texel and its per-axis volumes
+	// VOXEL-R13: the half store's texel
 	@insertpiece( JahVoxelHalves )
-	INLINE float4 jahStep0HalfLight( int a, int3 t )
-	{
-		return a == 0 ? OGRE_Load3D( inHalfLightX, t, 0 )
-					  : ( a == 1 ? OGRE_Load3D( inHalfLightY, t, 0 ) : OGRE_Load3D( inHalfLightZ, t, 0 ) );
-	}
-	INLINE float4 jahStep0HalfDirect( int a, int3 t )
-	{
-		return a == 0 ? OGRE_Load3D( inHalfDirectX, t, 0 )
-					  : ( a == 1 ? OGRE_Load3D( inHalfDirectY, t, 0 ) : OGRE_Load3D( inHalfDirectZ, t, 0 ) );
-	}
 @end
 
 @piece( BodyCS )
@@ -88,8 +78,8 @@
 			{
 				const int n = e == 0 ? jahDirFront[dir * 4 + p] : jahDirBack[dir * 4 + p];
 				const float k = min( plusHalf ? coveragesP[n][axis] : coveragesN[n][axis], 1.0f );
-				const int3 t = jahHalfTexel( iSourceUvw + jahDirOffsets[n], plusHalf ? 0 : 1, jahHalfW );
-				const float3 b = max( jahStep0HalfLight( axis, t ).xyz - jahStep0HalfDirect( axis, t ).xyz,
+				const int3 t = jahHalfTexel( iSourceUvw + jahDirOffsets[n], plusHalf ? 0 : 1, axis, jahHalfW );
+				const float3 b = max( OGRE_Load3D( inHalfLight, t, 0 ).xyz - OGRE_Load3D( inHalfDirect, t, 0 ).xyz,
 									  float3( 0, 0, 0 ) );
 				pair[e] = k > 0.0f ? float4( b, k ) : float4( 0, 0, 0, 0 );
 			}

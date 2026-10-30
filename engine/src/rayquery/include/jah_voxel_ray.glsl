@@ -71,7 +71,8 @@
 // THE AT-SIGN RULE: this file becomes Hlms input (the piece JahVoxelRay), so no character of it may be the Hlms
 // directive mark, comments included. It includes nothing; the caller inserts JahVoxelSample first (the finite test
 // and the sample file's macros) and binds, besides the chain's (JAH_VOX_COUNT, JAH_VOX_MAX_CASCADES, JAH_VOX_INVRES,
-// JAH_VOX_FROM_PREV_SCALE / _OFFSET), the level-0 reads JAH_VOX_SAMPLE_ISO, _BACK, _NRM, _COVP, _COVN, _POSP, _POSN.
+// JAH_VOX_FROM_PREV_SCALE / _OFFSET), the level-0 reads JAH_VOX_SAMPLE_ISO (the half store, VOXEL-R13), _COVP, _COVN,
+// _POSP, _POSN; and jah_voxel_halves.glsl before it.
 // Every texture array is indexed by the loop's own counter, the same for every invocation still marching.
 
 #ifndef JAH_VOXEL_RAY_GLSL
@@ -80,12 +81,38 @@
 #if !( JAH_VOX_MAX_CASCADES >= 1 )
 #error "jah_voxel_ray.glsl: JAH_VOX_MAX_CASCADES must be a preprocessor integer of at least 1 - an identifier (a const int) reads 0 in #if and skips every cascade's hand-over"
 #endif
-#ifndef JAH_VOX_SAMPLE_NRM
-#error "jah_voxel_ray.glsl: the hit reads the side facing the ray - bind JAH_VOX_SAMPLE_NRM (the voxeliser's normal)"
-#endif
-#ifndef JAH_VOX_SAMPLE_BACK
-#error "jah_voxel_ray.glsl: the hit reads the side facing the ray - bind JAH_VOX_SAMPLE_BACK (level 0's back side)"
-#endif
+
+/// THE HALF A RAY READS (VOXEL-R13 stage 2): the radiance of cell `iv`'s half (h, axis a) - its store's (radiance x k,
+/// k) at the cell's own texel - 0 where the half holds no face.
+vec3 jahVoxelHalfRadiance( int c, ivec3 iv, vec3 invRes, int h, int a )
+{
+	const vec4 t = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( ( vec3( iv ) + 0.5 ) * invRes, h, a, invRes.x ), 0.0 );
+	return t.w > 0.0 ? t.xyz * ( 1.0 / t.w ) : vec3( 0.0, 0.0, 0.0 );
+}
+
+/// ...AND THE HALVES FACING A RAY, where no one face decides (VOXEL-R13 stage 2): on every axis the half whose faces look
+/// back at the travel, weighted by what the ray sees of it - its coverage times the travel's share along that axis
+/// (`mask`: the halves counted, bit h x 3 + a; all where it is 63). A cell with no face facing the ray reads 0.
+vec3 jahVoxelHalvesFacingRay( int c, ivec3 iv, vec3 uvw, vec3 invRes, vec3 dirLS, uint mask )
+{
+	const vec4 cP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), cN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 );
+	vec3 sum = vec3( 0.0, 0.0, 0.0 );
+	float wSum = 0.0;
+	for( int a = 0; a < 3; ++a )
+	{
+		if( dirLS[a] == 0.0 )
+			continue;
+		const int h = dirLS[a] > 0.0 ? 1 : 0;   // a ray travelling +a meets the faces looking -a (the N half)
+		if( ( mask & ( 1u << uint( 3 * h + a ) ) ) == 0u )
+			continue;
+		const float w = ( h == 0 ? cP[a] : cN[a] ) * abs( dirLS[a] );
+		if( !( w > 0.0 ) )
+			continue;
+		sum += w * jahVoxelHalfRadiance( c, iv, invRes, h, a );
+		wSum += w;
+	}
+	return wSum > 0.0 ? sum * ( 1.0 / wSum ) : vec3( 0.0, 0.0, 0.0 );
+}
 
 /// HOW A RAY ENDED.
 const uint kJahRayExhausted = 0u;	///< out of steps, or not a number: NO SAMPLE
@@ -116,11 +143,9 @@ struct JahVoxelRayResult
 ///   THE START CELL and THE OWN CELL holding faces on several axes (`crossing`): a face where the segment CROSSES its plane.
 ///   ANY OTHER CELL: occupancy - stopped from every direction.
 bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes,
-					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut, uint skip, out int bothAxis,
-					   out vec2 bothPlanes )
+					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut, uint skip, out int bothAxis )
 {
 	bothAxis = -1;
-	bothPlanes = vec2( 0.0, 0.0 );
 	const vec3 an = abs( nLS );
 	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
 	vec4 cov[2] = vec4[2]( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ) );
@@ -186,10 +211,10 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 	// several axes: occupancy, or (the start and own cells) the faces the segment crosses - in front of the plane
 	// (PHOTON-7 10-4 R7, F2: every face is read, so the caller learns of A CELL WHOSE FACES IN FRONT HOLD BOTH
 	// ORIENTATIONS ON ONE AXIS - a closed object under the cell, a wall's two faces: it has no plane to face, and the hit
-	// is read by jahVoxelRayHitSide's rule; bothAxis that axis, bothPlanes its +a and -a faces' planes)
+	// asks the finest cascade holding the cell's segment - its resolution, not a side rule (VOXEL-R13: the hit reads the
+	// half of the face it meets, jahVoxelRayHitSide); bothAxis that axis)
 	bool hit = false;
 	bool liveP[3] = bool[3]( false, false, false ), liveN[3] = bool[3]( false, false, false );
-	float qP[3] = float[3]( 0.0, 0.0, 0.0 ), qN[3] = float[3]( 0.0, 0.0, 0.0 );
 	for( int h = 0; h < 2; ++h )
 	{
 		for( int b = 0; b < 3; ++b )
@@ -217,8 +242,8 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 			if( live )
 			{
 				hit = true;
-				if( h == 0 ) { liveP[b] = true; qP[b] = qb; }
-				else { liveN[b] = true; qN[b] = qb; }
+				if( h == 0 ) liveP[b] = true;
+				else liveN[b] = true;
 			}
 		}
 	}
@@ -227,10 +252,7 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 		for( int b = 0; b < 3 && bothAxis < 0; ++b )
 		{
 			if( liveP[b] && liveN[b] )
-			{
 				bothAxis = b;
-				bothPlanes = vec2( qP[b], qN[b] );
-			}
 		}
 	}
 	return hit;
@@ -258,7 +280,7 @@ uint jahVoxelPaneMask( int c, vec3 uvw )
 /// own, the header's gate). The OCCLUDERS' faces of the cell are the caller's (occupancy or the plane test, as every face
 /// was: a wall's end beside a window still stops the ray). `T` / `fIn` the ray's throughput and inside fraction,
 /// carried; returns the light stopped here (none where `light` is false: the side's own cell, never read).
-vec3 jahVoxelPaneCross( int c, vec3 uvw, ivec3 iv, vec4 iso, uint mask, bool light, bool surface, vec3 sJ, vec3 nLS,
+vec3 jahVoxelPaneCross( int c, vec3 uvw, ivec3 iv, uint mask, bool light, bool surface, vec3 sJ, vec3 nLS,
 						float epsJ, vec3 invRes, vec3 pJ, vec3 dS, vec3 dirLS, float tIn, float tOut, inout float T,
 						inout float fIn )
 {
@@ -305,109 +327,46 @@ vec3 jahVoxelPaneCross( int c, vec3 uvw, ivec3 iv, vec4 iso, uint mask, bool lig
 	jahVoxelFacesCross( evT, evC, evFront, evN, T, fIn );
 	if( !light )
 		return vec3( 0.0, 0.0, 0.0 );
-	// THE SIDE FACING THE RAY (the hit's rule, by the travel: a pane cell's faces are one sheet's)
-	const vec4 bk = JAH_VOX_SAMPLE_BACK( c, uvw, 0.0 );
-	const vec3 nv = JAH_VOX_SAMPLE_NRM( c, uvw, 0.0 ).xyz * 2.0 - 1.0;
-	const float along = dot( nv, -dirLS );
-	const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
-	const vec3 L = side * ( 1.0 / iso.w );
+	// THE HALVES FACING THE RAY among the pane's faces (VOXEL-R13 stage 2: each its own light)
+	const vec3 L = jahVoxelHalvesFacingRay( c, iv, uvw, invRes, dirLS, mask );
 	return finite3( L ) ? ( before - T ) * L : vec3( 0.0, 0.0, 0.0 );
 }
 
-/// THE SIDE A HIT READS (the header's rule), un-premultiplied by the cell's opacity: THE FACE THE RAY MEETS decides it
-/// where the cell holds ONE surface (BUGS-8): a face looking at the ray is seen from the side it looks to, and every face
-/// of one surface is the store's FRONT (VoxelMerge: one normal group; the back is a two-sided voxel's alone). Where no face
-/// looks at the ray ahead of it, or the cell holds TWO surfaces (a plate thinner than the cell: the front the side the
-/// canonical normal points to), BY WHERE THE RAY IS - the side of the voxel's surfaces its entry point lies on, along the
-/// canonical normal's dominant axis (their coverage-weighted plane: a slab's mid-plane, a single face itself) - and by
-/// its travel only where the cell holds no face on that axis.
-/// (By its travel alone, a ray grazing a wall's cell column on its unlit side and leaving the wall read the wall's lit
-/// side through it: gi.voxel_ray_wall (3).)
-/// A CELL WHOSE FACES IN FRONT HOLD BOTH ORIENTATIONS ON ONE AXIS (PHOTON-7 10-4 R7, F2, the lead's ruling (c) of
-/// 2026-10-27; `bothAxis`, its two faces' planes `bothPlanes`) has no plane to face: the store keeps two sides along the
-/// canonical normal, and a closed object's six faces are not two. Its hit reads the side the ray is on only where that
-/// is decided - the canonical normal along that axis and the entry outside the two faces (a wall's two faces, the ray
-/// on one side of the wall: gi.voxel_ray_wall's W) - and otherwise THE DIMMER OF ITS TWO SIDES: never more light than
-/// one side holds, so never light through a wall. It errs DARK, by up to the two sides' difference, where no finer
-/// cascade holds the point (the chain march asks the finer cascade first: jahVoxelRay).
-vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec4 iso, vec3 pJ, vec3 dirLS, float s0j, float tIn, vec3 invRes,
-						 int bothAxis, vec2 bothPlanes )
+/// THE HALF A HIT READS (VOXEL-R13 stage 2; BUGS-8's face rule carried from the face to the radiance): THE FACE THE RAY
+/// MEETS decides it - of the axes the cell holds faces LOOKING AT THE RAY on, the plane the ray reaches first from its
+/// entry (a face it travels parallel to, has already passed, or that looks away from it is not met) - and the hit reads
+/// THAT face's half: the faces looking back at the ray on the met axis, lit and gathered from their own faces. Where no
+/// face is met ahead of the entry, the halves facing the ray, weighted by what it sees of each (jahVoxelHalvesFacingRay).
+/// (The two-side store's rules - the side by the canonical normal, by where the ray is along it, the dimmer of two sides
+/// where a cell held both orientations on one axis - are deleted with it: a half holds one orientation's faces, so a
+/// hit from outside a wall reads the outer face's half and one from inside the inner's, at every cell size.)
+vec3 jahVoxelRayHitSide( int c, vec3 uvw, ivec3 iv, vec3 pJ, vec3 dirLS, float s0j, float tIn, vec3 invRes )
 {
-	const vec4 bk = JAH_VOX_SAMPLE_BACK( c, uvw, 0.0 );
-	const vec4 nvs = JAH_VOX_SAMPLE_NRM( c, uvw, 0.0 );
-	const vec3 nv = nvs.xyz * 2.0 - 1.0;
-	// (the voxeliser's two-sided flag in the normal's alpha: two normal groups more than 120 degrees apart)
-	const bool twoSurfaces = nvs.w > 0.0;
-	const vec3 anv = abs( nv );
-	const int na = anv.x >= anv.y ? ( anv.x >= anv.z ? 0 : 2 ) : ( anv.y >= anv.z ? 1 : 2 );
-	if( bothAxis >= 0 )
+	const vec4 cP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), cN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 );
+	float tMeet = 1e30;
+	int kMeet = -1;
+	for( int k = 0; k < 3; ++k )
 	{
-		const float e = pJ[bothAxis] + dirLS[bothAxis] * s0j * tIn;
-		const bool outside = e < min( bothPlanes.x, bothPlanes.y ) || e > max( bothPlanes.x, bothPlanes.y );
-		if( !( outside && na == bothAxis ) )
+		const float okP = cP[k], okN = cN[k];
+		// (REDS-1, gi.screen_integrate's turned boxes: a face the ray MEETS looks AT it - only the half-axis facing the
+		// ray counts, N for a ray travelling +k, P for -k, the coverage's own rule)
+		if( !( ( dirLS[k] > 1e-6 && okN > 0.0 ) || ( dirLS[k] < -1e-6 && okP > 0.0 ) ) )
+			continue;
+		const float qP = okP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[k] / okP : 0.0;
+		const float qN = okN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[k] / okN : 0.0;
+		const float mk = ( float( iv[k] ) + ( okP * clamp( qP, 0.0, 1.0 ) + okN * clamp( qN, 0.0, 1.0 ) ) /
+										( okP + okN ) ) * invRes[k];
+		const float ek = pJ[k] + dirLS[k] * s0j * tIn;
+		const float tk = ( mk - ek ) / ( dirLS[k] * s0j );
+		if( tk >= 0.0 && tk < tMeet )
 		{
-			const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
-			return ( dot( iso.xyz, luma ) <= dot( bk.xyz, luma ) ? iso.xyz : bk.xyz ) * ( 1.0 / iso.w );
+			tMeet = tk;
+			kMeet = k;
 		}
 	}
-	float along = dot( nv, -dirLS );
-	{
-		// THE FACE THE RAY MEETS (PHOTON-7 11-2, gi.small_emitter): of the axes the cell holds faces LOOKING AT THE RAY on,
-		// the plane the ray reaches first from its entry (a face it travels parallel to, has already passed, or that looks
-		// away from it is not met); none met: where the ray is, along the canonical normal's axis, as before. A cube's EDGE
-		// cell is decided by the face toward the ray, never by the side face it meets edge-on (that read its x face's BACK
-		// for a ray hitting the +z face: three store steps dark at the far emitter's peak).
-		const vec4 cP = JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ), cN = JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 );
-		float tMeet = 1e30;
-		for( int k = 0; k < 3; ++k )
-		{
-			const float okP = cP[k], okN = cN[k];
-			// (REDS-1, gi.screen_integrate's turned boxes: a face the ray MEETS looks AT it - only the half-axis facing the
-			// ray counts, N for a ray travelling +k, P for -k, the coverage's own rule. Any coverage on the axis let a
-			// TILTED face's minor axis be chosen, where the face looks AWAY from the ray, and nv's minor component decided
-			// the BACK - a one-sided wall's back stores 0: the turned no-ray picture read 10-20 % dark, 10.86 -> 18.85 %)
-			if( !( ( dirLS[k] > 1e-6 && okN > 0.0 ) || ( dirLS[k] < -1e-6 && okP > 0.0 ) ) )
-				continue;
-			const float qP = okP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[k] / okP : 0.0;
-			const float qN = okN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[k] / okN : 0.0;
-			const float mk = ( float( iv[k] ) + ( okP * clamp( qP, 0.0, 1.0 ) + okN * clamp( qN, 0.0, 1.0 ) ) /
-											( okP + okN ) ) * invRes[k];
-			const float ek = pJ[k] + dirLS[k] * s0j * tIn;
-			const float tk = ( mk - ek ) / ( dirLS[k] * s0j );
-			if( tk >= 0.0 && tk < tMeet )
-				tMeet = tk;
-		}
-		// THE SIDE OF THE MET FACE IS THE RAY's (BUGS-8, completing c15de7326's met axis and f3ea1c12's candidacy): the
-		// face met looks AT the ray - its half is sign(-dir[a]) by the candidacy above - so the ray sees it from the side
-		// it looks to. In a cell of ONE surface every face is that surface's FRONT (the store's convention: the back is a
-		// two-sided voxel's alone, 0 on one surface), so a met face reads the front, whatever the canonical normal's
-		// component on the met axis. The sign of nv[a] decided it before: on a cylinder's crown cell nv[a] is zero in
-		// exact arithmetic (the arc's two halves cancel), its sign a coin, and the coin's back was the closed pipe's
-		// interior, 0 - samples.cleanstart.Physics' purple band 79 -> 74 codes at c15de7326 (the class measured by an
-		// arm: the dominant axis where |nv[a]| < |nv[na]| / 2 gave back 77). A cell of TWO surfaces (a plate thinner than
-		// the cell) is decided where the ray is along the dominant axis, the plate's own (gi.voxel_ray_wall).
-		if( tMeet < 1e30 && !twoSurfaces )
-			along = 1.0;
-		else
-		{
-			const float oP = cP[na];
-			const float oN = cN[na];
-			if( oP + oN > 0.0 )
-			{
-				const float pP = oP > 0.0 ? JAH_VOX_SAMPLE_POSP( c, uvw, 0.0 )[na] / oP : 0.0;
-				const float pN = oN > 0.0 ? JAH_VOX_SAMPLE_POSN( c, uvw, 0.0 )[na] / oN : 0.0;
-				const float m = ( float( iv[na] ) +
-								  ( oP * clamp( pP, 0.0, 1.0 ) + oN * clamp( pN, 0.0, 1.0 ) ) / ( oP + oN ) ) *
-								invRes[na];
-				const float e = pJ[na] + dirLS[na] * s0j * tIn;
-				const float side = ( e - m ) * ( nv[na] >= 0.0 ? 1.0 : -1.0 );
-				if( side != 0.0 )
-					along = side;
-			}
-		}
-	}
-	const vec3 side = along < 0.0 ? bk.xyz : ( along > 0.0 ? iso.xyz : 0.5 * ( iso.xyz + bk.xyz ) );
-	return side * ( 1.0 / iso.w );
+	if( kMeet >= 0 )
+		return jahVoxelHalfRadiance( c, iv, invRes, dirLS[kMeet] > 0.0 ? 1 : 0, kMeet );
+	return jahVoxelHalvesFacingRay( c, iv, uvw, invRes, dirLS, 63u );
 }
 
 /// ONE CELL OF THE MARCH (the chain's and a finer cascade's segment alike): cell `iv` of cascade `c` over the ray's
@@ -422,9 +381,12 @@ int jahVoxelRayCell( int c, ivec3 iv, vec3 invRes, bool own, bool crossing, bool
 	radiance = vec3( 0.0, 0.0, 0.0 );
 	bothAxis = -1;
 	const vec3 uvw = ( vec3( iv ) + 0.5 ) * invRes;
-	const vec4 iso = JAH_VOX_SAMPLE_ISO( c, uvw, 0.0 );
-	if( !( iso.w > 0.0 ) )
-		return 0;
+	// (an empty cell: no face on any axis - the coverage's; the light store keeps no per-cell opacity, VOXEL-R13)
+	{
+		const vec3 occ = max( JAH_VOX_SAMPLE_COVP( c, uvw, 0.0 ).xyz, JAH_VOX_SAMPLE_COVN( c, uvw, 0.0 ).xyz );
+		if( !( max( occ.x, max( occ.y, occ.z ) ) > 0.0 ) )
+			return 0;
+	}
 	// THE PANE FACES (jahVoxelPaneMask): out of the occluders' test, crossed after it (jahVoxelPaneCross)
 	const uint paneMask = jahVoxelPaneMask( c, uvw );
 	bool occluders = true;
@@ -436,15 +398,14 @@ int jahVoxelRayCell( int c, ivec3 iv, vec3 invRes, bool own, bool crossing, bool
 			occluders = occluders || ( cP[b] > 0.0 && ( paneMask & ( 1u << uint( b ) ) ) == 0u ) ||
 						( cN[b] > 0.0 && ( paneMask & ( 1u << uint( 3 + b ) ) ) == 0u );
 	}
-	vec2 bothPlanes = vec2( 0.0, 0.0 );
 	const bool front = occluders && jahVoxelRayFront( c, uvw, iv, surface, sJ, nLS, epsJ, invRes, crossing, planar, pJ,
-													  dirLS * s0j, tIn, tCell, paneMask, bothAxis, bothPlanes );
+													  dirLS * s0j, tIn, tCell, paneMask, bothAxis );
 	if( !front )
 	{
 		bothAxis = -1;
 		if( paneMask != 0u )
 		{
-			paneLight += jahVoxelPaneCross( c, uvw, iv, iso, paneMask, !own, surface, sJ, nLS, epsJ, invRes, pJ,
+			paneLight += jahVoxelPaneCross( c, uvw, iv, paneMask, !own, surface, sJ, nLS, epsJ, invRes, pJ,
 											dirLS * s0j, dirLS, tIn, tCell, paneT, paneIn );
 			if( !( paneT > 0.0 ) )
 			{
@@ -462,7 +423,7 @@ int jahVoxelRayCell( int c, ivec3 iv, vec3 invRes, bool own, bool crossing, bool
 		return 2;
 	}
 	// ...through the panes crossed before it, and their own light beside it (PHOTON-7 10-4 R7)
-	radiance = paneLight + paneT * jahVoxelRayHitSide( c, uvw, iv, iso, pJ, dirLS, s0j, tIn, invRes, bothAxis, bothPlanes );
+	radiance = paneLight + paneT * jahVoxelRayHitSide( c, uvw, iv, pJ, dirLS, s0j, tIn, invRes );
 	return 1;
 }
 

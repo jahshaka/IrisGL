@@ -311,7 +311,11 @@ JahConeResult jahConeMarchCascade( int c, vec3 posLS, vec3 dirLS, float tanHalfA
 			// for a distance field and the march skips whole planes across empty space.
 			// Empirically tuned upstream; the blend on the cone angle turns it off as the
 			// cone widens.
-			float finalOpac = JAH_VOX_SAMPLE_ISO( c, samplePosLS, skipLod ).w;
+			// (the opacity is the coverage chain's - the larger of the faces looking each way, per axis: the light
+			// store keeps level 0 alone, VOXEL-R13)
+			const vec3 skipCov = max( JAH_VOX_SAMPLE_COVP( c, samplePosLS, skipLod ).xyz,
+									  JAH_VOX_SAMPLE_COVN( c, samplePosLS, skipLod ).xyz );
+			float finalOpac = min( max( skipCov.x, max( skipCov.y, skipCov.z ) ), 1.0 );
 			float skipFactor = exp2( max( 0.0, skipLod * 0.5 - 1.0 ) ) * ( 1.0 - finalOpac ) +
 							   finalOpac;
 			skipFactor = mix( skipFactor, 1.0,

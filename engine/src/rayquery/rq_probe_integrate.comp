@@ -210,7 +210,7 @@ layout( r8, set = 0, binding = 51 ) uniform writeonly image2DArray skyVis;
 // the sky unoccluded, never nothing. THE HIT SET (bindings 18 - 50, OgreScreenProbeGather.cpp's kIntegrateHitSlots), its
 // uniforms the trace's (p.hit).
 layout( set = 0, binding = 18 ) uniform accelerationStructureEXT tlas;
-layout( set = 0, binding = 19 ) uniform sampler3D voxelIso[kMaxCascades];
+layout( set = 0, binding = 19 ) uniform sampler3D voxelHalf[kMaxCascades];   // VOXEL-R13: the half store
 layout( set = 0, binding = 20 ) uniform sampler3D voxelX[kMaxCascades];
 layout( set = 0, binding = 21 ) uniform sampler3D voxelY[kMaxCascades];
 layout( set = 0, binding = 22 ) uniform sampler3D voxelZ[kMaxCascades];
@@ -218,12 +218,12 @@ layout( set = 0, binding = 23 ) uniform sampler3D voxelCovP[kMaxCascades];
 layout( set = 0, binding = 24 ) uniform sampler3D voxelCovN[kMaxCascades];
 layout( set = 0, binding = 25 ) uniform sampler3D voxelPosP[kMaxCascades];
 layout( set = 0, binding = 26 ) uniform sampler3D voxelPosN[kMaxCascades];
-layout( set = 0, binding = 27 ) uniform sampler3D voxelBack[kMaxCascades];
-layout( set = 0, binding = 28 ) uniform sampler3D voxelNrm[kMaxCascades];
-layout( set = 0, binding = 29 ) uniform sampler3D voxelDirect[kMaxCascades];
-#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelDirect[c], u, l )
-layout( set = 0, binding = 30 ) uniform sampler3D voxelDirectBack[kMaxCascades];
-#define JAH_VOX_SAMPLE_DIRECT_BACK( c, u, l ) textureLod( voxelDirectBack[c], u, l )
+layout( set = 0, binding = 27 ) uniform sampler3D voxelHalfDirect[kMaxCascades];   // VOXEL-R13: its direct terms
+layout( set = 0, binding = 28 ) uniform sampler3D voxelHalfNrmX[kMaxCascades];   // VOXEL-R13: the halves' normals, x
+layout( set = 0, binding = 29 ) uniform sampler3D voxelHalfNrmY[kMaxCascades];   // ...y
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelHalfDirect[c], u, l )
+layout( set = 0, binding = 30 ) uniform sampler3D voxelHalfNrmZ[kMaxCascades];
+#define JAH_VOX_SAMPLE_HALF_NRM( c, a, h, u, l ) jahHalfNrmPick( ( a ) == 0 ? textureLod( voxelHalfNrmX[c], u, l ) : ( ( a ) == 1 ? textureLod( voxelHalfNrmY[c], u, l ) : textureLod( voxelHalfNrmZ[c], u, l ) ), h )
 layout( set = 0, binding = 31 ) uniform samplerCube skyCube;
 #define JAH_VOX_MAX_CASCADES 4   // a PREPROCESSOR integer (kMaxCascades): #if reads an identifier as 0
 #include "jah_rq_hit.glsl"

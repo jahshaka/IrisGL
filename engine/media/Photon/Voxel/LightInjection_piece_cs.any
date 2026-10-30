@@ -122,35 +122,23 @@
 	@end
 	// VOXEL-R13 stage 1: THE HALF STORE's per-axis volumes (jah_voxel_halves.glsl's packing)
 	@insertpiece( JahVoxelHalves )
-	INLINE float4 jahHalfLightLoad( int a, int3 t )
+	INLINE float4 jahHalfLightLoad( int3 t )
 	{
-		return a == 0 ? OGRE_imageLoad3D( halfLightX, t )
-					  : ( a == 1 ? OGRE_imageLoad3D( halfLightY, t ) : OGRE_imageLoad3D( halfLightZ, t ) );
+		return OGRE_imageLoad3D( halfStore, t );
 	}
 	/// (each store rounds the half float to nearest itself - REDS-1's rule, through the store macros: callers pass the f32)
-	INLINE void jahHalfLightStore( int a, int3 t, float4 v )
+	INLINE void jahHalfLightStore( int3 t, float4 v )
 	{
-		if( a == 0 )
-			OGRE_imageWrite3D4( halfLightX, t, jahStoreLight( v ) );
-		else if( a == 1 )
-			OGRE_imageWrite3D4( halfLightY, t, jahStoreLight( v ) );
-		else
-			OGRE_imageWrite3D4( halfLightZ, t, jahStoreLight( v ) );
+		OGRE_imageWrite3D4( halfStore, t, jahStoreLight( v ) );
 	}
 	@property( vct_keep_direct )
-	INLINE float4 jahHalfDirectLoad( int a, int3 t )
+	INLINE float4 jahHalfDirectLoad( int3 t )
 	{
-		return a == 0 ? OGRE_imageLoad3D( halfDirectX, t )
-					  : ( a == 1 ? OGRE_imageLoad3D( halfDirectY, t ) : OGRE_imageLoad3D( halfDirectZ, t ) );
+		return OGRE_imageLoad3D( halfStoreDirect, t );
 	}
-	INLINE void jahHalfDirectStore( int a, int3 t, float4 v )
+	INLINE void jahHalfDirectStore( int3 t, float4 v )
 	{
-		if( a == 0 )
-			OGRE_imageWrite3D4( halfDirectX, t, jahStoreDirect( v ) );
-		else if( a == 1 )
-			OGRE_imageWrite3D4( halfDirectY, t, jahStoreDirect( v ) );
-		else
-			OGRE_imageWrite3D4( halfDirectZ, t, jahStoreDirect( v ) );
+		OGRE_imageWrite3D4( halfStoreDirect, t, jahStoreDirect( v ) );
 	}
 	@end
 @end
@@ -473,7 +461,7 @@
 	// THE HALVES' WRITES (VOXEL-R13 stage 1) and the most any half's direct term moved (the brick mask's and the absolute
 	// move's share, below): a whole injection writes each half whole, a delta (a scroll's commit) replaces its old direct
 	// term inside its total against its own store's read-back (the sides' rule, below)
-	const int jahHalfW = imageSize( halfLightX ).x >> 1;
+	const int jahHalfW = imageSize( halfStore ).x / 6;
 	float jahHalfDirChange = 0.0f;
 	float3 jahHalfAbs = float3( 0.0f, 0.0f, 0.0f );
 	float3 jahHalfNew = float3( 0.0f, 0.0f, 0.0f );
@@ -481,22 +469,22 @@
 	{
 		for( int a = 0; a < 3; ++a )
 		{
-			const int3 t = jahHalfTexel( voxelId, h, jahHalfW );
+			const int3 t = jahHalfTexel( voxelId, h, a, jahHalfW );
 			const float4 v = jahHalfVal[h * 3 + a];
 @property( vct_keep_direct )
-			const float4 hdOld = jahHalfDirectLoad( a, t );
-			jahHalfDirectStore( a, t, v );
-			const float4 hdNew = jahHalfDirectLoad( a, t );
+			const float4 hdOld = jahHalfDirectLoad( t );
+			jahHalfDirectStore( t, v );
+			const float4 hdNew = jahHalfDirectLoad( t );
 	@property( jah_inject_delta )
 			if( any( notEqual( floatBitsToUint( hdNew ), floatBitsToUint( hdOld ) ) ) )
-				jahHalfLightStore( a, t, jahHalfLightLoad( a, t ) + ( hdNew - hdOld ) );
+				jahHalfLightStore( t, jahHalfLightLoad( t ) + ( hdNew - hdOld ) );
 	@else
-			jahHalfLightStore( a, t, v );
+			jahHalfLightStore( t, v );
 	@end
 @else
-			const float4 hdOld = jahHalfLightLoad( a, t );
-			jahHalfLightStore( a, t, v );
-			const float4 hdNew = jahHalfLightLoad( a, t );
+			const float4 hdOld = jahHalfLightLoad( t );
+			jahHalfLightStore( t, v );
+			const float4 hdNew = jahHalfLightLoad( t );
 @end
 			jahHalfDirChange = max( jahHalfDirChange, jahBrickChange( hdOld.xyz, hdNew.xyz ) );
 			jahHalfAbs = max( jahHalfAbs, abs( hdNew.xyz - hdOld.xyz ) );

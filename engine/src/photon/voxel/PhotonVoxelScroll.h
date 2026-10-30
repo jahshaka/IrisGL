@@ -58,12 +58,13 @@ namespace Ogre
             uint32 layer = 0u;
         };
         /// A LIGHT TEXTURE THE COMMIT SHIFTS: its level 0 at `cellsPerTexel` volume cells a texel (1, or 2 for the
-        /// directional direct parts), two halves packed along x or not.
+        /// directional direct parts), `blocks` volumes packed along x (1; 2 the directional direct parts' two signs; 6 the
+        /// half store's six halves, VOXEL-R13).
         struct LightVolume
         {
             TextureGpu *texture = nullptr;
             uint32 cellsPerTexel = 1u;
-            bool packedHalves = false;
+            uint32 blocks = 1u;
         };
 
         /// Creates the scratch's level-0 volumes (a texture creation: a GRAPHICS region's work - the chain's build),
@@ -94,9 +95,9 @@ namespace Ogre
                      const Slab *slabs, size_t numSlabs, bool fault = false );
 
         /// ONE VOLUME'S LEVEL 0 SHIFTED BY -`texels` ALONG `axis` IN PLACE, the far end set to `clear`
-        /// (Photon/ScrollShift; `packedHalves`: two halves along x, each shifted on its own).
+        /// (Photon/ScrollShift; `blocks`: that many volumes packed along x, each shifted on its own).
         static void shiftVolume( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *volume,
-                                 uint32 axis, int32 texels, bool packedHalves, const float clear[4] );
+                                 uint32 axis, int32 texels, uint32 blocks, const float clear[4] );
         /// ONE BOX COPIED (Photon/ScrollCopy): `size` texels of `dst` from `dstOrigin`, read from `src` at
         /// `srcOrigin` + the box's id permuted by `permAxis` (0 the identity; Slab's layout otherwise).
         static void copyBox( HlmsManager *hlmsManager, RenderSystem *renderSystem, TextureGpu *src,

@@ -25,12 +25,21 @@ ivec2 jahHalfOtherAxes( int a )
 	return a == 0 ? ivec2( 1, 2 ) : ( a == 1 ? ivec2( 0, 2 ) : ivec2( 0, 1 ) );
 }
 
-/// THE HALF STORE's TEXEL of cell `cell`'s half (h, axis a) - the directional volumes' packing at level 0: one volume an
-/// axis, both signs side by side along x, the -a half (h 1) in [0, W), the +a half (h 0) in [W, 2W); `width` W, the
-/// voxel volume's own width.
-ivec3 jahHalfTexel( ivec3 cell, int h, int width )
+/// THE HALF STORE's TEXEL of cell `cell`'s half (h, axis a): ONE volume six times the voxels wide, the directional
+/// volumes' packing generalised to the six halves - axis a's -a half (h 1) in [2a W, (2a + 1) W), its +a half (h 0) in
+/// [(2a + 1) W, (2a + 2) W); `width` W, the voxel volume's own width.
+ivec3 jahHalfTexel( ivec3 cell, int h, int a, int width )
 {
-	return ivec3( cell.x + ( h == 0 ? width : 0 ), cell.y, cell.z );
+	return ivec3( cell.x + ( 2 * a + ( h == 0 ? 1 : 0 ) ) * width, cell.y, cell.z );
+}
+
+/// ...and a FILTERED read's coordinate in it: `u` a point in the voxel volume's normalised box, its x kept a half texel
+/// inside the volume (a bilinear tap never reaches the next half's block), mapped into half (h, axis a)'s block.
+vec3 jahHalfUvw( vec3 u, int h, int a, float invWidth )
+{
+	return vec3( ( clamp( u.x, 0.5 * invWidth, 1.0 - 0.5 * invWidth ) + float( 2 * a + ( h == 0 ? 1 : 0 ) ) ) *
+					 ( 1.0 / 6.0 ),
+				 u.y, u.z );
 }
 
 /// THE HALF'S NORMAL from its stored HEMISPHERE OCTAHEDRON: `enc` the two unorm coordinates (0.5 0.5 the half's own
@@ -52,6 +61,12 @@ vec3 jahHalfNormalDecode( vec2 enc, int a, int h )
 		return n;
 	}
 	return n * ( 1.0 / l );
+}
+
+/// The stored pair of half h (0 the +a half: rg, 1 the -a half: ba) of an axis's normal or centroid texel.
+vec2 jahHalfNrmPick( vec4 enc, int h )
+{
+	return h == 0 ? enc.xy : enc.zw;
 }
 
 /// ...and its encoding from the half's NORMAL SUM in the half's own frame: `along` the sum's component along the half's

@@ -1411,7 +1411,7 @@ GiVoxelStats PhotonComponent::giVoxelStats(int cascadeIdx) {
             voxelizer = mVctVoxelizer;
         }
         if (!lighting) return st;
-        Ogre::TextureGpu *total = lighting->getLightVoxelTextures()[0];
+        Ogre::TextureGpu *total = lighting->getLightFrontTexture();
         if (!total || total->getResidencyStatus() != Ogre::GpuResidency::Resident) return st;
 
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
@@ -1703,8 +1703,13 @@ bool PhotonComponent::giFeedbackBricks(int cascadeIdx, GiFeedbackBricks &out) {
     return false;
 }
 
-bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part) {
+bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part, const float *worldLo,
+                                    const float *worldHi) {
     const bool lightOnly = part == 1;
+    // THE CELL BOX (VOXEL-R13: Scene::giVoxelHalves' region): only the level-0 texels of the cells the world box
+    // [worldLo, worldHi] reaches are decoded (the rest stay 0) - a law over one room reads that room, not the cascade
+    bool useBox = false;
+    Ogre::uint32 cellLo[3] = { 0u, 0u, 0u }, cellHi[3] = { ~0u, ~0u, ~0u };
     out = GiVoxelVolume();
     JAH_TRY {
         Ogre::PhotonVoxelLighting *lighting = nullptr;
@@ -1733,6 +1738,19 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
         Ogre::RenderSystem *rs = mRoot->getRenderSystem();
         rs->flushCommands();
         Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const Ogre::uint32 volW = voxelizer->getAlbedoVox() ? voxelizer->getAlbedoVox()->getWidth() : 0u;
+        if (worldLo && worldHi && volW) {
+            const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
+            const Ogre::uint32 dims[3] = { volW, voxelizer->getAlbedoVox()->getHeight(),
+                                           voxelizer->getAlbedoVox()->getDepth() };
+            for (int k = 0; k < 3; ++k) {
+                const float lo = std::floor((worldLo[k] - o[size_t(k)]) / c[size_t(k)]);
+                const float hi = std::floor((worldHi[k] - o[size_t(k)]) / c[size_t(k)]) + 1.0f;
+                cellLo[k] = Ogre::uint32(std::min(std::max(lo, 0.0f), float(dims[k])));
+                cellHi[k] = Ogre::uint32(std::min(std::max(hi, 0.0f), float(dims[k])));
+            }
+            useBox = true;
+        }
         const auto grab = [&](Ogre::TextureGpu *tex, std::vector<float> &dst, Ogre::uint8 mip = 0u) -> bool {
             const Ogre::PixelFormatGpu fmt = tex->getPixelFormat();
             const bool isHalf = (fmt == Ogre::PFG_RGBA16_FLOAT);
@@ -1743,7 +1761,14 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
             const bool srgb = (fmt == Ogre::PFG_RGBA8_UNORM_SRGB);
             const Ogre::uint32 W = std::max(1u, tex->getWidth() >> mip), H = std::max(1u, tex->getHeight() >> mip),
                                D = std::max(1u, tex->getDepth() >> mip);
-            dst.assign(size_t(W) * H * D * 4u, 0.0f);
+            // THE CELL BOX's COMPACT VOLUME (VOXEL-R13): with a box, level 0 is returned as the box alone - its own
+            // width (times the blocks a packed volume holds along x), height and depth, x fastest
+            const bool boxed = useBox && mip == 0u && volW && W % volW == 0u;
+            const Ogre::uint32 blocks = boxed ? W / volW : 1u;
+            const Ogre::uint32 bw = boxed ? cellHi[0] - cellLo[0] : W;
+            const Ogre::uint32 oW = boxed ? blocks * bw : W, oH = boxed ? cellHi[1] - cellLo[1] : H,
+                               oD = boxed ? cellHi[2] - cellLo[2] : D;
+            dst.assign(size_t(oW) * oH * oD * 4u, 0.0f);
             Ogre::AsyncTextureTicket *ticket =
                 tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, fmt);
             bool ok = false;
@@ -1752,9 +1777,14 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
                 const Ogre::TextureBox box = ticket->map(0);
                 for (Ogre::uint32 z = 0; z < D; ++z)
                     for (Ogre::uint32 y = 0; y < H; ++y) {
+                        if (boxed && (z < cellLo[2] || z >= cellHi[2] || y < cellLo[1] || y >= cellHi[1])) continue;
                         const void *row = box.at(0, y, z);
-                        float *o = &dst[((size_t(z) * H + y) * W) * 4u];
-                        for (Ogre::uint32 x = 0; x < W; ++x)
+                        float *o = boxed ? &dst[((size_t(z - cellLo[2]) * oH + (y - cellLo[1])) * oW) * 4u]
+                                         : &dst[((size_t(z) * H + y) * W) * 4u];
+                        for (Ogre::uint32 x = 0; x < W; ++x) {
+                            // (a packed volume's texel x holds cell x mod the volume's width, block x / width)
+                            if (boxed && ((x % volW) < cellLo[0] || (x % volW) >= cellHi[0])) continue;
+                            const Ogre::uint32 ox = boxed ? (x / volW) * bw + (x % volW - cellLo[0]) : x;
                             for (int c = 0; c < 4; ++c) {
                                 float v;
                                 if (is1010102) {
@@ -1774,8 +1804,9 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
                                     if (srgb && c < 3)
                                         v = v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
                                 }
-                                o[size_t(x) * 4u + c] = v;
+                                o[size_t(ox) * 4u + c] = v;
                             }
+                        }
                     }
                 ticket->unmap();
                 ok = true;
@@ -1790,6 +1821,12 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
             out.depth = int(total->getDepth());
             const Ogre::Vector3 o = voxelizer->getVoxelOrigin(), c = voxelizer->getVoxelCellSize();
             for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
+            if (useBox) {   // the cell box's compact volume: its own size, its first cell's corner the origin
+                out.width = int(cellHi[0] - cellLo[0]);
+                out.height = int(cellHi[1] - cellLo[1]);
+                out.depth = int(cellHi[2] - cellLo[2]);
+                for (int k = 0; k < 3; ++k) out.origin[k] += float(cellLo[k]) * out.cell[k];
+            }
             out.available = true;
         };
         // VOXEL-R13 stage 1: THE HALF STORE (Scene::giVoxelHalves) - the six half lights, their direct terms, the halves'
@@ -1801,11 +1838,11 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
             if (!grab(coverage[0], out.coverageP) || !grab(coverage[1], out.coverageN) ||
                 !grab(position[0], out.positionP) || !grab(position[1], out.positionN))
                 return false;
+            Ogre::TextureGpu *hl = lighting->getHalfLightTexture();
+            if (!hl || !grab(hl, out.halfLight)) return false;
+            if (Ogre::TextureGpu *hd = lighting->getHalfDirectTexture())
+                if (!grab(hd, out.halfDirect)) return false;
             for (size_t a = 0; a < 3u; ++a) {
-                Ogre::TextureGpu *hl = lighting->getHalfLightTexture(a);
-                if (!hl || !grab(hl, out.halfLight[a])) return false;
-                if (Ogre::TextureGpu *hd = lighting->getHalfDirectTexture(a))
-                    if (!grab(hd, out.halfDirect[a])) return false;
                 if (!grab(voxelizer->getHalfSideVox(a), out.halfSide[a]) ||
                     !grab(voxelizer->getHalfNrmVox(a), out.halfNormal[a]))
                     return false;
@@ -1824,7 +1861,7 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
             if (!nrm || !grab(nrm, out.normal)) return false;
         }
         {
-            Ogre::TextureGpu *backTex = lighting->getLightVoxelTextures()[lighting->backIndex()];
+            Ogre::TextureGpu *backTex = lighting->getLightBackTexture();
             std::vector<float> backVals;
             if (!backTex || !grab(total, out.lightFront) || !grab(backTex, backVals) ||
                 backVals.size() != out.lightFront.size() || out.normal.size() != out.lightFront.size())
@@ -6429,13 +6466,13 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
         constexpr size_t kLight = Ogre::PhotonVoxelLighting::kScrollLightTextures;
         Ogre::TextureGpu *light[kLight] = {};
         Ogre::uint32 cellsPerTexel[kLight] = {};
-        bool packed[kLight] = {};
-        const size_t numLight = c.lighting ? c.lighting->scrollLightTextures(light, cellsPerTexel, packed) : 0u;
+        Ogre::uint32 blocks[kLight] = {};
+        const size_t numLight = c.lighting ? c.lighting->scrollLightTextures(light, cellsPerTexel, blocks) : 0u;
         Ogre::PhotonVoxelScroll::LightVolume lv[kLight];
         for (size_t i = 0; i < numLight; ++i) {
             lv[i].texture = light[i];
             lv[i].cellsPerTexel = cellsPerTexel[i];
-            lv[i].packedHalves = packed[i];
+            lv[i].blocks = blocks[i];
         }
         std::vector<Ogre::PhotonVoxelScroll::Slab> slabs;
         for (const VctCascade::Scroll::Slab &s : sc.slabs) {
