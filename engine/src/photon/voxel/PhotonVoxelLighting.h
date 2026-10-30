@@ -628,6 +628,9 @@ namespace Ogre
         /// device, in the frame): the buffer (two words a brick, ensureBrickMask's), its bricks per axis, and the host
         /// frame of its last clear - its content is that frame's changes (null before the first light work).
         UavBufferPacked *getBrickMaskBuffer() const { return mBrickBuffer; }
+        /// MEASURING ARM (DETERMINISM-1, to be reverted): the feedback's current state buffer and its active list
+        UavBufferPacked *jahDiagBrickState() const { return mBrickState[mBrickStateCur]; }
+        UavBufferPacked *jahDiagBrickList() const { return mBrickList; }
         const uint32 *getBrickMaskDims() const { return mBrickDims; }
         uint64 getBrickMaskFrame() const { return mBrickClearFrame; }
         /// THE TEST DOOR gi.feedbackCarriedRoute (PHOTON-7 stage 5's read A2 (i)): while set, the selection never passes a

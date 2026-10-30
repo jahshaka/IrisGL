@@ -9097,6 +9097,32 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
             const VkDescriptorBufferInfo tb = h.cardTable ? rawBufferInfo(h.cardTable) : VkDescriptorBufferInfo{};
             const size_t tableBytes = h.cardTable ? size_t(h.cardTable->getTotalSizeBytes()) : 0u;
             if (tableBytes) { slot->parts.emplace_back("card.table", tableBytes); total += tableBytes; }
+            // (arm 3d: the voxel feedback's buffers per cascade - the brick mask, the solver state, the active list, the
+            // sides' TLAS gather)
+            std::vector<std::pair<std::string, Ogre::UavBufferPacked *>> bufs;
+            if (rv.scene) {
+                std::vector<PhotonComponent::Volume> vols;
+                rv.scene->photon().volumes(vols);
+                for (size_t c = 0; c < vols.size(); ++c) {
+                    if (!vols[c].lighting) continue;
+                    const std::string n = "vb" + std::to_string(c) + ".";
+                    const auto addb = [&](const std::string &k, Ogre::UavBufferPacked *b) {
+                        if (!b) return;
+                        for (const auto &e : bufs)
+                            if (e.second == b) return;
+                        bufs.emplace_back(n + k, b);
+                    };
+                    addb("mask", vols[c].lighting->getBrickMaskBuffer());
+                    addb("state", vols[c].lighting->jahDiagBrickState());
+                    addb("list", vols[c].lighting->jahDiagBrickList());
+                    addb("sides", vols[c].lighting->sideGather());
+                }
+            }
+            for (const auto &e : bufs) {
+                const size_t bytes = size_t(e.second->getTotalSizeBytes());
+                slot->parts.emplace_back(e.first, bytes);
+                total += bytes;
+            }
             if (slot->host.buffer && slot->host.size < total) retire(slot->host);
             std::string err;
             if (total && (slot->host.buffer || makeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err))) {
@@ -9135,6 +9161,16 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                         bc.dstOffset = off;
                         bc.size = tableBytes;
                         vkCmdCopyBuffer(dcmd, tb.buffer, slot->host.buffer, 1, &bc);
+                        off += tableBytes;
+                    }
+                    for (const auto &e : bufs) {
+                        const VkDescriptorBufferInfo bi = rawBufferInfo(e.second);
+                        VkBufferCopy bc{};
+                        bc.srcOffset = bi.offset;
+                        bc.dstOffset = off;
+                        bc.size = e.second->getTotalSizeBytes();
+                        vkCmdCopyBuffer(dcmd, bi.buffer, slot->host.buffer, 1, &bc);
+                        off += bc.size;
                     }
                     VkMemoryBarrier toHost{};
                     toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
