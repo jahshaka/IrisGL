@@ -1382,7 +1382,7 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf, bool ownMoving, float lobeAlpha,
 					EyeImage thisEye, bool atRest, bool restInPlace, bool restBatch, uint batchRays,
 					JahReflectState inPlace, uint restStop, float throwT, JahRestStats rs, bool restHasH, float restN,
-					uint vNow, uint folds, uint consumed, float restT, bool stoppedCard, JahReflectSample s )
+					uint vNow, uint folds, uint consumed, float restT, bool stoppedCard, bool centreOnly, JahReflectSample s )
 {
 	jahPickSample( tc, s, vNow, restStop, atRest );   // THE PICK (the reds' instrument; nothing unless the arm names tc)
 	bool resume;
@@ -1402,12 +1402,15 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	const float blendVouch = s.blendVouch;
 	const bool noSample = s.noSample, blend = s.blend;
 	const float sampleT = s.sampleT;
-	// THE BATCH'S FOLDS STORED (the rest half in place, and the residual where the frozen half is free for it).
+	// THE BATCH'S FOLDS STORED (the rest half in place, and the residual where the frozen half is free for it - else, for
+	// a centre texel, its plain mean there: every reader composes M, the temporal pass's rule for its own fold).
 	if( folds > 0u )
 	{
 		imageStore( historyCur, ivec3( tc, gEye ), jahRoundHalf( vec4( rs.M, rs.m2 ) ) );
 		if( jahRestHasResidual( float( vNow ), restHasH, restN ) )
 			imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( rs.res ) );
+		else if( centreOnly )
+			imageStore( historyPrev, ivec3( tc, gEye ), jahRoundHalf( vec4( rs.M, 0.0 ) ) );
 	}
 	// THE STATE THIS FRAME STORES (jah_reflect_state.glsl): the surface's distance (the texel is live: the temporal pass
 	// decides whether it holds an answer), the throw this draw used (the resolve re-derives a neighbour's chance from it;
@@ -1811,9 +1814,20 @@ void main()
 	// record's texel), and the record's sample folds in the temporal pass as the sequence's next - so the batch is the
 	// sequence's order, unbiased and deterministic; a dropped record is no sample and the same index is retried next
 	// frame. A ray that crosses a moved instance (G6) ends it too: the texel resumes on that sample. One ray a frame
-	// otherwise - moving, the first rest frame, a fixed estimator (its every sample is one), the reference arm, the freeze.
+	// otherwise - moving, the first rest frame, a DETERMINISTIC sample (below), the reference arm, the freeze.
 	// The batch's rays are DEALT across the subgroup's lanes (below), its folds made in this order all the same.
-	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && centreChance < 1.0 &&
+	// A DETERMINISTIC SAMPLE (DETERMINISM-1, the R13 tail): a lobe under a texel draws its centre ray every time
+	// (centreChance 1: no lobe draw, the screen's coin fixed, no NEE - the NEE pairs only a VNDF draw), but its SAMPLE is
+	// still stochastic wherever the HIT's shading is: C2's traced lobe at the hit (its own VNDF draw, keyed on the sample
+	// index) and the hit's area-light stratum (jahHitAreaSeq / the rest's cycle) - known only once the hit is. Measured on
+	// photon-glass: the far wall's mirror texels reflecting the r0.3 floor pane read a card (~0.0107, constant) and ALL
+	// their noise is C2's lobe there (0.010-0.060, CV ~1); at one sample a frame their stop needed ~1,400-1,700 rest frames
+	// (116-285 texels; the walk's hold refused at 1,200). So a centre texel is excluded from the batch only where no hit
+	// can be stochastic: C2 off - the flat-hits arm (p.denoiser.w: every hit a constant of its instance) - and otherwise
+	// batched like every texel (the price: its rays at rest until it stops).
+	const bool centreOnly = centreChance >= 1.0;
+	const bool centreFixed = centreOnly && p.denoiser.w > 0.5;
+	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && !centreFixed &&
 						   p.rest.z > 1.5;
 	// THE BATCH: the tile pass's k (the rest's first frame's), the compact pass's the tail's rays a frame shared by the
 	// listed texels, k = min( 64, ( count / 8 ) / listed ) - each texel's samples over its own warp's lanes.
@@ -1908,7 +1922,12 @@ void main()
 	const uint compactLeft = compactWarp ? JAH_HIT_CAPACITY - min( compactWords[kCompactRecordsWord], JAH_HIT_CAPACITY )
 										 : 0u;
 	const uint compactShare = compactLeft / max( compactN, 1u );
-	const uint allowance = compactWarp ? min( batchRays, compactShare > 0u ? compactShare - 1u : 0u )
+	// A CENTRE TEXEL hands NO run: its frozen half holds its plain mean while it hands over (the temporal pass writes M
+	// there - a centre texel composes M, never lerp( H, M ) - and so does its batch's store, reflectFinish), which the
+	// write-back's run fold (rq_hit_composite.comp) cannot keep (it knows no texel's chance); its record ends its batch
+	// and is the frame's sample, folded by the temporal pass, which keeps the frozen half its mean.
+	const uint allowance = centreOnly ? 0u
+						 : compactWarp ? min( batchRays, compactShare > 0u ? compactShare - 1u : 0u )
 									   : min( uint( p.rest.w ), batchRays );
 	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
@@ -2123,7 +2142,7 @@ void main()
 			}
 			reflectFinish( tc, dist, world, origin, prevSurf, ownMoving, lobeAlpha, thisEye, atRest, restInPlace,
 						   restBatch, batchRays, inPlace, restStop, throwT, rs, restHasH, restN, vNow, folds,
-						   folds + runUsed, restT, stoppedCard, s );
+						   folds + runUsed, restT, stoppedCard, centreOnly, s );
 			phase = 2u;
 		}
 	}
