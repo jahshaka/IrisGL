@@ -8922,6 +8922,7 @@ void RayQueryTier::diagTemporal(ReflectView &rv, const ReflectPassListener *key,
             line += " " + part.first + " " + hx;
             at += part.second;
         }
+        std::fprintf(stderr, "%s\n", line.c_str());
         // THE DECODE'S RECORDS, ORDER-FREE (a record's texel is its list position: S3's order is not a divergence)
         if (d.hitW) {
             size_t aIds = 0, aDest = 0, aRad = 0, aBuf = 0, a = 0;
