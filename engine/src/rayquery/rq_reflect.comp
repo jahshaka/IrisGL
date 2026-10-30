@@ -56,8 +56,14 @@ layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 /// THE COMPACT PASS (this module with constant 0 true): one subgroup a listed texel - its first lane the texel, the
 /// others its workers - instead of the 8 x 8 tile.
 layout( constant_id = 0 ) const bool kCompactPass = false;
-/// THE REST'S COMPACT LIST (binding 52): [0..1] the halves' counts, then the halves' texel indices (x | y << 16).
+/// THE REST'S COMPACT LIST (binding 52, OgreRayQuery.cpp kCompactList*): [0..1] the halves' counts, [2..4] the compact
+/// pass's indirect dispatch { groups, 1, 1 } (the tile pass raises the groups as it lists), [5] the hit list's record count
+/// after the tile pass (the host's copy: the compact pass's record budget), [6..7] unused, then the two halves' texel
+/// indices (x | y << 16) - each half as long as the trace grid, so a listing can never overflow it.
 layout( std430, set = 0, binding = 52 ) buffer JahCompactList { uint compactWords[]; };
+const uint kCompactHeaderWords = 8u;
+const uint kCompactDispatchWord = 2u;
+const uint kCompactRecordsWord = 5u;
 
 /// ONE EYE'S IMAGE, as the five numbers everything below needs: where it is,
 /// and the world-space ray (or image-plane offset) of its own 0..1 image.
@@ -1502,10 +1508,16 @@ void main()
 	// A LANE WHOSE TEXEL TRACES NOTHING STAYS TO THE REST'S DEAL (below) as a worker - one past the image's edge too
 	// (its reads clamped inside): its outcome stored, `live` false, and every later side effect guarded by it - the
 	// values computed past this point on its texel are never used.
-	// THE REST'S COMPACT PATH: the list this frame's tile pass fills (its half), and whether last frame's fit - then the
-	// texels it lists are the compact pass's (the converging set only shrinks at rest: a resumed texel is not listed).
+	// THE REST'S COMPACT PATH: the list this frame's tile pass fills (its half), and whether last frame's count was within
+	// the path's bound L (p.compact.z) - then every texel it lists this frame is the compact pass's. The converging set
+	// does NOT only shrink at rest: resumes (a crossing, a card-only reach) and late first samples re-list texels, and it
+	// was measured to swing 8,827 -> 83,695 between two frames (DETERMINISM-1, rf 141-142) - so a half holds the whole
+	// trace grid (compactCap: the buffer's own length) and a listing never overflows: no texel is traced by neither pass,
+	// and which texels the compact pass takes never depends on the order of the listing's atomics.
 	const uint compactL = uint( p.compact.z );
+	const uint compactCap = ( uint( compactWords.length() ) - kCompactHeaderWords ) / 2u;
 	const uint compactHalf = uint( p.compact.x ) & 1u;
+	const uint compactBase = kCompactHeaderWords + compactHalf * compactCap;
 	const uint compactPrev = compactWords[compactHalf ^ 1u];
 	const bool compactOn = p.compact.w > 0.5 && compactPrev > 0u && compactPrev <= compactL;
 	ivec2 gid = ivec2( gl_GlobalInvocationID.xy );
@@ -1514,11 +1526,12 @@ void main()
 	if( kCompactPass )
 	{
 		// a subgroup a listed texel (the slot uniform in the subgroup: the whole subgroup leaves together)
-		compactN = min( compactWords[compactHalf], compactL );
+		// (the dispatch is the tile pass's count in groups of gl_NumSubgroups slots: the last group's tail leaves here)
+		compactN = min( compactWords[compactHalf], compactCap );
 		const uint slot = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
 		if( !compactOn || slot >= compactN )
 			return;
-		const uint packed = compactWords[2u + compactHalf * compactL + slot];
+		const uint packed = compactWords[compactBase + slot];
 		gid = ivec2( int( packed & 0xFFFFu ), int( packed >> 16u ) );
 		compactOwner = gl_SubgroupInvocationID == 0u;
 	}
@@ -1641,14 +1654,22 @@ void main()
 												: jahStateNone();
 	const uint restStop = restInPlace ? inPlace.stop : 0u;
 	// THE TILE PASS LISTS each texel still converging (the stop's own state, as the trace reads it) into this frame's
-	// half, and leaves it to the compact pass when last frame's list fit.
+	// half, and leaves it to the compact pass when last frame's count was within L. The slot is always inside the half
+	// (it holds the grid; `stored` is the invariant, kept), and only a STORED texel leaves the tile pass. On a compact
+	// frame the texel opening a group of gl_NumSubgroups slots raises the indirect dispatch to cover it: the groups end
+	// at ceil( count / gl_NumSubgroups ) whatever order the atomics took (atomicMax).
 	if( !kCompactPass && live && p.compact.w > 0.5 && restInPlace && inPlace.v >= 1u && restStop < kReflectStopFrames )
 	{
 		const uint at = atomicAdd( compactWords[compactHalf], 1u );
-		if( at < compactL )
-			compactWords[2u + compactHalf * compactL + at] = uint( tc.x ) | ( uint( tc.y ) << 16u );
-		if( compactOn )
+		const bool stored = at < compactCap;
+		if( stored )
+			compactWords[compactBase + at] = uint( tc.x ) | ( uint( tc.y ) << 16u );
+		if( compactOn && stored )
+		{
+			if( at % gl_NumSubgroups == 0u )
+				atomicMax( compactWords[kCompactDispatchWord], at / gl_NumSubgroups + 1u );
 			live = false;   // the compact pass's (this lane works in the tile's deal)
+		}
 	}
 	bool resume = false, stoppedCard = false;
 	if( live && restStop >= kReflectStopFrames )
@@ -1852,8 +1873,14 @@ void main()
 	// A record past the allowance, or one the list cannot hold, ends the batch as
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
-	// record.
-	const uint allowance = kCompactPass ? min( batchRays, JAH_HIT_CAPACITY / max( compactN, 1u ) )
+	// record. THE COMPACT PASS's share is of what the list has LEFT after the records in it before this pass (the host's
+	// copy of the count, one value for every texel - never the live counter, which this pass's own runs raise), less the
+	// one record a texel's own sample may still append: compactN ( allowance + 1 ) <= left, so its runs never reach
+	// the drop.
+	const uint compactLeft = kCompactPass ? JAH_HIT_CAPACITY - min( compactWords[kCompactRecordsWord], JAH_HIT_CAPACITY )
+										  : 0u;
+	const uint compactShare = compactLeft / max( compactN, 1u );
+	const uint allowance = kCompactPass ? min( batchRays, compactShare > 0u ? compactShare - 1u : 0u )
 									   : min( uint( p.rest.w ), batchRays );
 	uint runUsed = 0u;                               // this texel's records in its run this frame
 	uint dealt = 0u;                                 // this texel's samples dealt so far
