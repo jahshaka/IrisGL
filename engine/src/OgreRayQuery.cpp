@@ -1316,7 +1316,8 @@ private:
         /// MEASURING ARM (DETERMINISM-1 arm T, to be reverted): the Ogre textures the pass samples, and the copies.
         Ogre::TextureGpu *diagT[5] = {};
         struct DiagT { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull; bool outputs = false;
-                       unsigned long long ubo = 0ull; std::vector<std::pair<std::string, size_t>> parts; };
+                       unsigned long long ubo = 0ull; std::vector<std::pair<std::string, size_t>> parts;
+                       unsigned hitW = 0u, idsBpp = 0u, destBpp = 0u, radBpp = 0u; };
         DiagT diagTemp[8];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
@@ -8921,7 +8922,29 @@ void RayQueryTier::diagTemporal(ReflectView &rv, const ReflectPassListener *key,
             line += " " + part.first + " " + hx;
             at += part.second;
         }
-        std::fprintf(stderr, "%s\n", line.c_str());
+        // THE DECODE'S RECORDS, ORDER-FREE (a record's texel is its list position: S3's order is not a divergence)
+        if (d.hitW) {
+            size_t aIds = 0, aDest = 0, aRad = 0, aBuf = 0, a = 0;
+            bool hasIds = false, hasDest = false, hasRad = false, hasBuf = false;
+            for (const auto &part : d.parts) {
+                if (part.first == "hit.ids") { aIds = a; hasIds = true; }
+                if (part.first == "hit.dest") { aDest = a; hasDest = true; }
+                if (part.first == "hit.radiance") { aRad = a; hasRad = true; }
+                if (part.first == "hitBuf") { aBuf = a; hasBuf = true; }
+                a += part.second;
+            }
+            if (hasIds && hasDest && hasRad && hasBuf) {
+                uint32_t count = 0u;
+                std::memcpy(&count, m + aBuf, 4u);
+                count = std::min<uint32_t>(count, 1u << 22);
+                unsigned long long sum = 0ull;
+                for (uint32_t i = 0; i < count; ++i)
+                    sum += mix(hashBytes(m + aDest + size_t(i) * d.destBpp, d.destBpp) ^
+                               mix(hashBytes(m + aIds + size_t(i) * d.idsBpp, d.idsBpp) ^
+                                   mix(hashBytes(m + aRad + size_t(i) * d.radBpp, d.radBpp))));
+                std::fprintf(stderr, "DIAG TREC rf %llu count %u records %016llx\n", d.rf, count, sum);
+            }
+        }
     }
     const unsigned long long rfNow = Ogre::Root::getSingleton().getNextFrameNumber();
     const unsigned long long from = std::strtoull(win.c_str(), nullptr, 10),
@@ -8956,7 +8979,24 @@ void RayQueryTier::diagTemporal(ReflectView &rv, const ReflectPassListener *key,
                                 t->getNumSlices(), Ogre::PixelFormatGpuUtils::getBytesPerPixel(t->getPixelFormat()),
                                 VkImageAspectFlags(depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), true });
         }
+        // the decode's output and its records' grid (the composite's inputs, upstream of the temporal pass)
+        auto hit = mHits.find(key);
+        if (hit != mHits.end() && hit->second.ids && hit->second.dest && hit->second.radiance) {
+            const char *hn[3] = { "hit.ids", "hit.dest", "hit.radiance" };
+            Ogre::TextureGpu *ht[3] = { hit->second.ids, hit->second.dest, hit->second.radiance };
+            for (int k = 0; k < 3; ++k) {
+                auto *vt = static_cast<Ogre::VulkanTextureGpu *>(ht[k]);
+                imgs.push_back(Img{ hn[k], vt->getFinalTextureName(), vt->mCurrLayout, ht[0]->getWidth(), ht[0]->getHeight(), 1u,
+                                    Ogre::PixelFormatGpuUtils::getBytesPerPixel(ht[k]->getPixelFormat()),
+                                    VK_IMAGE_ASPECT_COLOR_BIT, true });
+            }
+            slot->hitW = ht[0]->getWidth();
+            slot->idsBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(ht[0]->getPixelFormat());
+            slot->destBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(ht[1]->getPixelFormat());
+            slot->radBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(ht[2]->getPixelFormat());
+        }
     }
+    if (outputs) slot->hitW = 0u;
     std::vector<std::pair<std::string, VkDescriptorBufferInfo>> bufs;
     {
         auto hit = mHits.find(key);
