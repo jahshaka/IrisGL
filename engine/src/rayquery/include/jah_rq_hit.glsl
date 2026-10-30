@@ -286,32 +286,24 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			const float d = max( max( dv.x, dv.y ), dv.z );
 			const vec4 lv = JAH_VOX_LEVEL( c );
 			wLevel = mirror ? ( d <= lv.x ? 1.0 : 0.0 ) : clamp( ( lv.x - d ) / max( lv.y, 1e-6 ), 0.0, 1.0 );
-			// THE FOOTPRINT'S LEVEL TOO (the clipmap law): this cascade's levels up to K = log2 of its placement
-			// quantum are world-anchored, so a footprint fades out of it between K - 1 and K (its reads then touch
-			// levels under K) and the next one out answers past it
-			if( !mirror )
-			{
-				wLevel *= clamp( lv.z - lod, 0.0, 1.0 );
-				lod = min( lod, max( lv.z - 1.0, 0.0 ) + 1.0 );
-			}
 			if( !( wLevel > 0.0 ) )
 				continue;				// past this cascade's level: the next one out answers
+			// THE FOOTPRINT IS THE HIT SURFACE'S (VOXEL-R13 stage 2, the lead's ruling): its levels are capped at this
+			// cascade's world-anchored ones (under K = log2 of its placement quantum) - a footprint filters over the
+			// surface the ray met, and a wide one is never handed out to a coarser cascade, whose texel at that level
+			// averages the surface with what stands beyond its walls (gi.sealed_sky (8): a matte wall's secondary hit
+			// on the floor read by cascade 2 at lod 3.6, a 5.8 m texel, 1.1 % of the roof inside a sealed room)
+			if( !mirror )
+				lod = min( lod, max( lv.z - 1.0, 0.0 ) + 0.999 );
 		}
 		// THE CACHE'S LEVEL: ITS RAY'S OWN FOOTPRINT, WHATEVER THE CAMERA (PHOTON-7 stage 10-3, the lead's ruling - a
-		// cache's store is a world function): this cascade answers while its world-anchored levels carry the footprint
-		// (up to K, fading out between K - 1 and K to the next one out, the clipmap law), in the finest box holding the hit
-		// (its edge blend below). The camera's level made the store a function of where the camera stood: a sealed room
+		// cache's store is a world function): the finest box holding the hit answers (its edge blend below), its footprint
+		// capped under its K (VOXEL-R13 stage 2: the clipmap law's fade out to the next cascade is deleted - the next one
+		// out read the surface's footprint through its walls). The camera's level made the store a function of where the camera stood: a sealed room
 		// beyond c0's radius read c2 / c3, whose cells hold several faces under one normal, and a teleport into it read the
 		// sky-lit roof's share for a hundred frames (gi.sealed_sky (8): 5.8 % of the roof).
-		float wFoot = -1.0;
 		if( JAH_VOX_LEVEL_FOOTPRINT && c < count - 1 && !mirror )
-		{
-			const vec4 lv = JAH_VOX_LEVEL( c );
-			wFoot = clamp( lv.z - lod, 0.0, 1.0 );
-			lod = min( lod, max( lv.z - 1.0, 0.0 ) + 1.0 );
-			if( !( wFoot > 0.0 ) )
-				continue;				// past this cascade's levels: the next one out answers
-		}
+			lod = min( lod, max( JAH_VOX_LEVEL( c ).z - 1.0, 0.0 ) + 0.999 );
 		// THE HIT READS THE TEXEL ITS SURFACE WAS VOXELISED INTO (PHOTON-VOXEL-5 item (iv)).
 		// Along the ray's dominant axis the surface lies in one of the two texels either side
 		// of the hit - the voxels are half-open, so a face ON a texel plane belongs to the
@@ -355,8 +347,6 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			const float cellLS = invSize.w * max( max( invSize.x, invSize.y ), invSize.z );
 			w = clamp( edge / max( kBlendCells * cellLS, 1e-6 ), 0.0, 1.0 );
 		}
-		if( wFoot >= 0.0 )
-			w = min( w, wFoot );		// the cache's footprint fade inside the box's edge blend
 		w = min( w, 1.0 - accW );
 		if( w <= 0.0 )
 			continue;
