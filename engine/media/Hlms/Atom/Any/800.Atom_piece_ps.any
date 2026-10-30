@@ -445,7 +445,7 @@
 		// space) and the fork's Forward+ cell hook (a pixel of THIS target, and
 		// whether the hit has a cell at all).
 		float atomHitSun = 1.0;
-		// PHOTON-7 11-2 L9 (b1): the record's area lights' visibility (word 10), byte i the forward LTC light i's
+		// PHOTON-7 11-2 L9 (b1): the record's area lights' visibility (word 8), byte i the forward LTC light i's
 		uint atomHitAreaVis = 0u;
 		midf3 atomHitViewDir = midf3_c( 0.0, 0.0, 1.0 );
 		// THE GATHER'S RECORD (the record's bit 28, jah_rq_hit_record.glsl): the
@@ -471,7 +471,7 @@
 			bool atomOk = atomIds.x != 0xFFFFFFFFu && atomListIdx < inAtom.hitCount;
 			// The record's aux words, CLAMPED into the buffer (a lane past the count
 			// - a helper lane - still loads).
-			uint atomAuxAt = min( 12u + 11u * atomListIdx, max( uint( atomHitBuf.length() ), 12u ) - 11u );
+			uint atomAuxAt = min( 12u + 9u * atomListIdx, max( uint( atomHitBuf.length() ), 12u ) - 9u );
 			float2 atomAux = unpackHalf2x16( atomHitBuf[atomAuxAt] );
 		@else
 			uint2 atomIds = texelFetch( atomIdTex, atomXY, 0 ).xy;
@@ -652,7 +652,7 @@
 				atomFacing = dot( cross( w1 - w0, w2 - w0 ), -atomDirW );
 			}
 			atomHitSun = clamp( atomAux.x, 0.0, 1.0 );
-			atomHitAreaVis = atomHitBuf[atomAuxAt + 10u];
+			atomHitAreaVis = atomHitBuf[atomAuxAt + 8u];
 			atomHitDiffuseOnly = ( atomIds.x & 0x10000000u ) != 0u;
 			atomHitTracedLobe = ( atomIds.x & 0x20000000u ) != 0u;
 			if( !atomOk )
