@@ -4810,6 +4810,9 @@ public:
     bool giVoxelLight(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelLight(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelLight"); return mPhoton.giVoxelVolume(cascade, out, 1); }
+    bool giVoxelDirect(int cascade, GiVoxelVolume &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelDirect(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giVoxelDirect"); return mPhoton.giVoxelVolume(cascade, out, 3); }
     bool giVoxelHalves(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr,
                        const float *worldHi = nullptr) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelHalves(cascade, out, worldLo, worldHi); }); return r; }   // a REQUEST on the host's side (U3 4b)

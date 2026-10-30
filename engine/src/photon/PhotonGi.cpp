@@ -1862,6 +1862,15 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
                 }
             return true;
         };
+        // THE DIRECT TERM ALONE (Scene::giVoxelDirect): the half store's direct terms and the cell's, nothing else read
+        if (part == 3) {
+            Ogre::TextureGpu *hd = lighting->getHalfDirectTexture();
+            if (!hd || hd->getResidencyStatus() != Ogre::GpuResidency::Resident || !grab(hd, out.halfDirect) ||
+                !cellOfHalves(out.halfDirect, out.direct))
+                return false;
+            placement();
+            return true;
+        }
         if (!grab(total, out.halfLight) || !cellOfHalves(out.halfLight, out.light)) return false;
         if (lightOnly) {   // Scene::giVoxelLight: the cell's light alone
             placement();

@@ -1111,6 +1111,13 @@ public:
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
     virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// ...ITS DIRECT TERM ALONE (BISTRO-REST-1; jahlab's `voxels <c> direct`, gi.light_is_world) - the same TEST AND TOOL
+    /// readback (flushes and BLOCKS): the half store's direct terms (`halfDirect`), `direct` the cell's direct derived from
+    /// its six halves as `light` is (Types.h GiVoxelVolume::direct), and the placement; every other member left empty.
+    /// One volume, where the whole door decodes some twenty-five (the half store, every voxeliser volume, the albedo's
+    /// levels and every directional level): about two seconds a dump in Debug since VOXEL-R13. False where the cascade
+    /// keeps no direct term (no bounce).
+    virtual bool giVoxelDirect(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// ...ITS HALF STORE (VOXEL-R13 stage 1) - the same TEST AND TOOL readback (flushes and BLOCKS): `halfLight` and
     /// `halfDirect` (the six half lights and their direct terms), the halves' own faces (`halfSide`, `halfNormal`), the
     /// coverage and the surface position per half, and the placement; every other member empty.

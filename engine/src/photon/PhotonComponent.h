@@ -754,7 +754,7 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade);
     bool giFieldAtlas(GiFieldAtlas &out);
-    /// `part`: 0 the whole door (Scene::giVoxelVolume), 1 the light alone (giVoxelLight), 2 the half store (giVoxelHalves)
+    /// `part`: 0 the whole door (Scene::giVoxelVolume), 1 the light alone (giVoxelLight), 2 the half store (giVoxelHalves), 3 the direct term alone (giVoxelDirect)
     /// `worldLo` / `worldHi` (both or neither): only the level-0 texels of the cells that world box reaches are decoded
     bool giVoxelVolume(int cascade, GiVoxelVolume &out, int part = 0, const float *worldLo = nullptr,
                        const float *worldHi = nullptr);
