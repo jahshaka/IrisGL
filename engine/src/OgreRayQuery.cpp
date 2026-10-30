@@ -132,8 +132,6 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
-#include <cstdlib>   // MEASURING ARM (DETERMINISM-1 stage 1)
-#include <string>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -1778,10 +1776,6 @@ private:
         Pending pending[kFramesInFlight];
         unsigned frame = 0;
         OgreScene *scene = nullptr;
-        /// MEASURING ARM (DETERMINISM-1 stage 1, to be reverted): the previous frame's list copied to the host.
-        struct DiagSlot { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull;
-                          uint32_t w = 0u, h = 0u, idsBpp = 0u, destBpp = 0u, radBpp = 0u; size_t bufBytes = 0u; };
-        DiagSlot diag[6];
         /// The newest retired frame's counters (RayQueryStatus) and the scene draw they landed at (a view whose readings
         /// stopped is STALE: the status counts live views only).
         unsigned long long appended = 0ull, dropped = 0ull;
@@ -12058,152 +12052,6 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         if (cap >= 1.0) hv.capacity = std::min(hv.capacity, uint32_t(cap));
     }
     hv.width = hv.ids->getWidth();
-
-    // MEASURING ARM (DETERMINISM-1 stage 1, to be reverted; JAH_DIAG_HITS): THE PREVIOUS FRAME'S HIT LIST, copied before
-    // this frame writes it, read at a fixed lag: one line a frame - the records' count, an ORDER-FREE hash of the record
-    // multiset (dest + ids + the eleven aux words), of the dests, and of the decoded radiance keyed by its record - and,
-    // inside JAH_DIAG_HITS_DUMP=<dir>:<from rf>:<to rf>, every record sorted, one line each.
-    static const bool diagHits = std::getenv("JAH_DIAG_HITS") != nullptr;
-    if (diagHits && hv.buf) {
-        const auto mix = [](unsigned long long x) {
-            x += 0x9E3779B97F4A7C15ull;
-            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
-            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
-            return x ^ (x >> 31);
-        };
-        const auto hashBytes = [&](const unsigned char *b, size_t n) {
-            unsigned long long h = 0x51ED270B27u;
-            for (size_t i = 0; i < n; i += 4) {
-                uint32_t v = 0u;
-                std::memcpy(&v, b + i, std::min<size_t>(4u, n - i));
-                h = mix(h ^ v);
-            }
-            return h;
-        };
-        const uint32_t now = frameNow(), inFlight = framesInFlight();
-        for (HitView::DiagSlot &d : hv.diag) {
-            if (!d.live || uint32_t(now - d.frame) < inFlight) continue;
-            d.live = false;
-            const unsigned char *m = static_cast<const unsigned char *>(d.host.mapped);
-            const uint32_t *words = reinterpret_cast<const uint32_t *>(m);
-            const size_t texels = size_t(d.w) * d.h;
-            const unsigned char *ids = m + d.bufBytes, *dst = ids + texels * d.idsBpp, *rad = dst + texels * d.destBpp;
-            const uint32_t raw = words[0];
-            const uint32_t count = uint32_t(std::min<size_t>(raw, std::min(texels, (d.bufBytes / 4u - kHitCounterWords) / kHitAuxWords)));
-            unsigned long long recSum = 0ull, recXor = 0ull, destSum = 0ull, radSum = 0ull;
-            std::vector<std::string> lines;
-            static const std::string dump = std::getenv("JAH_DIAG_HITS_DUMP") ? std::getenv("JAH_DIAG_HITS_DUMP") : "";
-            unsigned long long from = 0ull, to = 0ull;
-            std::string dir;
-            if (!dump.empty()) {
-                const size_t a = dump.find(':'), b = dump.rfind(':');
-                dir = dump.substr(0, a);
-                from = std::strtoull(dump.c_str() + a + 1, nullptr, 10);
-                to = std::strtoull(dump.c_str() + b + 1, nullptr, 10);
-            }
-            const bool dumpThis = !dir.empty() && d.rf >= from && d.rf <= to;
-            for (uint32_t i = 0; i < count; ++i) {
-                const unsigned char *idp = ids + size_t(i) * d.idsBpp, *dp = dst + size_t(i) * d.destBpp,
-                                    *rp = rad + size_t(i) * d.radBpp;
-                const uint32_t *aux = words + kHitCounterWords + size_t(kHitAuxWords) * i;
-                const unsigned long long hd = hashBytes(dp, d.destBpp);
-                const unsigned long long key = mix(hd ^ mix(hashBytes(idp, d.idsBpp) ^ mix(hashBytes(
-                                                   reinterpret_cast<const unsigned char *>(aux), kHitAuxWords * 4u))));
-                const unsigned long long hr = hashBytes(rp, d.radBpp);
-                recSum += key;
-                recXor ^= mix(key);
-                destSum += mix(hd);
-                radSum += mix(key ^ hr);
-                if (dumpThis) {
-                    char line[512];
-                    int n = 0;
-                    uint32_t dv = 0u;
-                    std::memcpy(&dv, dp, 4u);
-                    n += std::snprintf(line + n, sizeof(line) - size_t(n), "%08x %016llx rad %016llx ids", dv, key, hr);
-                    for (uint32_t k = 0; k < d.idsBpp / 4u; ++k) {
-                        uint32_t v = 0u;
-                        std::memcpy(&v, idp + 4u * k, 4u);
-                        n += std::snprintf(line + n, sizeof(line) - size_t(n), " %08x", v);
-                    }
-                    n += std::snprintf(line + n, sizeof(line) - size_t(n), " aux");
-                    for (uint32_t k = 0; k < kHitAuxWords; ++k)
-                        n += std::snprintf(line + n, sizeof(line) - size_t(n), " %08x", aux[k]);
-                    lines.emplace_back(line);
-                }
-            }
-            std::fprintf(stderr, "DIAG HITS rf %llu count %u raw %u w %u rec %016llx %016llx dest %016llx rad %016llx\n",
-                         d.rf, count, raw, d.w, recSum, recXor, destSum, radSum);
-            if (dumpThis) {
-                std::sort(lines.begin(), lines.end());
-                if (FILE *f = std::fopen((dir + "/hits-" + std::to_string(d.rf) + ".txt").c_str(), "w")) {
-                    for (const std::string &l : lines) std::fprintf(f, "%s\n", l.c_str());
-                    std::fclose(f);
-                }
-            }
-        }
-        HitView::DiagSlot *slot = nullptr;
-        for (HitView::DiagSlot &d : hv.diag)
-            if (!d.live) { slot = &d; break; }
-        if (slot && hv.radiance && hv.radiance->getWidth() == hv.ids->getWidth() &&
-            hv.radiance->getHeight() >= hv.ids->getHeight()) {
-            const uint32_t w = hv.ids->getWidth(), h = hv.ids->getHeight();
-            const uint32_t idsBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(hv.ids->getPixelFormat());
-            const uint32_t destBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(hv.dest->getPixelFormat());
-            const uint32_t radBpp = Ogre::PixelFormatGpuUtils::getBytesPerPixel(hv.radiance->getPixelFormat());
-            const VkDescriptorBufferInfo bi = rawBufferInfo(hv.buf);
-            const size_t bufBytes = size_t(bi.range == VK_WHOLE_SIZE ? hv.buf->getTotalSizeBytes() : bi.range);
-            const VkDeviceSize need = VkDeviceSize(bufBytes) + VkDeviceSize(w) * h * (idsBpp + destBpp + radBpp);
-            if (slot->host.buffer && slot->host.size < need) retire(slot->host);
-            std::string err;
-            if (slot->host.buffer || makeBuffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err)) {
-                {
-                    Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
-                    Ogre::ResourceTransitionArray trans;
-                    for (Ogre::TextureGpu *t : { hv.ids, hv.dest, hv.radiance })
-                        solver.resolveTransition(trans, t, Ogre::ResourceLayout::CopySrc, Ogre::ResourceAccess::Read, 0u);
-                    mRs->executeResourceTransition(trans);
-                }
-                if (VkCommandBuffer dcmd = frameCmd()) {
-                    VkMemoryBarrier toCopy{};
-                    toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                    toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                    vkCmdPipelineBarrier(dcmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
-                                         &toCopy, 0, nullptr, 0, nullptr);
-                    VkBufferCopy bc{};
-                    bc.srcOffset = bi.offset;
-                    bc.size = bufBytes;
-                    vkCmdCopyBuffer(dcmd, bi.buffer, slot->host.buffer, 1, &bc);
-                    VkDeviceSize at = bufBytes;
-                    for (Ogre::TextureGpu *t : { hv.ids, hv.dest, hv.radiance }) {
-                        VkBufferImageCopy region{};
-                        region.bufferOffset = at;
-                        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                        region.imageSubresource.layerCount = 1;
-                        region.imageExtent = { w, h, 1u };
-                        vkCmdCopyImageToBuffer(dcmd, static_cast<Ogre::VulkanTextureGpu *>(t)->getFinalTextureName(),
-                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->host.buffer, 1, &region);
-                        at += VkDeviceSize(w) * h * Ogre::PixelFormatGpuUtils::getBytesPerPixel(t->getPixelFormat());
-                    }
-                    VkMemoryBarrier toHost{};
-                    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-                    vkCmdPipelineBarrier(dcmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0,
-                                         nullptr, 0, nullptr);
-                    slot->live = true;
-                    slot->frame = frameNow();
-                    slot->rf = Ogre::Root::getSingleton().getNextFrameNumber();
-                    slot->w = w;
-                    slot->h = h;
-                    slot->idsBpp = idsBpp;
-                    slot->destBpp = destBpp;
-                    slot->radBpp = radBpp;
-                    slot->bufBytes = bufBytes;
-                }
-            }
-        }
-    }
 
     // THE LAYOUTS through Ogre's solver, before the command buffer is taken (the
     // reflection's rule: executeResourceTransition closes every encoder).
