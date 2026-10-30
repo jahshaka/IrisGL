@@ -620,7 +620,13 @@ void SurfaceCache::destroyAll() {
         if (mRelightBuffer) { vao->destroyUavBuffer(mRelightBuffer); mRelightBuffer = nullptr; }
         if (mLightBuffer) { vao->destroyUavBuffer(mLightBuffer); mLightBuffer = nullptr; }
         if (mGiBuffer) { vao->destroyUavBuffer(mGiBuffer); mGiBuffer = nullptr; }
-        for (ReportTicket &t : mReportReadings) t.ticket.reset();
+        for (ReportTicket &t : mReportReadings) {
+            t.ticket.reset();
+            // (a report never read: its relit instances are listed, never dropped - 8B B1)
+            mLateRelitBoxes.insert(mLateRelitBoxes.end(), t.boxes.begin(), t.boxes.end());
+            t.boxes.clear();
+        }
+        listPendingRelits();
         mReportNextIssue = mReportNextTake = 0u;
         for (DemandTicket &t : mDemandReadings) t.ticket.reset();
         mDemandNextIssue = mDemandNextTake = 0u;
@@ -803,14 +809,22 @@ constexpr unsigned kDemandHeadEntries = 2u;
 constexpr unsigned kDemandReaders = 2u;
 /// Per atlas cell and reader, a stamp: 2 x 16384 words.
 constexpr unsigned kDemandCellEntries = kDemandCells * kDemandReaders / 4u;
-/// Per item slot, the face marks: per reader 6 buckets in 8 words, four entries.
-constexpr unsigned kDemandFaceEntries = 4u;
+/// Per item slot, the face marks: per MARK READER 6 buckets in 8 words - the reflection's (0), the gather's every hit (1:
+/// the admission path, the window's offers) and the gather's REST-SPAN hits (2: JAH_CARD_FACE_GATE, the decision's rank;
+/// PHOTON-7 8B, the lead's ruling - the two jobs of the mark) - six entries; the face HITS (the measuring arm) keep the
+/// readers' two blocks, four entries.
+constexpr unsigned kDemandFaceEntries = 6u, kDemandHitEntries = 4u;
+/// ...the marks a slot holds (8 per mark reader) and the hits (8 per reader)
+constexpr unsigned kFaceMarkStride = 4u * kDemandFaceEntries, kFaceHitStride = 4u * kDemandHitEntries;
+/// THE MARK THE DECISION RANKS for a reader: the reflection's own, the gather's rest-span block (2); the window's (the
+/// admission) reads each reader's own block
+constexpr unsigned restMarkOf(unsigned r) { return r == 1u ? 2u : r; }
 /// The read-back's period (the stamps persist on the GPU: a period only costs latency).
 constexpr unsigned long long kDemandReadEvery = 4ull;
 
 size_t demandEntries(unsigned slots) {
     // the head, the cells' stamps, the slots' face marks, and the slots' face hits (the measuring arm's, the marks' layout)
-    return size_t(kDemandHeadEntries) + kDemandCellEntries + 2u * size_t(kDemandFaceEntries) * slots;
+    return size_t(kDemandHeadEntries) + kDemandCellEntries + size_t(kDemandFaceEntries + kDemandHitEntries) * slots;
 }
 unsigned demandCellOf(const CardRec &c) {
     return (c.atlasY / kCardMinSize) * (kCardAtlasSize / kCardMinSize) + c.atlasX / kCardMinSize;
@@ -972,8 +986,8 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
     // card is the same card (its demand, its flags) at a new rect, RE-CAPTURED there - the capture rewrites every layer
     // of the rect, the relight and the march follow it (planRelights' captured cards), exactly as a newly arrived card.
     mPageOwner[best] = 3u;
-    for (std::vector<CardRec> &list : cards)
-        for (CardRec &c : list) {
+    for (size_t inst = 0; inst < cards.size(); ++inst)
+        for (CardRec &c : cards[inst]) {
             if (!c.size || c.atlasX < x0 || c.atlasX >= x0 + kCardPageSize || c.atlasY < y0 ||
                 c.atlasY >= y0 + kCardPageSize)
                 continue;
@@ -993,6 +1007,10 @@ bool SurfaceCache::compactOnePage(std::vector<std::vector<CardRec>> &cards, unsi
             c.roots |= roots;   // (moved for the arrival that needed the room: its root's work)
             c.moverTraced = false;
             ++mCompactionMoves;
+            // (a moved card answers no hit until its re-capture: the voxels do meanwhile - a change of what its instance's
+            // hits read, the changed-region list's Card kind, PHOTON-7 stage 8B B1)
+            if (inst < mInstances.size())
+                mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
         }
     mPageOwner[best] = 0u;
     mPageSubSize[best] = 0u;
@@ -1080,17 +1098,18 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
                 card.lastRead = std::max(card.lastRead, stamp);
             }
         const Ogre::uint32 *face = cell + 4u * kDemandCellEntries;
-        if (mFaceMarks.size() < size_t(t.slots) * 16u) {
-            mFaceMarks.resize(size_t(t.slots) * 16u, 0ull);
-            mFacePrev.resize(size_t(t.slots) * 16u, 0ull);
-            mFaceRing.resize(size_t(t.slots) * 16u * kFaceRing, 0u);
-            mFaceRingHead.resize(size_t(t.slots) * 16u, 0u);
+        if (mFaceMarks.size() < size_t(t.slots) * kFaceMarkStride) {
+            mFaceMarks.resize(size_t(t.slots) * kFaceMarkStride, 0ull);
+            mFacePrev.resize(size_t(t.slots) * kFaceMarkStride, 0ull);
+            mFaceRing.resize(size_t(t.slots) * kFaceMarkStride * kFaceRing, 0u);
+            mFaceRingHead.resize(size_t(t.slots) * kFaceMarkStride, 0u);
         }
-        for (size_t k = 0; k < size_t(t.slots) * 16u; ++k)
-            if (face[k] > mFaceMarks[k] && counted(unsigned((k % 16u) / 8u), face[k])) {
+        // (a mark's clock is its reader's: the gather's rest-span block, 2, counts on the gather's)
+        for (size_t k = 0; k < size_t(t.slots) * kFaceMarkStride; ++k)
+            if (face[k] > mFaceMarks[k] && counted(std::min(unsigned((k % kFaceMarkStride) / 8u), 1u), face[k])) {
                 mFacePrev[k] = mFaceMarks[k];
                 mFaceMarks[k] = face[k];
-                const size_t slot = k / 16u;
+                const size_t slot = k / kFaceMarkStride;
                 if (mSlotMarked.size() <= slot) mSlotMarked.resize(size_t(t.slots), 0u);
                 if (!mSlotMarked[slot]) {
                     mSlotMarked[slot] = 1u;
@@ -1103,12 +1122,12 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
         // THE FACES' HITS (the measuring arm cards.demandCount): every read of a face, resident or not - the GPU's
         // counts are cumulative per buffer, so the host adds each word's move (a grown table's new buffer starts at 0)
         if (mDemandCount) {
-            const Ogre::uint32 *hits = face + size_t(t.slots) * 16u;
-            if (mFaceHits.size() < size_t(t.slots) * 16u) {
-                mFaceHits.resize(size_t(t.slots) * 16u, 0ull);
-                mFaceHitsGpu.resize(size_t(t.slots) * 16u, 0u);
+            const Ogre::uint32 *hits = face + size_t(t.slots) * kFaceMarkStride;
+            if (mFaceHits.size() < size_t(t.slots) * kFaceHitStride) {
+                mFaceHits.resize(size_t(t.slots) * kFaceHitStride, 0ull);
+                mFaceHitsGpu.resize(size_t(t.slots) * kFaceHitStride, 0u);
             }
-            for (size_t k = 0; k < size_t(t.slots) * 16u; ++k) {
+            for (size_t k = 0; k < size_t(t.slots) * kFaceHitStride; ++k) {
                 mFaceHits[k] += hits[k] >= mFaceHitsGpu[k] ? hits[k] - mFaceHitsGpu[k] : hits[k];
                 mFaceHitsGpu[k] = hits[k];
             }
@@ -1128,8 +1147,10 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
         bool wanted = false;
         for (unsigned r = 0; r < kDemandReaders && !wanted; ++r)
             for (unsigned b = 0; b < 6u && !wanted; ++b) {
-                const unsigned long long m = mFaceMarks[s * 16u + 8u * r + b];
-                wanted = m && (m + mDemandWindow >= mDemandNewest[r] || (restPending && m >= mRestStart[r]));
+                // (the window offers what any hit marked; a pending decision, what its rest span marked)
+                const unsigned long long m = mFaceMarks[s * kFaceMarkStride + 8u * r + b];
+                const unsigned long long mr = mFaceMarks[s * kFaceMarkStride + 8u * restMarkOf(r) + b];
+                wanted = (m && m + mDemandWindow >= mDemandNewest[r]) || (restPending && mr && mr >= mRestStart[r]);
             }
         if (wanted) slots.push_back(uint32_t(s));
     }
@@ -1138,6 +1159,12 @@ void SurfaceCache::takeDemand(std::vector<uint32_t> &slots, const CardSceneView 
 }
 
 void SurfaceCache::refreshResidency(const CardSceneView &view) {
+    // A CARD THAT LEAVES CHANGES WHAT ITS INSTANCE's HITS READ (the voxels answer them from the next frame): its instance's
+    // box joins the frame's relit boxes - the changed-region list's Card kind (PHOTON-7 stage 8B, B1: the gather's
+    // cells that read it resume; an eviction is no input it may rest across)
+    const auto departedBox = [this](size_t inst) {
+        if (inst < mInstances.size()) mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+    };
     // 1. WHAT THE SCENE STILL OFFERS. Membership is decided by the CANDIDATE
     //    LIST the scene hands over, so an item that was destroyed, hidden, made
     //    a mover or re-materialled out of the GI channel simply stops being
@@ -1215,6 +1242,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (unsigned c = 0; c < inst.cardCount; ++c) {
                 mCards[inst.firstCard + c].queued = true;
                 mCards[inst.firstCard + c].roots |= root;
+                mCards[inst.firstCard + c].sceneCause = true;   // (the edit's first round: CardScene)
             }
             ++mInvalidMaterial;
         }
@@ -1361,10 +1389,11 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         unsigned long long marks[2][6] = {};
         bool twice[6] = {};
         bool any = mv != moved.end();
-        if (cand.itemSlot != size_t(-1) && (cand.itemSlot + 1u) * 16u <= mFaceMarks.size())
+        if (cand.itemSlot != size_t(-1) && (cand.itemSlot + 1u) * kFaceMarkStride <= mFaceMarks.size())
             for (unsigned r = 0; r < kDemandReaders; ++r)
                 for (unsigned b = 0; b < 6u; ++b) {
-                    const size_t k = cand.itemSlot * 16u + 8u * r + b;
+                    // (the decision reads the rest span's block, the window each reader's own: the two jobs of the mark)
+                    const size_t k = cand.itemSlot * kFaceMarkStride + 8u * (decide ? restMarkOf(r) : r) + b;
                     const unsigned long long m = mFaceMarks[k];
                     // KEPT AND ARRIVED JUDGED ALIKE AT THE DECISION (PHOTON-7 stage 10, gi.card_residency (6)): a face
                     // the readers marked anywhere in their demand span is a candidate - as a resident card read anywhere
@@ -1478,6 +1507,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                     changed = true;
                     mDeparted = true;
                     forcedLeft = true;
+                    departedBox(i);
                 }
     if (windowDrain && !decide) {
         for (size_t i = 0; i < per.size(); ++i)
@@ -1492,6 +1522,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
                 changed = true;
                 drained = true;
                 mDeparted = true;
+                departedBox(i);
             }
     }
     if (windowDrain && drained) ++mWindowDrains;
@@ -1519,9 +1550,9 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
     if (decide) {
         const auto spanCount = [this](size_t slot, unsigned bucket) {
             unsigned n = 0u;
-            if (slot == size_t(-1) || (slot + 1u) * 16u > mFaceMarks.size()) return n;
+            if (slot == size_t(-1) || (slot + 1u) * kFaceMarkStride > mFaceMarks.size()) return n;
             for (unsigned r = 0; r < kDemandReaders; ++r) {
-                const size_t k = slot * 16u + 8u * r + bucket;
+                const size_t k = slot * kFaceMarkStride + 8u * restMarkOf(r) + bucket;   // (the rest span's marks)
                 for (unsigned e = 0; e < kFaceRing; ++e) {
                     const uint32_t m = mFaceRing[k * kFaceRing + e];
                     n += (m && m >= mRestStart[r]) ? 1u : 0u;
@@ -1592,12 +1623,25 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             for (size_t k = 0; k < per[i].size(); ++k) {
                 CardRec &c = per[i][k];
                 if (!c.size || keep[i][k] || (view.forcedCardMode > 0 && heldCard(i, c))) continue;
+                // READ IN MOTION (8B, the lead's check; its SCOPE, the lead's ruling on lab.card_set_binds and
+                // gi.card_residency_crowded (4)): the decision ranks the rest span's faces alone, so a card only cells that
+                // never rest read (a mover resuming them every frame - K 0, no face marks) is outside the prefix; it stays
+                // while a reader that reads it (fresh, the moving residency's window) is MOVING - that reader's rest not
+                // begun - and leaves the moment that reader rests or stops reading it. At a rest decision every reader
+                // rests, so the set is the prefix exactly (one set at one pose by any path); the keep blocks eviction
+                // alone - compaction moves a kept card like any resident.
+                bool readMoving = false;
+                for (unsigned r = 0; r < kDemandReaders && !readMoving; ++r)
+                    readMoving = view.readerActive[r] && view.readerRestFrames[r] == 0u && c.readBy[r] &&
+                                 c.readBy[r] + mDemandWindow >= mDemandNewest[r];
+                if (readMoving) continue;
                 freeRect(c.atlasX, c.atlasY, c.size);
                 c.size = 0u;
                 ++mEvicted;
                 ++mRestDrained;
                 changed = true;
                 mDeparted = true;
+                departedBox(i);
             }
         // ...and the prefix's others arrive, in rank order (placed below: compaction, never eviction)
         arriving.clear();
@@ -1681,6 +1725,7 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
             ++mEvicted;
             changed = true;
             mDeparted = true;
+            departedBox(e.inst);
             roomChanged();
             placed = place(c);
         }
@@ -2074,7 +2119,7 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
                 for (size_t k = 0; !n && k < view.indirectBoxes.size(); ++k) n = box.intersects(view.indirectBoxes[k]);
             }
             if ((d || n) && !regionRoot) regionRoot = 1ull << rootBit('r', mFrame);
-            if (d) { c.relight = true; direct = true; c.roots |= regionRoot; }
+            if (d) { c.relight = true; direct = true; c.roots |= regionRoot; c.sceneCause = true; }
             if (n) { c.relightIndirect = true; indirect = true; ++mIndirectByRegion; c.roots |= regionRoot; }
         }
         if (direct && !mRadianceMovingLastFrame) ++mInvalidRadiance;   // one per gesture
@@ -2180,13 +2225,24 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
     }
     // 3. THE CHANGED-REGION LIST'S BOXES (PHOTON-7 stage 3): each instance this plan relights a card of, ONCE - its
     // world box (the transform signature's: where its cards were cut).
+    // (8B (A): an instance is listed CardScene when ANY card of it this plan relights carries a scene change's first
+    // round - CardRec::sceneCause, cleared here: its later rounds are Card)
+    const size_t pendingFrom = mPendingRelitBoxes.size(), relitFrom = mRelitInstances.size();
     for (unsigned idx : mRelight) {
         const unsigned inst = mCards[idx].instance;
-        if (inst >= mInstances.size() ||
-            std::find(mRelitInstances.begin(), mRelitInstances.end(), inst) != mRelitInstances.end())
+        const bool scene = mCards[idx].sceneCause;
+        mCards[idx].sceneCause = false;
+        if (inst >= mInstances.size()) continue;
+        const auto at = std::find(mRelitInstances.begin(), mRelitInstances.end(), inst);
+        if (at != mRelitInstances.end()) {
+            const size_t k = size_t(at - mRelitInstances.begin());
+            if (scene && k >= relitFrom) mPendingRelitBoxes[pendingFrom + (k - relitFrom)].scene = true;
             continue;
+        }
         mRelitInstances.push_back(inst);
-        mRelitBoxes.push_back(Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize));
+        // (listed when its report reads the move VISIBLE - a texel moved a code - never for a sub-quantum relight:
+        // PHOTON-7 stage 8B B1, R3 (a)'s display quantum at the gather's cells; mPendingRelitBoxes)
+        mPendingRelitBoxes.push_back(RelitBox{ Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize), scene });
     }
 }
 
@@ -2803,7 +2859,9 @@ void SurfaceCache::relightCards() {
         if (c.instance < mInstances.size() &&
             std::find(mRelitInstances.begin(), mRelitInstances.end(), c.instance) == mRelitInstances.end()) {
             mRelitInstances.push_back(c.instance);
-            mLateRelitBoxes.push_back(Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize));
+            mLateRelitBoxes.push_back(RelitBox{ Ogre::Aabb(mInstances[c.instance].centre, mInstances[c.instance].halfSize),
+                                                c.sceneCause });
+            c.sceneCause = false;
         }
         c.relight = lampsUntraced;   // its lamps unshadowed this once: relit again when the trace can run
         c.lastRelit = mFrame;
@@ -2866,6 +2924,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
         ++mVisibleRelights;
         ++mUnmeasuredRelights;
         mRelitMeasured = false;
+        listPendingRelits();   // (counted visible: listed at once)
     };
     if (shaderReadyRelight && !ensureIndirectBuffers()) { unmeasured(); return; }
     if (!shaderReadyRelight || !ensureIndirectBuffers()) return;
@@ -2953,6 +3012,7 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
     }
     if (cardsRead && ready) endIndirectFrame(mPlanFrame);
     if (mMovesOwed && !mReportPending) { mMovesOwed = false; unmeasured(); }   // (no report will carry them)
+    if (!mMovesOwed && !mPendingRelitBoxes.empty()) listPendingRelits();      // (no move owed to a report: at once)
 }
 
 bool SurfaceCache::ensureIndirectBuffers() {
@@ -3093,12 +3153,16 @@ void SurfaceCache::flushReport() {
         ++mIndirectOverflows;
         if (mMovesOwed) { ++mVisibleRelights; ++mUnmeasuredRelights; }
         mMovesOwed = false;
+        listPendingRelits();
         return;
     }
     r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
     r.frame = mReportPendingHost;
     r.cacheFrame = mReportPendingCache;
     r.carriesMoves = mMovesOwed;
+    r.boxes.clear();
+    if (mMovesOwed) r.boxes.swap(mPendingRelitBoxes);
+    else listPendingRelits();
     mMovesOwed = false;
     mReportNextIssue = (mReportNextIssue + 1u) % kReportSlots;
 }
@@ -3157,8 +3221,12 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             float codes = 0.0f;
             std::memcpy(&codes, &w[1u + kReportCapacity], sizeof(codes));
             const bool nonFinite = w[2u + kReportCapacity] != 0u;
-            if (nonFinite || codes > 0.0f) ++mVisibleRelights;
-            else ++mSubQuantumRelights;
+            if (nonFinite || codes > 0.0f) {
+                ++mVisibleRelights;
+                mLateRelitBoxes.insert(mLateRelitBoxes.end(), r.boxes.begin(), r.boxes.end());
+            } else
+                ++mSubQuantumRelights;
+            r.boxes.clear();
             mMoveCodesLast = nonFinite ? -1.0f : codes;
             mMoveCodesFrame = r.cacheFrame;
         }
@@ -4266,6 +4334,7 @@ void SurfaceCache::noteMaterialChanged(MaterialId material) {
         for (unsigned c = 0; c < inst.cardCount; ++c) {
             mCards[inst.firstCard + c].queued = true;
             mCards[inst.firstCard + c].roots |= root;
+            mCards[inst.firstCard + c].sceneCause = true;   // (the edit's first round: CardScene)
         }
         any = true;
     }
@@ -4538,9 +4607,9 @@ bool SurfaceCache::readFaceDemand(std::vector<CardFaceDemand> &out, unsigned lon
             d.node = mSlotNode[s];
             d.bucket = b;
             for (unsigned r = 0; r < kDemandReaders; ++r) {
-                const size_t k = s * 16u + 8u * r + b;
+                const size_t k = s * kFaceHitStride + 8u * r + b, m = s * kFaceMarkStride + 8u * r + b;
                 d.hits[r] = k < mFaceHits.size() ? mFaceHits[k] : 0ull;
-                d.mark[r] = k < mFaceMarks.size() ? mFaceMarks[k] : 0ull;
+                d.mark[r] = m < mFaceMarks.size() ? mFaceMarks[m] : 0ull;
             }
             if (inst)
                 for (unsigned c = 0; c < inst->cardCount; ++c) d.resident += mCards[inst->firstCard + c].bucket == b ? 1u : 0u;

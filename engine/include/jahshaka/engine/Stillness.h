@@ -163,9 +163,15 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
-    /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7): the gather's rest key moved, or its inputs owed work, or
-    /// (PHOTON-7 stage 10, R3's contract) the surface cache owed the readers their hold (CardCacheStatus::readersHoldOwed).
+    /// B3 (PHOTON-7 stage 8B): the longest hand-over a held cell began this frame, in frames - a hold's completion
+    /// includes it (the picture walks at a code a frame)
+    unsigned           handoverM = 0;
+    /// THE HOLD WAITED ON THIS FRAME (PHOTON-2 round 2, L7; PHOTON-7 stage 8B, B1): an input REACHED a cell of the gather's
+    /// this frame (its rest clock restarted: GatherRestRecord::reached, the frame's own record) - or a REFINEMENT re-rested a
+    /// held cell (8B B3, GatherRestRecord::refined: the hold waits for its rest and its hand-over as for an input's).
     bool               holdKey = false;
+    /// ...and the reflection held this frame or none traces (the view's hold = the gather's and this)
+    bool               reflOk = true;
     /// THE FIELD'S GRANT AND ITS SPEND this frame (PHOTON-7 stage 5, 5-4; GiStatus::ifdGrantLastFrame /
     /// ifdDispatchedLastFrame, integrations), the restarts and refinements it owes after it, and the voxel store's own
     /// owed work (GiStatus::chainOwed: the store not at rest).
@@ -292,12 +298,22 @@ struct StillnessWindow {
     /// "last input write", rows or none.
     int lastHoldKeyFrame = -1;
     /// THE HOLD's DERIVED BOUND (PHOTON-7 stage 10, R3's design; ONE formula, stillnessDeriveLiveness - lab.stillness_control
-    /// and scripting.e2e.world_stillness both read it): the readers' FIRST REST frame (rest frames >= 1), the stop's one
+    /// and scripting.e2e.world_stillness both read it): the readers' REST THE DECISION READ (PHOTON-7 stage 8B, B1: the start
+    /// of the rest that ran unbroken to the decision - the gather's clock restarts on every input that reaches a cell; the
+    /// first rest frame where no decision is taken), the stop's one
     /// rest DECISION's frame (the cache's decisions moving) and its WORK's end (its last GI row), and the first hold's
     /// bound from the first rest: (N + due) + due + W + N + 1 - the readers' demand span (N + the due), the read-back's
     /// due after it, W = the decision's work (workEnd - decision), the re-rest after it, the hold's own frame; W's PACE:
     /// ceil(the work's pages / the tier's pages a frame) + due. -1 where the window has no such frame.
     int firstRestFrame = -1, decisionFrame = -1, decisionWorkEnd = -1, holdBound = -1, workPace = -1;
+    /// ...C, the frames the gather's cells took to converge after the work's last row before their rest began again (8B,
+    /// B1: the re-rest is C + N + 1 - the history catching up with its samples is part of the rest's start)
+    int convergeFrames = 0;
+    /// ...H, the longest card-refinement hand-over (M frames, StillnessFrame::handoverM) that began after the work's last
+    /// row (8B, B3: a refining cell walks to its new answer a code a frame, counted active - the hold waits for it)
+    int handoverFrames = 0;
+    /// ...and C after the LAST hold key (the frames before the gather's rest began again; 0 with none after it)
+    int lastKeyConverge = 0;
     double workPages = 0.0;
     /// THE MOVE BEFORE THE STOP: the GI rows that fired on its frames ("name:frames/units", ',' joined) and how
     /// many frames before the stop the last of them landed (-1: none) — a commit that lands inside the move is the

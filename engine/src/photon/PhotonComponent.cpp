@@ -342,10 +342,10 @@ bool peakJumped(float before, float now) {
 }
 }   // namespace
 
-void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask, bool mover) {
+void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uint32_t cascadeMask) {
     if (regionEmpty(box)) return;
     if (mRegionsOpen.size() < kGiRegionCap) {
-        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
+        mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
         return;
     }
     // AT THE CAP THE LIST MERGES, IT NEVER GIVES UP (the dirty path's lesson, PhotonComponent.h's seventeen crates: an
@@ -363,7 +363,6 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (best < mRegionsOpen.size()) {
         mRegionsOpen[best].box.merge(box);
         mRegionsOpen[best].mask |= cascadeMask;
-        mRegionsOpen[best].mover = mRegionsOpen[best].mover && mover;   // (a merge with the chain's is the chain's)
         ++mRegionMergesOpen;
         return;
     }
@@ -382,11 +381,10 @@ void PhotonComponent::appendRegion(GiRegionKind kind, const Ogre::Aabb &box, uin
     if (bi < mRegionsOpen.size()) {
         mRegionsOpen[bi].box.merge(mRegionsOpen[bj].box);
         mRegionsOpen[bi].mask |= mRegionsOpen[bj].mask;
-        mRegionsOpen[bi].mover = mRegionsOpen[bi].mover && mRegionsOpen[bj].mover;
         mRegionsOpen.erase(mRegionsOpen.begin() + std::ptrdiff_t(bj));
         ++mRegionMergesOpen;
     }
-    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask, mover });
+    mRegionsOpen.push_back(RegionEntry{ box, kind, cascadeMask });
 }
 
 void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts, bool voxel) {
@@ -459,6 +457,21 @@ void PhotonComponent::listLamp(bool hadSphere, const Ogre::Vector3 &oldCentre, f
 
 void PhotonComponent::closeRegions() {
     const unsigned long long frame = giWriterFrame();
+    // THE LAST CLOSE THAT CARRIED AN INPUT (PHOTON-7 stage 8B; the gather's missed-draw rule): the PREVIOUS close, judged
+    // now that its frame's light work is done - its list (a region, an overflow, a restart), a brick mask its frame's
+    // light work wrote, or the field at work. A view that missed draws re-rests whole only when one of the closes it
+    // missed carried an input (a still scene's missed frame changes nothing it would have read).
+    if (mRegionCloses > 0ull) {
+        const GiChangedRegions &was = mRegionsClosed;
+        bool input = was.available && (!was.regions.empty() || was.overflow || was.restart);
+        if (!input) {
+            std::vector<Volume> vols;
+            volumes(vols);
+            for (const Volume &v : vols)
+                if (v.lighting && v.lighting->getBrickMaskFrame() == mRegionCloseFrame) { input = true; break; }
+        }
+        if (input || fieldWideWorkOwed()) mLastInputClose = mRegionCloses;
+    }
     // THE CASCADES EACH REGION REACHES, against the boxes as they stand at the close (a scroll's commit earlier in the
     // frame moved one): a box test, as the dirty path's marks; a Slab names its own.
     for (RegionEntry &e : mRegionsOpen) {
@@ -511,6 +524,7 @@ void PhotonComponent::closeRegions() {
         c.regions.push_back(r);
     }
     ++mRegionCloses;
+    mRegionCloseFrame = frame;
     if (!c.regions.empty() || c.overflow || c.restart) ++mRegionClosesListing;
     // (THE MOVERS' REGION LIST is the late GI work's, spent in its frame: PhotonComponent::recordLate - a frame with no GI
     // step keeps it for the next.)

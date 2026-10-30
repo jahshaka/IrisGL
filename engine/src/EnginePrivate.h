@@ -2040,7 +2040,13 @@ struct AreaVisParams {
     float alpha[4] = {};
     float lights[4] = {};
     AreaVisLightParams light[4];
+    /// THE GEOMETRY THAT CHANGED THIS FRAME (PHOTON-7 8B, B2; jah_area_vis_params.glsl): [0] the boxes, [1] 1 = all
+    float regions[4] = {};
+    float regionBox[2 * 32][4] = {};
 };
+/// The geometry boxes a frame hands the area visibility's trace (jah_area_vis_params.glsl kAreaVisRegions): the list's
+/// movers and edits, merged to fit (areaVisRegions) - never dropped, never a view-wide break.
+constexpr unsigned kAreaVisRegions = 32u;
 static_assert(sizeof(AreaVisParams) % 16u == 0u, "the area visibility's block is whole vec4s");
 /// The trace's grid: one texel a 2 x 2 block (the spec's half resolution), both producers.
 constexpr unsigned kAreaVisDivisor = 2u;
@@ -2052,20 +2058,29 @@ std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm);
 /// (the five numbers) and the light set it traced.
 struct AreaVisState {
     unsigned frame = 0u, flip = 0u, age = 0u, restFrames = 0u, lights = 0u, strata = 0u;
-    unsigned long long restKey = 0ull;
+    /// THE REST FRAME OF THE LAST FRAME THAT LISTED CHANGED GEOMETRY (PHOTON-7 8B, B2): the texels it reached rest again
+    /// from the next, so the view holds n^2 frames after it (the scene's view-wide rest key is DELETED: a change breaks
+    /// the rest per texel, the light set restarts it whole)
+    unsigned restListAt = 0u;
+    /// ...and the changed-region list's last close it read (PhotonComponent::regionCloseSerial): each close is read once,
+    /// and a close it missed that carried an input restarts every texel's rest
+    unsigned long long listSerialSeen = 0ull;
     float prev[5][4] = {};
     std::vector<float> lightKey;
     bool held = false;
 };
 /// ONE FRAME OF IT: the lights packed in HlmsPbs's order, the camera, whether the view is at rest (the camera bit for
-/// bit, the scene's rest key `restKey`, the light set) and so whether it HOLDS (past n^2 rest frames: nothing is
-/// dispatched - `freshImages` never holds), and - not holding - every member of `pp` but the ray tier's alpha table:
+/// bit, the light set) and so whether it HOLDS (n^2 rest frames past the last frame the changed-region list `regions`
+/// carried geometry - a mover's swept box, an edit, an overflow, a missed close that carried an input - and none this
+/// frame: nothing is dispatched;
+/// `freshImages` never holds), and - not holding - every member of `pp` but the ray tier's alpha table (the list's
+/// geometry boxes included, merged to kAreaVisRegions):
 /// the clearance's two terms, the producer's (`liftA`, `liftB`: the ray tier's drawn footprints and sub-pixel snap -
 /// the ray origin's one law; the no-ray route's 0 and the voxel cell), the mask word `mask`, the strata n (`strata`),
 /// the sequence and the rest. Returns whether the view holds.
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, unsigned long long restKey, bool freshImages, float liftA, float liftB,
+                  unsigned strata, const PhotonComponent &photon, bool freshImages, float liftA, float liftB,
                   float mask, CameraImageF &eye);
 /// ...and after its dispatches: the camera kept, the pair flipped, the age and the frame advanced.
 void areaVisAdvance(AreaVisState &st, const CameraImageF &eye);
@@ -5001,7 +5016,6 @@ public:
     unsigned long long probeShadowBytes() const { return mPhoton.probeShadowBytes(); }
     void dropProbeGridByRays() { return mPhoton.dropProbeGridByRays(); }
     unsigned long long giLightingSerial() const { return mPhoton.giLightingSerial(); }
-    unsigned long long gatherRestKey() const { return mPhoton.gatherRestKey(); }
     unsigned long long gatherRestartKey() const { return mPhoton.gatherRestartKey(); }
     void gatherStatusInto(GatherStatus &out) const;
     /// The cards' view readers have finished their rest sample sequences (RayQueryTier::cardReadersRestComplete; no

@@ -287,13 +287,10 @@ constexpr unsigned kReflectRestTailDivisor = 8u;
 /// THE STOP'S FRAMES (jah_reflect_rest.glsl kReflectStopFrames): a texel stops after its standard error stayed within its
 /// share this many frames - the rest bound's last term (PHOTON-7 11-1c).
 constexpr unsigned kReflectStopFrames = 8u;
-/// THE MOVED INSTANCES A REST FOLLOWS PER TEXEL (G6, rq_reflect.comp's restMoverBox): more moved in one frame breaks
-/// the view's rest whole.
-constexpr unsigned kReflectRestMovers = 16u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 57u;
+constexpr unsigned kReflectBindings = 63u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -385,7 +382,16 @@ constexpr unsigned kReflectPickSlots = 64u, kReflectPickWords = 64u;
 /// a frame a slot - word 0 the fragments recorded, then four records of 31 words - over 256 frames (a stillness window's
 /// 120 and its move's trail fit; the lab reads it back by each slot's engine frame).
 constexpr unsigned kColourPickSlots = 256u, kColourPickWords = 128u;
-static_assert(kReflectBindings == kReflectPickBinding + 1u, "the pick is the reflection set's last binding");
+/// ...and THE CHANGED-REGION LIST (57, PHOTON-7 8B, B2: jah_rest_regions.glsl; the gather's resume reads the same buffer)
+/// and THE BRICK MASKS (58-61, one a cascade in the hit set's order): a resting texel resumes when a geometry region
+/// crosses one of its segments, or a light region or a changed brick lies at one of its hits (rq_reflect.comp).
+constexpr unsigned kReflectRegionsBinding = kReflectPickBinding + 1u;
+constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
+/// ...and THE REFINEMENT (62, PHOTON-7 8B, B2's no-pop hand-over; jah_reflect_rest.glsl kRefine*): rgba32ui a trace
+/// texel and eye - a texel reached at rest by a CARD region alone re-rests in the background showing its answer, then
+/// walks to the new one at a code a frame (the gather's B3, the reflection's form).
+constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
+static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement word is the reflection set's last binding");
 /// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
@@ -957,21 +963,12 @@ private:
     float pointSnapKnob() const { return arm(ArmId::RaysOriginPoint, true) ? mSubPixelSnapPx : 0.0f; }
     /// subPixelPrecisionBits' snap (init; Vulkan's minimum is 4 bits, a 1/32-pixel worst case when unknown).
     float mSubPixelSnapPx = float(1.4142135623730951 / 32.0);
-    /// THE GATHER'S REST KEY with the measuring arms "gi.hitDirect" and "gi.freeze" in it (FAR-SUN-2; PHOTON-7 stage
-    /// 0's read W1): a paired A/B in one process flips the arm on a still view, and a held view traces nothing. Under the
-    /// freeze no rest sample enters (W4u), so a view still past its rest length HOLDS on the frozen walk's EMA picture
-    /// (measured on the court: held from the stop's 15th frame); lifting the arm must break that hold, or a lift with no
-    /// GI work owed (a walk inside one lattice cell) leaves the view held on the walk's picture until something moves.
-    unsigned long long gatherRestKeyArmed(const detail::OgreScene *scene) const {
-        return scene->gatherRestKey() ^ (arm(ArmId::GiHitDirect, true) ? 0ull : 0x9E3779B97F4A7C15ull) ^
-               (arm(ArmId::GiFreeze, false) ? 0xC2B2AE3D27D4EB4Full : 0ull);
-    }
     /// THE REFLECTION'S REST KEY (PHOTON-2 fix F5; round 2, G6): what breaks a reflection's rest VIEW-WIDE - every
     /// lighting write and edit a reflection ray reads (PhotonComponent::reflectionReadsKey), the measuring arm
     /// "gi.hitDirect" (a paired A/B flips it on a still view), the material store's rows (a reflected object's albedo,
     /// a reflector's roughness), and a change of the TRACED SET: a slot born or dead (the slot count), a mesh acquired
     /// or released, a rigged item's structure made ready. NOT A MOVE: an instance that moves - a node, a drag, a pose -
-    /// breaks the rest PER TEXEL (its swept box, rq_reflect.comp's restSegmentMoved), and the structure builds, refits
+    /// breaks the rest PER TEXEL (the changed-region list's swept box, rq_reflect.comp's restSegmentMoved), and the structure builds, refits
     /// and compactions that follow a move change nothing a ray finds (the read's #7: a moving node anywhere broke every
     /// view's rest, and every BLAS compaction once).
     unsigned long long reflectRestKey(const detail::OgreScene *scene, const SceneAs &sa) const {
@@ -1105,6 +1102,8 @@ private:
     RawBuffer mColourPick;
     uint32_t mColourPickFrames[kColourPickSlots] = {};
     uint32_t mColourPickZeroed = 0xFFFFFFFFu;
+    /// ...and the changed-region list's (B2: a reflection set bound before any list closed)
+    RawBuffer mRestRegionStandIn;
     bool mDummiesReady = false;
     bool mDummiesNeedClear = false;
     /// `layers` 0 = a plain 2D image and view (the hit list's stand-ins); n >= 1 =
@@ -1204,6 +1203,8 @@ private:
         ReflectImage reference;
         /// THE REST'S STOP SHARE (binding 51): r32ui a trace texel, a float's bits.
         ReflectImage share;
+        /// THE REFINEMENT (binding 62, B2's no-pop hand-over): rgba32ui a trace texel, jah_reflect_rest.glsl's layout.
+        ReflectImage refine;
         /// THE REST'S COMPACT LIST (binding 52, kReflectCompactBinding): [0..1] the halves' counts, then the halves; the
         /// half this frame lists into flips each traced frame.
         RawBuffer compactList;
@@ -1261,15 +1262,15 @@ private:
         /// rays a frame and STOPS once its rest mean's standard error has stayed under a code for kReflectStopFrames
         /// frames, and the view HOLDS - the trace and the temporal pass dispatch nothing, the filter composites - once a
         /// rest frame's count of active texels read back zero (no frame count holds it: K_max deleted, commit 8). A
-        /// MOVED INSTANCE breaks the rest per
-        /// texel (its swept box: the texels its ray segments cross resume); a BREAK of the key composes every texel's
+        /// MOVED INSTANCE, an edit, a relit card, a lamp, a changed brick break the rest per texel (the changed-region
+        /// list: the texels whose segments or hits they reach resume - B2); a BREAK of the key composes every texel's
         /// answer into the half the trace reads (rq_reflect_compose.comp) and the moving rules resume from it.
         unsigned restFrames = 0u;
         unsigned long long restKey = 0ull, restParams = 0ull;
         bool restKnown = false;
         /// The rest's serial (one a rest begun), the rest frame a moved instance last crossed it (0: none), and the
         /// latch "a rest frame since then counted no active texel" (the hit list's third counter word, read late).
-        unsigned restSession = 0u, restMoverFrame = 0u;
+        unsigned restSession = 0u, restListFrame = 0u;
         /// THE REST'S RAY COUNT (kReflectRestRaysCap's note): k x the texels batching at the rest's first batching
         /// frame, from its read-back (0 until it arrives: the first frames run k a texel).
         unsigned long long restRayCount = 0ull;
@@ -1282,7 +1283,8 @@ private:
         /// timed on the draws).
         uint32_t recordedFrame = 0u;
         uint32_t recordedDraw = 0u;
-        unsigned restMoverCrossings = 0u;   ///< rest frames a moved instance's box was handed to the trace (status)
+        unsigned long long restSerialSeen = 0ull;   ///< the changed-region list's last close read (B2: once each)
+        unsigned restListCrossings = 0u;   ///< rest frames the changed-region list or a live brick mask was handed to the trace (status; B2)
         /// THE REST's N this view last recorded with (reflectRestLength): its hand-over is 2N rest samples
         /// (jahRestHandOverLength), and past 2N rest frames every texel's composite is its rest mean (PHOTON-7 stage
         /// 10-3, carrier 2: GiStatus::giAtRest waits for it)
@@ -2402,6 +2404,12 @@ bool RayQueryTier::ensureDummyImages(std::string &err) {
         !makeBuffer(256u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, mDummyStorage, err))
         return false;
     std::memset(mDummyStorage.mapped, 0, 256u);
+    // (the changed-region list's stand-in, B2: its whole block - jah_rest_regions.glsl - zero, no region)
+    const VkDeviceSize regionBytes = VkDeviceSize(2u + 2u * kGiRegionCap) * 16u;
+    if (!mRestRegionStandIn.buffer &&
+        !makeBuffer(regionBytes, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, mRestRegionStandIn, err))
+        return false;
+    std::memset(mRestRegionStandIn.mapped, 0, size_t(regionBytes));
     mDummiesReady = true;
     mDummiesNeedClear = true;
     return true;
@@ -2918,6 +2926,7 @@ void RayQueryTier::close() {
     }
     dropBuffer(mDummyStorage);
     dropBuffer(mColourPick);
+    dropBuffer(mRestRegionStandIn);
     mDummiesReady = false;
     mDummiesNeedClear = false;
     for (Retired &r : mRetireBin) {
@@ -5848,10 +5857,12 @@ struct ReflectParams {
     float fog[8][4] = {};
     /// THE REST BLOCK (PHOTON-2 round 2): [0] = 1 = the GI freeze (the arm "gi.freeze": M1's measuring arm).
     float rest[4] = {};
-    /// THE MOVED INSTANCES' SWEPT BOXES (G6): [0] = how many follow (<= kReflectRestMovers); box i = [2i] min,
-    /// [2i + 1] max, its world bounds this frame joined with last frame's.
-    float restMovers[4] = {};
-    float restMoverBox[2 * kReflectRestMovers][4] = {};
+    /// THE REST's CHANGED-REGION LIST (PHOTON-7 8B, B2; jah_reflect_params.glsl restLists): [0] the regions this
+    /// frame, [1] 1 = every resting texel resumes (an overflow, a restart), [2] 1 = a brick mask is this frame's; and
+    /// per cascade its brick grid's corner and a brick's metres, its bricks per axis and 1 = live.
+    float restLists[4] = {};
+    float restBrickOrigin[GatherRestInputs::kCascades][4] = {};
+    float restBrickDims[GatherRestInputs::kCascades][4] = {};
     /// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6; rq_reflect.comp's screen, screen2): [0] = 1 the screen trace runs,
     /// [1] = 1 the screen alone (reflectSources Screen), [2] its steps, [3] its phase rule; screen2: the march's length
     /// and thickness, the far copies' query from / to (0 = none).
@@ -5911,6 +5922,53 @@ void fillDisplaySlope(float (&out)[16][4], bool tonemap, const ImageGrade &g) {
         out[i >> 2][i & 3] = float((displayCodeGrey(std::exp(l + h), tonemap, g) -
                                     displayCodeGrey(std::exp(l - h), tonemap, g)) / (2.0 * h));
     }
+}
+
+/// THE REST's INPUTS (PHOTON-7 stage 8B, B1/B2; GatherRestInputs): the frame's changed-region list as it closed before
+/// the render (its buffer, read by the gather's cells' tests and the reflection's texels' on the device) and each
+/// cascade's brick mask this frame's light work wrote (in the hit set's order: the cascades the hits read).
+void restInputsOf(const detail::OgreScene *scene, GatherRestInputs &r) {
+    const PhotonComponent &ph = scene->photon();
+    r.drawSerial = scene->drawSerial();
+    r.regionSerial = ph.regionCloseSerial();
+    r.lastInputClose = ph.lastInputCloseSerial();
+    const GiChangedRegions &list = ph.changedRegions();
+    if (Ogre::ConstBufferPacked *rb = ph.regionBuffer()) {
+        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(rb->getBufferInterface());
+        r.regions = bi->getVboName();
+        r.regionsOffset = VkDeviceSize(rb->_getFinalBufferStart()) * rb->getBytesPerElement();
+        r.regionsRange = rb->getTotalSizeBytes();
+        r.regionCount = list.available ? unsigned(list.regions.size()) : 0u;
+        r.overflow = list.available ? list.overflow : 0u;
+        r.restart = list.available && list.restart;
+    }
+    std::vector<PhotonComponent::Volume> vols;
+    ph.volumes(vols);
+    unsigned c = 0u;
+    for (const PhotonComponent::Volume &vol : vols) {
+        if (c >= GatherRestInputs::kCascades) break;   // (hitSetOf's order and skips: the hits' cascades)
+        if (!vol.lighting || !vol.voxelizer) continue;
+        Ogre::TextureGpu **tex = vol.lighting->getLightVoxelTextures();
+        if (!tex || !tex[0]) continue;   // (the hit set's own skip: the same order)
+        GatherRestInputs::Bricks &b = r.bricks[c++];
+        Ogre::UavBufferPacked *mask = vol.lighting->getBrickMaskBuffer();
+        const Ogre::uint32 *dims = vol.lighting->getBrickMaskDims();
+        const Ogre::Vector3 og = vol.voxelizer->getVoxelOrigin();
+        const Ogre::Vector3 cl = vol.voxelizer->getVoxelCellSize();
+        for (int a = 0; a < 3; ++a) {
+            b.dims[a] = dims[a];
+            b.origin[a] = og[a];
+        }
+        b.brickMetres = 8.0f * std::max(std::max(cl.x, cl.y), cl.z);
+        if (mask) {
+            auto *bi = static_cast<Ogre::VulkanBufferInterface *>(mask->getBufferInterface());
+            b.buffer = bi->getVboName();
+            b.offset = VkDeviceSize(mask->_getFinalBufferStart()) * mask->getBytesPerElement();
+            b.range = mask->getTotalSizeBytes();
+            b.live = vol.lighting->getBrickMaskFrame() == ph.regionCloseFrame();
+        }
+    }
+    r.fieldBusy = ph.fieldWideWorkOwed();
 }
 
 void sweptBoundsOf(const detail::GpuInstance &g, float lo[3], float hi[3]) {
@@ -6065,6 +6123,12 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         kHitSetSlot,                                     // 54 (the hit set) voxelDirectBack[] (PHOTON-7 stage 7)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 55 the sample's NEE part (PHOTON-7 stage 11, 11-1b)
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 56 the pick (PHOTON-7 11-2, the reds' instrument)
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 57 the changed-region list (PHOTON-7 8B, B2)
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 58 the brick mask of cascade 0
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 59 ...1
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 60 ...2
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 61 ...3
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 62 the refinement word (PHOTON-7 8B, B2's hand-over)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6248,6 +6312,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
+    retireImage(rv.refine);
     rv.imagesReady = false;
     rv.havePrev = false;
     rv.historyFrames = 0;
@@ -6266,6 +6331,7 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     if (!makeStorageImage(w, h, formats[0], rv.sample, err, layers)) return false;
     if (!makeStorageImage(w, h, formats[0], rv.nee, err, layers)) return false;
     if (!makeStorageImage(w, h, VK_FORMAT_R32_UINT, rv.share, err, layers)) return false;   // the stop share: a float's bits, atomic min
+    if (!makeStorageImage(w, h, VK_FORMAT_R32G32B32A32_UINT, rv.refine, err, layers)) return false;   // the refinement (B2): the held answer's bits + the word
     // (the arm toggled re-makes the whole set: a measuring arm, set before the session's measurement)
     if (!makeStorageImage(reference ? w : 1u, reference ? h : 1u, VK_FORMAT_R32G32B32A32_SFLOAT, rv.reference, err,
                           layers))
@@ -6288,10 +6354,10 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
     // clear waits for those stages and makes their writes available before it writes;
     // a freshly made image has no earlier access and the same barrier costs it nothing.
     // The old contents are discarded (UNDEFINED): they are cleared.
-    constexpr int kImages = 8;
+    constexpr int kImages = 9;
     VkImageMemoryBarrier toGeneral[kImages] = {};
     ReflectImage *imgs[kImages] = { &rv.hist[0], &rv.hist[1], &rv.state[0], &rv.state[1], &rv.sample, &rv.reference,
-                                    &rv.share, &rv.nee };
+                                    &rv.share, &rv.nee, &rv.refine };
     for (int i = 0; i < kImages; ++i) {
         toGeneral[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         toGeneral[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -6339,6 +6405,7 @@ void RayQueryTier::dropReflect(ReflectView &rv) {
     retireImage(rv.nee);
     retireImage(rv.reference);
     retireImage(rv.share);
+    retireImage(rv.refine);
     retire(rv.compactList);
     retire(rv.histReadback);
     retire(rv.movingSe);
@@ -6398,13 +6465,13 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         st.reflectSources = rv.sources;
         st.reflectHeld = rv.held;
         st.reflectRests = rv.restSession;
-        st.reflectRestMoverFrames = rv.restMoverCrossings;
+        st.reflectRestMoverFrames = rv.restListCrossings;
         st.reflectCameraCuts = std::max(st.reflectCameraCuts, rv.cameraCuts);
         st.reflectRestActive = -1;
         st.reflectRestCapped = -1;
         if (const auto h = mHits.find(kv.first); h != mHits.end() && rv.restFrames > 0u) {
             const uint32_t tag = h->second.restActiveTag;
-            if (tag && (tag >> 20u) == (rv.restSession & 0xFFFu) && (tag & 0xFFFFFu) > rv.restMoverFrame) {
+            if (tag && (tag >> 20u) == (rv.restSession & 0xFFFu) && (tag & 0xFFFFFu) > rv.restListFrame) {
                 st.reflectRestActive = int(h->second.restActive);
                 st.reflectRestCapped = int(h->second.restCapped);
             }
@@ -6925,35 +6992,57 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     const unsigned restN = reflectRestLength(reflectWindow);
     pp.stereo[3] = float(restN);
     rv.restN = restN;
-    // THE MOVED INSTANCES (G6): every slot the frame's update staged (a transform write, a flags change, a birth) and
-    // every pose the skin pass moved, as a SWEPT BOX - its world bounds this frame joined with last frame's (the same
-    // box carried by prevWorld * world^-1). A resting texel whose ray segments cross one resumes; more than
-    // kReflectRestMovers break the view's rest whole.
-    unsigned movedBoxes = 0u;
-    bool tooManyMoved = false;
+    // THE REST BREAKS PER TEXEL AGAINST THE CHANGED-REGION LIST (PHOTON-7 8B, B2; G6's swept boxes, their cap of 16 and
+    // its view-wide break DELETED): the list as it closed before the render - a moved or posed slot's swept box (the
+    // stage-3 list's movers, OgreEngine::listRayMovers: the same boxes), an edit, a scroll's slab, a relit card, a lamp -
+    // and each cascade's brick mask this frame's light work wrote; the trace resumes each resting texel they reach
+    // (rq_reflect.comp restSegmentMoved / restHitChanged). `listed`: anything at all this frame - a frame that lists
+    // something is no hold (the trace must test it) and every active count read before it is stale.
+    GatherRestInputs restIn;
+    restInputsOf(scene, restIn);
+    // EACH CLOSE IS READ ONCE (two frames reading one close would resume its texels twice; a brick mask is its close's
+    // frame's), and a close this view missed that carried an input resumes every texel (the gather's missed-draw rule,
+    // without its held exception)
+    const bool restMissed = rv.restSerialSeen != 0ull && restIn.lastInputClose > rv.restSerialSeen &&
+                            restIn.lastInputClose < restIn.regionSerial;
+    if (restIn.regionSerial == rv.restSerialSeen) {
+        restIn.regionCount = 0u;
+        restIn.overflow = 0u;
+        restIn.restart = false;
+        for (GatherRestInputs::Bricks &b : restIn.bricks) b.live = false;
+    }
+    rv.restSerialSeen = restIn.regionSerial;
+    bool listed = restIn.regionCount || restIn.overflow || restIn.restart || restMissed;
+    pp.restLists[0] = restIn.regions ? float(std::min(restIn.regionCount, kGiRegionCap)) : 0.0f;
+    pp.restLists[1] = restIn.overflow || restIn.restart || restMissed ? 1.0f : 0.0f;
+    // (a SCENE CHANGE in this close - a mover, an edit, a lamp or a scene write's card relight listed, an overflow, a restart, a missed close: a brick that
+    // changed with it is its consequence, a resume at once; on a close with none the store relights toward its fixed
+    // point, an estimate converging, the readers' slew - rq_reflect.comp restHitKind)
     {
-        const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
-        const auto addBox = [&](const detail::GpuInstance &g) {
-            if (movedBoxes >= kReflectRestMovers) { tooManyMoved = true; return; }
-            float lo[3], hi[3];
-            sweptBoundsOf(g, lo, hi);
-            for (int c = 0; c < 3; ++c) {
-                pp.restMoverBox[2 * movedBoxes][c] = lo[c];
-                pp.restMoverBox[2 * movedBoxes + 1][c] = hi[c];
-            }
-            ++movedBoxes;
-        };
-        if (gpuScn.live() && gpuScn.movedThisFrame(vaoFrame)) {
-            const detail::GpuInstance *mirror = gpuScn.mirrorData();
-            for (uint32_t slot : gpuScn.movedSlots())
-                if (slot < gpuScn.slotCount()) addBox(mirror[slot]);
+        bool sceneChange = pp.restLists[1] > 0.5f;
+        const GiChangedRegions &closed = scene->photon().changedRegions();
+        if (!sceneChange && restIn.regionCount && closed.available)
+            for (const GiChangedRegion &r : closed.regions)
+                if (r.kind == GiRegionKind::Mover || r.kind == GiRegionKind::Edit || r.kind == GiRegionKind::Lamp ||
+                    r.kind == GiRegionKind::LampShadow || r.kind == GiRegionKind::CardScene) {
+                    sceneChange = true;   // (8B (A): a light write's or its relights' close - the store's bricks follow it)
+                    break;
+                }
+        pp.restLists[3] = sceneChange ? 1.0f : 0.0f;
+    }
+    for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
+        const GatherRestInputs::Bricks &b = restIn.bricks[c];
+        const bool bound = b.buffer && b.dims[0] && b.dims[1] && b.dims[2];
+        for (int a = 0; a < 3; ++a) {
+            pp.restBrickOrigin[c][a] = b.origin[a];
+            pp.restBrickDims[c][a] = bound ? float(b.dims[a]) : 0.0f;
         }
-        if (gpuScn.live() && sa.skinPosedFrame == vaoFrame) {
-            const detail::GpuInstance *mirror = gpuScn.mirrorData();
-            for (uint32_t slot : sa.skinPosedSlots)
-                if (slot < gpuScn.slotCount()) addBox(mirror[slot]);
+        pp.restBrickOrigin[c][3] = bound ? b.brickMetres : 0.0f;
+        pp.restBrickDims[c][3] = bound && b.live ? 1.0f : 0.0f;
+        if (bound && b.live) {
+            pp.restLists[2] = 1.0f;
+            listed = true;
         }
-        pp.restMovers[0] = float(tooManyMoved ? 0u : movedBoxes);
     }
     // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the
     // reflection's rest key (reflectRestKey: never a move), and every parameter of the pass but the ones a still frame
@@ -6972,7 +7061,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // tables, the sun legs, the id pass's image, the alpha table, the origin's terms, the fog, the metal route, the
         // clouds, the rest's own arms, the screen trace's and the denoiser's. NOT the eye (`sameEye` compares its basis
         // bit for bit), nor what a still frame changes by construction: the frame index (knobs.z), the rest frame
-        // (knobs2.x), the view's age (stereo.y), the previous basis, the moved instances' boxes, the recent-move flag
+        // (knobs2.x), the view's age (stereo.y), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
         // (motion.w: a move, which breaks per texel) and the list's capacity (hitList.x: it grows in place).
         unsigned long long paramsKey = 1469598103934665603ull;
         const auto foldBytes = [&paramsKey](const void *d, size_t n) {
@@ -7009,7 +7098,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
         const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
-                           paramsKey == rv.restParams && rv.historyFrames >= 1u && !tooManyMoved;
+                           paramsKey == rv.restParams && rv.historyFrames >= 1u;
         rv.restableLast = !stereo && !photon;
         rv.recordedFrame = frameNow();
         rv.recordedDraw = rv.scene ? rv.scene->drawSerial() : 0u;
@@ -7022,19 +7111,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         restBreak = wasResting && rv.restFrames == 0u;
         if (rv.restFrames == 1u) {
             ++rv.restSession;
-            rv.restMoverFrame = 0u;
+            rv.restListFrame = 0u;
             rv.restAllStopped = false;
         }
-        if (rv.restFrames > 0u && movedBoxes > 0u) {
-            rv.restMoverFrame = rv.restFrames;   // the texels it crossed resume: every count before it is stale
+        if (rv.restFrames > 0u && listed) {
+            rv.restListFrame = rv.restFrames;   // the texels it reached resume: every count before it is stale
             rv.restAllStopped = false;
-            ++rv.restMoverCrossings;
+            ++rv.restListCrossings;
         }
         // THE ACTIVE COUNT READ BACK (R1): a rest frame of THIS rest, after the last moved instance, that counted no
         // texel still converging - every texel has stopped and the view holds.
         if (rv.restFrames > 0u && restHits && restHits->restActiveTag != 0u &&
             (restHits->restActiveTag >> 20u) == (rv.restSession & 0xFFFu) &&
-            (restHits->restActiveTag & 0xFFFFFu) > rv.restMoverFrame && restHits->restActive == 0u)
+            (restHits->restActiveTag & 0xFFFFFu) > rv.restListFrame && restHits->restActive == 0u)
             rv.restAllStopped = true;
         // THE REST'S TWO PATHS (kReflectRestRaysCap's note): the TILE pass traces every batching texel at k a frame, the
         // rest's first frame's work on fewer texels; the COMPACT pass (kReflectCompactTexels) takes the tail, its rays a
@@ -7062,7 +7151,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // ...AND THE CACHE OWES THE READERS NOTHING (PHOTON-7 stage 10, (1) (ii): readersHoldOwed): the stop's one decision
         // taken, its work done, no relight's report in flight - the rest runs across a sub-quantum relight, so a hold
         // must wait until the late reading says whether it moved a code (the gather's own rule)
-        hold = rv.restFrames > 0u && movedBoxes == 0u &&
+        hold = rv.restFrames > 0u && !listed &&
                (restReference ? rv.restFrames > 4096u : rv.restAllStopped) && !scene->photon().readersHoldOwed();
         pp.knobs2[0] = restBreak ? -1.0f : float(rv.restFrames);   // (< 2^20: exact)
         // THE REST'S SEQUENCE BASE (the shader adds each sample's number v; kReflectRestSequence).
@@ -7261,6 +7350,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!shareImg.imageView) { bail("the rest's stop-share binding is null"); return; }
     w[kReflectShareBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectShareBinding].pImageInfo = &shareImg;
+    // THE REFINEMENT WORD (62, B2): the trace marks a card-only reach, the temporal pass runs the hand-over, the filter
+    // and the compose read the answer it shows
+    VkDescriptorImageInfo refineImg{};
+    refineImg.imageView = rv.refine.view;
+    refineImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
+    w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[kReflectRefineBinding].pImageInfo = &refineImg;
     // THE REST'S COMPACT LIST (52)
     if (!rv.compactList.buffer) {
         std::string lerr;
@@ -7308,6 +7405,23 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pickInfo.range = VK_WHOLE_SIZE;
     w[kReflectPickBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectPickBinding].pBufferInfo = &pickInfo;
+    // THE CHANGED-REGION LIST (57) and THE BRICK MASKS (58-61), B2 - stand-ins where none closed (the count reads 0) or a
+    // cascade has no mask (its dims read 0: never indexed)
+    VkDescriptorBufferInfo regionInfo{};
+    regionInfo.buffer = restIn.regions ? restIn.regions : mRestRegionStandIn.buffer;
+    regionInfo.offset = restIn.regions ? restIn.regionsOffset : 0u;
+    regionInfo.range = restIn.regions ? restIn.regionsRange : VK_WHOLE_SIZE;
+    w[kReflectRegionsBinding].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w[kReflectRegionsBinding].pBufferInfo = &regionInfo;
+    VkDescriptorBufferInfo brickInfo[GatherRestInputs::kCascades] = {};
+    for (unsigned c = 0; c < GatherRestInputs::kCascades; ++c) {
+        const GatherRestInputs::Bricks &b = restIn.bricks[c];
+        brickInfo[c].buffer = b.buffer ? b.buffer : mDummyStorage.buffer;
+        brickInfo[c].offset = b.buffer ? b.offset : 0u;
+        brickInfo[c].range = b.buffer ? b.range : VK_WHOLE_SIZE;
+        w[kReflectBricksBinding + c].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w[kReflectBricksBinding + c].pBufferInfo = &brickInfo[c];
+    }
     vkUpdateDescriptorSets(mVk, kReflectBindings, w, 0, nullptr);
 
     // ---- THE LAYOUTS, THROUGH OGRE'S OWN SOLVER -----------------------------
@@ -7384,6 +7498,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         composed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &composed, 0, nullptr, 0, nullptr);
+    }
+    // THE BRICK MASKS THIS FRAME's LIGHT WORK WROTE (B2): its compute writes made visible to the trace's reads (the
+    // gather's head barrier, the same rule)
+    if (!hold && pp.restLists[2] > 0.5f) {
+        VkMemoryBarrier masks{};
+        masks.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        masks.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        masks.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &masks,
+                             0, nullptr, 0, nullptr);
     }
     if (!hold) {
         // THE COMPACT LIST'S COUNT for this frame's half, zeroed (both, the first frame of a new list)
@@ -8862,7 +8986,7 @@ void RayQueryTier::forgetGather(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
-    if (mGather) mGather->statsInto(scene, gatherRestKeyArmed(scene), scene->gatherRestartKey(), out);
+    if (mGather) mGather->statsInto(scene, scene->gatherRestartKey(), out);
 }
 
 /// THE CARDS' VIEW READERS' REST DEMAND COMPLETE (PHOTON-7 stage 10, R3 (b), the lead's ruling): every reader of the
@@ -8884,7 +9008,7 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     // L = N + the due (SurfaceCache::demandDueFrames), and the demand is complete once every reader has traced its L -
     // so the decision, a due later, reads exactly each reader's span whatever its rest started on
     const unsigned due = SurfaceCache::demandDueFrames();
-    if (mGather) complete = mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames[1], n, due, active[1]);
+    if (mGather) complete = mGather->restDemandComplete(scene, restFrames[1], n, due, active[1]);
     else n = ScreenProbeGather::shippedRestLength();
     mDemandSpan = n + due;
     for (const auto &kv : mReflects) {
@@ -8904,7 +9028,7 @@ bool RayQueryTier::gatherRestPastHandOver(const OgreScene *scene) const {
     if (!mGather) return true;
     unsigned restFrames = 0u, n = 0u;
     bool active = false;
-    return mGather->restDemandComplete(scene, gatherRestKeyArmed(scene), restFrames, n, 0u, active);
+    return mGather->restDemandComplete(scene, restFrames, n, 0u, active);
 }
 
 bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
@@ -9057,9 +9181,14 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         if (arm(ArmId::GatherIrradianceReadback, false)) in.tuning.readback = true;
         if (arm(ArmId::GatherHistoryReadback, false)) in.tuning.historyReadback = true;
     }
-    in.restKey = gatherRestKeyArmed(scene);
-    in.inputsBusy = scene->photon().gatherInputsBusy();
-    in.holdOwed = scene->photon().readersHoldOwed();
+    // THE RESUME'S INPUTS (PHOTON-7 stage 8B, B1; GatherRestInputs): the frame's changed-region list as it closed before
+    // the render (its buffer, read by the cells' tests on the device), each cascade's brick mask this frame's light work
+    // wrote (in the hit set's order: the cascades the hits read), and whether the field is at work. The view-wide rest key,
+    // gatherInputsBusy and the readers' hold owed are no longer the gather's (8B's CRUD).
+    {
+        restInputsOf(scene, in.rest);
+        in.fastSkinPosed = posedSlotsOf(scene, mRs->getVaoManager()->getFrameCount()) != nullptr;
+    }
     in.demandDue = SurfaceCache::demandDueFrames();   // (the gather's demand span: its rest indices [1, N + this])
     in.restartKey = scene->gatherRestartKey();
     in.farOverlap = sa.farOverlap;
@@ -9084,6 +9213,10 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
         std::memcpy(&bits, &in.roughGateRamp, sizeof bits);
         fold(bits);
         fold(in.roughQuadrature);
+        // ...AND THE A/B ARMS THE ESTIMATE DEPENDS ON (FAR-SUN-2's gi.hitDirect, the GI freeze; were the armed rest key's,
+        // deleted with it, 8B): a paired A/B flips one on a still view, which restarts the view's rest whole
+        fold(arm(ArmId::GiHitDirect, true) ? 1ull : 0ull);
+        fold(arm(ArmId::GiFreeze, false) ? 1ull : 0ull);
         in.chainKey = key;
     }
     {
@@ -9764,7 +9897,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     const unsigned n = std::max(giQualityFacts(scene->giParams().quality).cardAreaStrata, 1u);
     // THE CLEARANCE: the ray origin's one law, as the sun contact takes it (rq_area_vis.comp's jahAreaLiftRays): the
     // drawn surface's footprints (knobs.x) and the depth-rebuilt point's sub-pixel snap (knobs.y)
-    areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, gatherRestKeyArmed(scene),
+    areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, scene->photon(),
                  av.imagesNeedClear, drawnFootprintsOf(scene, view->chainDesc().lodHysteresis), pointSnapKnob(),
                  float(kAreaVisMask), eye);
     const bool readback = arm(ArmId::AreaVisReadback, false);
@@ -13279,46 +13412,6 @@ bool PhotonComponent::probeGatherWanted() const {
     return mScene.rayTracingResolved();
 }
 
-/// THE GATHER'S REST KEY (PHOTON-GATHER-1d; PHOTON-2 stage 2's round, H1): what PREVENTS THE HOLD — every write to an
-/// input of the gather's answer, the frame it is recorded: a light or environment write and a light removed, a node
-/// moved (the transform epoch with the shadow scan's writes), a material edit, an injection landing or a cascade
-/// rebuilt (giLightingSerial, the settle's steps included), the cloud layer's GI (cloudGiSerial - a restart-class
-/// change that also breaks the hold), a field dispatch (counted on the
-/// CPU as it is recorded: no readback latency) and the surface cache's captures and VISIBLE relights (a texel moved a code: R3 (a)). With the camera still
-/// and this key moving, the gather is SETTLING: its EMA goes on taking every input's change at its rate, no rest
-/// mean starts and nothing holds — the stage-2 key that left these out held the picture over changing inputs, and
-/// they landed later as BURSTS (Bistro after the 4 m dolly: 385k px at frames 29-45, 273k at 188-205). The key and
-/// gatherInputsBusy (work still OWED between two writes) together decide RESTING. What RESTARTS is another key
-/// (gatherRestartKey: restart-class events only) — a write never restarts a history. The reflection folds what its
-/// rays read beside these (reflectionReadsKey).
-unsigned long long PhotonComponent::gatherRestKey() const {
-    unsigned long long key = 1469598103934665603ull;
-    const auto fold = [&key](unsigned long long v) {
-        key ^= v;
-        key *= 1099511628211ull;
-    };
-    fold(mScene.lightWriteSerial());
-    fold(mScene.lightsRemoved());
-    fold(mScene.shadowEpoch());
-    fold(mMaterialEditSerial);
-    fold(giLightingSerial());
-    fold(mScene.cloudGiSerial());
-    fold(mIfd ? mIfd->getDispatches() : 0ull);
-    if (mSurfaceCache) {
-        CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
-        fold(cs.captures);
-        fold(cs.stillTraces);
-        // R3 (a)'s DISPLAY QUANTUM APPLIED TO THE READER (PHOTON-7 stage 10, (1) (ii)): the relights that moved a card
-        // texel by a code since its last report (or could not be measured), read back - never the relight count, which
-        // restarted a rest on relights whose every texel stayed under a code (Showroom 2: all 272 frames of a stop's
-        // rounds). The report is CUMULATIVE (against the last reported value), so a rest across sub-code relights is never
-        // more than a code from the cache.
-        fold(cs.visibleRelights);
-    }
-    return key;
-}
-
 /// THE GATHER'S INPUTS STILL OWE WORK (PHOTON-2 stage 2's round, H1): a cascade rebuild or a chain re-solve pending,
 /// a settle step or a light tick owed, a bounce series being measured, the field's integration or refinements owed,
 /// and the surface cache's capture queue or stale sun terms. Between two writes of a cache that runs at a cadence
@@ -13334,26 +13427,17 @@ bool PhotonComponent::readersHoldOwed() const {
     return mSurfaceCache && mSurfaceCache->restHoldOwed();
 }
 
-bool PhotonComponent::gatherInputsBusy() const {
-    if (giInputsOwed()) return true;
-    if (mSurfaceCache) {
-        CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
-        if (cs.queueLength > 0u || cs.stillPending > 0u) return true;
-    }
-    return false;
-}
-
-/// WHAT BREAKS A REFLECTION'S REST VIEW-WIDE (PHOTON-2 F5; round 2, G6): every LIGHTING write a reflection ray reads -
-/// a light write or removal (the hit's direct light), giLightingSerial (an injection landing, a cascade rebuild, the
-/// settle's steps), the cloud layer's GI, the irradiance field's every dispatch (counted on the CPU as recorded) and the
-/// surface cache's captures and VISIBLE relights (R3 (a): a texel moved a code) - every material EDIT, every TEXTURE that arrived (a streamed map the hit
-/// decode reads from then on: settleTextureResidency). (The traced geometry no longer changes under a still node: the
-/// near copy is level 0, PHOTON-7 stage 6.) NOT A MOVE: the transform and shadow epochs are out - a moved instance breaks the rest
-/// PER TEXEL (the swept boxes RayQueryTier hands rq_reflect.comp: a texel whose ray, mean segment or sun leg crosses
-/// one resumes; the sun leg is the hit's shadow ray, so a mover's shadow at a hit is caught there). The field's late
-/// integration count stays out (the round-2 read's W3: its every dispatch is counted here as recorded).
-/// RayQueryTier::reflectRestKey folds the material store's rows and the traced set with it.
+/// WHAT BREAKS A REFLECTION'S REST VIEW-WIDE (PHOTON-2 F5; round 2, G6; PHOTON-7 8B, B2): the LIGHTING writes a
+/// reflection ray reads that the changed-region list cannot place - a light write or removal (the hit's direct light),
+/// giLightingSerial (an injection landing, a cascade rebuild, the settle's steps), the cloud layer's GI, the irradiance
+/// field's every dispatch (counted on the CPU as recorded), every material EDIT, every TEXTURE that arrived (a streamed
+/// map the hit decode reads from then on: settleTextureResidency). (The traced geometry no longer changes under a still
+/// node: the near copy is level 0, PHOTON-7 stage 6.) NOT A MOVE and NOT A CARD: a moved or posed instance and a relit
+/// or captured card break the rest PER TEXEL against the list (rq_reflect.comp restSegmentMoved / restHitChanged: a
+/// mover's swept box across a texel's segments, a relit card's instance box at its hits - B2 took the cards' captures,
+/// card-to-card traces and visible relights out of this key: a card's arrival resumes the texels whose rays meet it, never
+/// the view). The field's late integration count stays out (the round-2 read's W3: its every dispatch is counted here as
+/// recorded). RayQueryTier::reflectRestKey folds the material store's rows and the traced set with it.
 unsigned long long PhotonComponent::reflectionReadsKey() const {
     unsigned long long key = 1469598103934665603ull;
     const auto fold = [&key](unsigned long long v) {
@@ -13367,18 +13451,6 @@ unsigned long long PhotonComponent::reflectionReadsKey() const {
     fold(mScene.cloudGiSerial());
     fold(mIfd ? mIfd->getDispatches() : 0ull);
     fold(mTextureArrivals);
-    if (mSurfaceCache) {
-        CardCacheStatus cs;
-        mSurfaceCache->fillStatus(cs);
-        fold(cs.captures);
-        fold(cs.stillTraces);
-        // R3 (a)'s DISPLAY QUANTUM APPLIED TO THE READER (PHOTON-7 stage 10, (1) (ii)): the relights that moved a card
-        // texel by a code since its last report (or could not be measured), read back - never the relight count, which
-        // restarted a rest on relights whose every texel stayed under a code (Showroom 2: all 272 frames of a stop's
-        // rounds). The report is CUMULATIVE (against the last reported value), so a rest across sub-code relights is never
-        // more than a code from the cache.
-        fold(cs.visibleRelights);
-    }
     return key;
 }
 

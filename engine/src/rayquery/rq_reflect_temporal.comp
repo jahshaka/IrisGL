@@ -230,6 +230,24 @@ History historyOfPoint( vec3 point, EyeImage before, bool depthTest, float thres
 layout( std430, set = 0, binding = 53 ) buffer JahMovingSe { float movingSe[]; };
 // THE PICK (binding 56, rq_reflect.comp jahPickSlot): the picked texel's rest terms into its slot's words 32-47
 layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
+/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl: the no-pop hand-over of a card-only reach) - this pass runs it.
+layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
+/// THE CODE-A-FRAME SLEW (B2's refinement): the shown answer D moved toward the composed answer T by at most ONE display
+/// code per channel - the code distance from D to T integrated along the line (the display slope at four midpoints), and
+/// D moved that fraction of the way that is one code of it (all of it under a code). The same curve at every brightness.
+vec3 refineSlew( vec3 D, vec3 T )
+{
+	vec3 r;
+	for( int c = 0; c < 3; ++c )
+	{
+		const float d = abs( T[c] - D[c] );
+		float codes = 0.0;
+		for( int k = 0; k < 4; ++k )
+			codes += jahDisplayCodes( mix( D[c], T[c], ( float( k ) + 0.5 ) * 0.25 ), 0.25 * d );
+		r[c] = codes <= 1.0 ? T[c] : D[c] + ( T[c] - D[c] ) / codes;
+	}
+	return r;
+}
 int jahPickSlotT( ivec2 tc )
 {
 	const uint w = floatBitsToUint( p.alpha.y );
@@ -302,6 +320,13 @@ void main()
 	barrier();
 	if( any( greaterThanEqual( tc, traceRes ) ) )
 		return;
+	// THE REFINEMENT WORD (B2): a rest's own - cleared on every frame off rest (the break's compose read it first)
+	uvec4 refine = imageLoad( restRefine, ivec3( tc, gEye ) );
+	if( p.knobs2.x < 0.5 && refine != uvec4( 0u ) )
+	{
+		refine = uvec4( 0u );
+		imageStore( restRefine, ivec3( tc, gEye ), refine );
+	}
 	// A texel the trace declined this frame keeps what it holds (the filter reads no answer there).
 	JahReflectState st = jahStateUnpack( imageLoad( stateCur, ivec3( tc, gEye ) ).xy );
 	if( !( st.surfDist > 0.0 ) )
@@ -349,7 +374,24 @@ void main()
 	if( restK >= 0.5 )
 	{
 		if( st.stop >= kReflectStopFrames && !st.resume )
-			return;   // a stopped texel: its rest is held as it is
+		{
+			// a stopped texel: its rest is held as it is - and one still REFINING (B2) slews its shown answer a code toward
+			// its composed answer, the word cleared once it has arrived
+			if( ( refine.w & kRefineRefining ) != 0u )
+			{
+				const float Nr = max( p.stereo.w, 1.0 );
+				const vec4 Hq = imageLoad( historyPrev, ivec3( tc, gEye ) );
+				const bool hasHq = finite3( Hq.xyz ) && ownPrev.N > 0.0;
+				const vec4 Mq = imageLoad( historyCur, ivec3( tc, gEye ) );
+				const vec3 T = jahRestAnswer( hasHq ? clamp( Hq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 ), hasHq,
+											  clamp( Mq.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ), float( st.v ), Nr );
+				const vec3 D = refineSlew( jahRefineD( refine ), T );
+				refine = all( equal( jahRefineD( jahRefineWithD( refine, D ) ), jahRefineD( jahRefineWithD( refine, T ) ) ) )
+							 ? uvec4( 0u ) : jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), D );
+				imageStore( restRefine, ivec3( tc, gEye ), refine );
+			}
+			return;
+		}
 		const vec4 s = imageLoad( reflectSample, ivec3( tc, gEye ) );
 		const bool hasSample = s.w > 0.0 && finite3( s.xyz );
 		const vec3 sample1 = hasSample ? clamp( s.xyz, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
@@ -380,8 +422,15 @@ void main()
 		{
 			if( !hasSample )
 				return;   // a resume with no answer: the texel's rest restarts next frame, as it stands
-			// THE COMPOSED ANSWER IS THIS TEXEL'S HISTORY for the moving rule below (the surface's, in place).
-			const vec3 sofar = jahRestAnswer( H, hasH, rs.M, vPrev, N );
+			// THE COMPOSED ANSWER IS THIS TEXEL'S HISTORY for the moving rule below (the surface's, in place) - what it
+			// SHOWS (a refinement's held answer or its walk, B2: a real change resumes from what is on screen)
+			const vec3 sofar = jahRefineShown( jahRestAnswer( H, hasH, rs.M, vPrev, N ), refine );
+			// B2: A CARD-ONLY REACH (the trace's mark: any texel at rest, stopped or converging) RE-RESTS IN THE
+			// BACKGROUND - the readers show `sofar` until the new rest stops and its walk is done; any other resume
+			// ends a refinement
+			refine = ( refine.w & kRefineReach ) != 0u ? jahRefineWithD( uvec4( 0u, 0u, 0u, kRefineRefining ), sofar )
+													   : uvec4( 0u );
+			imageStore( restRefine, ivec3( tc, gEye ), refine );
 			if( vPrev > 0.0 || hasH )
 			{
 				hs.ok = true;
@@ -437,8 +486,33 @@ void main()
 			const bool settled = v >= max( handOver ? jahRestHandOverLength( N ) : float( kReflectStopFrames ), p.alpha.w );
 			// A CAPPED TEXEL (its count at the field's ceiling) stops as it stands - the defect the trace counts.
 			const bool capped = st.v >= kReflectRestVCap;
-			st.stop = capped ? kReflectStopFrames
-							 : ( e <= share && settled && !reference ? min( st.stop + 1u, kReflectStopFrames ) : 0u );
+			// THE STOP (B2's (e)): within the share for its last kReflectStopFrames frames AND across a window of
+			// kReflectStopSamples samples since it first came within it (jah_reflect_rest.glsl) - the window's samples stand
+			// across a frame out of the share (its frame count restarts); it closes only while not settled
+			const uvec4 refineWas = refine;
+			if( capped )
+				st.stop = kReflectStopFrames;
+			else if( !( e <= share && settled && !reference ) )
+			{
+				st.stop = 0u;
+				if( !settled )
+					refine.w &= ~kRefineWindow;
+			}
+			else
+			{
+				if( ( refine.w & kRefineWindow ) == 0u )
+				{
+					refine.z = uint( min( v, 65535.0 ) );
+					refine.w |= kRefineWindow;
+				}
+				const bool enough = v - float( refine.z ) >= kReflectStopSamples;
+				st.stop = min( st.stop + 1u, enough ? kReflectStopFrames : kReflectStopFrames - 1u );
+			}
+			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
+			if( ( refine.w & kRefineRefining ) != 0u )
+				refine = jahRefineWithD( refine, refineSlew( jahRefineD( refine ), answer ) );
+			if( refine != refineWas )
+				imageStore( restRefine, ivec3( tc, gEye ), refine );
 			{
 				const int ps = jahPickSlotT( tc );   // THE PICK (the reds' instrument)
 				if( ps >= 0 )

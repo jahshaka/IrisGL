@@ -116,11 +116,19 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// w = THE RECORD ALLOWANCE a batching texel's record run may take of the list this frame (rq_reflect.comp's record
 	/// runs: min( k_active, capacity / batching ); 0 = a record ends the batch).
 	vec4 rest;
-	/// THE REST BREAKS PER TEXEL FOR MOVERS (PHOTON-2 round 2, G6): x = how many moved instances' SWEPT BOXES follow
-	/// (their bounds this frame and last, joined; at most 16 - more moved breaks the view's rest whole, on the host);
-	/// a resting texel resumes when its ray, its lobe's mean segment or its hit's sun leg crosses one.
-	vec4 restMovers;
-	vec4 restMoverBox[32];   // per box: [2i] = min, [2i + 1] = max (xyz)
+	/// THE REST BREAKS PER TEXEL AGAINST THE CHANGED-REGION LIST (PHOTON-7 8B, B2; jah_rest_regions.glsl at the set's
+	/// kReflectRegionsBinding): x = the list's regions this frame (0: none, or no list closed), y = 1 = every resting
+	/// texel resumes (the list overflowed - the sun, the sky, a change with no box - or restarted), z = 1 = a brick mask
+	/// is this frame's, w = 1 = the close carries a SCENE CHANGE (a mover, an edit, an overflow, a restart, a missed close:
+	/// a brick changed with it is its consequence, a resume at once; else the store relighting, the slew - restHitKind).
+	/// A resting texel resumes when a GEOMETRY region (a mover's swept box) crosses one of its
+	/// segments (its ray, its lobe's mean segment, its hit's sun leg, its NEE ray, C2's secondary rays), or a LIGHT
+	/// region or a changed brick lies at one of its hits (rq_reflect.comp restSegmentMoved, restHitChanged).
+	vec4 restLists;
+	/// ...THE BRICK MASKS (the four bindings after the regions'), per cascade in the hit set's order: xyz the brick
+	/// grid's corner, w a brick in metres; and xyz its bricks per axis, w 1 = its mask is this frame's.
+	vec4 restBrickOrigin[4];
+	vec4 restBrickDims[4];
 	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
 	/// sources are bound: PostFxDesc::reflectSources Both or Screen, a mono view), y = 1 for THE SCREEN ALONE (Screen: a
 	/// miss is no sample - no ray follows it), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);

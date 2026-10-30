@@ -91,6 +91,14 @@
 //    integrate's ROUGH SPECULAR reads these maps along the lobe's dominant
 //    direction (rq_probe_integrate.comp). R11G11B10, one layer a level, at the
 //    raw atlas' addressing.
+//    (NO DISTANCE MOMENT - PHOTON-7 stage 8B, B4, measured and deleted, the lead's ruling: a second moment under the
+//    same weights, the lobe's mean hit distance (an escaped ray at the far query's end), gave the integrate's rough
+//    lobe a history by the VIRTUAL POINT that distance names behind the surface. gi.walk_rough's breaking at walk
+//    frames 14 / 28 / 59: B5 alone 1.86 / 4.60 / 0.27 %; the virtual point 3.51 / 3.99 / 0.11; with a same-plane tap
+//    3.55 / 3.53 / 0.23; with Lumen's 3 x 3 pick 3.16 / 3.05 / 0.24 - frame 14 doubled, because one mean distance
+//    across a lobe spanning a depth break (a near edge before a far wall) names a point on neither. The leftover
+//    re-adds the moment WITH the distance's variance as a third, and blends the virtual point's history against the
+//    surface's by the parallax error that spread predicts against the lobe's footprint - continuous, no box.)
 //
 // WHAT IT WRITES: the record's SH and its E/pi at the probe's own normal, and the
 // prefiltered maps.
@@ -107,6 +115,11 @@ layout( rgba16f, set = 0, binding = 2 ) uniform readonly image2D probeAtlas;
 layout( set = 0, binding = 3 ) uniform sampler2DArray sceneDepth;
 /// THE PREFILTERED MAPS (PHOTON-7 stage 7, 7-3; the header's job 3): one layer a roughness level.
 layout( r11f_g11f_b10f, set = 0, binding = 4 ) uniform writeonly image2DArray prefilteredAtlas;
+/// THE CELLS' STATE (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): a probe the trace skipped (its cell held, outside every
+/// active cell's ring) is not filtered - nothing reads it this frame.
+layout( std430, set = 0, binding = 5 ) readonly buffer JahCellState { uint jahCellState[]; };
+const uint kFilterCellHeld = 1u;
+const uint kFilterCellWords = 12u;   // jah_probe_rest.glsl kCellWords
 #include "jah_reproject.glsl"
 #include "jah_probe_seen.glsl"
 
@@ -185,6 +198,11 @@ void main()
 	const bool adaptive = probe >= uniformProbes;
 	const uint cellIndex = adaptive ? uint( max( normalW.w - 1.0, 0.0 ) ) : probe;
 	const ivec2 cell = ivec2( int( cellIndex ) % max( grid.x, 1 ), int( cellIndex ) / max( grid.x, 1 ) );
+	{
+		if( ( jahCellState[kFilterCellWords * cellIndex] & kFilterCellHeld ) != 0u &&
+			jahCellState[kFilterCellWords * cellIndex + 1u] == 0u )
+			return;   // (uniform across the workgroup: one probe a group)
+	}
 	if( lane == 0u )
 		gUnsampled = 0u;		// (ordered before every lane's count by the tap table's barrier)
 

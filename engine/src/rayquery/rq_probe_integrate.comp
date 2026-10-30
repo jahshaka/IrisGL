@@ -126,6 +126,7 @@
 // the truck and the yaw).
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 
@@ -144,7 +145,7 @@ layout( rgba16f, set = 0, binding = 4 ) uniform image2DArray probeIrradiance;
 layout( rg32ui, set = 0, binding = 5 ) uniform readonly uimage2DArray historyPrev;
 layout( rg32ui, set = 0, binding = 6 ) uniform writeonly uimage2DArray historyCur;
 /// THE REST MEAN (PHOTON-GATHER-1d): at rest — the camera, the lighting and the
-/// scene held still (p.knobs6.x = the rest frame k >= 1) — a TRUE MEAN of the rest
+/// scene held still (the cell's rest clock k >= 1) — a TRUE MEAN of the rest
 /// frames' estimates, restarted at the first rest frame, premultiplied by
 /// coverage like the history. The same pixel reads and writes it (the camera has
 /// not moved, so there is no reprojection and no race): one image, not a pair.
@@ -159,7 +160,8 @@ layout( rgba16f, set = 0, binding = 8 ) uniform writeonly image2DArray photonOve
 /// THE FRAME'S COUNTER (the placement's buffer, zeroed at the frame's head): word 1 counts the pixels whose history only
 /// the foliage rule accepted (PHOTON-2 L8, K5's guard; read back with the placement's word 0); words 2 and 3 the pixels
 /// that reached the HOLD with no rest sample - the diffuse's and the rough specular's (PHOTON-7 stage 10-3: they answer
-/// NO SAMPLE there, below).
+/// NO SAMPLE there, below); word 4 the longest hand-over M begun this frame (B3, the door's; the placement's rows follow
+/// from word 5).
 layout( std430, set = 0, binding = 9 ) buffer GatherCounter { uint words[]; } gatherCounter;
 /// THE IRRADIANCE FIELD (PHOTON-7 stage 7, 7-2; bindings 10, 11): the fallback of the pixels no probe answers is the
 /// field's cage at its confidence - jah_field_read.glsl, the one text the PBS pixel's reader runs too; where it fades,
@@ -175,7 +177,7 @@ layout( set = 0, binding = 11 ) uniform sampler2D fieldDepth;
 /// filter's PREFILTERED maps (one layer a roughness level, bilinear inside each probe's block) and the output.
 layout( set = 0, binding = 12 ) uniform sampler2DArray gBufShadowRoughness;
 layout( set = 0, binding = 13 ) uniform sampler2DArray prefilteredAtlas;
-layout( rgba16f, set = 0, binding = 14 ) uniform writeonly image2DArray roughSpec;
+layout( rgba16f, set = 0, binding = 14 ) uniform image2DArray roughSpec;   // (read too: B3's hand-over steps it)
 /// ...the lobe's history pair (one shared-exponent word a pixel, at the diffuse history's texel) and its rest mean (a
 /// 1 x 1 stand-in under stereo, as the diffuse's).
 layout( r32ui, set = 0, binding = 15 ) uniform readonly uimage2DArray roughHistoryPrev;
@@ -185,6 +187,60 @@ layout( rgba16f, set = 0, binding = 17 ) uniform image2DArray roughRest;
 /// filter's cosine-weighted miss share, the record's sh[6].w) under the diffuse's own weights; a pixel no probe answers
 /// keeps its last share, the sky's own pixels read 1. The colour passes' fog in-scatter reads it.
 layout( r8, set = 0, binding = 51 ) uniform writeonly image2DArray skyVis;
+/// THE CELLS' REST (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): the clock - the rest law's k is the view's rest clock K
+/// (jahRestK, 0 settling), the bilinear's grid offset its frame index - and the cells' state: a HELD cell's pixels are
+/// never integrated (their rest mean is the picture), they write their two histories through the ping-pong.
+#define JAH_REST_CLOCK_BINDING 52
+#include "jah_probe_rest.glsl"
+layout( std430, set = 0, binding = 53 ) buffer JahCellState { uint jahCellState[]; };
+/// THE CELLS' DISTANCE STORE (PHOTON-7 stage 8B; rq_probe_gather.comp's bins, jah_probe_rest.glsl): the pixel's own rays
+/// record their hits there too - a card, a brick or a lamp they read can change, and the resume's region test reaches a
+/// cell only through its bins (the integrate's rays had none: a relight they read resumed nothing).
+layout( std430, set = 0, binding = 54 ) buffer JahCellStore { uint jahCellStore[]; };
+/// THE HISTORY's VALIDITY STREAK (PHOTON-7 stage 8B, the lead's ruling), last frame's and this frame's halves (the
+/// history's flip): the frames each pixel's history has been carried unbroken, / 255 (0: none) - an AGE, what the stillness
+/// door's "seen before the stop" reads; the history word's count is the blend's N (B5's fast update stores N'), never this.
+layout( r8, set = 0, binding = 55 ) uniform readonly image2DArray streakPrev;
+layout( r8, set = 0, binding = 56 ) uniform writeonly image2DArray streakCur;
+/// A PROBE's MOVING SHARE, this frame's and last (PHOTON-7 stage 8B, B5; the cell's word kCellMovingWord, written by
+/// rq_probe_gather.comp, shifted a frame by the resume's finalize): a uniform probe is its cell's bytes 0 and 2, an
+/// adaptive one - its cell in its record's normal.w, + 1 - bytes 1 and 3; in [0, 1]
+vec2 probeMovingOf( uint pi )
+{
+	const bool adaptive = pi >= uint( max( p.knobs3.x, 0.0 ) );
+	const uint cell = adaptive ? uint( max( records.r[pi].normalW.w - 1.0, 0.0 ) ) : pi;
+	const uint word = jahCellState[kCellWords * cell + kCellMovingWord] >> ( adaptive ? 8u : 0u );
+	return vec2( float( word & 0xFFu ), float( ( word >> 16u ) & 0xFFu ) ) * ( 1.0 / 255.0 );
+}
+/// THE DEMAND SPAN ON THE CLOCK (rq_probe_gather.comp's note): p.knobs6.x = the span
+/// (the pixel's cell's clock: its K and its sample index, set at main's head)
+float gRestK = 0.0;
+uint gFrameIndex = 0u;
+uint gCell = 0u;
+/// B3: the pixel's cell RE-RESTS IN THE BACKGROUND (kCellRefining): its outputs and histories hold, its rest mean fills
+bool gRefining = false;
+bool gRoughTarget = false;   // (B3: this pixel's lobe stored its hand-over target)
+/// ...and the sky share this frame measured (-1: none - the pixel keeps its own), for the hand-over's target
+float gSkyNow = -1.0;
+/// the display code of a radiance, per channel (the irradiance's curve L / (1 + L), 0..255)
+vec3 dispCodes( vec3 c ) { return 255.0 * max( c, vec3( 0.0 ) ) / ( 1.0 + max( c, vec3( 0.0 ) ) ); }
+/// A ray of the pixel's in its cell's bin of world directions: its hit distance from the pixel (the least and the most),
+/// or an escape
+void restStoreRay( vec3 d, bool hit, float t )
+{
+	const uint at = kRestStoreWords * gCell;
+	const uint bin = jahRestBin( d );
+	if( hit )
+	{
+		atomicMin( jahCellStore[at + bin], floatBitsToUint( max( t, 0.0 ) ) );
+		atomicMax( jahCellStore[at + 64u + bin], floatBitsToUint( max( t, 0.0 ) ) );
+	}
+	else
+		atomicOr( jahCellStore[at + 128u + ( bin >> 5u )], 1u << ( bin & 31u ) );
+}
+#define JAH_CARD_STAMP_GATE jahCardStampsOf( gCell, p.knobs6.x )
+// (the faces: from the rest span or moving - a still view's settling cell, K 0, marks none; p.young.w 1 = the view still)
+#define JAH_CARD_FACE_GATE ( p.young.w < 0.5 || jahRestKOf( gCell ) >= 0.5 )
 // (the environment's SH alone: no cube is read here)
 #define JAH_ENV_CUBE_ON false
 #define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
@@ -290,10 +346,10 @@ void jahCardLobeHemi( float r, out float a, out float b )
 /// AT REST THE KEY IS THE REST FRAME'S OWN INDEX (PHOTON-7 stage 10-3; L1: the picture at rest is the pose's): the
 /// view's frame counter counts every frame the view traced before its rest began, so a key on it rounded the rest's
 /// history differently by the path - how long the view had lived, which another view's state set (the resize history's
-/// row). The rest index (p.knobs6.x: 1, 2, ... N) is the same sequence whatever came before it.
+/// row). The rest index (the cell's K, gRestK: 1, 2, ... N) is the same sequence whatever came before it.
 float roundingDither( ivec2 localPix, uint salt )
 {
-	const uint key = p.knobs6.x >= 1.0 ? 0x80000000u + uint( p.knobs6.x ) : uint( p.knobs6.z );
+	const uint key = gRestK >= 1.0 ? 0x80000000u + uint( gRestK ) : uint( p.knobs6.z );
 	const uint h = jahPcg( uint( localPix.x ) * 1973u + uint( localPix.y ) * 9277u + key * 26699u + salt * 104729u );
 	return float( h & 0xFFFFFFu ) / 16777216.0;
 }
@@ -420,6 +476,7 @@ int gnEye = 0;
 #include "jah_geometric_normal.glsl"
 #include "jah_ray_origin.glsl"
 
+float gRayT[kJahPixelDiffuseRays];   // (8B: the fallback's rays' distances for the cell's bins)
 vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 {
 	const int n = kJahPixelDiffuseRays;
@@ -453,13 +510,19 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 															 persp ) );
 	vec3 sum = vec3( 0.0 );
 	float taken = 0.0;
-	for( int i = 0; i < n; ++i )
+	for( int i = 0; i < kJahPixelDiffuseRays; ++i )
+		gRayT[i] = -2.0;   // (no record: an exhausted ray)
+	// [[dont_unroll]] (PHOTON-7 8B): the loop holds the whole hit set (the voxel march, the TLAS continuation, the card read
+	// and its secondaries); unrolled n = 8 times it made this pipeline's cold driver compile 70 s, 120 s with the bins
+	[[dont_unroll]] for( int i = 0; i < n; ++i )
 	{
 		const vec3 d = normalize( basis * jahRayCosineDir( i, n ) );
 		const vec3 dLS = JAH_CONES_TO_LS( d );
 		const JahVoxelRayResult vr = jahVoxelRay( startLS, dLS, surfLS, nLS, epsC0, ivec4( 0 ), 0.0, 0.0, true );
 		if( vr.exitReason == kJahRayHit )
 		{
+			// (its distance in metres: cascade 0's normalised units along dLS over the direction's scale)
+			gRayT[i] = vr.tC0 / max( length( d * JAH_VOX_INVSIZE( 0 ).xyz ), 1e-12 );
 			sum += vr.radiance;
 			taken += 1.0;
 			continue;
@@ -468,6 +531,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 			continue;
 		if( vr.exitReason == kJahRayEscaped && jahEscapeIsExit( startLS, dLS, vr.tC0 ) )
 		{
+			gRayT[i] = -1.0;
 			sum += jahEnvCone( d, binTan );
 			taken += 1.0;
 			continue;
@@ -479,11 +543,13 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		JAH_RQ_PROCEED( rq )
 		if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
 		{
+			gRayT[i] = -1.0;
 			sum += jahEnvCone( d, binTan );   // an exit: the sky
 			taken += 1.0;
 			continue;
 		}
 		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
+		gRayT[i] = tHit;
 		const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
 		const uint prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
 		const uint geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
@@ -508,6 +574,12 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		sum += radiance;
 		taken += 1.0;
 	}
+	// THE RAYS INTO THE CELL's BINS (8B), after the loop: their hits, their escapes (-1), none for an exhausted one (-2).
+	// (A NAMED COST, the leftover list's: this pipeline's cold driver compile is 120 s with the bins' writes, 67-71 s
+	// without them - the whole hit set is inlined into this loop; paid once per shader change, at the warm or a first boot)
+	for( int i = 0; i < n; ++i )
+		if( gRayT[i] > -1.5 )
+			restStoreRay( normalize( basis * jahRayCosineDir( i, n ) ), gRayT[i] >= 0.0, gRayT[i] );
 	return taken > 0.0 ? sum * ( 1.0 / taken ) : vec3( 0.0 );
 }
 
@@ -754,6 +826,46 @@ void main()
 	const ivec2 cell = clamp( ivec2( vec2( lx, pix.y ) / stride ), ivec2( 0 ), gridEye - 1 ) + cellOff;
 	const uint index = uint( cell.y * grid.x + cell.x );
 	const JahEye thisEye = jahEyeNow( eye );
+	// A HELD CELL (PHOTON-7 stage 8B, B1): its pixels' picture is their rest mean - the irradiance, the rough specular
+	// and the sky visibility this target holds since the rest's N-th frame, untouched - and their histories are written
+	// through (this frame's half becomes the held one) so the ping-pong reads them where it flips to.
+	gRestK = jahRestKOf( index );
+	gCell = index;
+	gFrameIndex = jahFrameIndexOf( index );
+	const uint cellSt = jahCellState[kCellWords * index];
+	gRefining = ( cellSt & kCellRefining ) != 0u;
+	if( ( cellSt & kCellHeld ) != 0u )
+	{
+		// B3: A CELL HANDING OVER steps its outputs toward the targets its refined rest's last frame stored - equal steps,
+		// the remaining distance over the remaining steps (a linear walk from the held picture, never a code a frame more)
+		if( ( cellSt & kCellHandover ) != 0u )
+		{
+			const uint hw = jahCellState[kCellWords * index + 10u];
+			const uint j = hw & 0xFFFFu, M = max( hw >> 16u, 1u );
+			const float step = 1.0 / float( max( M + 1u - min( j, M ), 1u ) );
+			if( j == 1u )
+				atomicMax( gatherCounter.words[4], M );   // (the hand-overs that began this frame: their longest, for the door)
+			const vec4 tgt = imageLoad( restMean, at );
+			if( tgt.w > 1.5 )
+			{
+				const vec4 cur = imageLoad( probeIrradiance, at );
+				imageStore( probeIrradiance, at, jahRoundHalf( mix( cur, vec4( tgt.xyz, 1.0 ), step ) ) );
+				const bool lobe = tgt.w > 5.5;
+				if( lobe )
+					imageStore( roughSpec, at, jahRoundHalf( mix( imageLoad( roughSpec, at ), imageLoad( roughRest, at ), step ) ) );
+				const float sky = tgt.w - ( lobe ? 6.0 : 2.0 );
+				if( j >= M && sky <= 1.0 )
+					imageStore( skyVis, at, vec4( sky ) );
+			}
+		}
+		if( p.knobs5.z > 0.5 )
+		{
+			imageStore( historyCur, at, imageLoad( historyPrev, at ) );
+			imageStore( streakCur, at, imageLoad( streakPrev, at ) );   // (the streak rides with its history)
+			imageStore( roughHistoryCur, at, imageLoad( roughHistoryPrev, at ) );
+		}
+		return;
+	}
 	if( p.knobs4.w > 0.5 )
 		imageStore( photonOverlay, at,
 					jahRoundHalf( photonDisc( pix, lx, cell, cellOff, gridEye, grid, thisEye, eyeW, full, stride ) ) );
@@ -801,8 +913,9 @@ void main()
 		if( temporal )
 		{
 			imageStore( historyCur, at, uvec4( 0u ) );
+			imageStore( streakCur, at, vec4( 0.0 ) );
 			imageStore( roughHistoryCur, at, uvec4( 0u ) );
-			if( p.knobs6.x >= 1.0 )
+			if( gRestK >= 1.0 )
 			{
 				imageStore( restMean, at, jahRoundHalf( vec4( 0.0 ) ) );
 				imageStore( roughRest, at, jahRoundHalf( vec4( 0.0 ) ) );
@@ -854,7 +967,7 @@ void main()
 	// frame by frame as the pixel ages (the converged answer is the bilinear's).
 	// NEVER AT REST: the rest mean is the shipped estimator's mean, exactly.
 	float reach = 1.0;
-	if( temporal && p.knobs6.x < 1.0 && float( prevCount ) < p.young.x )
+	if( temporal && gRestK < 1.0 && float( prevCount ) < p.young.x )
 		reach = mix( max( p.young.y, 1.0 ), 1.0, float( prevCount ) / max( p.young.x, 1.0 ) );
 
 	// THE FOUR GRID PROBES AROUND THE PIXEL: the cells whose centres bracket
@@ -864,7 +977,7 @@ void main()
 	// is taken on that shifted grid - rq_probe_place.comp's offset, the same hash; plane.w 1 = the centres)
 	vec2 g = ( vec2( lx, pix.y ) + 0.5 ) / stride - 0.5;
 	if( p.plane.w < 0.5 )
-		g = ( vec2( lx, pix.y ) + 0.5 - ( floor( jahSample2( ivec2( 0 ), 0u, uint( p.knobs.z ) ) * stride ) + 0.5 ) ) / stride;
+		g = ( vec2( lx, pix.y ) + 0.5 - ( floor( jahSample2( ivec2( 0 ), 0u, gFrameIndex ) * stride ) + 0.5 ) ) / stride;
 	const ivec2 c0 = ivec2( floor( g ) );
 	const vec2 f = g - vec2( c0 );
 	const int bands = p.knobs4.x > 5.0 ? 9 : 4;
@@ -873,6 +986,7 @@ void main()
 	vec3 sum = vec3( 0.0 );
 	float wsum = 0.0;
 	float skySum = 0.0;   // (R11: the taps' sky shares under the same weights)
+	vec2 movingSum = vec2( 0.0 );   // (B5: the taps' moving shares, this frame's and last, under the same weights)
 	// THE DEPTH WALK ON EVERY READ (PHOTON-2 stage 2's tail; 1.6 B4, DEEP_AUDIT photon-diffuse F13): no LIGHT THROUGH
 	// A WALL on any read of a neighbouring probe - the bilinear four, the twin and both silhouette steps as the wide
 	// young read always did (jah_probe_seen.glsl). A wall thinner than one probe stride on screen (0.1 m at 30 m is
@@ -945,6 +1059,7 @@ void main()
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
 					skySum += records.r[pi].sh[6].w * w;
+					movingSum += probeMovingOf( pi ) * w;
 					wsum += w;
 				}
 			}
@@ -959,6 +1074,7 @@ void main()
 		{
 			sum += shEvalAt( tapIdx[t], pixelNormal, bands ) * tapW[t];
 			skySum += records.r[tapIdx[t]].sh[6].w * tapW[t];
+			movingSum += probeMovingOf( tapIdx[t] ) * tapW[t];
 			wsum += tapW[t];
 		}
 	}
@@ -1005,6 +1121,7 @@ void main()
 						continue;
 					sum += shEvalAt( pi, pixelNormal, bands ) * w;
 					skySum += records.r[pi].sh[6].w * w;
+					movingSum += probeMovingOf( pi ) * w;
 					wsum += w;
 				}
 			}
@@ -1038,6 +1155,7 @@ void main()
 							continue;
 						sum += shEvalAt( pi, pixelNormal, bands ) * w;
 						skySum += records.r[pi].sh[6].w * w;
+						movingSum += probeMovingOf( pi ) * w;
 						wsum += w;
 					}
 				}
@@ -1049,9 +1167,11 @@ void main()
 	// (a pixel no probe answers this frame - a starved one, a silhouette - keeps the share it last measured: no flicker;
 	// the view's first frame has no last one - its image is new - and such a pixel reads the sky's share unmeasured, 1)
 	if( wsum >= weightFloor )
-		imageStore( skyVis, at, vec4( clamp( skySum / wsum, 0.0, 1.0 ) ) );
+		gSkyNow = clamp( skySum / wsum, 0.0, 1.0 );
 	else if( p.knobs5.x < 1.0 )
-		imageStore( skyVis, at, vec4( 1.0 ) );
+		gSkyNow = 1.0;
+	if( gSkyNow >= 0.0 && !gRefining )   // (B3: a refining cell's sky share is its hand-over's target, below)
+		imageStore( skyVis, at, vec4( gSkyNow ) );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
 	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
@@ -1091,8 +1211,39 @@ void main()
 	const float floorBlend = clamp( p.knobs5.y, 1.0 / float( kHistoryCountMax ), 1.0 );
 	// THE GI FREEZE (M1's measuring arm, stereo.w): a pixel with a history keeps it, no new sample enters.
 	// ...and A PIXEL WITH NO SAMPLE THIS FRAME (its probes starved by a full hit list, above) keeps it too.
-	const float blend = prevCount > 0u ? ( p.stereo.w > 0.5 || noSample ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
-									   : 1.0;
+	float blend = prevCount > 0u ? ( p.stereo.w > 0.5 || noSample ? 0.0 : max( 1.0 / ( float( prevCount ) + 1.0 ), floorBlend ) )
+								 : 1.0;
+	// ---- THE FAST UPDATE (PHOTON-7 stage 8B, B5): LUMEN's FastUpdateMode, LumenScreenProbeGatherTemporal.usf:486-497 ----
+	// The pixel's MOVING SHARE m is its probes' (the share of each one's rays whose hit moved this frame:
+	// rq_probe_gather.comp's fastRayMoving), interpolated as its irradiance is; Lumen's amount
+	//     F = saturate( min( ( saturate( m / 0.1 ) - 0.2 ) / 0.8, 0.9 ) ),
+	// MAX'ED with last frame's (the same probes' shares a frame old - Lumen keeps it in the pixel's history: one frame of
+	// memory, so the light keeps up for a frame where the moving thing was), caps the frames the history averages:
+	//     N' = min( N, ( 1 - F ) Nmax ),   blend' = 1 / ( 1 + N' ).
+	// OURS IN THOSE TERMS: the blend above is 1 / ( 1 + N ) with N = min( count, Nmax ), Nmax = 1 / floor - 1 (the floor's
+	// frames, Lumen's MaxFramesAccumulated), so N = 1 / blend - 1 and N' follows exactly; F = 0 (nothing moving: every
+	// still frame, every rest) leaves the blend bit for bit. A frozen or sample-less pixel (blend 0) and a first frame (1)
+	// are not touched. The rough specular's history takes the same blend (Lumen's one N for both). AND THE HISTORY KEEPS
+	// N' (Lumen writes NewNumFramesAccumulated back): the count stored is N' + 1, rounded, so when the motion stops the
+	// history restarts its running mean from the new pose's few frames (1 / (N' + 2), 1 / (N' + 3), ...) instead of
+	// jumping back to the floor over a mean that still holds the old pose - the settle after the motion is the short
+	// history's, not the floor's.
+	uint countNext = noSample && prevCount > 0u ? prevCount : prevCount + 1u;
+	if( p.fast.w > 0.5 && blend > 0.0 && blend < 1.0 && wsum >= weightFloor )
+	{
+		const vec2 m = movingSum / wsum;
+		const vec2 amount = clamp( min( ( clamp( m / max( p.fast.x, 1e-6 ), 0.0, 1.0 ) - 0.2 ) / 0.8, vec2( p.fast.y ) ),
+								   0.0, 1.0 );
+		const float F = max( amount.x, amount.y );
+		if( F > 0.0 )
+		{
+			const float n = 1.0 / blend - 1.0;
+			const float nMax = 1.0 / floorBlend - 1.0;
+			const float nFast = min( n, ( 1.0 - F ) * nMax );
+			blend = 1.0 / ( 1.0 + nFast );
+			countNext = uint( nFast + 0.5 ) + 1u;
+		}
+	}
 	const vec4 sample1 = vec4( answer.xyz * answer.w, answer.w );
 	vec4 mean = mix( prev, sample1, blend );
 	// ---- AT REST, THE REST MEAN (PHOTON-GATHER-1d) ------------------------------
@@ -1117,7 +1268,7 @@ void main()
 	// Bistro 0.19 -> 0.23). The hand-over's weight starts at 0 on the first rest frame ((k - 1) / (N - 1): that frame
 	// steps exactly as a settling one, Bistro's first rest frame jumped 0.18 -> 0.26 at k / N) and reaches 1 at k = N,
 	// where the answer is still the rest mean exactly.
-	const float restK = p.knobs6.x;
+	const float restK = gRestK;
 	// (the rest's law, held for the rough specular's rest below: whether this frame's sample enters, and the hand-over)
 	bool restTakes = false;
 	float restHandover = 0.0;
@@ -1153,9 +1304,17 @@ void main()
 		restHandover = clamp( ( restK - 1.0 ) / max( p.knobs6.y - 1.0, 1.0 ), 0.0, 1.0 );
 		mean = mix( mix( prev, restAnswer, blend ), restAnswer, restHandover );
 	}
+	// THE STREAK (8B): one more frame where the reprojected history was taken, 1 where it was not
+	imageStore( streakCur, at, vec4( prevCount > 0u
+										? min( round( imageLoad( streakPrev, ivec3( histAt, eye ) ).x * 255.0 ) + 1.0, 255.0 ) / 255.0
+										: 1.0 / 255.0 ) );
+	// (B3: a refining cell's history holds until its rest's last frame, which writes the refined answer)
+	if( gRefining && restK < p.knobs6.y )
+		imageStore( historyCur, at, imageLoad( historyPrev, at ) );
+	else
 	imageStore( historyCur, at,
 				uvec4( packRgbShared( mean.xyz, roundingDither( ivec2( lx, pix.y ), 1u ) ),
-					   packGeom( pixelDist, pixelFoliage, noSample && prevCount > 0u ? prevCount : prevCount + 1u, mean.w,
+					   packGeom( pixelDist, pixelFoliage, countNext, mean.w,
 								 roundingDither( ivec2( lx, pix.y ), 2u ) ),
 					   0u, 0u ) );
 	// The pixel's answer: the answered frames' mean irradiance at the fraction
@@ -1172,6 +1331,10 @@ void main()
 		outV = vec4( outV.xyz * cover +
 						 ( cover < 1.0 ? fieldFallback( pixelWorld, pixelNormal, toEyeField ) * ( 1.0 - cover ) : vec3( 0.0 ) ),
 					 1.0 );
+		// (THE CELL READS THE FIELD, PHOTON-7 stage 8B, B1: while the field's work is owed a held cell that read it
+		// resumes - its fallback moves with the field; its pixels mark it, the camera's move clears it)
+		if( cover < 1.0 && ( jahCellState[kCellWords * index] & kCellField ) == 0u )
+			atomicOr( jahCellState[kCellWords * index], kCellField );
 	}
 	// ---- THE ROUGH SPECULAR (7-3; the header's second output) -----------------
 	// This frame's lobe (its fallback the pixel's diffuse E/pi as the shading pass takes it: the composed answer)
@@ -1231,13 +1394,62 @@ void main()
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
 		}
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
+		const vec4 roughNew = roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness );
+		if( gRefining )
+		{
+			// B3: the lobe's history and output hold; at the rest's last frame the new texel is the hand-over's target
+			// (in the rough rest mean, done with), its change against the held one counted in the cell's hand-over size
+			if( restK < p.knobs6.y )
+				imageStore( roughHistoryCur, at, imageLoad( roughHistoryPrev, at ) );
+			else
+			{
+				imageStore( roughHistoryCur, at,
+							uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
+				imageStore( roughRest, at, jahRoundHalf( roughNew ) );
+				const vec3 dc = abs( dispCodes( roughNew.xyz ) - dispCodes( imageLoad( roughSpec, at ).xyz ) );
+				atomicMax( jahCellState[kCellWords * index + 9u], uint( max( max( dc.x, dc.y ), dc.z ) * 16.0 + 0.999 ) );
+				gRoughTarget = true;
+			}
+		}
+		else
+		{
 		imageStore( roughHistoryCur, at,
 					uvec4( packRgbShared( meanLobe, roundingDither( ivec2( lx, pix.y ), 4u ) ), 0u, 0u, 0u ) );
-		imageStore( roughSpec, at, jahRoundHalf( roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness ) ) );
+		imageStore( roughSpec, at, jahRoundHalf( roughNew ) );
+		}
 	}
 	// THE HISTORY-AGE VIEW (GatherTuning::ageView, an instrument; p.stereo.z):
 	// magenta where the reprojected history held fewer than N frames.
 	if( p.stereo.z > 0.5 )
 		outV = float( prevCount ) < p.stereo.z ? vec4( 0.5, 0.0, 0.5, 1.0 ) : vec4( 0.0, 0.0, 0.0, 1.0 );
-	imageStore( probeIrradiance, at, jahRoundHalf( outV ) );
+	if( gRefining )
+	{
+		// B3: the output holds; at the rest's last frame the new answer is the hand-over's target - in the rest mean, done
+		// with (w: 2 + the sky share, + 4 where the lobe has its target too; a sky share none measured: 1.5, kept) - and its
+		// change against the held picture sets the hand-over's steps (the finalize: M = ceil(delta / a code))
+		if( restK >= p.knobs6.y )
+		{
+			const vec3 dc = abs( dispCodes( outV.xyz ) - dispCodes( imageLoad( probeIrradiance, at ).xyz ) );
+			atomicMax( jahCellState[kCellWords * index + 9u], uint( max( max( dc.x, dc.y ), dc.z ) * 16.0 + 0.999 ) );
+			imageStore( restMean, at, jahRoundHalf( vec4( outV.xyz, ( gRoughTarget ? 6.0 : 2.0 ) + ( gSkyNow >= 0.0 ? gSkyNow : 1.5 ) ) ) );
+		}
+	}
+	else
+		imageStore( probeIrradiance, at, jahRoundHalf( outV ) );
+	// THE CELL's CONVERGENCE (PHOTON-7 stage 8B, B1; the lead's ruling on the rest's start): this frame's SAMPLE and the
+	// HISTORY's answer at each pixel, summed in display codes (x 16, the irradiance's display curve L / (1 + L)) -
+	// rq_probe_resume.comp says a settling cell has converged when its history's answer has caught up with its samples'
+	// mean over the last N frames (within a code and their standard error) and that mean stopped moving
+	if( gRestK < 0.5 && !gRefining )
+	{
+		const vec3 luma = vec3( 0.2126, 0.7152, 0.0722 );
+		// (LIKE WITH LIKE: the sample and the history's mean BEFORE the field's composition - both the answered share's
+		// premultiplied irradiance; the composed answer carries the field's fallback for the unanswered share, which the
+		// sample never holds, so a cell with any field share never "caught up" and its clock stayed at 0 for ever:
+		// samples.cleanstart.World_Background's fidelity shot, 2040 cells active at K 0 through its 2002-frame cap)
+		const float Ls = max( dot( sample1.xyz, luma ), 0.0 ), La = max( dot( mean.xyz, luma ), 0.0 );
+		atomicAdd( jahCellState[kCellWords * index + 2u], uint( clamp( 255.0 * Ls / ( 1.0 + Ls ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
+		atomicAdd( jahCellState[kCellWords * index + 3u], uint( clamp( 255.0 * La / ( 1.0 + La ), 0.0, 255.0 ) * 16.0 + 0.5 ) );
+		atomicAdd( jahCellState[kCellWords * index + 4u], 1u );
+	}
 }

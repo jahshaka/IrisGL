@@ -218,7 +218,38 @@ struct StillnessRun::Impl {
     Image prev;                                       ///< the previous frame's picture (inside a window)
     Image trailPrev;                                  ///< ...and inside a move's trail
     std::vector<unsigned char> trailPrevChange;       ///< ...and its per-pixel change from the one before (J1's steps)
-    unsigned long long lastKeyMoves = 0;              ///< GatherStatus::keyMoves after the last frame (L7)
+    /// THE GATHER's PER-CELL REST, BY THE FRAME IT BELONGS TO (PHOTON-7 stage 8B, B1): the gather decides its cells on the
+    /// device and its records retire a few frames late (GatherStatus::restLog, by gather frame), so the door maps each
+    /// gather frame to the window frame that drew it and fills that frame's hold from its own record at the window's end
+    /// (applyGatherRest) - never from the record that happened to arrive in it.
+    struct RestAt { int window = -1; bool trail = false; size_t index = 0; };
+    std::map<unsigned, RestAt> byGatherRest;
+    unsigned lastGatherRest = 0u;
+    std::map<unsigned, GatherRestRecord> restByGather;
+    void mapGatherRest(const GatherStatus &g, int window, bool trail, size_t index)
+    {
+        for (const GatherRestRecord &r : g.restLog) restByGather[r.frame] = r;
+        if (!g.running || g.frame == 0u || g.frame <= lastGatherRest) return;
+        byGatherRest[g.frame - 1u] = { window, trail, index };
+        lastGatherRest = g.frame;
+    }
+    void applyGatherRest(StillnessWindow &w, size_t win)
+    {
+        for (const auto &kv : byGatherRest) {
+            if (kv.second.window != int(win)) continue;
+            const auto r = restByGather.find(kv.first);
+            if (r == restByGather.end()) continue;
+            std::vector<StillnessFrame> &list = kv.second.trail ? w.trail : w.frames;
+            if (kv.second.index >= list.size()) continue;
+            StillnessFrame &f = list[kv.second.index];
+            // THE HOLD WAITED ON THIS FRAME: an input reached a cell (its clock restarted); THE GATHER HELD: every cell
+            f.holdKey = r->second.reached > 0u || r->second.refined;
+            f.gatherHeld = r->second.everyHeld;
+            if (!kv.second.trail) f.held = f.gatherHeld && f.reflOk;
+            f.restFrames = r->second.restK;
+            f.handoverM = r->second.handoverM;
+        }
+    }
     unsigned long long lastFoliageRule = 0;           ///< GatherStatus::foliageRuleAccepts after the last frame (L8)
     unsigned picW = 0, picH = 0;
     std::vector<unsigned char> classAt;               ///< per picture pixel: its class (0 = unclassified)
@@ -274,6 +305,11 @@ struct StillnessRun::Impl {
             for (size_t i = 0; i < n.size(); ++i) n[i] = (unsigned char)std::min<unsigned>(g.historyCount[i], 255u);
             std::ofstream hc(dumpPath(tag + ".ghc"), std::ios::binary);
             hc.write(reinterpret_cast<const char *>(n.data()), std::streamsize(n.size()));
+            // ...and THE STREAK (8B): the history's age, the same grid (.ghs) - the door's mask reads it
+            if (g.historyStreak.size() == g.historyCount.size()) {
+                std::ofstream hs(dumpPath(tag + ".ghs"), std::ios::binary);
+                hs.write(reinterpret_cast<const char *>(g.historyStreak.data()), std::streamsize(g.historyStreak.size()));
+            }
         }
         int px = 0, rs = 0;
         for (size_t i = 0; i < g.historyCount.size(); ++i)
@@ -595,7 +631,11 @@ struct StillnessRun::Impl {
             for (unsigned x = 0; x < picW; ++x) {
                 const unsigned gx = std::min(g.historyCountW - 1, unsigned((unsigned long long)x * g.historyCountW / picW));
                 const unsigned gy = std::min(g.historyCountH - 1, unsigned((unsigned long long)y * g.historyCountH / picH));
-                mask[size_t(y) * picW + x] = g.historyCount[size_t(gy) * g.historyCountW + gx] >= spec.visibleAge ? 1u : 0u;
+                // (THE STREAK, 8B: the frames the pixel's history has been carried unbroken - "the gather saw it before the
+                // stop"; the count is the blend's N, which B5's fast update shortens while the pixel is still the same)
+                const size_t gi = size_t(gy) * g.historyCountW + gx;
+                const unsigned age = g.historyStreak.size() == g.historyCount.size() ? g.historyStreak[gi] : g.historyCount[gi];
+                mask[size_t(y) * picW + x] = age >= spec.visibleAge ? 1u : 0u;
             }
         w.visibleFromGather = true;
         maskKnown[size_t(win)] = true;
@@ -630,6 +670,7 @@ struct StillnessRun::Impl {
 
     void completeWindow(StillnessWindow &w, size_t win)
     {
+        applyGatherRest(w, win);
         const unsigned n = classes();
         {
             std::map<std::string, std::pair<unsigned, unsigned long long>> sum;   // name -> (frames, units)
@@ -686,9 +727,22 @@ struct StillnessRun::Impl {
             if (i > 0 && f.giRowCount) w.lastGiRowFrame = int(i);
             if (i > 0 && f.holdKey) w.lastHoldKeyFrame = int(i);
             if (w.holdFrame < 0 && f.held) w.holdFrame = int(i);
-            if (w.gatherHoldFrame < 0 && f.gatherHeld) w.gatherHoldFrame = int(i);
+            // THE GATHER's HOLD IS ITS LAST HOLD RUN's START (PHOTON-7 stage 8B, B1: the gather rests per cell, so a hold
+            // can end on an input that reaches a cell after it - the hold that counts is the one that lasts to the
+            // window's end; -1 where the window ends unheld)
+            if (f.gatherHeld && (i == 0 || !w.frames[i - 1].gatherHeld)) w.gatherHoldFrame = int(i);
+            if (!f.gatherHeld) w.gatherHoldFrame = -1;
             if (w.reflHoldFrame < 0 && f.reflHeld) w.reflHoldFrame = int(i);
         }
+        // C AFTER THE LAST WRITE (PHOTON-7 stage 8B, B1): the frames after the last hold key before the gather's rest began
+        // again - the gather's hold is then within C + N + 1 of that write
+        w.lastKeyConverge = 0;
+        for (size_t i = size_t(std::max(w.lastHoldKeyFrame, 0)) + 1u; i < w.frames.size(); ++i)
+            if (w.frames[i].restFrames >= 1u &&
+                (w.frames[i - 1].restFrames == 0u || w.frames[i].restFrames < w.frames[i - 1].restFrames)) {
+                w.lastKeyConverge = int(i) - std::max(w.lastHoldKeyFrame, 0) - 1;
+                break;
+            }
         stillnessDeriveLiveness(w);
         for (unsigned k = 0; k <= n; ++k) {
             if (!w.frames.empty()) w.visiblePixels[k] = w.frames.size() > 1 ? w.frames[1].classes[k].pixels : 0u;
@@ -708,6 +762,7 @@ struct StillnessRun::Impl {
 //   + due        the read-back's due after it (the period + the ring + the issue frame's one + 1)
 //   + W          the decision's own work: its captures and card-to-card rounds, from the decision to its last GI row
 //   + N + 1      the re-rest after that work, and the hold's own frame
+//   + C, + H     the re-rest's convergence and the hand-over's steps after it (8B: B1's C, B3's H - both measured)
 // with N the gather's settle (StillnessFrame::settleFrames) and the due the cards' demand due (the record's period + lag +
 // 1); and W'S PACE: W <= ceil(the work's pages / the tier's indirect pages a frame) + due (the rounds pipelined: one due
 // covers the chain), the pages the frames' own indirect texels relit over a page. A window without a decision derives none.
@@ -720,6 +775,27 @@ void stillnessDeriveLiveness(StillnessWindow &w) {
     for (size_t i = 1; i < n && w.decisionFrame < 0; ++i)
         if (w.frames[i].cardsDecisions > w.frames[i - 1].cardsDecisions) w.decisionFrame = int(i);
     if (w.decisionFrame < 0) return;
+    // THE REST THE DECISION READ (PHOTON-7 stage 8B, B1): the gather rests PER CELL, so its clock can start on the window's
+    // first frame and restart on every input that reaches a cell after it (a relight landing, the field at work); the
+    // decision waits for EVERY reader's demand (the gather's and the reflection's spans) - so the bound counts from the
+    // later of the two readers' rests that ran UNBROKEN to the decision: each one's last start before it (1 after 0, or
+    // a restart; the decision's own frame may restart both - its work lands there). A reader not resting on the frame
+    // before the decision does not move it.
+    {
+        int start = w.firstRestFrame;
+        for (int reader = 0; reader < 2; ++reader) {
+            const auto restOf = [&](size_t i) { return reader == 0 ? w.frames[i].restFrames : w.frames[i].reflRestFrames; };
+            for (int i = w.decisionFrame - 1; i > 0; --i) {
+                const unsigned now = restOf(size_t(i)), before = restOf(size_t(i) - 1u);
+                if (now >= 1u && (before == 0u || now < before)) {
+                    start = std::max(start, i);
+                    break;
+                }
+                if (now == 0u) break;   // (not resting at the decision: no unbroken run to it)
+            }
+        }
+        w.firstRestFrame = start;
+    }
     w.decisionWorkEnd = w.decisionFrame;
     for (size_t i = size_t(w.decisionFrame); i < n; ++i)
         if (w.frames[i].giRowCount) w.decisionWorkEnd = int(i);
@@ -727,7 +803,22 @@ void stillnessDeriveLiveness(StillnessWindow &w) {
     const unsigned N = d.settleFrames;
     const unsigned due = d.cardsDemandEvery + d.cardsDemandLag + 1u;
     const int W = w.decisionWorkEnd - w.decisionFrame;
-    w.holdBound = int(N + due) + int(due) + W + int(N) + 1;
+    // THE RE-REST's CONVERGENCE (PHOTON-7 stage 8B, B1, the lead's ruling: a cell's rest starts when no input reaches it
+    // AND its history has caught up with its samples): the frames after the work's last row before the gather's rest
+    // begins again (its clock 1), measured - the re-rest is C + N + 1, never a fixed N + 1
+    w.convergeFrames = 0;
+    for (size_t i = size_t(w.decisionWorkEnd) + 1u; i < n; ++i)
+        if (w.frames[i].restFrames >= 1u && (w.frames[i - 1].restFrames == 0u || w.frames[i].restFrames < w.frames[i - 1].restFrames)) {
+            w.convergeFrames = int(i) - w.decisionWorkEnd - 1;
+            break;
+        }
+    // THE HAND-OVER's STEPS H (PHOTON-7 stage 8B, B3): a held cell a card refinement reached re-rests on its own frames,
+    // then walks from the held picture to its new answer over M = ceil(delta / one code) frames, counted active - the
+    // hold waits for the longest hand-over the record shows beginning after the work's last row (measured, as C is)
+    w.handoverFrames = 0;
+    for (size_t i = size_t(w.decisionWorkEnd) + 1u; i < n; ++i)
+        w.handoverFrames = std::max(w.handoverFrames, int(w.frames[i].handoverM));
+    w.holdBound = int(N + due) + int(due) + W + w.convergeFrames + int(N) + w.handoverFrames + 1;
     const double page = double(d.cardsPageSize) * double(d.cardsPageSize);
     const double P = page > 0.0 ? double(d.cardsIndirectTexels) / page : 0.0;
     for (int i = w.decisionFrame; i <= w.decisionWorkEnd; ++i) {
@@ -959,6 +1050,7 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.trail[w.trail.size() - p.index];
         m.mapGatherFrame(g, p.window, true, w.trail.size() - p.index);
+        m.mapGatherRest(g, p.window, true, w.trail.size() - p.index);
         if (!m.spec.dumpDir.empty() && pub.rayQuery.reflectFrame > m.lastTraced) {
             m.byTracedTrail[pub.rayQuery.reflectFrame - 1u] = w.trail.size() - p.index;
             m.lastTraced = pub.rayQuery.reflectFrame;
@@ -967,9 +1059,10 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
-        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
+        // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
+        // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
+        // the gather's any more)
+        f.holdKey = false;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1098,13 +1191,15 @@ bool StillnessRun::frameDone(std::string &err)
         StillnessWindow &w = m.report.windows[size_t(p.window)];
         StillnessFrame &f = w.frames[p.index];
         m.mapGatherFrame(g, p.window, false, p.index);
+        m.mapGatherRest(g, p.window, false, p.index);
         f.engineFrame = engineFrame;
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
-        // (...or the cache owed the readers their hold - the stop's decision, its rounds, a report in flight:
-        // readersHoldOwed, PHOTON-7 stage 10 - the hold waits on it as on its inputs)
-        f.holdKey = g.keyMoves != m.lastKeyMoves || g.inputsBusy || pub.gi.cards.readersHoldOwed;
+        // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
+        // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
+        // the gather's any more)
+        f.holdKey = false;
         f.ifdGrant = pub.gi.ifdGrantLastFrame;
         f.ifdSpent = pub.gi.ifdDispatchedLastFrame;
         f.ifdOwedRestarts = pub.gi.ifdOwedRestarts;
@@ -1156,7 +1251,8 @@ bool StillnessRun::frameDone(std::string &err)
         // where the reflection traces, the reflection held - a still view whose reflection still converges moves its
         // pixels, and the door's hold was blind to it (Showroom 2: 29-56 codes a frame for 100+ frames after the
         // gather's hold, past the canary)
-        f.held = g.running && g.held && (!pub.rayQuery.reflect || pub.rayQuery.reflectHeld);
+        f.reflOk = !pub.rayQuery.reflect || pub.rayQuery.reflectHeld;
+        f.held = g.running && g.held && f.reflOk;
         f.gatherHeld = g.running && g.held;
         // THE TRACE THIS FRAME DID (when it did: a frame the reflection skipped leaves the counter where it was, and
         // its copy is the earlier frame's — never re-labelled as this one).
@@ -1222,7 +1318,6 @@ bool StillnessRun::frameDone(std::string &err)
         m.prev = std::move(pic);
         if (p.index + 1u == w.frames.size()) m.snapshotWindow(w, size_t(p.window), m.prev);   // (the window's last frame)
     }
-    m.lastKeyMoves = g.keyMoves;
     m.lastFoliageRule = g.foliageRuleAccepts;
     // THE FROZEN WALK (StillnessSpec::freezeWalk): the next frame is the walk's first - the freeze is switched on for
     // it (an arm latches at the top of the next frame) only when THIS frame is converged: the gather HELD (its true rest
@@ -1370,7 +1465,7 @@ std::string StillnessReport::tsv() const
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
       << "\trefl_sources"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\thandover_m\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1406,7 +1501,7 @@ std::string StillnessReport::tsv() const
               << "\t" << f.cardsCaptures << "\t" << f.cardsVisible << "\t" << f.cardsSubQuantum << "\t" << f.cardsUnmeasured
               << "\t" << f.cardsMoveCodes << "\t" << (f.gatherHeld ? 1 : 0) << "\t" << f.cardsReportsDropped
               << "\t" << f.cardsChange << "\t" << f.cardsFirst[0] << "\t" << f.cardsFirst[1] << "\t" << f.cardsNewest[0]
-              << "\t" << f.cardsNewest[1] << "\t" << f.cardsOpenLag << "\n";
+              << "\t" << f.cardsNewest[1] << "\t" << f.cardsOpenLag << "\t" << f.handoverM << "\n";
         }
     return o.str();
 }
@@ -1421,7 +1516,8 @@ std::string StillnessReport::summary() const
           << (w.frames.empty() ? 0 : w.frames.size() - 1) << " visible="
           << (w.visibleFromGather ? "gather" : "all") << " lastGiRow=" << w.lastGiRowFrame << " lastHoldKey=" << w.lastHoldKeyFrame << " hold=" << w.holdFrame
           << " firstRest=" << w.firstRestFrame << " decision=" << w.decisionFrame << " workEnd=" << w.decisionWorkEnd
-          << " holdBound=" << w.holdBound << " pace=" << w.workPace << " pages=" << w.workPages
+          << " holdBound=" << w.holdBound << " converge=" << w.convergeFrames << " handover=" << w.handoverFrames << " pace=" << w.workPace
+          << " pages=" << w.workPages
           << " | frames to <1 code (from stop / from last GI row; = the window: never):";
         for (size_t k = 0; k < names.size() && k < w.settleFromStop.size(); ++k)
             o << " " << names[k] << "=" << w.settleFromStop[k] << "/" << w.settleFromLastGiRow[k] << "("

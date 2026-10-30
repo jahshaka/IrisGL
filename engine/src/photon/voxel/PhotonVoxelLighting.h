@@ -611,6 +611,12 @@ namespace Ogre
         /// THE HOST'S FRAME (PHOTON-7 stage 4's read R2): the engine frame this volume's light work is in - set by the host
         /// before an injection and before the feedback; the once-a-frame CLEAR and the readings' lag count it.
         void setLightFrame( uint64 frame ) { mLightFrame = frame; }
+        /// THE BRICK MASK AS THE FRAME's LIGHT WORK LEFT IT (PHOTON-7 stage 8B, B1: the gather's resume reads it on the
+        /// device, in the frame): the buffer (two words a brick, ensureBrickMask's), its bricks per axis, and the host
+        /// frame of its last clear - its content is that frame's changes (null before the first light work).
+        UavBufferPacked *getBrickMaskBuffer() const { return mBrickBuffer; }
+        const uint32 *getBrickMaskDims() const { return mBrickDims; }
+        uint64 getBrickMaskFrame() const { return mBrickClearFrame; }
         /// THE TEST DOOR gi.feedbackCarriedRoute (PHOTON-7 stage 5's read A2 (i)): while set, the selection never passes a
         /// brick its injection moved this frame and the accumulation reads the selection's carried section alone.
         void setCarriedRouteDoor( bool on ) { mCarriedRouteDoor = on; }

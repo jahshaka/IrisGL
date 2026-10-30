@@ -38,6 +38,20 @@
 #define JAH_REFLECT_REST_GLSL
 
 const uint kReflectStopFrames = 8u;
+/// THE STOP's SAMPLES (PHOTON-7 8B, B2's (e) attribution - a LAW CONSTANT): a texel stops only when its standard error
+/// has stayed within its share across a window of at least kReflectStopSamples SAMPLES as well as kReflectStopFrames
+/// frames. A stop's confidence is the samples', not the frames': counted in frames, the same lobe stopped at v = 68 at 4
+/// samples a frame (32 in its window) and ran on to v = 1,296 at 64 a frame, where one bright sample in ~100 lifted its
+/// mean 34 % - the held pictures 9 codes apart (rtreflect.lamp_step_held (e)). S = ln( 1 / delta ) / p, the samples that
+/// see an event of probability p with confidence 1 - delta: delta 0.05, p 0.01 (the measured tail) -> S = 300.
+/// THE RESIDUAL, named: a tail event of probability p is missed by a fraction delta of such texels - 5 % at p = 0.01,
+/// more for rarer paths - which hold a biased mean until a region resumes them: a limit of any standard-error stop.
+const float kReflectStopSamples = 300.0;
+/// NO DRIFT TERM (B2, measured and ruled OUT): the stop's halves test (the window's first-half mean against its
+/// second-half's, apart by K times the SE of their difference) cannot tell a stationary heavy tail from a drift at this
+/// window: at one bright sample in ~100, each 150-sample half holds ~1.5 tail events, a Poisson count, and their
+/// difference (Skellam) trips the test at K 2 and still at K 4 - the glass's ~660-860 texels restarted their windows and
+/// never stopped (held from 828 with the test off). A light still rising must fool S = 300 samples in a row instead.
 /// The state's v field's ceiling (16 bits, jah_reflect_state.glsl): a texel that reaches it is CAPPED.
 const uint kReflectRestVCap = 65535u;
 /// THE REST'S SAMPLE SEQUENCE (commit 8): a rest sample's index is the rest sequence's base (knobs.z at rest) plus the
@@ -52,6 +66,36 @@ float jahRestHandOverWeight( float v, float N )
 {
 	const float x = 1.0 - min( v / jahRestHandOverLength( N ), 1.0 );
 	return 1.0 - x * x;
+}
+/// THE NO-POP FOLLOW OF A CACHE REFINEMENT (PHOTON-7 8B, B2 - the gather's B3 in the reflection's form; the set's binding
+/// 62, OgreRayQuery.cpp kReflectRefineBinding: an rgba32ui a trace texel and eye - x, y.lo the SHOWN answer D in halves,
+/// z the stop window's start v, w
+/// the word). A texel reached at rest by an ESTIMATE CONVERGING alone (rq_reflect.comp restHitKind 1: a card's capture,
+/// relight or card-to-card round, a scroll's slab, the store's bricks relighting on a close that lists no scene change -
+/// the caches refined what its hit reads, the world did not change), stopped or still converging, RE-RESTS AT A CODE A
+/// FRAME (a scene change - a mover, an edit, a lamp, a lamp's shadow range - resumes it at once): its
+/// rest restarts as a resume's, and every reader SHOWS D, which the temporal pass SLEWS each frame toward the texel's
+/// COMPOSED answer T (the accumulated estimate, never a frame's raw sample: D does not random-walk on the estimator's
+/// noise) by at most ONE DISPLAY CODE per channel - the code distance integrated along the step as the delta is, the
+/// same curve at every brightness. The picture follows the re-convergence and never steps by more than a code. (The
+/// first build HELD the old answer until the new rest stopped and then walked: a glossy texel's ~500-frame re-convergence
+/// frozen - the instrument's read, 2026-10-29.) The texel counts active until D has reached T on a stopped texel, when
+/// the word clears. A real change (a mover, a light, a slab, an edit, a brick) resumes it at once from what it shows.
+/// The word: kRefineReach = the trace found a card-only reach THIS frame (the temporal pass consumes it), kRefineRefining
+/// = D is shown.
+/// kRefineWindow = the stop window's start (z) is held.
+const uint kRefineReach = 1u, kRefineRefining = 2u, kRefineWindow = 4u;
+vec3 jahRefineD( uvec4 r ) { return vec3( unpackHalf2x16( r.x ), unpackHalf2x16( r.y ).x ); }
+uvec4 jahRefineWithD( uvec4 r, vec3 D )
+{
+	r.x = packHalf2x16( D.xy );
+	r.y = ( r.y & 0xFFFF0000u ) | ( packHalf2x16( vec2( D.z, 0.0 ) ) & 0xFFFFu );
+	return r;
+}
+/// What a reader SHOWS of a texel's composed answer under its refinement word `r`.
+vec3 jahRefineShown( vec3 answer, uvec4 r )
+{
+	return ( r.w & kRefineRefining ) != 0u ? jahRefineD( r ) : answer;
 }
 /// THE COMPOSED ANSWER (G2): the hand-over from the frozen history H (`hasH`: the texel carried one) to the rest mean
 /// M of v samples, the rest mean after it.

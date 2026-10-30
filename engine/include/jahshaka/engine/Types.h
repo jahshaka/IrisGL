@@ -3767,6 +3767,25 @@ struct GatherRay {
 };
 
 /// What the gather did on the last drawn frame of this scene.
+/// ONE RETIRED GATHER FRAME's REST (PHOTON-7 stage 8B, B1; GatherStatus::restLog): its gather frame (GatherStatus::frame's
+/// count before it advanced: the frame it traced), its rest clock K, the cells an input reached, held and active after
+/// it, and whether every cell held.
+struct GatherRestRecord {
+    unsigned frame = 0u;
+    unsigned restK = 0u;
+    unsigned reached = 0u, held = 0u, active = 0u;
+    bool everyHeld = false;
+    /// THE FAST UPDATE (PHOTON-7 stage 8B, B5): the probes that frame with a ray whose hit moved, and those whose own
+    /// amount F passed one half (rq_probe_gather.comp's instrument)
+    unsigned movingProbes = 0u, fastProbes = 0u;
+    /// ...and B3's hand-over: the longest a held cell's picture began to walk that frame, in frames (M = ceil(delta /
+    /// one code)); 0 none began
+    unsigned handoverM = 0u;
+    /// ...and B3's refinement: a card region re-rested a held cell in the background that frame (its rest restarted, its
+    /// picture held - the hold waits for its rest and its hand-over)
+    bool refined = false;
+};
+
 struct GatherStatus {
     /// The scene's row resolved ON: `GiParams::gather` is On and this machine
     /// traces (a ray-capable device, the project's ray row not Off).
@@ -3853,19 +3872,23 @@ struct GatherStatus {
     unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
     bool settled = true;
-    /// THE HOLD ITSELF: every latest view of the scene HELD its last frame (dispatched nothing). Past its rest length a
-    /// view holds unless its hold is owed to the cards' rest decision (PHOTON-7 stage 10, R3: it rests and waits) - so
-    /// `restFrames > settleFrames` alone is not the hold.
+    /// THE HOLD ITSELF: EVERY CELL of every latest view of the scene holds (PHOTON-7 stage 8B, B1: the rest is per
+    /// screen cell - a cell an input reached resumes, every other cell keeps its rest picture; the view's rest clock
+    /// past N means every cell holds).
     bool held = false;
-    /// THE HOLD'S REASONS (PHOTON-2 round 2, L7): the frames the gather's rest key has moved (every input write, the
-    /// ones that file no GI row included: a ray-level refit, a shadow scan, a light write), and whether the inputs owed
-    /// work on the last gathered frame. A frame where either moved is one the hold waited on.
-    unsigned long long keyMoves = 0ull;
+    /// THE CELLS (PHOTON-7 stage 8B, B1), the latest retired frame's (a few frames late): the cells an input reached
+    /// that frame, those held and those active after it, those traced as the ring of an active cell; and the frames
+    /// any cell resumed on (cumulative).
+    unsigned cellsReached = 0u, cellsHeld = 0u, cellsActive = 0u, cellsRing = 0u;
+    unsigned long long resumes = 0ull;
+    /// ...AND THE RETIRED FRAMES' OWN RECORDS (the last 32, oldest first), by the gather frame each one traced (`frame`
+    /// counts them: a record names the frame it belongs to, so a reader attributes it there and not to the frame it
+    /// arrived in): its rest clock, the cells reached, held and active, and whether every cell held after it.
+    std::vector<GatherRestRecord> restLog;
     /// THE CAMERA CUTS (PHOTON-2 round 2, N3): the frames a view of the gather detected a cut on (a view axis turned
     /// more than 75 degrees or the eye moved more than 100 m between two frames - Lumen's rule) and restarted its
     /// history; the most any view counted.
     unsigned cameraCuts = 0u;
-    bool inputsBusy = false;
     /// THE FOLIAGE RULE'S OWN ACCEPTS (PHOTON-2 L8, K5's guard): the pixels whose history only the foliage class's
     /// looser test accepted (a depth delta between the 1 % and the 3 % bounds), summed over the gathered frames since
     /// the view began (a few frames late). 0 under gather.classOff by construction.
@@ -3906,6 +3929,10 @@ struct GatherStatus {
     /// ...and per pixel the VIEW DISTANCE the integrate wrote (the history word's bits 0-20: linear depth along the
     /// view axis; 0 = no surface), the same layout (PHOTON-2 round 2, M1's moving window).
     std::vector<float> historyDist;
+    /// ...and per pixel the history's VALIDITY STREAK (PHOTON-7 stage 8B): the frames its history has been carried
+    /// unbroken (0..255; 1 = none usable this frame) - what "the gather saw it before the stop" means (the stillness
+    /// door's mask); `historyCount` is the BLEND's N (B5's fast update stores the shortened N'), never an age.
+    std::vector<unsigned char> historyStreak;
     unsigned historyCountW = 0u, historyCountH = 0u;
     unsigned historyCountFrame = 0u;
     /// THE GATHER-HITS READBACK (FAR-SUN-1; the arm "gather.hitsReadback"): what answered EVERY
@@ -4429,8 +4456,13 @@ enum class GiRegionKind : uint32_t {
     MoverShadow = 5,
     LampShadow = 6,    ///< the range sphere's box of a lamp whose range meets a casting mover (its shadow cannot leave it)
     Lamp = 7,          ///< a lamp's old range sphere joined with its new one (its pose, colour or range changed; it came or went)
+    /// ...a relit card's instance box whose relight a SCENE change caused - its first round after a lamp's, the sun's or
+    /// a material edit's write (SurfaceCache CardRec::sceneCause; PHOTON-7 8B (A), the lead's ruling): the world changed,
+    /// carried through the cache - its readers resume at once. Card (2) is the cache refining (a capture, an eviction,
+    /// a convergence round): an estimate converging, the readers' slew.
+    CardScene = 8,
 };
-constexpr unsigned kGiRegionKindCount = 8u;   ///< indexed by the kind's value (0 unused)
+constexpr unsigned kGiRegionKindCount = 9u;   ///< indexed by the kind's value (0 unused)
 constexpr unsigned kGiRegionCap = 128u;       ///< regions a list holds; past it boxes MERGE (never an overflow)
 /// "CANNOT SAY WHERE" (GiChangedRegions::overflow, bits): the sun changed (a directional light, the cloud layer's
 /// shadow on it) or the sky did (the environment, the ambient, the fog) - every sun- or sky-lit cache changed - or a

@@ -164,7 +164,12 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 	const uint reader = uint( JAH_CARD_DEMAND );
 	// THE DEMAND SPAN (PHOTON-7 stage 10, the per-reader snapshot): a reader past its rest indices [1, N + the due]
 	// stamps nothing - its demand is that span in every run (the face hits below are counted all the same)
+	// (...and a reader whose rest clock lives on the device gates them on it there: JAH_CARD_STAMP_GATE, the gather's)
+#ifdef JAH_CARD_STAMP_GATE
+	const bool stamps = JAH_HIT_PARAMS.cards.z > 0.5 && JAH_CARD_STAMP_GATE;
+#else
 	const bool stamps = JAH_HIT_PARAMS.cards.z > 0.5;
+#endif
 	if( stamps && pick.ok )
 	{
 		const uvec4 at = jahCards[pick.card].atlas;
@@ -174,16 +179,28 @@ void jahCardDemand( uint slot, JahCardPick pick, vec3 facing )
 	// THE FACE BUCKET ON EVERY HIT, ANSWERED OR NOT (PHOTON-7 stage 10-3, F3): the rest's demand is the faces the rays
 	// HIT. A mark written only when no card answered made it follow the cache's state - a resident card not yet
 	// (re)captured answers nothing, so whether a face was marked followed the capture queue's history.
+	// (...and a reader whose rest is per cell marks the FACES only from its rest span - or moving: the cards' one rest
+	// decision ranks the faces the RESTED picture reads, a set the pose fixes and no settle's timing does (PHOTON-7 8B,
+	// the lead's ruling); its settling cells' card stamps above still keep what they read resident: JAH_CARD_FACE_GATE)
+	// THE TWO JOBS OF THE MARK (PHOTON-7 8B, the lead's ruling): every hit marks its reader's block - the ADMISSION path,
+	// the window's offers (a face the rays read is in the cache while they read it: a still view's settling cells
+	// admitted nothing through the gate alone - gi.card_closed_form's sixth face, a rest declared on a missing card) -
+	// and a gated reader marks the REST SPAN's block (2) too, the one the decision ranks: JAH_CARD_FACE_GATE
 	if( stamps )
 	{
-		const uint w = 8u * reader + jahCardBucket( facing );
-		jahCardDemandStamp( S + 8194u + 4u * slot + ( w >> 2u ), w & 3u, head.x );
+		const uint b = jahCardBucket( facing );
+		const uint w = 8u * reader + b;
+		jahCardDemandStamp( S + 8194u + 6u * slot + ( w >> 2u ), w & 3u, head.x );
+#ifdef JAH_CARD_FACE_GATE
+		if( JAH_CARD_FACE_GATE )
+			jahCardDemandStamp( S + 8194u + 6u * slot + 4u + ( b >> 2u ), b & 3u, head.x );
+#endif
 	}
 	if( head.y != 0u )
 	{
 		// THE FACE'S HITS (the measuring arm): EVERY read of the face, its card's or none's - the settle law's lambda
 		const uint w = 8u * reader + jahCardBucket( facing );
-		const uint e = S + 8194u + 4u * S + 4u * slot + ( w >> 2u );
+		const uint e = S + 8194u + 6u * S + 4u * slot + ( w >> 2u );
 		const uint k = w & 3u;
 		if( k == 0u )
 			atomicAdd( jahCardInstances[e].x, 1u );

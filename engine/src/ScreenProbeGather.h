@@ -365,6 +365,47 @@ private:
 /// the hits' demand stamps), into the caller's transitions before its command buffer is taken.
 void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const HitSetSources &src);
 
+/// THE GATHER'S RESUME INPUTS (PHOTON-7 stage 8B, B1; RayQueryTier::gatherFrame fills them, rq_probe_resume.comp reads
+/// them): the frame's CHANGED-REGION LIST (PhotonComponent's one buffer, closed before the render), each cascade's BRICK
+/// MASK where this frame's light work wrote it (in the frame: no read-back), and whether the irradiance field is at work.
+struct GatherRestInputs {
+    static constexpr unsigned kCascades = 4u;
+    /// The list's buffer (null: none closed yet) and the close it holds (PhotonComponent::regionCloseSerial: a view
+    /// reads each close once), its region count, its overflow bits and its restart.
+    VkBuffer regions = VK_NULL_HANDLE;
+    VkDeviceSize regionsOffset = 0u, regionsRange = 0u;
+    unsigned long long regionSerial = 0ull;
+    /// ...and the last close that carried an input (PhotonComponent::lastInputCloseSerial): a view that missed draws re-rests
+    /// whole only when a close it missed carried one.
+    unsigned long long lastInputClose = 0ull;
+    unsigned regionCount = 0u;
+    uint32_t overflow = 0u;
+    bool restart = false;
+    /// One cascade's mask, in the hit set's order: its buffer (two words a brick), its bricks, its grid's corner, a
+    /// brick in metres, and whether THIS frame's light work wrote it (`live`; a stale mask is no change).
+    struct Bricks {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0u, range = 0u;
+        uint32_t dims[3] = { 0u, 0u, 0u };
+        float origin[3] = { 0.0f, 0.0f, 0.0f };
+        float brickMetres = 0.0f;
+        bool live = false;
+    } bricks[kCascades];
+    /// THE FIELD AT WORK (PhotonComponent::fieldWideWorkOwed: its integration, empties, restarts or refinements): every
+    /// cell a pixel of which read the field's fallback since the camera stopped resumes.
+    bool fieldBusy = false;
+    /// THE SCENE'S DRAW at this record (OgreScene::drawSerial): a view that missed one of its scene's lists re-rests whole.
+    uint32_t drawSerial = 0u;
+    /// Anything at all this frame (a region, an overflow, a live mask, a field box): with none the cells' tests are
+    /// skipped and a view past N + 1 such frames holds whole.
+    bool any() const {
+        if (regionCount || overflow || restart || fieldBusy) return true;
+        for (const Bricks &b : bricks)
+            if (b.live) return true;
+        return false;
+    }
+};
+
 struct GatherInputs {
     const detail::OgreScene *scene = nullptr;
     Ogre::SceneManager *sceneMgr = nullptr;
@@ -432,19 +473,13 @@ struct GatherInputs {
     /// the view's SSR row (GA-TIERROW). ...and the test door's overrides.
     GiGatherFacts facts;
     GatherTuning tuning;
-    /// THE SCENE'S REST KEY (OgreScene::gatherRestKey): moves on every write to an
-    /// input — a light write, an injection landing, a field dispatch, a capture or
-    /// relight, a node moved. With the camera's basis and `inputsBusy` it decides
-    /// the view's state (PHOTON-2 stage 2's round, H1): MOVING (the camera moved),
-    /// SETTLING (the camera still, an input written or owed: the EMA goes on, no
-    /// rest mean, no hold), RESTING (still and quiet: the rest mean, then the hold).
-    unsigned long long restKey = 0ull;
-    /// The scene's GI inputs still owe work (PhotonComponent::gatherInputsBusy): a view
-    /// settles, never rests, until none is owed.
-    bool inputsBusy = false;
-    /// The view's HOLD is owed to the cards' rest decision (PhotonComponent::readersHoldOwed, R3): it rests - its rest
-    /// frames count, its rest mean is the decision's demand - but does not hold until the decision and its work are done.
-    bool holdOwed = false;
+    /// WHAT CHANGED THIS FRAME, WHERE (PHOTON-7 stage 8B, B1): the resume's inputs - the cells they reach resume, every
+    /// other cell keeps its rest (rq_probe_resume.comp). The view-wide rest key, the inputs-busy and the hold-owed
+    /// gates are DELETED with it: a write lands somewhere, and its cells resume when it lands.
+    GatherRestInputs rest;
+    /// THE FAST UPDATE's skin (PHOTON-7 stage 8B, B5): a skinned item was posed this frame (the skin pass's posed slots at
+    /// this frame) - a ray hitting a skinned slot then counts as moving (rq_probe_gather.comp's fastRayMoving)
+    bool fastSkinPosed = false;
     /// THE DEMAND'S DUE (SurfaceCache::demandDueFrames; 0: no span, stamp always): the view stamps the cards it reads at
     /// its rest indices [1, N + this] alone - its demand span (PHOTON-7 stage 10, the per-reader snapshot).
     unsigned demandDue = 0u;
@@ -543,12 +578,11 @@ public:
     static constexpr uint32_t kReaderStaleFrames = 4u;
     /// ...complete once each of its views has traced its demand span, its rest indices [1, N + `due`] (the per-reader
     /// snapshot, PHOTON-7 stage 10); `active`: a view recorded lately (a stale one makes no demand).
-    bool restDemandComplete(const detail::OgreScene *scene, unsigned long long restKey, unsigned &restFrames,
-                            unsigned &restLength, unsigned due, bool &active) const;
+    bool restDemandComplete(const detail::OgreScene *scene, unsigned &restFrames, unsigned &restLength, unsigned due,
+                            bool &active) const;
     /// The rest sequence's N at the shipped tuning (the cards' readers' demand length where no gather runs).
     static unsigned shippedRestLength();
-    void statsInto(const detail::OgreScene *scene, unsigned long long restKey,
-                   unsigned long long restartKey, GatherStatus &out) const;
+    void statsInto(const detail::OgreScene *scene, unsigned long long restartKey, GatherStatus &out) const;
     /// The shot-view fold's numbers alone (statsInto calls it; also with no live view of the scene).
     void shotInto(const detail::OgreScene *scene, GatherStatus &out) const;
     /// ...and its entry's end, with the scene (RayQueryTier::forgetScene).
@@ -610,20 +644,45 @@ private:
         VkImage history[2] = {};
         VkDeviceMemory historyMemory[2] = {};
         VkImageView historyView[2] = {};
+        /// THE HISTORY's VALIDITY STREAK (PHOTON-7 stage 8B, the lead's ruling): R8 at the history's resolution, a
+        /// ping-pong pair like it - the frames each pixel's history has been carried unbroken (/ 255), 0 none. The count in
+        /// the history word is the blend's N (B5's fast update stores N'), never this.
+        VkImage streak[2] = {};
+        VkDeviceMemory streakMemory[2] = {};
+        VkImageView streakView[2] = {};
         /// Which of the pair is THIS frame's.
         unsigned flip = 0u;
         /// THE VIEW'S AGE: consecutive frames the history has been written
         /// (0 = the previous images hold nothing and are never read).
         unsigned age = 0u;
-        /// THE REST (PHOTON-GATHER-1d): consecutive frames with the camera, the
-        /// scene's rest key and the estimator unchanged, and the key the last
-        /// frame saw. Past N (settleFramesOf) the view HOLDS: nothing is dispatched.
+        /// THE REST, PER CELL (PHOTON-7 stage 8B, B1; jah_probe_rest.glsl): the rest clock K as the host knows it
+        /// (restKnown: the read-back's, extended by the frames since where no input could reach a cell; a frame with
+        /// inputs since makes it the frames since the last such frame - a lower bound until its read-back lands).
         unsigned restFrames = 0u;
-        unsigned long long restKey = 0ull;
-        /// THE HOLD'S TWO REASONS, counted (PHOTON-2 round 2, L7): the frames the rest key moved (an input written)
-        /// and whether the inputs owed work on the last gathered frame - what the stillness door reads as "the last
-        /// frame the hold waited on", rows or none (a ray-level refit, a shadow scan, a light write file no GI row).
-        unsigned long long keyMoves = 0ull;
+        /// ...the cells' buffers (device-local): their state (two words a cell: the state bits, the ring bit), their
+        /// distance store (130 words a cell: 520 B), the clock (eight words), the brick pyramids (sized by the masks)
+        VkBuffer cellState = VK_NULL_HANDLE, cellStore = VK_NULL_HANDLE, clock = VK_NULL_HANDLE, pyramid = VK_NULL_HANDLE;
+        VkDeviceMemory cellStateMemory = VK_NULL_HANDLE, cellStoreMemory = VK_NULL_HANDLE, clockMemory = VK_NULL_HANDLE,
+                       pyramidMemory = VK_NULL_HANDLE;
+        VkDeviceSize pyramidBytes = 0u;
+        /// ...made this size, and zeroed on the device yet (every cell active, the clock at 0)
+        bool cellsCleared = false;
+        /// ...the resume's parameter block and set per ring slot
+        VkBuffer restParams[3] = {};
+        VkDeviceMemory restParamsMemory[3] = {};
+        void *restParamsMapped[3] = {};
+        VkDescriptorSet resumeSets[3] = {};
+        /// ...the changed-region list's close this view read last (a close is read once)
+        unsigned long long regionSerialSeen = 0ull;
+        /// ...the gather frame of the last frame that had a resume input or moved, and of the last that moved (the
+        /// clock's 0 for certain: a retired clock older than it says nothing of this rest)
+        unsigned lastInputFrame = 0u, lastMovedFrame = 0u;
+        /// ...the latest retired clock: its gather frame, K, and the cells reached / held / active / ring then, and
+        /// the frames that resumed (cumulative); `restLog` the last retired records (GatherStatus::restLog)
+        bool clockKnown = false;
+        unsigned clockFrame = 0u, clockK = 0u, cellsReached = 0u, cellsHeld = 0u, cellsActive = 0u, cellsRing = 0u;
+        unsigned long long resumes = 0ull;
+        std::vector<GatherRestRecord> restLog;
         /// THE CAMERA CUTS this view detected (N3: isCameraCut) - each one a history restart.
         unsigned cameraCuts = 0u;
         /// PHOTON-2 L8: the pixels whose history the foliage rule ALONE accepted (between the 1 % and 3 % depth
@@ -632,7 +691,6 @@ private:
         /// PHOTON-7 stage 10-3: the pixels that reached the hold with no rest sample (NO SAMPLE there), the diffuse's and
         /// the rough specular's, the last traced frame's
         unsigned starvedDiffuse = 0u, starvedRough = 0u;
-        bool inputsBusyLast = false;
         /// ...and whether it HELD its last frame (GatherStatus::held)
         bool heldLast = false;
         /// THE SETTLE (the fix round's split): frames drawn since the history's
@@ -745,6 +803,7 @@ private:
         std::vector<unsigned char> histHost;
         std::vector<unsigned char> histClassHost;   ///< ...its class bit (bit 21), the same layout
         std::vector<float> histDistHost;            ///< ...its view distance (bits 0-20), the same layout
+        std::vector<unsigned char> histStreakHost;  ///< ...and its validity streak (the streak pair), the same layout
         unsigned histHostFrame = 0u;
         /// THE GATHER-HITS READBACK (FAR-SUN-1): the trace's per-ray records (device, one
         /// uvec4 per ray of every uniform probe), a host ring of them and of the atlas rows the
@@ -795,6 +854,9 @@ private:
     };
 
     bool makePipelines(std::string &err);
+    /// The rest clock K as the host knows it (statsInto, restDemandComplete; OgreScreenProbeGather.cpp says how).
+    static unsigned restKnownOf(const View &v);
+    static bool everyCellHeldOf(const View &v, unsigned restN);
     bool ensureTargets(View &v, const GatherInputs &in, unsigned stride, unsigned octRes,
                        unsigned adaptiveCap, std::string &err);
     void drop(View &v);
@@ -839,6 +901,14 @@ private:
     VkShaderModule mTraceModule = VK_NULL_HANDLE;
     VkShaderModule mFilterModule = VK_NULL_HANDLE;
     VkShaderModule mIntegrateModule = VK_NULL_HANDLE;
+    /// THE RESUME's FIVE JOBS (PHOTON-7 stage 8B, B1; rq_probe_resume.comp): the test, the brick pyramids, the clock,
+    /// the finalize and the ring - one layout, a pipeline each.
+    static constexpr unsigned kResumeJobs = 5u;
+    enum ResumeJob : unsigned { kResumeTest = 0u, kResumePyramid = 1u, kResumeClock = 2u, kResumeFinal = 3u, kResumeRing = 4u };
+    VkDescriptorSetLayout mResumeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout mResumePipeLayout[kResumeJobs] = {};
+    VkShaderModule mResumeModule[kResumeJobs] = {};
+    VkPipeline mResumePipeline[kResumeJobs] = {};
     VkDescriptorPool mPool = VK_NULL_HANDLE;
     /// The pipelines could not be made on this device: say so ONCE and take the
     /// fallback picture (the cones and the field) for the rest of the process.

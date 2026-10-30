@@ -187,6 +187,14 @@ layout( set = 0, binding = JAH_PROBE_PARAMS_BINDING ) uniform ProbeParams
 	/// gather.roughQuadrature): >= 1 the filtered map itself is stored in the layer after the levels, 2 the integrate
 	/// reads the lobe by brute force over it (the split sum's own error, gi.rough_lobe_quadrature); 0 shipped.
 	vec4 roughLevels;
+	/// THE FAST UPDATE (PHOTON-7 stage 8B, B5; Lumen's FastUpdateMode, LumenScreenProbeGatherTemporal.usf:486-497): x the
+	/// share of a probe's rays MOVING that saturates it (FractionOfLightingMovingForFastUpdateMode, 0.1), y its most
+	/// (MaxFastUpdateModeAmount, 0.9), z 1 = a skinned item was posed this frame, w 1 = on (the masks and the instance table bound)
+	vec4 fast;
+	/// ...the brick masks a hit's change is read from (rq_probe_gather.comp): per cascade, in the hit set's order, xyz the
+	/// grid's corner and w a brick in metres; then xyz its bricks and w 1 = this frame's light work wrote it
+	vec4 fastBrickOrigin[4];
+	vec4 fastBrickDims[4];
 	// THE HIT SET'S UNIFORMS (PHOTON-7 stage 10, 10-2: the one text, jah_rq_hit_params.glsl)
 	JahHitParams hit;
 } p;

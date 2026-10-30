@@ -22,11 +22,13 @@
 //   [S + 1]   the hit counts while the flag is set: ( reflection carded, uncarded, gather carded, uncarded );
 //   [S + 2 .. S + 2 + 8192)   per ATLAS CELL (16 texels a side, y x 128 + x) and PER READER (word 2 x cell + reader):
 //                             the stamp of the last frame that reader read the card whose corner is that cell;
-//   [S + 8194 .. S + 8194 + 4S)   per ITEM SLOT, per reader, per face bucket (the hit's facing axis and its sign: word
-//                             16 x slot + 8 x reader + bucket): the stamp of the last frame a hit there found NO card -
-//                             the faces the readers want. Per reader because a reader at REST (the reflection held,
-//                             the gather held) reads nothing: what it read stays wanted on its own clock;
-//   [S + 8194 + 4S .. + 4S)   per ITEM SLOT, per reader, per face bucket (the marks' layout), the HITS on that face
+//   [S + 8194 .. S + 8194 + 6S)   per ITEM SLOT, per MARK READER, per face bucket (the hit's facing axis and its sign:
+//                             word 24 x slot + 8 x reader + bucket): the stamp of the last frame a hit there - the
+//                             faces the readers want. Per reader because a reader at REST (the reflection held, the
+//                             gather held) reads nothing: what it read stays wanted on its own clock. Mark reader 2 is
+//                             the gather's REST SPAN (JAH_CARD_FACE_GATE, the decision's rank; 1 its every hit, the
+//                             admission - PHOTON-7 8B);
+//   [S + 8194 + 6S .. + 4S)   per ITEM SLOT, per reader, per face bucket (word 16 x slot + 8 x reader + bucket), the HITS on that face
 //                             while the count flag is set - every read, its card's or none's (cumulative: the measuring
 //                             arm cards.demandCount - a row's read rate per face, the settle law's lambda).
 // A reader defines JAH_CARD_DEMAND (its index: 0 the reflection, 1 the gather) before including jah_rq_card.glsl;
