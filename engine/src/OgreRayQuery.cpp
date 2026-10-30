@@ -132,6 +132,8 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>   // MEASURING ARM (DETERMINISM-1 arm T)
+#include <string>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -1311,6 +1313,11 @@ private:
             bool     se = false;          ///< the moving SE instrument was copied beside it
         };
         HistPending histPending[kReflectRing];
+        /// MEASURING ARM (DETERMINISM-1 arm T, to be reverted): the Ogre textures the pass samples, and the copies.
+        Ogre::TextureGpu *diagT[5] = {};
+        struct DiagT { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull; bool outputs = false;
+                       unsigned long long ubo = 0ull; std::vector<std::pair<std::string, size_t>> parts; };
+        DiagT diagTemp[8];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
         /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
@@ -1339,6 +1346,8 @@ private:
     void dropReflect(ReflectView &rv);
     /// The history-count readback (PHOTON-2 stage 0): decode the retired copies, copy this frame's.
     void readReflectHistory(ReflectView &rv, VkCommandBuffer cmd);
+    /// MEASURING ARM (DETERMINISM-1 arm T, to be reverted): the temporal pass's every input (outputs = false) or output
+    void diagTemporal(ReflectView &rv, const ReflectPassListener *key, VkCommandBuffer cmd, unsigned ring, bool outputs);
 
     std::unordered_map<const ReflectPassListener *, ReflectView> mReflects;
     /// THE SHOT-VIEW FOLD (PHOTON-7 stage 10-3): a screenshot's shot view is destroyed right after its readback, and
@@ -7485,6 +7494,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
     clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
+    rv.diagT[0] = ssrTex; rv.diagT[1] = normalTex; rv.diagT[2] = roughTex; rv.diagT[3] = depthTex;   // (MEASURING ARM T)
+    rv.diagT[4] = exposureTex;
     // THE BREAK'S COMPOSE (G2): every texel's answer at rest - lerp( H, M, min( v / N, 1 ) ) - into the half the trace
     // reads, at its own texel, before the trace reprojects it; the moving rules resume from the picture on screen.
     if (restBreak && mComposePipeline) {
@@ -8832,6 +8843,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &resolved, 0, nullptr, 0, nullptr);
     }
+    diagTemporal(rv, key, cmd, ring, false);   // MEASURING ARM T: the temporal pass's inputs
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTemporalPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectPipeLayout, 0, 1,
                             &rv.sets[ring], 0, nullptr);
@@ -8848,6 +8860,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &meanBlended, 0, nullptr, 0, nullptr);
     }
+    diagTemporal(rv, key, cmd, ring, true);   // MEASURING ARM T: its outputs, after the barrier that orders them
     }
     // THE FILTER AND THE COMPOSITE — the same descriptor set, a different
     // pipeline. Its time is the SAME row as the trace's, deliberately:
@@ -8866,6 +8879,160 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
+}
+
+// MEASURING ARM (DETERMINISM-1 arm T, to be reverted; JAH_DIAG_TEMP=<from rf>:<to rf>): the temporal pass's every input
+// (before its dispatch, after the barrier that orders its producers) or every output (after the barrier that orders them
+// for the filter), copied raw and read once the frame retired (VaoManager::waitForSpecificFrameToFinish, the fork's frame
+// fence), one hash each; the uniform block's host bytes hashed. A sampled Ogre texture is moved to GENERAL for its copy and
+// back to the layout it was in (never a layout left behind).
+void RayQueryTier::diagTemporal(ReflectView &rv, const ReflectPassListener *key, VkCommandBuffer cmd, unsigned ring,
+                                bool outputs) {
+    static const std::string win = std::getenv("JAH_DIAG_TEMP") ? std::getenv("JAH_DIAG_TEMP") : "";
+    if (win.empty() || !cmd) return;
+    const auto mix = [](unsigned long long x) {
+        x += 0x9E3779B97F4A7C15ull;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+        return x ^ (x >> 31);
+    };
+    const auto hashBytes = [&](const unsigned char *b, size_t n) {
+        unsigned long long h = 0x51ED270B27u;
+        for (size_t i = 0; i + 8u <= n; i += 8u) {
+            unsigned long long v = 0ull;
+            std::memcpy(&v, b + i, 8u);
+            h = mix(h ^ v);
+        }
+        for (size_t i = n & ~size_t(7); i < n; ++i) h = mix(h ^ b[i]);
+        return h;
+    };
+    const uint32_t now = frameNow(), inFlight = framesInFlight();
+    for (ReflectView::DiagT &d : rv.diagTemp) {
+        if (!d.live || uint32_t(now - d.frame) < inFlight) continue;
+        if (mDev && mDev->mVaoManager) mDev->mVaoManager->waitForSpecificFrameToFinish(d.frame);
+        d.live = false;
+        const unsigned char *m = static_cast<const unsigned char *>(d.host.mapped);
+        char hx[24];
+        std::snprintf(hx, sizeof(hx), "%016llx", d.ubo);
+        std::string line = std::string(d.outputs ? "DIAG TOUT rf " : "DIAG TIN rf ") + std::to_string(d.rf) + " ubo " + hx;
+        size_t at = 0u;
+        for (const auto &part : d.parts) {
+            std::snprintf(hx, sizeof(hx), "%016llx", hashBytes(m + at, part.second));
+            line += " " + part.first + " " + hx;
+            at += part.second;
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+    const unsigned long long rfNow = Ogre::Root::getSingleton().getNextFrameNumber();
+    const unsigned long long from = std::strtoull(win.c_str(), nullptr, 10),
+                             to = std::strtoull(win.c_str() + win.find(':') + 1, nullptr, 10);
+    if (rfNow < from || rfNow > to) return;
+    ReflectView::DiagT *slot = nullptr;
+    for (ReflectView::DiagT &d : rv.diagTemp)
+        if (!d.live) { slot = &d; break; }
+    if (!slot) return;
+    const unsigned w = rv.traceW, h = rv.traceH, L = rv.layers;
+    struct Img { std::string name; VkImage image; VkImageLayout layout; unsigned w, h, layers, bpp; VkImageAspectFlags aspect;
+                 bool ogre; };
+    std::vector<Img> imgs;
+    const auto own = [&](const char *n, const ReflectImage &ri, unsigned bpp) {
+        if (ri.image) imgs.push_back(Img{ n, ri.image, VK_IMAGE_LAYOUT_GENERAL, w, h, L, bpp, VK_IMAGE_ASPECT_COLOR_BIT, false });
+    };
+    own("histPrev", rv.hist[rv.prevIdx], 8u);
+    own("histCur", rv.hist[rv.curIdx], 8u);
+    own("statePrev", rv.state[rv.prevIdx], 8u);
+    own("stateCur", rv.state[rv.curIdx], 8u);
+    own("share", rv.share, 4u);
+    own("refine", rv.refine, 16u);
+    if (!outputs) own("sample", rv.sample, 8u);
+    if (!outputs) {
+        const char *names[5] = { "ssrReflection", "gNormals", "gShadowRough", "sceneDepth", "exposure" };
+        for (int k = 0; k < 5; ++k) {
+            Ogre::TextureGpu *t = rv.diagT[k];
+            if (!t) continue;
+            auto *vt = static_cast<Ogre::VulkanTextureGpu *>(t);
+            const bool depth = Ogre::PixelFormatGpuUtils::isDepth(t->getPixelFormat());
+            imgs.push_back(Img{ names[k], vt->getFinalTextureName(), vt->mCurrLayout, t->getWidth(), t->getHeight(),
+                                t->getNumSlices(), Ogre::PixelFormatGpuUtils::getBytesPerPixel(t->getPixelFormat()),
+                                VkImageAspectFlags(depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), true });
+        }
+    }
+    std::vector<std::pair<std::string, VkDescriptorBufferInfo>> bufs;
+    {
+        auto hit = mHits.find(key);
+        if (hit != mHits.end() && hit->second.buf) {
+            VkDescriptorBufferInfo b = rawBufferInfo(hit->second.buf);
+            b.range = hit->second.buf->getTotalSizeBytes();
+            bufs.emplace_back("hitBuf", b);
+        }
+        if (rv.movingSe.buffer) bufs.emplace_back("movingSe", VkDescriptorBufferInfo{ rv.movingSe.buffer, 0u, rv.movingSe.size });
+        if (rv.pick.buffer) bufs.emplace_back("pick", VkDescriptorBufferInfo{ rv.pick.buffer, 0u, rv.pick.size });
+    }
+    slot->parts.clear();
+    size_t total = 0u;
+    for (const Img &i : imgs) { const size_t b = size_t(i.w) * i.h * i.layers * i.bpp; slot->parts.emplace_back(i.name, b); total += b; }
+    for (const auto &b : bufs) { slot->parts.emplace_back(b.first, size_t(b.second.range)); total += size_t(b.second.range); }
+    if (slot->host.buffer && slot->host.size < total) retire(slot->host);
+    std::string err;
+    if (!total || (!slot->host.buffer && !makeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err)))
+        return;
+    slot->ubo = rv.params[ring].mapped
+                    ? hashBytes(static_cast<const unsigned char *>(rv.params[ring].mapped), sizeof(ReflectParams)) : 0ull;
+    std::vector<VkImageMemoryBarrier> toGen, back;
+    for (const Img &i : imgs) {
+        if (!i.ogre || i.layout == VK_IMAGE_LAYOUT_GENERAL) continue;
+        VkImageMemoryBarrier b{};
+        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                          VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b.oldLayout = i.layout;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = i.image;
+        b.subresourceRange = { i.aspect, 0u, 1u, 0u, i.layers };
+        toGen.push_back(b);
+        b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.newLayout = i.layout;
+        back.push_back(b);
+    }
+    VkMemoryBarrier toCopy{};
+    toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy, 0, nullptr,
+                         uint32_t(toGen.size()), toGen.data());
+    VkDeviceSize off = 0u;
+    for (const Img &i : imgs) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = off;
+        region.imageSubresource.aspectMask = i.aspect;
+        region.imageSubresource.layerCount = i.layers;
+        region.imageExtent = { i.w, i.h, 1u };
+        vkCmdCopyImageToBuffer(cmd, i.image, VK_IMAGE_LAYOUT_GENERAL, slot->host.buffer, 1, &region);
+        off += VkDeviceSize(i.w) * i.h * i.layers * i.bpp;
+    }
+    for (const auto &b : bufs) {
+        VkBufferCopy bc{};
+        bc.srcOffset = b.second.offset;
+        bc.dstOffset = off;
+        bc.size = b.second.range;
+        vkCmdCopyBuffer(cmd, b.second.buffer, slot->host.buffer, 1, &bc);
+        off += bc.size;
+    }
+    VkMemoryBarrier after{};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 1, &after, 0, nullptr, uint32_t(back.size()), back.data());
+    slot->live = true;
+    slot->frame = now;
+    slot->rf = rfNow;
+    slot->outputs = outputs;
 }
 
 // THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, the arm "reflect.historyReadback") — the stillness
