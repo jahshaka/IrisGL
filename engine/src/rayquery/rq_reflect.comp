@@ -286,14 +286,20 @@ layout( std430, set = 0, binding = 61 ) readonly buffer JahRestBricks3 { uint w[
 /// THE REFINEMENT (binding 62, jah_reflect_rest.glsl kRefine*): the trace marks an estimate-only reach of any texel at rest
 /// (kRefineReach, this frame's), and counts a stopped texel still refining as active.
 layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
-bool restBrickChanged( uint c, uint idx )
+/// A BRICK's CHANGE this frame by its CAUSE (PHOTON-7 8B, the lead's ruling): 2 its DIRECT word moved (word 0: the most
+/// a voxel's direct term changed in the frame's injections - the direct term moves only when a light, a shadow or the
+/// geometry does: the world changing, over every frame its injection is spread across), 1 only its FEEDBACK word moved
+/// (word 1: the store relighting toward its fixed point - an estimate converging), 0 none. A NaN word is a change.
+uint restBrickChange( uint c, uint idx )
 {
 	uint a = 0u, b = 0u;
 	if( c == 0u ) { a = restBricks0.w[2u * idx]; b = restBricks0.w[2u * idx + 1u]; }
 	else if( c == 1u ) { a = restBricks1.w[2u * idx]; b = restBricks1.w[2u * idx + 1u]; }
 	else if( c == 2u ) { a = restBricks2.w[2u * idx]; b = restBricks2.w[2u * idx + 1u]; }
 	else { a = restBricks3.w[2u * idx]; b = restBricks3.w[2u * idx + 1u]; }
-	return jahBrickChangedWords( a, b );
+	if( jahBrickChangedWords( a, 0u ) )
+		return 2u;
+	return jahBrickChangedWords( 0u, b ) ? 1u : 0u;
 }
 /// A SEGMENT THE TRACED GEOMETRY CHANGED ACROSS THIS FRAME (G6; B2): origin o, unit direction d, length t, against the
 /// list's MOVERS - a moved, staged or posed slot's swept box (its bounds this frame and last, joined: every transform
@@ -335,6 +341,7 @@ uint restHitKind( vec3 x, float r )
 	if( p.restLists.y > 0.5 )
 		return 2u;
 	uint found = 0u;
+	bool inSlab = false;
 	const uint n = min( uint( p.restLists.x + 0.5 ), 128u );
 	for( uint k = 0u; k < n; ++k )
 	{
@@ -346,6 +353,7 @@ uint restHitKind( vec3 x, float r )
 			continue;
 		if( kind == kRegionEdit || kind == kRegionLamp || kind == kRegionLampShadow || kind == kRegionCardScene )
 			return 2u;   // (a scene change: CardScene is a relight a scene write caused - 8B (A))
+		inSlab = inSlab || kind == kRegionSlab;
 		found = 1u;   // (Card, Slab)
 	}
 	if( p.restLists.z < 0.5 )
@@ -375,8 +383,16 @@ uint restHitKind( vec3 x, float r )
 	for( int z = b0.z; z <= b1.z; ++z )
 		for( int y = b0.y; y <= b1.y; ++y )
 			for( int xx = b0.x; xx <= b1.x; ++xx )
-				if( restBrickChanged( c, uint( ( z * dims.y + y ) * dims.x + xx ) ) )
-					return p.restLists.w > 0.5 ? 2u : 1u;
+			{
+				// (a brick's DIRECT change is the world changing - unless a Slab of this close re-injected it, a
+				// cascade's commit: the store's own estimate; its FEEDBACK change is the store converging, a scene
+				// change only on a close that listed one)
+				const uint ch = restBrickChange( c, uint( ( z * dims.y + y ) * dims.x + xx ) );
+				if( ch == 2u && !inSlab )
+					return 2u;
+				if( ch != 0u )
+					found = max( found, p.restLists.w > 0.5 ? 2u : 1u );
+			}
 	return found;
 }
 
