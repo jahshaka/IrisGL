@@ -665,6 +665,10 @@ private:
         uint32_t hitSlotUntil[kFramesInFlight] = {};
         int hitSlot = -1;
         std::vector<uint32_t> hitWords, hitScratch;
+        /// THE TABLES' CONTENT GENERATIONS (DETERMINISM-1, C4): bumped when the alpha table's or the hit table's words
+        /// change (each re-made then: a fresh buffer, a fresh address). The reflection's rest key folds THESE, never an
+        /// address - a device address is the process's allocation, not the picture's input.
+        unsigned long long alphaGen = 0ull, hitGen = 0ull;
         /// THE EMITTER TABLE (PHOTON-7 stage 11, 11-1a; updateEmitterTable): the reflection's NEE targets, a section of
         /// the hit table (its u[5] / u[6]). `emitterWords` the section as last derived (kEmitterWords a target, ordered
         /// by slot); the inputs it was derived from (the GPU scene's writes, slot count and mesh set, the rows' serial,
@@ -1324,6 +1328,10 @@ private:
             bool     se = false;          ///< the moving SE instrument was copied beside it
         };
         HistPending histPending[kReflectRing];
+        /// THE PASS'S SAMPLED READS (DETERMINISM-1, M3): the G-buffer normals, the shadow-roughness, the depth and the
+        /// exposure the trace transitioned - the resolve, the temporal pass and the filter read them too, and declare
+        /// them again at finishReflect (a pass between the trace and finishReflect may have moved them)
+        Ogre::TextureGpu *passReads[4] = {};
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
         /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
@@ -1791,6 +1799,12 @@ private:
         /// The newest retired frame's counters (RayQueryStatus) and the scene draw they landed at (a view whose readings
         /// stopped is STALE: the status counts live views only).
         unsigned long long appended = 0ull, dropped = 0ull;
+        /// THE REST BOUND's WORDS (8-9) are copied AFTER finishReflect (DETERMINISM-1, M1): the temporal pass adds to
+        /// them after the composite's counter copy, so the copy of all twelve words there raced its atomics (a
+        /// write-after-read, the cb2636c0b class by a raw copy). The slot this frame's counters went to, and whether
+        /// its words 8-9 are still owed.
+        uint32_t boundCopySlot = 0u;
+        bool boundCopyOwed = false;
         uint32_t readDraw = 0u;
         bool everRead = false;
         /// ...THE PER-VIEW READOUT (RayQueryStatus::hitViews, PHOTON-7 stage 0's read R4): the view's eyes and one
@@ -7092,10 +7106,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
         foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
         {
-            // THE HIT SET'S UNIFORMS, all but the list's capacity (as before: the list grows under a rest)
+            // THE HIT SET'S UNIFORMS, all but the list's capacity (as before: the list grows under a rest) - and NOT the
+            // DEVICE ADDRESSES (DETERMINISM-1, C4: the alpha and hit tables' in `tables`, the tier counters' in
+            // `surface.zw`): an address is the process's allocation, so a table re-made at a new address broke a rest
+            // in one process and not another's; the tables' CONTENT generations stand for them (the counters' address
+            // is no picture input at all)
             HitSetParams h = pp.hit;
             h.hitList[0] = 0.0f;
+            for (float &t : h.tables) t = 0.0f;
+            h.surface[2] = 0.0f;
+            h.surface[3] = 0.0f;
             foldBytes(&h, sizeof(h));
+            foldBytes(&sa.alphaGen, sizeof(sa.alphaGen));
+            foldBytes(&sa.hitGen, sizeof(sa.hitGen));
         }
         foldF(pp.motion[0]); foldF(pp.motion[1]); foldF(pp.motion[2]);
         foldF(pp.alpha[0]); foldF(pp.alpha[2]); foldF(pp.alpha[3]);   // (NOT alpha.y: the pick, an instrument - its slot
@@ -7503,6 +7526,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!cmd) { bail("frameCmd"); return; }   // device lost: record nothing
     clearDummyImages(cmd);
     clearReflectImages(rv, cmd);
+    rv.passReads[0] = normalTex; rv.passReads[1] = roughTex; rv.passReads[2] = depthTex; rv.passReads[3] = exposureTex;
     // THE BREAK'S COMPOSE (G2): every texel's answer at rest - lerp( H, M, min( v / N, 1 ) ) - into the half the trace
     // reads, at its own texel, before the trace reprojects it; the moving rules resume from the picture on screen.
     if (restBreak && mComposePipeline) {
@@ -7780,6 +7804,7 @@ void RayQueryTier::updateAlphaTable(OgreScene *scene, SceneAs &sa) {
             w.clear();
         }
     }
+    ++sa.alphaGen;   // (C4: the words changed - the rest key's input)
     sa.alphaWords.swap(w);
 }
 
@@ -8386,6 +8411,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
             sa.hitTableAddress = 0;
             sa.hitTableCap[ring] = 0u;
             w.clear();
+            ++sa.hitGen;   // (C4)
             sa.hitWords.swap(w);
             return;
         }
@@ -8401,6 +8427,7 @@ void RayQueryTier::updateHitTable(OgreScene *scene, SceneAs &sa) {
     if (sa.hitSlot >= 0) sa.hitSlotUntil[sa.hitSlot] = nowFrame ? nowFrame - 1u : 0u;
     sa.hitSlot = int(ring);
     sa.hitSlotUntil[ring] = nowFrame;
+    ++sa.hitGen;   // (C4: the words changed - the rest key's input)
     sa.hitWords.swap(w);
 }
 
@@ -8835,6 +8862,17 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
     rv.finishPending = false;
     const unsigned ring = rv.finishRing;
     const unsigned traceW = rv.traceW, traceH = rv.traceH;
+    // THE SAMPLED READS DECLARED AGAIN (M3), before the command buffer is taken (executeResourceTransition closes every
+    // encoder): the trace's transitions hold only while nothing between the trace and here moves these images; the solver
+    // emits nothing when they still are where the trace left them
+    {
+        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
+        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+        Ogre::ResourceTransitionArray trans;
+        for (Ogre::TextureGpu *t : rv.passReads)
+            if (t) solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read, computeStage);
+        mRs->executeResourceTransition(trans);
+    }
     VkCommandBuffer cmd = frameCmd();
     if (!cmd) return;
     // THE MEAN IS WRITTEN; NOW IT IS READ BY ITS NEIGHBOURS. A plain memory
@@ -8904,6 +8942,39 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
+    // THE REST BOUND's WORDS (M1): the temporal pass's atomics on words 8-9 are done (every reflection dispatch of the
+    // frame is recorded above) - their copy, into the slot the composite's copy filled, ordered after them and before
+    // the host's read. THE PICK (M2): the trace's and the temporal pass's shader writes into the host-visible pick buffer
+    // made visible to the host (no barrier carried SHADER_WRITE to HOST before: the frame barrier's scope ends at
+    // ALL_COMMANDS).
+    auto hit = mHits.find(key);
+    const bool boundOwed = hit != mHits.end() && hit->second.boundCopyOwed && hit->second.buf && hit->second.readback.buffer;
+    if (boundOwed || rv.pick.buffer) {
+        VkMemoryBarrier toCopy{};
+        toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toCopy, 0, nullptr, 0,
+                             nullptr);
+    }
+    if (boundOwed) {
+        HitView &hv = hit->second;
+        const VkDescriptorBufferInfo bi = rawBufferInfo(hv.buf);
+        VkBufferCopy region{};
+        region.srcOffset = bi.offset + 8u * 4u;
+        region.dstOffset = VkDeviceSize(hv.boundCopySlot) * kHitCounterBytes + 8u * 4u;
+        region.size = 2u * 4u;
+        vkCmdCopyBuffer(cmd, bi.buffer, hv.readback.buffer, 1, &region);
+        VkMemoryBarrier h{};
+        h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        h.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        h.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        // (HOST: the read; COMPUTE: the next writers of the list's words wait for this read - a write-after-read)
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &h, 0, nullptr, 0, nullptr);
+        hv.boundCopyOwed = false;
+    }
 }
 
 // THE REFLECTION HISTORY'S COUNT TO THE HOST (PHOTON-2 stage 0, the arm "reflect.historyReadback") — the stillness
@@ -12668,14 +12739,20 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
         b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
-        VkBufferCopy region{};
-        region.srcOffset = bufInfo.offset;
-        region.dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * kHitCounterBytes;
         // appended, dropped, the reflection's active resting texels, its CAPPED texels (word 3: the copy stopped at 12
         // bytes, so RayQueryStatus::reflectRestCapped read a word no frame wrote - 0 - until PHOTON-7 stage 6), its
-        // batching texels, ... and (PHOTON-7 11-1b/c) the rest bound's two and the NEE's two: every counter word
-        region.size = kHitCounterBytes;
-        vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 1, &region);
+        // batching texels, ... and the NEE's two (PHOTON-7 11-1b) - every counter word but the rest bound's two (8-9),
+        // which the temporal pass writes after this copy: copied after finishReflect (M1)
+        VkBufferCopy regions[2]{};
+        regions[0].srcOffset = bufInfo.offset;
+        regions[0].dstOffset = VkDeviceSize(hv.frame % kFramesInFlight) * kHitCounterBytes;
+        regions[0].size = 8u * 4u;
+        regions[1].srcOffset = bufInfo.offset + 10u * 4u;
+        regions[1].dstOffset = regions[0].dstOffset + 10u * 4u;
+        regions[1].size = kHitCounterBytes - 10u * 4u;
+        vkCmdCopyBuffer(cmd, bufInfo.buffer, hv.readback.buffer, 2, regions);
+        hv.boundCopySlot = hv.frame % kFramesInFlight;
+        hv.boundCopyOwed = true;
         VkMemoryBarrier h{};
         h.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         h.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
