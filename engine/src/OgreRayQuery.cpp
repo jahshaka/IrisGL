@@ -358,13 +358,9 @@ constexpr unsigned kReflectExposureBinding = kReflectScreenBinding + 3u;
 /// pass, which stops the texel when its own standard error is within it. A STATISTIC read for the stop, never colour
 /// fed back.
 constexpr unsigned kReflectShareBinding = kReflectExposureBinding + 1u;
-/// ...and THE REST'S COMPACT LIST (52, PHOTON-7 stage 6, the lead's compact path): a header (the halves' counts, the
-/// compact pass's indirect dispatch, the hit list's record count after the tile pass: kCompactList*) and two halves of
-/// texel indices, each as long as the trace grid - the tile pass lists, in the half of this frame, each texel still
-/// converging, and when last frame's count was within kReflectCompactTexels leaves them to the COMPACT PASS, one warp a
-/// texel. A half holds every texel the tile pass can list (DETERMINISM-1: a 16,384-texel half overflowed when the
-/// converging count rose 8,827 -> 83,695 in a frame, and the texels past it were traced by neither pass, which ones by
-/// the atomics' order).
+/// ...and THE REST'S COMPACT LIST (52, PHOTON-7 stage 6, the lead's compact path): two halves of kReflectCompactTexels
+/// texel indices and their counts - the tile pass lists, in the half of this frame, each texel still converging, and
+/// when last frame's list fit (at most kReflectCompactTexels) leaves them to the COMPACT PASS, one warp a texel.
 constexpr unsigned kReflectCompactBinding = kReflectShareBinding + 1u;
 /// ...and THE MOVING SE INSTRUMENT (53, PHOTON-7 stage 6, the lag law's row): a float a trace texel - the temporal pass'
 /// standard error of the texel's moving mean in DISPLAY CODES (its luma variance over its frames, carried through the
@@ -396,18 +392,10 @@ constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
 /// walks to the new one at a code a frame (the gather's B3, the reflection's form).
 constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
 static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement word is the reflection set's last binding");
-/// THE COMPACT PATH'S BOUND L (the lead's ruling): 16,384 texels - at or below this count last frame the rest's tail runs
+/// THE COMPACT PATH'S LIST LENGTH L (the lead's ruling): 16,384 texels - 64 KB a half - below which the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
-/// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU). The path's ENTRY bound,
-/// not the list's length: the list holds the trace grid (kCompactList*).
+/// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU).
 constexpr unsigned kReflectCompactTexels = 16384u;
-/// THE COMPACT LIST'S HEADER (rq_reflect.comp's twins): words [0..1] the halves' counts, [2..4] the compact pass's
-/// VkDispatchIndirectCommand (the tile pass raises its groups with an atomicMax - the larger of the warp mode's and the
-/// dense mode's needs; y = z = 1), [5] the hit list's record
-/// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused; the halves after it.
-constexpr unsigned kCompactListHeaderWords = 8u;
-constexpr unsigned kCompactListDispatchWord = 2u;
-constexpr unsigned kCompactListRecordsWord = 5u;
 /// THE HIT LIST'S BUFFER LAYOUT (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords, 800.Atom_piece_ps.any's read):
 /// twelve counter words (PHOTON-7 11-1b/c added four: the rest bound's two, the NEE's two), then ten words a record
 /// (the NEE delta + the estimator's gain 6-7, PHOTON-7 11-1b / 11-2; a reflection's crossed panes 8-9, 10-4 F6).
@@ -1224,7 +1212,6 @@ private:
         /// THE REST'S COMPACT LIST (binding 52, kReflectCompactBinding): [0..1] the halves' counts, then the halves; the
         /// half this frame lists into flips each traced frame.
         RawBuffer compactList;
-        unsigned compactCap = 0u;        ///< a half's texels: the trace grid the list was made for
         unsigned compactHalf = 0u;
         bool compactListFresh = false;   ///< made this frame: both counts zeroed before its first pass
         bool referenceFull = false;
@@ -1421,6 +1408,7 @@ private:
     VkPipelineLayout      mReflectPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mReflectPipeline = VK_NULL_HANDLE;
     VkPipeline            mReflectCompactPipeline = VK_NULL_HANDLE;   ///< the same module, kCompactPass true
+    unsigned              mSubgroupSize = 32u;   ///< the device's compute subgroup width (the compact pass's warps)
     VkShaderModule        mReflectModule = VK_NULL_HANDLE;
     /// THE SPATIAL FILTER + COMPOSITE (round C). A second pipeline on the
     /// SAME layout and the same descriptor set: it reads the temporal mean
@@ -2694,6 +2682,7 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
     const VkSubgroupFeatureFlags kSubgroupOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
                                                 VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
                                                 VK_SUBGROUP_FEATURE_SHUFFLE_BIT;
+    mSubgroupSize = std::max(1u, subgroupProps.subgroupSize);
     if (!(subgroupProps.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) ||
         (subgroupProps.supportedOperations & kSubgroupOps) != kSubgroupOps) {
         mVk = VK_NULL_HANDLE;
@@ -7393,20 +7382,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
     w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectRefineBinding].pImageInfo = &refineImg;
-    // THE REST'S COMPACT LIST (52): a half a trace grid (every texel the tile pass can list - it can never overflow),
-    // re-made when the trace size changes. 8 bytes a trace texel: 4.15 MB at a 960 x 540 trace.
-    {
-        const unsigned cap = traceW * traceH;
-        if (rv.compactList.buffer && rv.compactCap != cap) retire(rv.compactList);
-        if (!rv.compactList.buffer) {
-            std::string lerr;
-            if (!makeBuffer(VkDeviceSize(kCompactListHeaderWords + 2u * cap) * 4u,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-                            false, false, rv.compactList, lerr)) { bail("the rest's compact list could not be made"); return; }
-            rv.compactCap = cap;
-            rv.compactListFresh = true;
-        }
+    // THE REST'S COMPACT LIST (52)
+    if (!rv.compactList.buffer) {
+        std::string lerr;
+        if (!makeBuffer(VkDeviceSize(2u + 2u * kReflectCompactTexels) * 4u,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, false,
+                        rv.compactList, lerr)) { bail("the rest's compact list could not be made"); return; }
+        rv.compactListFresh = true;
     }
     VkDescriptorBufferInfo compactInfo{};
     compactInfo.buffer = rv.compactList.buffer;
@@ -7554,23 +7536,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                              0, nullptr, 0, nullptr);
     }
     if (!hold) {
-        // THE COMPACT LIST'S COUNT for this frame's half and the compact dispatch's groups, zeroed (the whole header,
-        // the first frame of a new list: both counts, the groups, y = z = 1, the record count)
+        // THE COMPACT LIST'S COUNT for this frame's half, zeroed (both, the first frame of a new list)
         {
             if (rv.compactListFresh) {
-                vkCmdFillBuffer(cmd, rv.compactList.buffer, 0, kCompactListHeaderWords * 4u, 0u);
-                vkCmdFillBuffer(cmd, rv.compactList.buffer, (kCompactListDispatchWord + 1u) * 4u, 8u, 1u);
+                vkCmdFillBuffer(cmd, rv.compactList.buffer, 0, 8u, 0u);
                 rv.compactListFresh = false;
             } else {
                 vkCmdFillBuffer(cmd, rv.compactList.buffer, VkDeviceSize(rv.compactHalf) * 4u, 4u, 0u);
-                vkCmdFillBuffer(cmd, rv.compactList.buffer, kCompactListDispatchWord * 4u, 4u, 0u);
             }
             VkMemoryBarrier fb{};
             fb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &fb,
+            fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fb,
                                  0, nullptr, 0, nullptr);
         }
         monitor::CacheScope traceRow(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.trace", mRs, key);
@@ -7579,36 +7557,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                 &rv.sets[ring], 0, nullptr);
         JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
-        // THE COMPACT PASS (kReflectCompactTexels): every texel the tile pass listed (the list holds the grid) -
-        // one warp a texel when THIS frame's count is within L, one lane a texel (the tile pass's batch and deal: the
-        // DENSE mode) past it; the mode is the shader's, by the count the tile pass left. Dispatched INDIRECTLY in the
-        // groups the tile pass counted: the larger of the two modes' needs (none on a frame the path is off).
+        // THE COMPACT PASS (kReflectCompactTexels): one warp a listed texel, after the tile pass listed them
         if (compactArmed && mReflectCompactPipeline) {
-            // THE RECORD BUDGET: the hit list's count after the tile pass (every record before this pass - the sun
-            // contact's, the area visibility's, the tile's), one value the compact pass shares out; its own runs raise
-            // the live counter, so a texel never reads that
-            if (hit.on && hit.buf) {
-                VkMemoryBarrier toCopy{};
-                toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1,
-                                     &toCopy, 0, nullptr, 0, nullptr);
-                VkBufferCopy count{};
-                count.srcOffset = hit.bufOffset;
-                count.dstOffset = VkDeviceSize(kCompactListRecordsWord) * 4u;
-                count.size = 4u;
-                vkCmdCopyBuffer(cmd, hit.buf, rv.compactList.buffer, 1, &count);
-            }
             VkMemoryBarrier lb{};
             lb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            lb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            lb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &lb, 0,
-                                 nullptr, 0, nullptr);
+            lb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            lb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
+                                 &lb, 0, nullptr, 0, nullptr);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mReflectCompactPipeline);
-            vkCmdDispatchIndirect(cmd, rv.compactList.buffer, VkDeviceSize(kCompactListDispatchWord) * 4u);
+            const unsigned perGroup = std::max(1u, 64u / mSubgroupSize);   // the 8 x 8 group's warps: a texel each
+            vkCmdDispatch(cmd, (kReflectCompactTexels + perGroup - 1u) / perGroup, 1u, 1u);
         }
         // The overlay holds this frame's picture from here; the photon listener takes it
         // to the texture layout in front of its composite.
