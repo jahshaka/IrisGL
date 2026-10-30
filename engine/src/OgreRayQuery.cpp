@@ -4169,6 +4169,10 @@ bool RayQueryTier::runCompaction(SceneAs &sa, VkCommandBuffer cmd) {
         waiting.pop_back();
         bl.compactState = 2;
         mCompactBusy &= ~(uint64_t(1) << bl.compactSlot);   // answered: reusable
+        if (std::getenv("JAH_DIAG_REGIONS"))   // MEASURING ARM (DETERMINISM-1 stage 0): the frame a size answer is TAKEN
+            std::fprintf(stderr, "DIAG COMPACT rf %llu vf %u blas %zu asked %u size %llu of %llu copied %d\n",
+                         (unsigned long long)Ogre::Root::getSingleton().getNextFrameNumber(), now, idx, bl.compactFrame,
+                         (unsigned long long)compacted, (unsigned long long)bl.storage.size, int(compacted < bl.storage.size));
         if (compacted >= bl.storage.size) continue;                 // nothing to win
         RawBuffer small;
         std::string err;
@@ -4335,6 +4339,10 @@ bool RayQueryTier::buildTlas(SceneAs &sa, VkCommandBuffer cmd, bool refit, std::
     sa.st.lastWasRefit = (build.mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR);
     if (!sa.st.lastWasRefit) sa.tlasUpdatable = updatable;
     if (sa.st.lastWasRefit) ++sa.st.tlasRefits; else ++sa.st.tlasBuilds;
+    if (std::getenv("JAH_DIAG_REGIONS"))   // MEASURING ARM (DETERMINISM-1 stage 0): every TLAS build, its mode
+        std::fprintf(stderr, "DIAG TLAS rf %llu vf %u %s prims %u blasVersion %llu\n",
+                     (unsigned long long)Ogre::Root::getSingleton().getNextFrameNumber(), frameNow(),
+                     sa.st.lastWasRefit ? "refit" : "build", sa.tlasPrimitives, (unsigned long long)sa.blasVersion);
     return true;
 }
 
@@ -12265,6 +12273,10 @@ void RayQueryTier::readHitCounters(HitView &hv) {
         if (!pd.live || uint32_t(now - pd.frame) < inFlight) continue;
         const uint32_t *w = reinterpret_cast<const uint32_t *>(
             static_cast<const unsigned char *>(hv.readback.mapped) + i * kHitCounterBytes);
+        if (std::getenv("JAH_DIAG_REGIONS"))   // MEASURING ARM (DETERMINISM-1): every hit-counter readback the host takes
+            std::fprintf(stderr, "DIAG HITCNT rf %llu gframe %u w %u %u %u %u %u %u %u %u %u %u %u %u\n",
+                         (unsigned long long)Ogre::Root::getSingleton().getNextFrameNumber(), pd.frame, w[0], w[1], w[2], w[3],
+                         w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
         // (every retired frame's NEE counts, the newest or not: a sum)
         hv.neeRays += w[10];
         hv.neeHits += w[11];

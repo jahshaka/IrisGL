@@ -998,6 +998,9 @@ void ScreenProbeGather::readPending(View &v) {
             if (!v.clockKnown || int32_t(v.pending[i].gatherFrame - v.clockFrame) > 0) {
                 v.clockKnown = true;
                 v.clockFrame = v.pending[i].gatherFrame;
+                if (std::getenv("JAH_DIAG_REGIONS") && (clock[0] != v.clockK || clock[5] != v.cellsActive || clock[3]))   // MEASURING ARM
+                    std::fprintf(stderr, "DIAG CLOCK gframe %u K %u active %u held %u reached %u resumes %u\n",
+                                 v.pending[i].gatherFrame, clock[0], clock[5], clock[4], clock[3], clock[6]);
                 v.clockK = clock[0];
                 v.cellsReached = clock[3];
                 v.cellsHeld = clock[4];

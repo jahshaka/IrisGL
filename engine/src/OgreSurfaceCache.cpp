@@ -46,6 +46,7 @@
 #include <chrono>
 #include <memory>
 #include <cmath>
+#include <cstdio>   // MEASURING ARM (DETERMINISM-1 stage 0)
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -2244,6 +2245,14 @@ void SurfaceCache::planRelights(const CardSceneView &view) {
         // PHOTON-7 stage 8B B1, R3 (a)'s display quantum at the gather's cells; mPendingRelitBoxes)
         mPendingRelitBoxes.push_back(RelitBox{ Ogre::Aabb(mInstances[inst].centre, mInstances[inst].halfSize), scene });
     }
+    if (std::getenv("JAH_DIAG_REGIONS") && (!mRelight.empty() || !mBatch.empty() || mCapturesDeferredForShaders)) {
+        // MEASURING ARM (DETERMINISM-1 stage 0): the plan's count, its cards (an order-sensitive hash), the async mode
+        unsigned long long h = 1469598103934665603ull;
+        for (unsigned idx : mRelight) h = (h ^ idx) * 1099511628211ull;
+        std::fprintf(stderr, "DIAG RELIGHT rf %llu n %zu hash %016llx batch %zu instances %zu async %d deferred %llu\n",
+                     (unsigned long long)view.frame, mRelight.size(), h, mBatch.size(), mRelitInstances.size() - relitFrom,
+                     int(mAsyncShaders), mCapturesDeferredForShaders);
+    }
 }
 
 void SurfaceCache::relightCards() {
@@ -3229,6 +3238,15 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             r.boxes.clear();
             mMoveCodesLast = nonFinite ? -1.0f : codes;
             mMoveCodesFrame = r.cacheFrame;
+        }
+        if (std::getenv("JAH_DIAG_REGIONS")) {   // MEASURING ARM (DETERMINISM-1 stage 0): every report taken
+            unsigned long long sum = 0ull, hx = 0ull;
+            for (Ogre::uint32 k = 0; k < n; ++k) { sum += w[1u + k]; hx ^= (w[1u + k] * 0x9E3779B97F4A7C15ull); }
+            Ogre::uint32 cb = 0u;
+            if (r.carriesMoves) std::memcpy(&cb, &w[1u + kReportCapacity], sizeof(cb));
+            std::fprintf(stderr, "DIAG REPORT rf %llu cacheFrame %llu n %u raw %u sum %llu xor %016llx moves %d codes %08x nonfinite %u\n",
+                         frame, (unsigned long long)r.cacheFrame, n, w[0], sum, hx, int(r.carriesMoves), cb,
+                         r.carriesMoves ? w[2u + kReportCapacity] : 0u);
         }
         r.ticket->unmap();
         r.ticket.reset();
