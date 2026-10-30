@@ -9120,6 +9120,13 @@ void RayQueryTier::diagTemporal(ReflectView &rv, const ReflectPassListener *key,
         return;
     slot->ubo = rv.params[ring].mapped
                     ? hashBytes(static_cast<const unsigned char *>(rv.params[ring].mapped), sizeof(ReflectParams)) : 0ull;
+    if (rv.params[ring].mapped && !outputs) {   // (arm W2: the uniform block's bytes, to name a differing field by offset)
+        const uint32_t *u = static_cast<const uint32_t *>(rv.params[ring].mapped);
+        std::string hexs;
+        char b9[10];
+        for (size_t k = 0; k < sizeof(ReflectParams) / 4u; ++k) { std::snprintf(b9, sizeof(b9), "%08x", u[k]); hexs += b9; }
+        std::fprintf(stderr, "DIAG UBO rf %llu size %zu %s\n", rfNow, sizeof(ReflectParams), hexs.c_str());
+    }
     std::vector<VkImageMemoryBarrier> toGen, back;
     for (const Img &i : imgs) {
         if (!i.ogre || i.layout == VK_IMAGE_LAYOUT_GENERAL) continue;
