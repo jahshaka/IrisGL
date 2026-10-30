@@ -1382,10 +1382,6 @@ struct ChainDesc {
     bool  displayEncode = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
-    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PostFxDesc::reflectSources): Both, Rays or Screen. A GRAPH field:
-    /// rasterMarch() and screenSources() below read it (with the stereo shape and the rays) for which passes and
-    /// textures exist.
-    ReflectSources reflectSources = ReflectSources::Both;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
@@ -1642,9 +1638,9 @@ struct ChainDesc {
     /// no-ray producer's prepass appends no hit.
     bool tracedPrepass() const;
     /// THE SCREEN SOURCES (PHOTON-7 stage 6): does the chain carry this view's previous picture, the depth it was drawn
-    /// at, the editor helpers' mask and the object motion - the screen trace's inputs (the one estimator on a ray chain,
-    /// rq_reflect.comp) and the raster march's? The SSR stage, reflectSources Both or Screen, never STEREO (the copies
-    /// are not per layer). `build` declares them on this answer and the ray tier binds them on it.
+    /// at, the editor helpers' mask and the object motion - the raster march's inputs? The SSR stage on a chain that
+    /// traces NO rays, never STEREO (the copies are not per layer): the reflection has no mode (PostFxDesc::ssr,
+    /// PHOTON-7-9A) - a ray chain reflects by its rays alone. `build` declares them on this answer.
     bool screenSources() const;
     /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
     /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.

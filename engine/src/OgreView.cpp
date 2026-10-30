@@ -281,12 +281,6 @@ ChainDesc OgreView::chainDesc() const {
     d.ditherOff      = mPostFx.ditherOff || (mStereo && !vr::colourEncodedOnce());
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
-    // AND THE SOURCES THE ROW SELECTS (lead's read, 2026-09-18: a missing copy left the chain's own default whatever a
-    // host pushed, so the MONO view of one eye - `vrEyeScreenshot`'s control, offscreen with `allowOffscreen`, copying
-    // the session's PostFxDesc - went on using the screen while its eye could not: the two pictures were not
-    // comparable in the way the control exists to be). Below the offscreen early-out for that reason.
-    // @see PostFxDesc::reflectSources.
-    d.reflectSources = mPostFx.reflectSources;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrSteps = mPostFx.ssrSteps;
     d.ssrMarchPhase = mPostFx.ssrMarchPhase;

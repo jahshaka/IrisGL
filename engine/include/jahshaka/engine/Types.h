@@ -5698,12 +5698,6 @@ struct RayQueryStatus {
     /// still converging at rest (-1: none read for this rest since it began or a moved instance last crossed it), the
     /// rests it has begun, and the rest frames on which a moved instance's swept box was handed to the trace.
     unsigned reflectRestFrames = 0u;
-    /// THE SOURCES THE REFLECTION TRACED WITH (PHOTON-7 stage 6, the mode label: every reflection row reads the mode it
-    /// RAN from here, prints it and asserts the one it intends - a mode is never assumed): a view's (the last in the
-    /// map's order), a ReflectSources value (0 both, 1 rays, 2 screen) - what the trace ran, not what was asked: a chain
-    /// that builds no screen sources (a stereo chain) runs the rays whatever PostFxDesc::reflectSources says. -1 = none
-    /// traced.
-    int      reflectSources = -1;
     bool     reflectHeld = false;
     int      reflectRestActive = -1;
     /// ...and of them the CAPPED texels (commit 8): stopped at their sample count's 16-bit ceiling rather than by their
@@ -6756,7 +6750,7 @@ struct VrConfig {
     /// one measurement, nothing written to the project.
     ///
     /// The SOURCE is not a choice here: a stereo chain never marches in screen
-    /// space (see `PostFxDesc::reflectSources`), so this row buys RAY-TRACED
+    /// space (see `PostFxDesc::ssr`), so this row buys RAY-TRACED
     /// reflections on a ray-capable machine and NOTHING AT ALL on one without —
     /// `chain::build` declines to build the reflection stage when neither source
     /// can write it, so a machine with no ray queries does not even pay the
@@ -7484,22 +7478,6 @@ struct ImageGrade {
     bool operator!=(const ImageGrade &o) const { return !(*this == o); }
 };
 
-/// WHERE A REFLECTION'S ANSWER MAY COME FROM (PHOTON-7 stage 6, REFLECT-MODE-1's engine half): the screen trace (this
-/// view's own previous picture, through the depth buffer) and the rays (the world, through the acceleration structure).
-///  * Both   - ON A RAY CHAIN the ONE ESTIMATOR: per pixel one direction, the screen trace first, the ray for whatever
-///             the screen cannot vouch for (rq_reflect.comp). On a chain without rays: the screen-space march.
-///  * Rays   - the rays alone: no screen source is built (no previous picture, no march). On a chain without rays:
-///             no reflection stage at all (the probe and the sky answer).
-///  * Screen - the screen alone: on a ray chain the trace's misses are NO SAMPLE (no ray follows them - biased by
-///             construction: a measuring arm); on a chain without rays the march, as Both.
-/// A STEREO chain builds no screen source whatever this says (its passes are per layer and the previous picture is not):
-/// it is Rays there by construction.
-enum class ReflectSources { Both, Rays, Screen };
-/// The sources' names ("both", "rays", "screen") - the spelling every reader prints and parses.
-inline const char *reflectSourcesName(ReflectSources s) {
-    return s == ReflectSources::Rays ? "rays" : s == ReflectSources::Screen ? "screen" : "both";
-}
-
 /// The post-processing chain for a View (POST_CHAIN_SPEC.md).
 ///
 /// Everything here is OFF by default, and every field is IGNORED on an offscreen
@@ -7646,14 +7624,16 @@ struct PostFxDesc {
     /// surface is then shaded with the blended material's normal. Scenes that
     /// lean on translucent panes should leave SSR off until the prepass learns
     /// a visibility split.
+    ///
+    /// THE REFLECTION HAS NO MODE (PHOTON-7-9A): it is the chain's RAYS where they run (the world through the
+    /// acceleration structure, rq_reflect.comp: no screen source - no previous picture, no march - is built for it, on
+    /// the desktop and in stereo alike) and the raster MARCH where they do not (Low, Medium, a machine or a project
+    /// without rays: the march and its resolve, the march's screen sources with them). A stereo chain never marches
+    /// (its copies and the march's passes are not per layer), so a stereo view without rays reflects the probe and the
+    /// sky. The "Both" estimator (the screen trace first, the ray for the rest) is deleted: on the desktop glass walk
+    /// the rays alone were the cheaper arm at rest and walking (ledger 3916) and the screen trace's moving slide was a
+    /// different picture.
     int   ssr = 0;
-    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PHOTON-7 stage 6; ReflectSources above). The `ssr` row above selects the
-    /// reflection's RESOLUTION (half or full); this, its SOURCES. Both is the one estimator on a ray chain. A GRAPH
-    /// field: the screen sources (the previous picture, its depth, the object motion, the helpers' mask) and, on a chain
-    /// without rays, the march are built only for Both and Screen - and never on a STEREO chain, which `chain::build`
-    /// ENFORCES whatever a host asked (the VR session asks for Rays: applyVrViewPolicy). A MONO view of the same picture
-    /// (the per-eye control `vrEyeScreenshot` renders) is asked for Rays to be comparable.
-    ReflectSources reflectSources = ReflectSources::Both;
     /// How far a reflection ray may travel, in world units. Beyond this the
     /// march gives up and the pixel falls back to the probe/sky reflection.
     /// Scene-scale dependent: the default suits a room, not a landscape.
@@ -7879,7 +7859,7 @@ struct PostFxDesc {
                ssaoScale == o.ssaoScale && ssaoPower == o.ssaoPower &&
                ssaoRadius == o.ssaoRadius && ditherOff == o.ditherOff &&
                smaaPreset == o.smaaPreset &&
-               ssr == o.ssr && reflectSources == o.reflectSources &&
+               ssr == o.ssr &&
                ssrMaxDistance == o.ssrMaxDistance && ssrSteps == o.ssrSteps &&
                ssrMarchPhase == o.ssrMarchPhase &&
                ssrThickness == o.ssrThickness &&
@@ -7928,10 +7908,6 @@ struct PostFxDesc {
 ///     half-resolution SSAO targets, the SMAA lookup tables' passes, the
 ///     pyramid's compute), and a layered chain refuses a pass that reads a
 ///     layered texture into a single-layer target (chain::applyStereo).
-///   * reflectSources Rays — the screen sources (the previous picture and the
-///     march's passes) are not per layer; `chain::build` enforces it for any
-///     stereo chain whatever a host asked; this is the place that asks. The RAYS
-///     are the stereo answer and run per layer.
 ///   * refractions, distortion — screen-space READS of a scene copy at an
 ///     offset, whose copy and composite passes are not per layer (and the pin's
 ///     refraction piece has no multiview arm, fork F4's stated limitation).
@@ -7950,7 +7926,6 @@ inline void applyVrViewPolicy(PostFxDesc &fx, int ssrOverride = -1) {
     fx.bloom          = false;
     fx.ssao           = false;
     fx.smaaPreset     = -1;
-    fx.reflectSources = ReflectSources::Rays;
     fx.hzb            = false;
     fx.hzbFarthest    = true;
     fx.refractions    = false;

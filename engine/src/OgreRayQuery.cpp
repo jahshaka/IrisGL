@@ -1186,8 +1186,6 @@ private:
         /// a copy per ring slot like the trace's own.
         RawBuffer       motionGeomRowOfSlot[3];
         unsigned        motionFrame = 0;
-        /// THE SOURCES THIS VIEW LAST TRACED WITH (RayQueryStatus::reflectSources).
-        int             sources = -1;
         /// Its GPU time is the monitor row "rq.reflect.motion" (owner = the key).
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
@@ -6488,7 +6486,6 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         // THE REST (R1, G6)
         const ReflectView &rv = kv.second;
         st.reflectRestFrames = rv.restFrames;
-        st.reflectSources = rv.sources;
         st.reflectHeld = rv.held;
         st.reflectRests = rv.restSession;
         st.reflectRestMoverFrames = rv.restListCrossings;
@@ -6611,7 +6608,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     // THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): this view's previous picture,
     // the depth it was drawn at and the object motion — declared only where the chain carries its SCREEN SOURCES
-    // (ChainDesc::screenSources: reflectSources Both or Screen, a mono view), and asked only of such a chain (Ogre logs
+    // (ChainDesc::screenSources: none on a ray chain since PHOTON-7-9A), and asked only of such a chain (Ogre logs
     // every getDefinedTexture miss). All three present and the picture the view's size, or the screen trace is off this
     // frame and the rays answer alone.
     const ChainDesc chainD = view->chainDesc();
@@ -6837,10 +6834,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
     // continuation, OgreScreenProbeGather.cpp).
     pp.screen[0] = screenTrace ? 1.0f : 0.0f;
-    pp.screen[1] = screenTrace && chainD.reflectSources == ReflectSources::Screen ? 1.0f : 0.0f;
-    rv.sources = int(!screenTrace ? ReflectSources::Rays
-                                  : chainD.reflectSources == ReflectSources::Screen ? ReflectSources::Screen
-                                                                                   : ReflectSources::Both);
+    pp.screen[1] = 0.0f;
     pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
                                        : (chainD.ssr >= 2 ? 96.0f : 48.0f);
     pp.screen[3] = float(chainD.ssrMarchPhase);

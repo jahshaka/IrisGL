@@ -611,7 +611,7 @@ Ogre::CompositorPassQuadDef *addDisplayEncodeQuad(Ogre::CompositorNodeDef *n, co
 
 /// DOES THIS CHAIN SHAPE CARRY THE RASTER MARCH? One predicate (ChainDesc::rasterMarch), read by `build` (which
 /// passes and textures exist) and by the per-frame update (whose material parameters to push) — two answers that must
-/// never disagree. @see PostFxDesc::reflectSources for why a stereo chain never marches.
+/// never disagree. @see PostFxDesc::ssr for why a stereo chain never marches.
 bool marchesInScreenSpace(const ChainDesc &d) {
     return d.rasterMarch();
 }
@@ -649,7 +649,7 @@ bool ChainDesc::anyEffect() const {
 }
 
 bool ChainDesc::screenSources() const {
-    return ssr > 0 && reflectSources != ReflectSources::Rays && !stereo;
+    return ssr > 0 && !rayReflect && !stereo;
 }
 
 bool ChainDesc::rasterMarch() const {
@@ -690,7 +690,6 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            a.letterbox == b.letterbox &&
            a.ssao == b.ssao && a.ssaoScale == b.ssaoScale &&
            a.smaaPreset == b.smaaPreset && a.ssr == b.ssr &&
-           a.reflectSources == b.reflectSources &&
            a.rayReflect == b.rayReflect && a.hitDecode == b.hitDecode &&
            // (hitListRows is NOT shape: the view resizes the list in place, OgreView::sizeHitList)
            a.atomDraw == b.atomDraw && a.atomOcclusion == b.atomOcclusion &&
@@ -1867,7 +1866,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // A STEREO CHAIN HAS NO SCREEN SOURCE, whatever a host asked for, and it is structural rather than a default: the
     // copies and the march's passes are not per layer, and every term of a screen-space trace (the neighbourhood it
     // walks, the colour history it reprojects) belongs to one picture. The rays are traced in the WORLD from the eye
-    // that owns the pixel, so they are the stereo answer — see PostFxDesc::reflectSources.
+    // that owns the pixel, so they are the stereo answer — see PostFxDesc::ssr.
     const bool screen = desc.screenSources();
     const bool ssrMarch = marchesInScreenSpace(desc);
     // ...AND WITHOUT THE MARCH THE STAGE IS ONLY WORTH BUILDING FOR THE RAYS.
