@@ -9070,6 +9070,17 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                     named += " " + e.first;
                 }
                 mRs->executeResourceTransition(trans);
+                {   // (...and back to the hit set's own state: never a layout left behind)
+                    Ogre::ResourceTransitionArray back;
+                    for (const auto &e : texs) {
+                        const bool in = (g == '1' && e.first.rfind("card.", 0) == 0) || (g == '2' && e.first.rfind("vox", 0) == 0) ||
+                                        (g == '3' && (e.first == "sky" || e.first == "cloud"));
+                        if (!in || (!prefix.empty() && e.first.rfind(prefix, 0) != 0)) continue;
+                        solver.resolveTransition(back, e.second, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                                 1u << Ogre::GPT_COMPUTE_PROGRAM);
+                    }
+                    mRs->executeResourceTransition(back);
+                }
                 static bool said = false;
                 if (!said) { said = true; std::fprintf(stderr, "DIAG GROUP %s:%s\n", group.c_str(), named.c_str()); }
                 return;
@@ -9131,6 +9142,16 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                     toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
                     vkCmdPipelineBarrier(dcmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr,
                                          0, nullptr);
+                    // (...and every texture back to the hit set's own state, Texture / Read at compute: a copy session
+                    // must never leave a layout behind - the capture's next copy throws on a texture left in CopySrc)
+                    {
+                        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+                        Ogre::ResourceTransitionArray trans;
+                        for (const auto &e : texs)
+                            solver.resolveTransition(trans, e.second, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
+                                                     1u << Ogre::GPT_COMPUTE_PROGRAM);
+                        mRs->executeResourceTransition(trans);
+                    }
                     slot->live = true;
                     slot->frame = now;
                     slot->rf = rfNow;
