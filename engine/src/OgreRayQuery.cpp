@@ -402,7 +402,8 @@ static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement wo
 /// not the list's length: the list holds the trace grid (kCompactList*).
 constexpr unsigned kReflectCompactTexels = 16384u;
 /// THE COMPACT LIST'S HEADER (rq_reflect.comp's twins): words [0..1] the halves' counts, [2..4] the compact pass's
-/// VkDispatchIndirectCommand (the tile pass raises its groups with an atomicMax; y = z = 1), [5] the hit list's record
+/// VkDispatchIndirectCommand (the tile pass raises its groups with an atomicMax - the larger of the warp mode's and the
+/// dense mode's needs; y = z = 1), [5] the hit list's record
 /// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused; the halves after it.
 constexpr unsigned kCompactListHeaderWords = 8u;
 constexpr unsigned kCompactListDispatchWord = 2u;
@@ -7578,9 +7579,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                 &rv.sets[ring], 0, nullptr);
         JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
         vkCmdDispatch(cmd, (traceW + 7u) / 8u, (traceH + 7u) / 8u, eyeLayers);   // z = the eye
-        // THE COMPACT PASS (kReflectCompactTexels): one warp a listed texel, after the tile pass listed them - every
-        // texel it listed (the list holds the grid), dispatched INDIRECTLY in the groups the tile pass counted
-        // (ceil( count / the group's warps ); none on a frame the path is off)
+        // THE COMPACT PASS (kReflectCompactTexels): every texel the tile pass listed (the list holds the grid) -
+        // one warp a texel when THIS frame's count is within L, one lane a texel (the tile pass's batch and deal: the
+        // DENSE mode) past it; the mode is the shader's, by the count the tile pass left. Dispatched INDIRECTLY in the
+        // groups the tile pass counted: the larger of the two modes' needs (none on a frame the path is off).
         if (compactArmed && mReflectCompactPipeline) {
             // THE RECORD BUDGET: the hit list's count after the tile pass (every record before this pass - the sun
             // contact's, the area visibility's, the tile's), one value the compact pass shares out; its own runs raise
