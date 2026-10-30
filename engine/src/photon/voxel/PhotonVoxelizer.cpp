@@ -71,10 +71,10 @@ namespace Ogre
         /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
         // (27 since PHOTON-7 stage 10-3, R2: channel 26 holds the voxel's brightest emissive contribution - the
-        // emissive sum's shared exponent; 28 since the merge of PHOTON-7 10-4 R7: channel 27 the kinds of faces; 40 since
-        // VOXEL-R13 stage 1: channels 28-39 the halves' own faces, two a half - their centroid across the axis and their
-        // normal, VoxelMerge_piece_cs.any's THE HALF'S OWN FACES)
-        constexpr uint32 kMergeAccumTexels = 40u;
+        // emissive sum's shared exponent; 28 since the merge of PHOTON-7 10-4 R7: channel 27 the kinds of faces; 34 since
+        // VOXEL-R13: the halves' own faces, two a half, and the voxel's two normal sums deleted - VoxelMerge_piece_cs.any
+        // has the layout)
+        constexpr uint32 kMergeAccumTexels = 34u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -517,9 +517,6 @@ namespace Ogre
             mMetalVox = mTextureGpuManager->createTexture(
                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/Metal",
                 GpuPageOutStrategy::Discard, texFlags, TextureTypes::Type3D );
-            mNormalVox = mTextureGpuManager->createTexture(
-                "VctVoxelizer" + StringConverter::toString( getId() ) + "/Normal",
-                GpuPageOutStrategy::Discard, texFlags, TextureTypes::Type3D );
 
             mAccumValVox = mTextureGpuManager->createTexture(
                 "VctVoxelizer" + StringConverter::toString( getId() ) + "/AccumVal",
@@ -566,7 +563,7 @@ namespace Ogre
 
         }
 
-        TextureGpu *textures[5] = { mAlbedoVox, mEmissiveVox, mNormalVox, mAccumValVox, mMetalVox };
+        TextureGpu *textures[4] = { mAlbedoVox, mEmissiveVox, mAccumValVox, mMetalVox };
         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
             textures[i]->scheduleTransitionTo( GpuResidency::OnStorage );
 
@@ -607,7 +604,6 @@ namespace Ogre
         // branch packs the texel into a single uint -- see the note beside it in
         // Voxelizer_piece_cs.any.
         mEmissiveVox->setPixelFormat( PFG_RGBA16_FLOAT );
-        mNormalVox->setPixelFormat( PFG_R10G10B10A2_UNORM );
         // the metal's F0 and weight are ratios in [0, 1], like the albedo: 16 bits (above)
         mMetalVox->setPixelFormat( PFG_RGBA16_UNORM );
         if( hasTypedUavs )
@@ -689,7 +685,7 @@ namespace Ogre
                 textures[i]->setResolution( mWidth, mHeight, mDepth );
             else
                 textures[i]->setResolution( mWidth >> 1u, mHeight, mDepth );
-            if( ( ( mNeedsAlbedoMipmaps && i == 0u ) || mNeedsAllMipmaps ) && i < 3u )
+            if( ( ( mNeedsAlbedoMipmaps && i == 0u ) || mNeedsAllMipmaps ) && i < 2u )
                 textures[i]->setNumMipmaps( numMipmaps );
             else
                 textures[i]->setNumMipmaps( 1u );
@@ -770,19 +766,13 @@ namespace Ogre
         OgreProfileGpuBegin( "VCT Voxelization Clear" );
         float fClearValue[4];
         uint32 uClearValue[4];
-        float fClearNormals[4];
         memset( fClearValue, 0, sizeof( fClearValue ) );
         memset( uClearValue, 0, sizeof( uClearValue ) );
-        fClearNormals[0] = 0.5f;
-        fClearNormals[1] = 0.5f;
-        fClearNormals[2] = 0.5f;
-        fClearNormals[3] = 0.0f;
 
         mResourceTransitions.clear();
         mComputeTools->prepareForUavClear( mResourceTransitions, mAlbedoVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mEmissiveVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mMetalVox );
-        mComputeTools->prepareForUavClear( mResourceTransitions, mNormalVox );
         mComputeTools->prepareForUavClear( mResourceTransitions, mAccumValVox );
         // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the sums start at zero, every build.
         mComputeTools->prepareForUavClear( mResourceTransitions, mMergeAccumTex );
@@ -802,7 +792,6 @@ namespace Ogre
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mAlbedoVox, fClearValue );
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mEmissiveVox, fClearValue );
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mMetalVox, fClearValue );
-        jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mNormalVox, fClearNormals );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mAccumValVox, uClearValue );
         jahshaka::engine::detail::photonClearUavUint( mComputeTools, mMergeAccumTex, uClearValue );
         for( size_t h = 0u; h < 2u; ++h )
@@ -898,7 +887,6 @@ namespace Ogre
         v.albedo = mAlbedoVox;
         v.emissive = mEmissiveVox;
         v.metal = mMetalVox;
-        v.normal = mNormalVox;
         v.accumVal = mAccumValVox;
         for( size_t h = 0u; h < 2u; ++h )
         {
@@ -948,21 +936,13 @@ namespace Ogre
             uavSlot.access = ResourceAccess::ReadWrite;
             mComputeJobs[i]->_setUavTexture( 2, uavSlot );
 
-            uavSlot.texture = v.normal;
-            if( hasTypedUavs )
-                uavSlot.pixelFormat = v.normal->getPixelFormat();
-            else
-                uavSlot.pixelFormat = PFG_R32_UINT;
-            uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 3, uavSlot );
-
             uavSlot.texture = v.emissive;
             if( hasTypedUavs )
                 uavSlot.pixelFormat = v.emissive->getPixelFormat();
             else
                 uavSlot.pixelFormat = PFG_R32_UINT;
             uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 4, uavSlot );
+            mComputeJobs[i]->_setUavTexture( 3, uavSlot );
 
             // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): THIS SLOT WAS THE TRIANGLE COUNTER and is now the
             // per-voxel INTEGER ACCUMULATOR the merge sums into (the count rides in
@@ -975,7 +955,7 @@ namespace Ogre
             uavSlot.texture = v.accumVal;
             uavSlot.pixelFormat = v.accumVal->getPixelFormat();
             uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 5, uavSlot );
+            mComputeJobs[i]->_setUavTexture( 4, uavSlot );
 
             // Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): the per-voxel INTEGER ACCUMULATOR the merge
             // sums into (R32_UINT, twenty-six texels per voxel — see
@@ -983,7 +963,7 @@ namespace Ogre
             uavSlot.texture = mMergeAccumTex;
             uavSlot.pixelFormat = mMergeAccumTex->getPixelFormat();
             uavSlot.access = ResourceAccess::ReadWrite;
-            mComputeJobs[i]->_setUavTexture( 6, uavSlot );
+            mComputeJobs[i]->_setUavTexture( 5, uavSlot );
 
             // Jahshaka (PHOTON-VOXEL-3/-4): the coverage per half-axis (7, 8) and the
             // surface position per half (9, 10) the resolve writes.
@@ -992,11 +972,11 @@ namespace Ogre
                 uavSlot.texture = v.coverage[h];
                 uavSlot.pixelFormat = v.coverage[h]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 7u + h ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 6u + h ), uavSlot );
                 uavSlot.texture = v.position[h];
                 uavSlot.pixelFormat = v.position[h]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 9u + h ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 8u + h ), uavSlot );
             }
 
             // Jahshaka (METAL-BOUNCE-1): the metal (11), written by the resolve beside the albedo.
@@ -1006,7 +986,7 @@ namespace Ogre
             else
                 uavSlot.pixelFormat = PFG_R32_UINT;
             uavSlot.access = ResourceAccess::Write;
-            mComputeJobs[i]->_setUavTexture( 11u, uavSlot );
+            mComputeJobs[i]->_setUavTexture( 10u, uavSlot );
 
             // Jahshaka (JUNCTION-NORMAL-1): the emissive factor per half-axis (12, 13), written by the resolve.
             for( size_t h = 0u; h < 2u; ++h )
@@ -1014,7 +994,7 @@ namespace Ogre
                 uavSlot.texture = v.emit[h];
                 uavSlot.pixelFormat = v.emit[h]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 12u + h ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 11u + h ), uavSlot );
             }
             // VOXEL-R13 stage 1: the halves' own faces (14..16 the centroids, 17..19 the normals), written by the resolve.
             for( size_t a = 0u; a < 3u; ++a )
@@ -1022,11 +1002,11 @@ namespace Ogre
                 uavSlot.texture = v.halfSide[a];
                 uavSlot.pixelFormat = v.halfSide[a]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 14u + a ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 13u + a ), uavSlot );
                 uavSlot.texture = v.halfNrm[a];
                 uavSlot.pixelFormat = v.halfNrm[a]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
-                mComputeJobs[i]->_setUavTexture( uint8( 17u + a ), uavSlot );
+                mComputeJobs[i]->_setUavTexture( uint8( 16u + a ), uavSlot );
             }
 
             DescriptorSetTexture2::BufferSlot texBufSlot(
@@ -1295,7 +1275,7 @@ namespace Ogre
     //-------------------------------------------------------------------------
     /// Jahshaka (ENGINE-UPGRADE-ASYNC-3 stage 1): THE MIP CHAINS ON COMPUTE (PhotonMipChain.h), in
     /// the order the blits ran. A volume whose level count is one (the albedo without area-light
-    /// shadows, the emissive and normal without mNeedsAllMipmaps) writes nothing.
+    /// shadows, the emissive without mNeedsAllMipmaps) writes nothing.
     void PhotonVoxelizer::generateMips()
     {
         PhotonMipChain::generate( mHlmsManager, mRenderSystem, mAlbedoVox );
@@ -1306,6 +1286,5 @@ namespace Ogre
             PhotonMipChain::generate( mHlmsManager, mRenderSystem, mPositionVox[h], mCoverageVox[h] );
         }
         PhotonMipChain::generate( mHlmsManager, mRenderSystem, mEmissiveVox );
-        PhotonMipChain::generate( mHlmsManager, mRenderSystem, mNormalVox );
     }
 }  // namespace Ogre

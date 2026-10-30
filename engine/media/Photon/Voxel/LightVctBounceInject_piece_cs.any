@@ -19,12 +19,7 @@
 	#define JAH_VOX_MAX_CASCADES @value( hlms_num_vct_cascades )
 	#define JAH_VOX_COUNT @value( hlms_num_vct_cascades )
 	#define JAH_VOX_SAMPLE_ISO( c, u, l ) OGRE_SampleLevel( vctProbes[c], vctProbeSampler, u, l )
-	// PHOTON-7 stage 7: the BACK side (the store holds the two sides) and stage 10's NORMAL: a ray's hit reads the side
-	// facing it (jah_voxel_ray.glsl). The mean-of-sides read this job took (a live leak carrier: half of a sunlit outer
-	// face lit the inside) is DELETED with the cones.
-	#define JAH_VOX_PER_SIDE 1
-	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
-	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
+	// VOXEL-R13 stage 2: vctProbes is every cascade's HALF STORE - a ray's hit reads the half facing it (jah_voxel_ray.glsl).
 	// Jahshaka (PHOTON-VOXEL-3): the PER-AXIS COVERAGE, VctLighting's last light-volume
 	// entry - the march's mip-0 read takes the opacity along its ray from it.
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( vctProbeCovP[c], vctProbeSampler, u, l )
@@ -90,31 +85,18 @@
 	#define JAH_CONES_TO_WORLD( d ) ( d )
 	@insertpiece( JahVoxelCones )
 
-	/// THE BOUNCE GATHERED AT ONE SIDE OF A VOXEL, BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light passes a wall) - the
-	/// card relight's estimator, ONE TEXT of it (jah_voxel_cones.glsl's jahRayDiffuse): the cosine-weighted mean
-	/// radiance over the side's hemisphere as the mean of N fixed cosine-distributed occupancy rays
-	/// (jah_voxel_ray.glsl), N = p_rayCounts.x. A HIT reads the side of the voxel facing the ray; an ESCAPE (out of the
-	/// last cascade: its world shell p_rayParams.w, or its box in the band) the sky over the ray's bin; an EXHAUSTED ray
-	/// is no sample. THE SIDE STARTS FROM ITS OWN SURFACE (the preflight's M4: the voxel's centre put a thin wall's two
-	/// sides' starts at one point, and a side's rays left from inside the wall): along the axis the side's normal is
-	/// dominant on, where the voxel's faces looking that way lie (the surface position of that half), the cell's
-	/// centre across it - then the finest cell off along the normal; the surface's tangent plane and the voxel's own
-	/// cell are the ray's (jah_voxel_ray.glsl).
-	/// `cellLS` the voxel's centre (this cascade's normalised space), `nWorld` the side's unit world normal. The result
-	/// is radiance, the store's units.
-	INLINE float3 jahBounceRays( float3 cellLS, int3 cell, float3 nWorld )
+	/// THE BOUNCE GATHERED AT ONE HALF OF A VOXEL, BY RAYS (PHOTON-7 stage 10, 10-1; L9: no light passes a wall) - the
+	/// card relight's estimator, ONE TEXT of it (jah_voxel_cones.glsl's jahRayDiffuse): the cosine-weighted mean radiance
+	/// over the half's hemisphere as the mean of N fixed cosine-distributed occupancy rays (jah_voxel_ray.glsl), N =
+	/// p_rayCounts.x. A HIT reads the half of the voxel facing the ray; an ESCAPE (out of the last cascade: its world shell
+	/// p_rayParams.w, or its box in the band) the sky over the ray's bin; an EXHAUSTED ray is no sample. THE HALF STARTS
+	/// FROM ITS OWN FACES (VOXEL-R13): `surfaceLS` their point (this cascade's normalised space: along the half's axis
+	/// where they lie, across it their centroid), `nWorld` their unit mean normal - then the finest cell off along it;
+	/// the surface's tangent plane and the voxel's own cell are the ray's (jah_voxel_ray.glsl). Radiance, the store's
+	/// units.
+	INLINE float3 jahBounceRays( float3 surfaceLS, int3 cell, float3 nWorld )
 	{
 		const float3 normalLS = jahConeBiasDir( nWorld * ( p_invVoxelResolution / p_voxelCellSize ) );
-		const float3 an = abs( normalLS );
-		const int a = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
-		float3 surfaceLS = cellLS;
-		{
-			const bool plus = normalLS[a] > 0.0;
-			const float o = ( plus ? OGRE_Load3D( vctProbeCovP[0], cell, 0 ) : OGRE_Load3D( vctProbeCovN[0], cell, 0 ) )[a];
-			const float pO = ( plus ? OGRE_Load3D( vctProbePosP[0], cell, 0 ) : OGRE_Load3D( vctProbePosN[0], cell, 0 ) )[a];
-			if( o > 0.0 )
-				surfaceLS[a] = ( float( cell[a] ) + saturate( pO / o ) ) * p_invVoxelResolution[a];
-		}
 		// THE START: the finest cascade's cell off the surface (p_rayCounts.y, this cascade's units) - never this cascade's
 		// own cell, which would jump a slab thinner than it (the roof's top 0.4 m above a contact face in a 0.47 m cell:
 		// gi.sealed_sky)
@@ -163,10 +145,8 @@
 	const uint jahSub = gl_WorkGroupID.x;
 	const uint3 jahCell = jahBrick * 8u + uint3( jahSub & 1u, ( jahSub >> 1u ) & 1u, jahSub >> 2u ) * 4u +
 						  gl_LocalInvocationID.xyz;
-	float3 voxelUvwPos = p_invVoxelResolution * (float3( jahCell ) + 0.5f);
 
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahCell, 0 );
-	float4 normalVal = OGRE_Load3D( voxelNormalTex, jahCell, 0 );
 	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): JACOBI, NOT ACCUMULATION. What this pass writes is  new = direct +
 	// rho * G( total )  -- the fixed point of the radiance in the volume, iterated once: the base term the DIRECT injection,
 	// read from its own volume, the GATHER reading the running total. (The running total as the base made the series
@@ -174,11 +154,9 @@
 	// what this voxel re-emits of what it gathers (0 where nothing is): the feedback's sensitivity, below
 	float3 jahReemit = float3( 0, 0, 0 );
 
-	// VOXEL-R13 stage 1: THE HALVES ARE THE FIXED POINT (jah_voxel_halves.glsl) - each half of the voxel is its own
-	// surface, L_q = D_q + rho G_q, G_q gathered FROM ITS OWN FACES along ITS OWN NORMAL (the ray tier: rq_voxel_sides.comp
-	// over the same list); stored in place, (radiance x k, k) - no gather of this pass reads a half (the ray tier's ran
-	// before it; the voxel rays read the two sides and the directional chain). The two sides are DERIVED from the stored
-	// halves (this stage only; jahHalfSideWeight), so they move only when a half moves.
+	// VOXEL-R13: THE HALVES ARE THE FIXED POINT (jah_voxel_halves.glsl) - each half of the voxel is its own surface,
+	// L_q = D_q + rho G_q, G_q gathered FROM ITS OWN FACES along ITS OWN NORMAL (the ray tier: rq_voxel_sides.comp over the
+	// same list; the no-ray tier: the voxel rays, below), written into the pass's target as (radiance x k, k).
 	const int jahHalfW = imageSize( lightVoxel ).x / 6;
 	const float3 jahCovP = OGRE_Load3D( vctProbeCovP[0], jahCell, 0 ).xyz;
 	const float3 jahCovN = OGRE_Load3D( vctProbeCovN[0], jahCell, 0 ).xyz;
@@ -190,8 +168,6 @@
 		jahHalfDirectAt[q] = jahHalfDirectLoad( jahHalfTexel( int3( jahCell ), q / 3, q % 3, jahHalfW ) );
 		jahHalfTarget[q] = jahHalfDirectAt[q];
 	}
-	const bool twoSided = normalVal.a > 0.0f;
-	normalVal.xyz = normalize( normalVal.xyz * 2.0f - 1.0f );
 
 	if( anyInvocationARB( albedoVal.a > 0 ) )
 	{
@@ -209,19 +185,30 @@
 			}
 		}
 	@else
-		// THE NO-RAY TIER (VOXEL-R13 stage 3 moves it to the halves): the voxel rays gather the two sides as before - a
-		// two-sided voxel both hemispheres, a one-sided voxel its front - and each half takes the gather of the side its
-		// faces belong to (jahHalfSideWeight)
-		// ONE call site in a loop over the sides, not two: the gather is the whole ray set, inlined per call (a second
-		// call doubled the job's compile time).
-		float3 gathered[2];
-		gathered[0] = float3( 0, 0, 0 );
-		gathered[1] = float3( 0, 0, 0 );
-		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
-			gathered[side] = jahBounceRays( voxelUvwPos, int3( jahCell ), side == 0 ? normalVal.xyz : -normalVal.xyz );
+		// THE NO-RAY TIER: each half's gather by the voxel rays FROM ITS OWN FACES (VOXEL-R13 stage 2: the side gathered
+		// from the canonical normal at the cell's centre across its axis is deleted with the two-side store) - along its
+		// axis where they lie, across it their centroid, along their mean normal. ONE call site in a loop over the halves
+		// (the gather is the whole ray set, inlined per call: a second call doubled the job's compile time).
+		const float4 jahPosP = OGRE_Load3D( vctProbePosP[0], jahCell, 0 );
+		const float4 jahPosN = OGRE_Load3D( vctProbePosN[0], jahCell, 0 );
+		float4 jahSide[3], jahNrm[3];
+		jahSide[0] = OGRE_Load3D( voxelHalfSideX, jahCell, 0 );
+		jahSide[1] = OGRE_Load3D( voxelHalfSideY, jahCell, 0 );
+		jahSide[2] = OGRE_Load3D( voxelHalfSideZ, jahCell, 0 );
+		jahNrm[0] = OGRE_Load3D( voxelHalfNrmX, jahCell, 0 );
+		jahNrm[1] = OGRE_Load3D( voxelHalfNrmY, jahCell, 0 );
+		jahNrm[2] = OGRE_Load3D( voxelHalfNrmZ, jahCell, 0 );
 		for( int q = 0; q < 6; ++q )
-			gatheredHalf[q] = jahHalfSideWeight( normalVal.xyz, twoSided, q / 3, q % 3, 0 ) * gathered[0] +
-							  jahHalfSideWeight( normalVal.xyz, twoSided, q / 3, q % 3, 1 ) * gathered[1];
+		{
+			gatheredHalf[q] = float3( 0, 0, 0 );
+			const int a = q % 3, h = q / 3;
+			const float o = h == 0 ? jahCovP[a] : jahCovN[a];
+			if( !( o > 0.0f ) )
+				continue;
+			const float3 local = jahHalfFacePoint( a, o, h == 0 ? jahPosP[a] : jahPosN[a], jahHalfNrmPick( jahSide[a], h ) );
+			gatheredHalf[q] = jahBounceRays( ( float3( jahCell ) + local ) * p_invVoxelResolution, int3( jahCell ),
+											 jahHalfNormalDecode( jahHalfNrmPick( jahNrm[a], h ), a, h ) );
+		}
 	@end
 		// THE BOUNCE RE-EMITS WHAT THE SURFACE RENDERS (PHOTON-WRITER-1): a voxel lit
 		// by the diffuse gather of its surroundings reflects the normalised Disney

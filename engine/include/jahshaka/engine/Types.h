@@ -6151,9 +6151,9 @@ struct GiFeedbackBricks {
 };
 
 /// THE VOXEL SIDES' ESCAPE SHARE (PHOTON-7 11-2 (6), the openings' instrument): cascade 0's grid (GiVoxelVolume's
-/// width/height/depth, x fastest), one word a voxel as the sides' TLAS gather last wrote it - bits 0-7 the front side's
-/// share of its cosine rays that left the world (an EXIT: the sky), 8-15 the back side's (two-sided voxels), bit 16
-/// written, bit 17 two-sided. 0 = never gathered (empty, or no pass since the placement).
+/// width/height/depth, x fastest), one word a voxel as the sides' TLAS gather last wrote it - over its six halves (VOXEL-R13)
+/// the share of their cosine rays that left the world (an EXIT: the sky): bits 0-7 the largest half's, 8-15 the halves'
+/// coverage-weighted mean, bit 16 written. 0 = never gathered (empty, or no pass since the placement).
 struct GiVoxelSideShares {
     bool available = false;
     int  width = 0, height = 0, depth = 0;
@@ -6166,8 +6166,9 @@ struct GiVoxelVolume {
     /// Cascade's voxel origin (the corner of voxel 0,0,0) and cell, world metres.
     float origin[3] = { 0.f, 0.f, 0.f };
     float cell[3] = { 0.f, 0.f, 0.f };
-    /// width*height*depth RGBA, x fastest: the TOTAL light (premultiplied by
-    /// the voxel's conservative opacity c; radiance), the voxeliser's albedo
+    /// width*height*depth RGBA, x fastest: THE CELL'S LIGHT (VOXEL-R13: derived from
+    /// the six halves below - rgb / a their coverage-weighted mean radiance, a the
+    /// largest half's coverage k; the readers read the halves), the voxeliser's albedo
     /// volume (rgb = the surfaces' area-mean albedo, a = c = max of the six
     /// per-half-axis coverages), the COVERAGE PER HALF-AXIS (rgb = O_x, O_y, O_z of
     /// the faces looking +a (P) and -a (N): the fraction of the voxel's face along
@@ -6180,15 +6181,6 @@ struct GiVoxelVolume {
     std::vector<float> albedo;
     std::vector<float> coverageP, coverageN;
     std::vector<float> positionP, positionN;
-    /// LEVEL 0 PER SIDE (PHOTON-VOXEL-5), every tier: the store holds a voxel's two SIDES (PHOTON-7 stage 7) -
-    /// `lightFront` and `lightBack` as stored (premultiplied the same way), `light` THE VOXEL'S LIGHT (a two-sided voxel's
-    /// the sides' mean, a one-sided voxel's its front: its back is the inside of a solid and stores 0, PHOTON-7 stage 10)
-    /// - and `normal` the voxeliser's (rgb biased 0.5 + 0.5 n, a = 1 for a two-sided voxel, whose normal is canonical:
-    /// the front is the side it points to). The faces looking +a take the front where n_a > 0, the back where n_a < 0.
-    /// (giVoxelLight fills `light`, `lightFront`, `lightBack` and `normal`.)
-    std::vector<float> lightFront;
-    std::vector<float> lightBack;
-    std::vector<float> normal;
     /// THE REST OF THE VOXELISER'S LEVEL 0 (ENGINE-UPGRADE-U5, the reader's decision 11 g): the emissive
     /// (rgb, the material roughness in a), decoded like `albedo`; and the raw integer area weight a build
     /// keeps per voxel (`accumWeight`, width*height*depth). With the arrays above, every level-0 volume a
@@ -6199,13 +6191,11 @@ struct GiVoxelVolume {
     /// half emits `emissive` x f.
     std::vector<float> emitP, emitN;
     std::vector<unsigned> accumWeight;
-    /// THE DIRECT VOLUME (FAR-SUN-2), level 0, premultiplied like `light`: every lamp's direct
+    /// THE DIRECT TERM (FAR-SUN-2), level 0, the cell's as `light` (from `halfDirect`, which the whole door returns
+    /// too, as `halfLight`): every lamp's direct
     /// term and the emissive - what a hit's read takes out of the store (jah_rq_hit.glsl's bounce
     /// share 1 - D / T). Empty where the cascade keeps none (no bounce texture).
     std::vector<float> direct;
-    /// ...AND ITS BACK SIDE (PHOTON-7 stage 2): the back side's direct term, level 0 - what a scroll commit's delta
-    /// replaces in `lightBack`, as `direct` is replaced in `light`. Empty where the cascade keeps none.
-    std::vector<float> directBack;
     /// THE ALBEDO VOLUME'S MIP LEVELS 1..n (ENGINE-UPGRADE-ASYNC-3 stage 1), decoded like `albedo`
     /// (level 0): albedoLevels[L - 1] is level L, max(1, size >> L) per axis, RGBA, x fastest — the
     /// compute chain's proof (each texel the blit's filter of the level below).
@@ -6216,8 +6206,8 @@ struct GiVoxelVolume {
     /// level 0 reads: step 0 composites them from the level-0 light and step 1 builds the levels, so they are a function
     /// of the level-0 light - gi.scroll_slab D compares a commit's with a whole regeneration (gi.regenerateDirectional).
     std::vector<std::vector<float>> directional[3];
-    /// THE HALF STORE (VOXEL-R13; Scene::giVoxelHalves fills these with the coverage, the position, the normal and the
-    /// placement): level 0's six HALF LIGHTS in `halfLight`, one volume 6 x width wide (x fastest): axis a's -a half's
+    /// THE HALF STORE (VOXEL-R13; Scene::giVoxelHalves fills these with the coverage, the position and the
+    /// placement; giVoxelVolume all four kinds, giVoxelLight `halfLight`): level 0's six HALF LIGHTS in `halfLight`, one volume 6 x width wide (x fastest): axis a's -a half's
     /// texel of cell x at 2 a width + x, its +a half's at ( 2 a + 1 ) width + x, RGBA decoded: (radiance x k, k), k the
     /// half's coverage capped at 1 - each half lit and gathered from its own faces; `halfDirect` their direct terms, the
     /// same layout (empty without a bounce). And THE HALVES' OWN FACES per axis at the volume's own size: `halfSide[a]`

@@ -26,10 +26,6 @@
 		// Jahshaka (PHOTON-VOXEL-4): the surface position per half-axis, the list's last entries.
 		vulkan_layout( ogre_t@value(vctProbePosP) ) uniform texture3D vctProbePosP[@value( vct_num_probes )];
 		vulkan_layout( ogre_t@value(vctProbePosN) ) uniform texture3D vctProbePosN[@value( vct_num_probes )];
-		// Jahshaka (PHOTON-VOXEL-5): level 0's BACK side and the voxeliser's normal (its side) -
-		// the list's last two entries on the anisotropic tiers.
-		vulkan_layout( ogre_t@value(vctProbeBack) ) uniform texture3D vctProbeBack[@value( vct_num_probes )];
-		vulkan_layout( ogre_t@value(vctProbeNrm) ) uniform texture3D vctProbeNrm[@value( vct_num_probes )];
 		// THE CONE FUNCTIONS COME AFTER THE VOLUMES THEY READ (PHOTON-READER-1): the
 		// march reads the volumes as globals through its macro convention, and this
 		// piece is the first point in the pixel shader where they are declared
@@ -131,10 +127,6 @@
 	#define JAH_VOX_SAMPLE_X( c, u, l ) OGRE_SampleLevel( vctProbeX[c], vctProbeSampler, u, l )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) OGRE_SampleLevel( vctProbeY[c], vctProbeSampler, u, l )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) OGRE_SampleLevel( vctProbeZ[c], vctProbeSampler, u, l )
-	// Jahshaka (PHOTON-VOXEL-5): level 0 read per side (jah_voxel_sample.glsl).
-	#define JAH_VOX_PER_SIDE 1
-	#define JAH_VOX_SAMPLE_BACK( c, u, l ) OGRE_SampleLevel( vctProbeBack[c], vctProbeSampler, u, l )
-	#define JAH_VOX_SAMPLE_NRM( c, u, l ) OGRE_SampleLevel( vctProbeNrm[c], vctProbeSampler, u, l )
 	#define JAH_VOX_INVRES( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].xyz
 	#define JAH_VOX_MAXLOD( c ) passBuf.vctProbeParams.vctInvResolution_cascadeMaxLod[c].w
 	@property( vct_num_probes > 1 )

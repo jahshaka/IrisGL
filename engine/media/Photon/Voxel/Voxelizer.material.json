@@ -10,9 +10,9 @@
             "inform_shader_of_texture_size" : false,
             "inform_shader_of_texture_data_change" : true,
 
-            "uav_units" : 20,
+            "uav_units" : 19,
 
-            "gl_tex_slot_start" : 20,
+            "gl_tex_slot_start" : 19,
 			
 			"params" :
             [
@@ -21,23 +21,22 @@
 			"params_glsl" :
             [
                 ["voxelAlbedoTex",      	[1], "int"],
-                ["voxelNormalTex",  		[2], "int"],
-                ["voxelEmissiveTex",		[3], "int"],
-                ["voxelAccumVal",			[4], "int"],
-                ["voxelMergeAccum",			[5], "int"],
-                ["voxelCoveragePTex",		[6], "int"],
-                ["voxelCoverageNTex",		[7], "int"],
-                ["voxelPositionPTex",		[8], "int"],
-                ["voxelPositionNTex",		[9], "int"],
-                ["voxelMetalTex",			[10], "int"],
-                ["voxelEmitPTex",			[11], "int"],
-                ["voxelEmitNTex",			[12], "int"],
-                ["voxelHalfSideXTex",		[13], "int"],
-                ["voxelHalfSideYTex",		[14], "int"],
-                ["voxelHalfSideZTex",		[15], "int"],
-                ["voxelHalfNrmXTex",		[16], "int"],
-                ["voxelHalfNrmYTex",		[17], "int"],
-                ["voxelHalfNrmZTex",		[18], "int"]
+                ["voxelEmissiveTex",		[2], "int"],
+                ["voxelAccumVal",			[3], "int"],
+                ["voxelMergeAccum",			[4], "int"],
+                ["voxelCoveragePTex",		[5], "int"],
+                ["voxelCoverageNTex",		[6], "int"],
+                ["voxelPositionPTex",		[7], "int"],
+                ["voxelPositionNTex",		[8], "int"],
+                ["voxelMetalTex",			[9], "int"],
+                ["voxelEmitPTex",			[10], "int"],
+                ["voxelEmitNTex",			[11], "int"],
+                ["voxelHalfSideXTex",		[12], "int"],
+                ["voxelHalfSideYTex",		[13], "int"],
+                ["voxelHalfSideZTex",		[14], "int"],
+                ["voxelHalfNrmXTex",		[15], "int"],
+                ["voxelHalfNrmYTex",		[16], "int"],
+                ["voxelHalfNrmZTex",		[17], "int"]
 			],
 
 			"properties" :
@@ -228,8 +227,6 @@
             "params_glsl" :
             [
                 ["voxelAlbedoTex",          [0], "int"],
-                ["voxelNormalTex",          [1], "int"],
-
                 ["lightVoxel",              [0], "int"]
             ]
         },

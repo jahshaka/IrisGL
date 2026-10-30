@@ -5,7 +5,7 @@
 
 @insertpiece( PreBindingsHeaderCS )
 
-@pset( vctTexUnit, 2 )
+@pset( vctTexUnit, 1 )
 
 /// Enable uses_array_bindings when there is more than one cascade
 /// (hlms_num_vct_cascades can't be 0)
@@ -13,7 +13,6 @@
 @psub( uses_array_bindings, hlms_num_vct_cascades, 1 )
 
 vulkan_layout( ogre_t0 ) uniform texture3D voxelAlbedoTex;
-vulkan_layout( ogre_t1 ) uniform texture3D voxelNormalTex;
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbes[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
 
@@ -39,46 +38,33 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosP[@value(
 @add( vctTexUnit, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbePosN[@value( hlms_num_vct_cascades )];
 @add( vctTexUnit, hlms_num_vct_cascades )
-// PHOTON-7 stage 7: every cascade's BACK SIDE, after the surface position (VctLighting::setupBounceTextures' order): the
-// store holds the two sides (vctProbes the front); a ray's hit reads the side facing it (stage 10, jah_voxel_ray.glsl).
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeBack[@value( hlms_num_vct_cascades )];
-@add( vctTexUnit, hlms_num_vct_cascades )
-// PHOTON-7 stage 10, 10-1: every cascade's NORMAL (the voxeliser's: the canonical normal of a two-sided voxel says which
-// side is the front), after the backs - the side a ray's hit reads.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D vctProbeNrm[@value( hlms_num_vct_cascades )];
-@add( vctTexUnit, hlms_num_vct_cascades )
-
-// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): THE DIRECT TERM, at the unit after every probe array (the
-// same order VctLighting::setupBounceTextures binds them in). It is read with a
-// plain Load3D at the voxel this invocation writes -- the D of the fixed point
-// L = D + rho * G( L ) -- so it needs no sampler and no mip chain.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directVoxel;
-@add( vctTexUnit, 1 )
-
-// JAHSHAKA (PHOTON-WRITER-1): THE VOXELISER'S EMISSIVE VOLUME, right after
-// `directVoxel` (VctLighting::setupBounceTextures): its alpha is the voxel's merged
-// roughness, which the bounce's re-emission reads. A plain Load3D, no sampler.
+// JAHSHAKA (PHOTON-WRITER-1): THE VOXELISER'S EMISSIVE VOLUME after the arrays (VctLighting::setupBounceTextures): its
+// alpha is the voxel's merged roughness, which the bounce's re-emission reads. A plain Load3D, no sampler.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelEmissiveTex;
 @add( vctTexUnit, 1 )
-
-// Jahshaka (PHOTON-VOXEL-5): THE BACK SIDE'S DIRECT TERM on the anisotropic tiers, after the
-// emissive volume (VctLighting::setupBounceTextures): a two-sided voxel's back is its own fixed
-// point, L_back = D_back + rho * G_back.
-vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
-@add( vctTexUnit, 1 )
-
-// Jahshaka (METAL-BOUNCE-1): THE METAL after the back side's direct term (VctLighting::setupBounceTextures):
-// the F0 and Fresnel-90 weight of the specular lobe (every surface's, a dielectric's 0.04 too), re-emitted by the lobe's hemispherical
-// integral. A plain Load3D, no sampler.
+// Jahshaka (METAL-BOUNCE-1): THE METAL: the F0 and Fresnel-90 weight of the specular lobe (every surface's, a
+// dielectric's 0.04 too), re-emitted by the lobe's hemispherical integral. A plain Load3D, no sampler.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 @add( vctTexUnit, 1 )
-
-// VOXEL-R13: THE HALF STORE's DIRECT TERMS after the metal (VctLighting::setupBounceTextures): each half's fixed point
-// L_q = D_q + rho G_q (plain Load3Ds at the voxel written).
+// VOXEL-R13: THE HALF STORE's DIRECT TERMS: each half's fixed point L_q = D_q + rho G_q (plain Load3Ds at the voxel
+// written); and THE HALVES' OWN FACES per axis - their centroid across the axis and their normal (PhotonVoxelizerSource
+// Base.h): a half's gather at the no-ray tier starts on its own faces along their normal.
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D halfStoreDirect;
 @add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideX;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideY;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfSideZ;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmX;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmY;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelHalfNrmZ;
+@add( vctTexUnit, 1 )
 
-// JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after `directVoxel`
+// JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after the halves' faces
 // (VctLighting::setupBounceTextures binds it last, and only while the host set a
 // cube - the job property jah_env). Sampled with vctProbeSampler.
 @property( jah_env )

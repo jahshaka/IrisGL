@@ -58,8 +58,13 @@ layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
 layout( std430, set = 0, binding = 37 ) buffer SideShare { uint jahSideShare[]; };
 /// VOXEL-R13 stage 1: THIS CASCADE's HALVES' OWN FACES per axis (PhotonVoxelizerSourceBase.h): where each half's faces lie
 /// across its axis (rg the +a half, ba the -a half) and their mean normal's hemisphere octahedron
-layout( set = 0, binding = 38 ) uniform sampler3D halfSide[3];
-layout( set = 0, binding = 41 ) uniform sampler3D halfNrm[3];
+// (six bindings of one descriptor each, as the layout declares them - an array would be ONE binding of three)
+layout( set = 0, binding = 38 ) uniform sampler3D halfSideX;
+layout( set = 0, binding = 39 ) uniform sampler3D halfSideY;
+layout( set = 0, binding = 40 ) uniform sampler3D halfSideZ;
+layout( set = 0, binding = 41 ) uniform sampler3D halfNrmX;
+layout( set = 0, binding = 42 ) uniform sampler3D halfNrmY;
+layout( set = 0, binding = 43 ) uniform sampler3D halfNrmZ;
 
 // ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
 layout( set = 0, binding = 5 ) uniform sampler3D voxelHalf[kMaxCascades];   // VOXEL-R13: the half store
@@ -243,8 +248,10 @@ void main()
 			if( !( o > 0.0 ) )
 				continue;
 			const float pO = h == 0 ? posP[a] : posN[a];
-			const vec4 sv = texelFetch( halfSide[a], ic, 0 );
-			const vec4 nv = texelFetch( halfNrm[a], ic, 0 );
+			const vec4 sv = a == 0 ? texelFetch( halfSideX, ic, 0 ) : a == 1 ? texelFetch( halfSideY, ic, 0 )
+																   : texelFetch( halfSideZ, ic, 0 );
+			const vec4 nv = a == 0 ? texelFetch( halfNrmX, ic, 0 ) : a == 1 ? texelFetch( halfNrmY, ic, 0 )
+																 : texelFetch( halfNrmZ, ic, 0 );
 			const vec3 nWorld = jahHalfNormalDecode( h == 0 ? nv.xy : nv.zw, a, h );
 			const vec3 local = jahHalfFacePoint( a, o, pO, h == 0 ? sv.xy : sv.zw );
 			const vec3 P = p.hit.voxelOrigin[cc].xyz + ( ( vec3( cell ) + local ) * invRes ) / invSize;

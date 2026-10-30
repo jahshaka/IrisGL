@@ -1105,15 +1105,15 @@ public:
     /// GiVoxelVolume). False
     /// without a VCT arm or that cascade.
     virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
-    /// ...ITS LIGHT ALONE (PHOTON-7 stage 4) - the same TEST AND TOOL readback (flushes and BLOCKS), the two stored sides:
-    /// `lightFront` and `lightBack` (mip 0, decoded), `light` the voxel's light (two-sided: their mean; one-sided: the
-    /// front - PHOTON-7 stage 10's one-sided write), the voxeliser's `normal` that says which, and the placement
+    /// ...ITS LIGHT ALONE (PHOTON-7 stage 4) - the same TEST AND TOOL readback (flushes and BLOCKS): the half store as
+    /// stored (`halfLight`, VOXEL-R13), `light` the cell's light derived from its six halves (Types.h
+    /// GiVoxelVolume::light), and the placement
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
     virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// ...ITS HALF STORE (VOXEL-R13 stage 1) - the same TEST AND TOOL readback (flushes and BLOCKS): `halfLight` and
     /// `halfDirect` (the six half lights and their direct terms), the halves' own faces (`halfSide`, `halfNormal`), the
-    /// coverage and the surface position per half, the voxeliser's `normal`, and the placement; every other member empty.
+    /// coverage and the surface position per half, and the placement; every other member empty.
     /// `worldLo` / `worldHi` (both or neither, world metres): the volume returned is THE CELLS THAT BOX REACHES alone -
     /// `width` / `height` / `depth` its own, `origin` its first cell's corner - a law over one room reads that room (the
     /// whole cascade decoded in Debug cost a fixture about a second and a half a cascade).

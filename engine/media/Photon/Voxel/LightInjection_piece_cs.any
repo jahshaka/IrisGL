@@ -12,7 +12,6 @@
 	#define JAH_VOX_SAMPLE_X( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
-	#define JAH_VOX_SAMPLE_BACK( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( chainCovP[c], voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( chainCovN[c], voxelAlbedoSampler, u, l )
 	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( chainPosP[c], voxelAlbedoSampler, u, l )
@@ -177,7 +176,6 @@
 	const int3 voxelId = int3( jahInjCell );
 
 	float4 albedoVal = OGRE_Load3D( voxelAlbedoTex, jahInjCell, 0 );
-	float4 normalVal = OGRE_Load3D( voxelNormalTex, jahInjCell, 0 );
 	float4 emissiveVal = OGRE_Load3D( voxelEmissiveTex, jahInjCell, 0 );
 	// THE SPECULAR LOBE (METAL-BOUNCE-1, ENGINE-POLISH-PHOTON-1 stage 2): its F0 kS (rgb) and Fresnel-90
 	// weight kS (alpha) - EVERY surface's, a dielectric's F0 = 0.04 included (Voxelizer_piece_cs.any);
@@ -189,14 +187,6 @@
 	float4 metalVal = OGRE_Load3D( voxelMetalTex, jahInjCell, 0 );
 	metalVal.xyz = metalVal.www * 0.04f + metalVal.xyz * 0.96f;
 	const bool metalVoxel = metalVal.w > 0.0f;
-
-	normalVal.xyz = normalVal.xyz * 2.0f - 1.0f;
-	normalVal.xyz = normalize( normalVal.xyz );
-	// A TWO-SIDED VOXEL (both faces of a slab thinner than the cell - VoxelMerge's two normal
-	// groups more than 120 degrees apart) stores its CANONICAL normal: the FRONT is the side it
-	// points to, the BACK the other (VoxelMerge_piece_cs.any).
-	const bool twoSided = normalVal.a > 0.0f;
-	const float3 nrm = normalVal.xyz;
 
 	// THE VOXEL EMITS ITS SURFACES' MEAN RADIANCE TIMES THE VOXEL'S OPACITY
 	// (PHOTON-VOXEL-3): the emissive and the albedo are area MEANS and the albedo's
@@ -218,8 +208,7 @@
 	// (the faces looking +a or -a, whose coverage the voxeliser keeps apart) takes its own light: its
 	// own faces' normal, its own exact march from its own faces (VOXEL-R13 stage 1: where they lie
 	// across the axis too); the half store holds it at level 0 and the directional level 0 is
-	// composited from it. Level 0's two SIDES for the level-0 readers (the rays, the hit read) are
-	// derived from the halves this stage (below; stage 2 moves those readers onto the halves).
+	// composited from it; every level-0 reader reads the half facing it (VOXEL-R13 stage 2).
 	const float3 covP0 = OGRE_Load3D( chainCovP[p_chainSelf], voxelId, 0 ).xyz;
 	const float3 covN0 = OGRE_Load3D( chainCovN[p_chainSelf], voxelId, 0 ).xyz;
 	// JUNCTION-NORMAL-1: THE EMISSIVE PER HALF-AXIS - each half emits what its own faces emit, the area
@@ -416,10 +405,10 @@
 		}
 	}
 	const float3 emissive = emissiveVal.xyz;
-	wshort3 voxelCelUvw = wshort3( jahInjCell );
-	// VOXEL-R13 stage 1: THE HALF LIGHTS - each half's direct light and what its own faces emit (JUNCTION-NORMAL-1's
-	// factor), (radiance x k, k) with k the half's coverage capped at 1: the half store's texel (and with a bounce its
-	// direct term's), and the fused step 0's input below (the directional level 0 is composited from the same values).
+	// THE HALF LIGHTS (VOXEL-R13) - each half's direct light and what its own faces emit (JUNCTION-NORMAL-1's factor),
+	// (radiance x k, k) with k the half's coverage capped at 1: the half store's texel (and with a bounce its direct
+	// term's), and the fused step 0's input below (the directional level 0 is composited from the same values). Level 0
+	// holds nothing else: the two sides the store held are deleted (VOXEL-R13 stage 2).
 	float4 jahHalfVal[6];
 	for( int h = 0; h < 2; ++h )
 	{
@@ -432,39 +421,38 @@
 										: float4( 0.0f, 0.0f, 0.0f, 0.0f );
 		}
 	}
-	// LEVEL 0's TWO SIDES (PHOTON-7 stage 7) ARE DERIVED FROM THE HALVES this stage (VOXEL-R13 stage 1; deleted with the
-	// two-side store at stage 2): each the coverage-weighted mean of the halves whose faces look its way along the
-	// canonical normal (jahHalfSideWeight) - the FRONT here (lightVoxel and its direct copy), the back beside it
-	// (backVoxel); a one-sided voxel's back is the inside of a solid and stores 0 (PHOTON-7 stage 10's ONE-SIDED WRITE).
-	float3 front = float3( 0.0f, 0.0f, 0.0f );
-	float3 back = float3( 0.0f, 0.0f, 0.0f );
+	// THE ABSOLUTE MOVE's REFERENCE (PHOTON-7 stage 5, 5-4: what a reader read at this world point before): a half's own
+	// old direct term - but a CLEARED voxel (a scroll's slab: outside the box the shift kept; every voxel of a whole
+	// injection, whose store held another placement or nothing) was read from the next cascade out, so its move is against
+	// that cascade's direct term of the same half there (the outermost's against nothing).
+@property( jah_inject_delta )
+	const bool jahCleared =
+		!( all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) ) );
+@else
+	const bool jahCleared = true;
+@end
+	int3 jahRefCell = int3( -1, -1, -1 );
+	int jahRefW = 0;
+	const uint jahNext = p_chainSelf + 1u;
+	if( jahCleared && jahNext < uint( JAH_INJ_CHAIN ) )
 	{
-		float wFront = 0.0f, wBack = 0.0f;
-		for( int h = 0; h < 2; ++h )
+		const float3 jahQ = ( voxelAabbCenter - p_chainOrigin[jahNext].xyz ) / p_chainOrigin[jahNext].w;
+		if( all( greaterThanEqual( jahQ, float3( 0.0f, 0.0f, 0.0f ) ) ) && all( lessThan( jahQ, p_chainRes[jahNext].xyz ) ) )
 		{
-			for( int a = 0; a < 3; ++a )
-			{
-				const float4 v = jahHalfVal[h * 3 + a];
-				const float wf = jahHalfSideWeight( nrm, twoSided, h, a, 0 );
-				const float wb = jahHalfSideWeight( nrm, twoSided, h, a, 1 );
-				front += wf * v.xyz;
-				wFront += wf * v.w;
-				back += wb * v.xyz;
-				wBack += wb * v.w;
-			}
+			jahRefCell = int3( jahQ );
+			jahRefW = int( p_chainRes[jahNext].x );
 		}
-		front = wFront > 0.0f ? front / wFront : float3( 0.0f, 0.0f, 0.0f );
-		back = wBack > 0.0f ? back / wBack : float3( 0.0f, 0.0f, 0.0f );
 	}
-	float4 injectedVoxel = float4( front * c, c );
-	const float4 backVoxelVal = float4( twoSided ? back * c : float3( 0, 0, 0 ), c );
-	// THE HALVES' WRITES (VOXEL-R13 stage 1) and the most any half's direct term moved (the brick mask's and the absolute
-	// move's share, below): a whole injection writes each half whole, a delta (a scroll's commit) replaces its old direct
-	// term inside its total against its own store's read-back (the sides' rule, below)
+	// THE HALVES' WRITES and the most any half's direct term moved (the brick mask's relative change and the absolute
+	// move): a whole injection writes each half whole; a DELTA (a scroll's commit; PHOTON-7 stage 2) replaces its old
+	// direct term inside its total - total += D_new - D_old, against ITS OWN store's read-back (never a conversion of
+	// ours: on this driver packHalf2x16 rounds unlike the image store, and unpackHalf2x16( packHalf2x16( x ) ) folds to
+	// x) - so whatever the bounces built over it is kept, and a half whose direct term did not change keeps every bit. A
+	// slab voxel's old terms are the shift's cleared zeros: each half becomes its D_new.
 	const int jahHalfW = imageSize( halfStore ).x / 6;
-	float jahHalfDirChange = 0.0f;
-	float3 jahHalfAbs = float3( 0.0f, 0.0f, 0.0f );
-	float3 jahHalfNew = float3( 0.0f, 0.0f, 0.0f );
+	float jahDirChange = 0.0f;
+	float3 jahAbsDir3 = float3( 0.0f, 0.0f, 0.0f );
+	bool jahChanged = false;
 	for( int h = 0; h < 2; ++h )
 	{
 		for( int a = 0; a < 3; ++a )
@@ -477,7 +465,10 @@
 			const float4 hdNew = jahHalfDirectLoad( t );
 	@property( jah_inject_delta )
 			if( any( notEqual( floatBitsToUint( hdNew ), floatBitsToUint( hdOld ) ) ) )
+			{
 				jahHalfLightStore( t, jahHalfLightLoad( t ) + ( hdNew - hdOld ) );
+				jahChanged = true;
+			}
 	@else
 			jahHalfLightStore( t, v );
 	@end
@@ -486,32 +477,17 @@
 			jahHalfLightStore( t, v );
 			const float4 hdNew = jahHalfLightLoad( t );
 @end
-			jahHalfDirChange = max( jahHalfDirChange, jahBrickChange( hdOld.xyz, hdNew.xyz ) );
-			jahHalfAbs = max( jahHalfAbs, abs( hdNew.xyz - hdOld.xyz ) );
-			jahHalfNew = max( jahHalfNew, abs( hdNew.xyz ) );
+			jahDirChange = max( jahDirChange, jahBrickChange( hdOld.xyz, hdNew.xyz ) );
+			float4 ref = hdOld;
+			if( jahCleared )
+				ref = jahRefW > 0 ? OGRE_Load3D( chainHalfDirect[jahNext], jahHalfTexel( jahRefCell, h, a, jahRefW ), 0 )
+								  : float4( 0.0f, 0.0f, 0.0f, 0.0f );
+			jahAbsDir3 = max( jahAbsDir3, abs( hdNew.xyz - ref.xyz ) );
 		}
 	}
 @property( jah_inject_delta )
-	// THE DELTA (PHOTON-7 stage 2; PREFLIGHT_1_2 W1): at a scroll's commit the direct term REPLACES ITS OLD SELF inside
-	// each side - front += Df_new - Df_old, back += Db_new - Db_old, each against ITS OWN store's read-back (never one
-	// side's delta derived from the other: the fp16 trap, DOCS/traps/ENGINE.md) - so whatever the bounces built over it
-	// is kept, and a voxel whose direct did not change keeps every bit (neither side is written). A slab voxel's old
-	// terms are the shift's cleared zeros: each side becomes its D_new.
-	// THE TEST IS THE STORE'S OWN CONVERSION: the new terms are written as a whole injection writes them and read back
-	// by this invocation (program order), then compared bit for bit with the old. Never a conversion of our own: on this
-	// driver packHalf2x16 rounds unlike the image store (measured: a quarter of the lit voxels "changed" with nothing
-	// moved), and unpackHalf2x16( packHalf2x16( x ) ) was folded back to x. (The store is float at every scroll tier.)
-	const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
-	const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
-	OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
-	OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, jahStoreDirect( backVoxelVal ) );
-	const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
-	const float4 dbNew = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
-	if( any( notEqual( floatBitsToUint( dNew ), floatBitsToUint( dOld ) ) ) ||
-		any( notEqual( floatBitsToUint( dbNew ), floatBitsToUint( dbOld ) ) ) )
+	if( jahChanged )
 	{
-		OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( OGRE_imageLoad3D( lightVoxel, voxelCelUvw ) + ( dNew - dOld ) ) );
-		OGRE_imageWrite3D4( backVoxel, voxelCelUvw, jahStoreLight( OGRE_imageLoad3D( backVoxel, voxelCelUvw ) + ( dbNew - dbOld ) ) );
 		const bool kept = all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) );
 		atomicAdd( jahCommitCount[kept ? 1u : 0u], 1u );
 	}
@@ -522,70 +498,7 @@
 	// delta costs is its marches, the writes are only what changed)
 	if( gl_LocalInvocationIndex == 0u )
 		atomicAdd( jahCommitCount[3], 64u );
-@else
-	// THE DIRECT TERM IT REPLACES, for the brick mask (PHOTON-7 stage 3): read before the writes and read back after them,
-	// the store's own conversion compared (the delta's rule above) - the direct volumes, or the light store's two sides
-	// where the cascade keeps none (no bounce: each side IS its direct term).
-	@property( vct_keep_direct )
-		const float4 dOld = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
-		const float4 dbOld = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
-	@else
-		const float4 dOld = OGRE_imageLoad3D( lightVoxel, voxelCelUvw );
-		const float4 dbOld = OGRE_imageLoad3D( backVoxel, voxelCelUvw );
-	@end
-	OGRE_imageWrite3D4( lightVoxel, voxelCelUvw, jahStoreLight( injectedVoxel ) );
-	// JAHSHAKA fork ae2ed529f+155a56bf8 (was 0076): the same value, kept apart as the bounce iteration's
-	// D term. One extra image store; no copy and no second dispatch.
-	@property( vct_keep_direct )
-		OGRE_imageWrite3D4( directVoxel, voxelCelUvw, jahStoreDirect( injectedVoxel ) );
-	@end
-
-	OGRE_imageWrite3D4( backVoxel, voxelCelUvw, jahStoreLight( backVoxelVal ) );
-	@property( vct_keep_direct )
-		OGRE_imageWrite3D4( directBackVoxel, voxelCelUvw, jahStoreDirect( backVoxelVal ) );
-	@end
-	@property( vct_keep_direct )
-		const float4 dNew = OGRE_imageLoad3D( directVoxel, voxelCelUvw );
-		const float4 dbNew = OGRE_imageLoad3D( directBackVoxel, voxelCelUvw );
-	@else
-		const float4 dNew = OGRE_imageLoad3D( lightVoxel, voxelCelUvw );
-		const float4 dbNew = OGRE_imageLoad3D( backVoxel, voxelCelUvw );
-	@end
 @end
-	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
-	const float jahDirChange = max( max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) ),
-									jahHalfDirChange );
-	// ...and ABSOLUTE (PHOTON-7 stage 5): the most either side moved with it (a delta adds exactly this to each side),
-	// the brick state's word 7 - a non-finite change saturates. ITS REFERENCE IS WHAT A READER READ AT THIS
-	// WORLD POINT BEFORE (5-4, the lead's ruling): the old direct term - but a CLEARED voxel (a scroll's slab: outside
-	// the box the shift kept; every voxel of a whole injection, whose store held another placement or nothing) was read
-	// from the next cascade out, so its move is against that cascade's direct there (the outermost's against nothing).
-	float4 jahRefD = dOld, jahRefDb = dbOld;
-@property( jah_inject_delta )
-	const bool jahCleared =
-		!( all( greaterThanEqual( voxelId, p_keepLo.xyz ) ) && all( lessThan( voxelId, p_keepHi.xyz ) ) );
-@else
-	const bool jahCleared = true;
-@end
-	if( jahCleared )
-	{
-		jahRefD = float4( 0.0f, 0.0f, 0.0f, 0.0f );
-		jahRefDb = float4( 0.0f, 0.0f, 0.0f, 0.0f );
-		const uint jahNext = p_chainSelf + 1u;
-		if( jahNext < uint( JAH_INJ_CHAIN ) )
-		{
-			const float3 jahQ = ( voxelAabbCenter - p_chainOrigin[jahNext].xyz ) / p_chainOrigin[jahNext].w;
-			if( all( greaterThanEqual( jahQ, float3( 0.0f, 0.0f, 0.0f ) ) ) && all( lessThan( jahQ, p_chainRes[jahNext].xyz ) ) )
-			{
-				jahRefD = OGRE_Load3D( chainDirect[jahNext], int3( jahQ ), 0 );
-				jahRefDb = OGRE_Load3D( chainDirectBack[jahNext], int3( jahQ ), 0 );
-			}
-		}
-	}
-	// (VOXEL-R13: a half's move counts against its own old term; a CLEARED voxel's halves against nothing - the whole of
-	// the new term, a bound from above: the next cascade out keeps no halves to read the old reading from)
-	const float3 jahAbsDir3 = max( max( abs( dNew.xyz - jahRefD.xyz ), abs( dbNew.xyz - jahRefDb.xyz ) ),
-								   jahCleared ? jahHalfNew : jahHalfAbs );
 	float jahAbsDir = max( max( jahAbsDir3.x, jahAbsDir3.y ), jahAbsDir3.z );
 	if( ( floatBitsToUint( jahAbsDir ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbsDir = 1.0e30;

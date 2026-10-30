@@ -8310,7 +8310,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
         }
         // VOXEL-R13 stage 2: kind 0 the half store, 8 its direct terms (the readers' list), 9..11 the halves' normals per
         // axis (the share's "same surface" ring, jah_rq_hit.glsl)
-        out.voxel[c][8] = tex[lighting->backIndex()];
+        out.voxel[c][8] = tex[lighting->halfDirectIndex()];
         for (unsigned a = 0; a < 3u; ++a) out.voxel[c][9 + a] = voxelizer->getHalfNrmVox(a);
         const Ogre::Vector3 og = voxelizer->getVoxelOrigin();
         const Ogre::Vector3 sz = voxelizer->getVoxelSize();

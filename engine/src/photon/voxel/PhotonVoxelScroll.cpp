@@ -51,40 +51,36 @@ namespace Ogre
         }
 
         /// The live store's volumes, in one fixed order: the shift, the copy-in and the clear walk it.
-        constexpr size_t kVolumes = 17u;
+        constexpr size_t kVolumes = 16u;
         void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
             out[0] = v.albedo;
             out[1] = v.emissive;
-            out[2] = v.normal;
-            out[3] = v.accumVal;
-            out[4] = v.coverage[0];
-            out[5] = v.coverage[1];
-            out[6] = v.position[0];
-            out[7] = v.position[1];
-            out[8] = v.metal;     // METAL-BOUNCE-1
-            out[9] = v.emit[0];   // JUNCTION-NORMAL-1
-            out[10] = v.emit[1];
-            for( size_t a = 0u; a < 3u; ++a )   // VOXEL-R13 stage 1: the halves' own faces
+            out[2] = v.accumVal;
+            out[3] = v.coverage[0];
+            out[4] = v.coverage[1];
+            out[5] = v.position[0];
+            out[6] = v.position[1];
+            out[7] = v.metal;     // METAL-BOUNCE-1
+            out[8] = v.emit[0];   // JUNCTION-NORMAL-1
+            out[9] = v.emit[1];
+            for( size_t a = 0u; a < 3u; ++a )   // VOXEL-R13: the halves' own faces
             {
-                out[11u + a] = v.halfSide[a];
-                out[14u + a] = v.halfNrm[a];
+                out[10u + a] = v.halfSide[a];
+                out[13u + a] = v.halfNrm[a];
             }
         }
-        const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "Normal",
-                                                      "AccumVal",  "CoverageP", "CoverageN",
-                                                      "PositionP", "PositionN", "Metal",
-                                                      "EmitP",     "EmitN",     "HalfSideX",
-                                                      "HalfSideY", "HalfSideZ", "HalfNrmX",
-                                                      "HalfNrmY",  "HalfNrmZ" };
-        /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the normal's 0.5 bias.
+        const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "AccumVal",  "CoverageP",
+                                                      "CoverageN", "PositionP", "PositionN", "Metal",
+                                                      "EmitP",     "EmitN",     "HalfSideX", "HalfSideY",
+                                                      "HalfSideZ", "HalfNrmX",  "HalfNrmY",  "HalfNrmZ" };
+        /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the halves' normals 0.5
+        /// (a half's own axis, VOXEL-R13).
         const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        const float kNormalClear[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
-        /// ...and the halves' normals' (VOXEL-R13: 0.5 0.5 is a half's own axis), every other volume zero.
         const float kHalfNrmClear[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
         const float *clearOf( size_t i )
         {
-            return i == 2u ? kNormalClear : ( i >= 14u && i < 17u ? kHalfNrmClear : kZero );
+            return i >= 13u && i < 16u ? kHalfNrmClear : kZero;
         }
 
         /// The copy job's parameters, EVERY one each dispatch (a clone keeps its last values): `clear` null = a copy,
@@ -160,19 +156,18 @@ namespace Ogre
         }
         mVolumes.albedo = dst[0];
         mVolumes.emissive = dst[1];
-        mVolumes.normal = dst[2];
-        mVolumes.accumVal = dst[3];
-        mVolumes.coverage[0] = dst[4];
-        mVolumes.coverage[1] = dst[5];
-        mVolumes.position[0] = dst[6];
-        mVolumes.position[1] = dst[7];
-        mVolumes.metal = dst[8];
-        mVolumes.emit[0] = dst[9];
-        mVolumes.emit[1] = dst[10];
+        mVolumes.accumVal = dst[2];
+        mVolumes.coverage[0] = dst[3];
+        mVolumes.coverage[1] = dst[4];
+        mVolumes.position[0] = dst[5];
+        mVolumes.position[1] = dst[6];
+        mVolumes.metal = dst[7];
+        mVolumes.emit[0] = dst[8];
+        mVolumes.emit[1] = dst[9];
         for( size_t a = 0u; a < 3u; ++a )
         {
-            mVolumes.halfSide[a] = dst[11u + a];
-            mVolumes.halfNrm[a] = dst[14u + a];
+            mVolumes.halfSide[a] = dst[10u + a];
+            mVolumes.halfNrm[a] = dst[13u + a];
         }
 
         // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a headset
@@ -324,7 +319,7 @@ namespace Ogre
         OgreProfileGpuBegin( "Photon scroll begin" );
         mRenderSystem->endRenderPassDescriptor();
         // CLEARED AS A WHOLE BUILD CLEARS (PhotonVoxelizer::clearVoxels): every value zero but the
-        // normal's 0.5 bias. The entering slab's cells keep these until its chunks write them.
+        // halves' normals' 0.5 (clearOf). The entering slab's cells keep these until its chunks write them.
         TextureGpu *dst[kVolumes];
         volumeList( mVolumes, dst );
         mResourceTransitions.clear();

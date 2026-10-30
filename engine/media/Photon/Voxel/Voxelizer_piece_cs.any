@@ -386,8 +386,6 @@
 	uint4 cMetal = uint4( 0u, 0u, 0u, 0u );
 	uint3 cEmissive = uint3( 0u, 0u, 0u );
 	uint  cRoughness = 0u;
-	int3  cNormalRaw = int3( 0, 0, 0 );
-	int3  cNormalFolded = int3( 0, 0, 0 );
 	uint3 cAxisP = uint3( 0u, 0u, 0u );
 	uint3 cAxisN = uint3( 0u, 0u, 0u );
 	uint3 cCasterP = uint3( 0u, 0u, 0u );
@@ -490,21 +488,8 @@
 				float3 triNormal = tri_barycentric_normal( pieceCentroid, tri );
 				triNormal = normalize( triNormal );
 
-				// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065): every normal goes into BOTH sums,
-				// raw and folded, and nothing is dropped. The "these two
-				// surfaces face opposite ways" decision upstream made
-				// here, against the sum SO FAR, is made once at the end
-				// of this shader from the two sums — see
-				// `voxelMergeNormal` in VoxelMerge_piece_cs.any. (The old
-				// code is worth remembering: `cosAngle <= -0.5` dropped
-				// the triangle from the sum and set a double-sided flag,
-				// so the FIRST triangle a thread happened to see decided
-				// which way the voxel faced.)
-				cNormalRaw	= voxelMergeWeighSigned3(
-										voxelMergeQuantizeSigned3( triNormal ), weight );
-				cNormalFolded	= voxelMergeWeighSigned3(
-										voxelMergeQuantizeSigned3(
-											voxelMergeCanonical( triNormal ) ), weight );
+				// (VOXEL-R13 stage 2: the voxel's two normal sums - the raw and the folded, whose two groups were the two-side
+				// store's sides - are deleted with it: a half keeps its own faces' normal, THE HALF'S OWN FACES below)
 
 				cWeight = weight;
 
@@ -592,11 +577,6 @@
 					cEmissive *= 2u;
 					cRoughness *= 2u;
 					cEmitWeight *= 2u;
-					cNormalRaw += voxelMergeWeighSigned3(
-										voxelMergeQuantizeSigned3( -triNormal ), weight );
-					cNormalFolded += voxelMergeWeighSigned3(
-										voxelMergeQuantizeSigned3(
-											voxelMergeCanonical( -triNormal ) ), weight );
 				}
 			}
 	}
@@ -671,8 +651,6 @@
 	// (VoxelMerge_piece_cs.any has the whole argument).
 	uint3 accAlbedo			= uint3( 0u, 0u, 0u );
 	uint4 accMetal			= uint4( 0u, 0u, 0u, 0u );	// METAL-BOUNCE-1: F0 rgb, the Fresnel-90 weight
-	int3  accNormalRaw		= int3( 0, 0, 0 );
-	int3  accNormalFolded	= int3( 0, 0, 0 );
 	uint3 accEmissive		= uint3( 0u, 0u, 0u );
 	uint  accRoughness		= 0u;	// PHOTON-WRITER-1: the fourteenth sum
 
@@ -696,7 +674,7 @@
 	// scroll, not the partition.)
 	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
 	// broadphase, the octants and the buckets are unchanged.
-	@foreach( 74, k )
+	@foreach( 68, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
 	// THE EMISSIVE'S SHARED EXPONENT (R2): the max pre-pass gathers it from nothing; the sum pass reads what it gathered
@@ -705,7 +683,7 @@
 	@else
 		g_voxelEmissiveMax[gl_LocalInvocationIndex] = voxelInBounds
 			? OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( uint3( gl_GlobalInvocationID.xyz ) +
-																 uint3( p_voxelPixelOrigin ), 26u ) ).x
+																 uint3( p_voxelPixelOrigin ), 20u ) ).x
 			: 0u;
 	@end
 	__sharedOnlyBarrier;
@@ -794,32 +772,30 @@
 								const uint v = uint( vx + 4 * vy + 16 * vz );
 								@foreach( 3, c )
 									atomicAdd( g_voxelSums[( 0 + @c ) * 64 + v], cAlbedo[@c] );
-									atomicAdd( g_voxelSums[( 33 + @c ) * 64 + v], cMetal[@c] );
+									atomicAdd( g_voxelSums[( 27 + @c ) * 64 + v], cMetal[@c] );
 								@end
 								atomicAdd( g_voxelSums[3 * 64 + v], cMetal.w );
 								@foreach( 3, c )
-									atomicAdd( g_voxelSums[( 4 + @c ) * 64 + v], uint( cNormalRaw[@c] ) );
-									atomicAdd( g_voxelSums[( 7 + @c ) * 64 + v], uint( cNormalFolded[@c] ) );
-									atomicAdd( g_voxelSums[( 10 + @c ) * 64 + v], cEmissive[@c] );
-									atomicAdd( g_voxelSums[( 15 + @c ) * 64 + v], cAxisP[@c] );
-									atomicAdd( g_voxelSums[( 18 + @c ) * 64 + v], cAxisN[@c] );
-									atomicAdd( g_voxelSums[( 21 + @c ) * 64 + v], cPosP[@c] );
-									atomicAdd( g_voxelSums[( 24 + @c ) * 64 + v], cPosN[@c] );
-									atomicAdd( g_voxelSums[( 27 + @c ) * 64 + v], cCasterP[@c] );
-									atomicAdd( g_voxelSums[( 30 + @c ) * 64 + v], cCasterN[@c] );
-									atomicAdd( g_voxelSums[( 36 + @c ) * 64 + v], cEmitP[@c] );
-									atomicAdd( g_voxelSums[( 39 + @c ) * 64 + v], cEmitN[@c] );
+									atomicAdd( g_voxelSums[( 4 + @c ) * 64 + v], cEmissive[@c] );
+									atomicAdd( g_voxelSums[( 9 + @c ) * 64 + v], cAxisP[@c] );
+									atomicAdd( g_voxelSums[( 12 + @c ) * 64 + v], cAxisN[@c] );
+									atomicAdd( g_voxelSums[( 15 + @c ) * 64 + v], cPosP[@c] );
+									atomicAdd( g_voxelSums[( 18 + @c ) * 64 + v], cPosN[@c] );
+									atomicAdd( g_voxelSums[( 21 + @c ) * 64 + v], cCasterP[@c] );
+									atomicAdd( g_voxelSums[( 24 + @c ) * 64 + v], cCasterN[@c] );
+									atomicAdd( g_voxelSums[( 30 + @c ) * 64 + v], cEmitP[@c] );
+									atomicAdd( g_voxelSums[( 33 + @c ) * 64 + v], cEmitN[@c] );
 								@end
-								atomicAdd( g_voxelSums[42 * 64 + v], cEmitWeight );
+								atomicAdd( g_voxelSums[36 * 64 + v], cEmitWeight );
 								if( cKinds != 0u )
-									atomicOr( g_voxelSums[43 * 64 + v], cKinds );
-								atomicAdd( g_voxelSums[13 * 64 + v], cRoughness );
-								atomicAdd( g_voxelSums[14 * 64 + v], cWeight );
+									atomicOr( g_voxelSums[37 * 64 + v], cKinds );
+								atomicAdd( g_voxelSums[7 * 64 + v], cRoughness );
+								atomicAdd( g_voxelSums[8 * 64 + v], cWeight );
 								// VOXEL-R13 stage 1: the halves' own faces at sums 44..73
 								for( uint jahK = 0u; jahK < 30u; ++jahK )
 								{
 									if( cHalfFace[jahK] != 0u )
-										atomicAdd( g_voxelSums[( 44u + jahK ) * 64u + v], cHalfFace[jahK] );
+										atomicAdd( g_voxelSums[( 38u + jahK ) * 64u + v], cHalfFace[jahK] );
 								}
 							}
 						}
@@ -834,7 +810,7 @@
 		// atomicMax: every dispatch of the build that touches the voxel, in any order), and no sum, no resolve
 		if( voxelInBounds && g_voxelEmissiveMax[gl_LocalInvocationIndex] != 0u )
 			imageAtomicMax( voxelMergeAccum,
-							ivec3( voxelMergeUvw( uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin ), 26u ) ),
+							ivec3( voxelMergeUvw( uint3( gl_GlobalInvocationID.xyz ) + uint3( p_voxelPixelOrigin ), 20u ) ),
 							g_voxelEmissiveMax[gl_LocalInvocationIndex] );
 		return;
 	@end
@@ -843,26 +819,24 @@
 		const uint v = gl_LocalInvocationIndex;
 		@foreach( 3, c )
 			accAlbedo[@c] = g_voxelSums[( 0 + @c ) * 64 + v];
-			accMetal[@c] = g_voxelSums[( 33 + @c ) * 64 + v];
+			accMetal[@c] = g_voxelSums[( 27 + @c ) * 64 + v];
 		@end
 		accMetal.w = g_voxelSums[3 * 64 + v];
 		@foreach( 3, c )
-			accNormalRaw[@c]	= int( g_voxelSums[( 4 + @c ) * 64 + v] );
-			accNormalFolded[@c]	= int( g_voxelSums[( 7 + @c ) * 64 + v] );
-			accEmissive[@c]		= g_voxelSums[( 10 + @c ) * 64 + v];
-			accAxisP[@c]		= g_voxelSums[( 15 + @c ) * 64 + v];
-			accAxisN[@c]		= g_voxelSums[( 18 + @c ) * 64 + v];
-			accPosP[@c]			= g_voxelSums[( 21 + @c ) * 64 + v];
-			accPosN[@c]			= g_voxelSums[( 24 + @c ) * 64 + v];
-			accCasterP[@c]		= g_voxelSums[( 27 + @c ) * 64 + v];
-			accCasterN[@c]		= g_voxelSums[( 30 + @c ) * 64 + v];
-			accEmitP[@c]		= g_voxelSums[( 36 + @c ) * 64 + v];
-			accEmitN[@c]		= g_voxelSums[( 39 + @c ) * 64 + v];
+			accEmissive[@c]		= g_voxelSums[( 4 + @c ) * 64 + v];
+			accAxisP[@c]		= g_voxelSums[( 9 + @c ) * 64 + v];
+			accAxisN[@c]		= g_voxelSums[( 12 + @c ) * 64 + v];
+			accPosP[@c]			= g_voxelSums[( 15 + @c ) * 64 + v];
+			accPosN[@c]			= g_voxelSums[( 18 + @c ) * 64 + v];
+			accCasterP[@c]		= g_voxelSums[( 21 + @c ) * 64 + v];
+			accCasterN[@c]		= g_voxelSums[( 24 + @c ) * 64 + v];
+			accEmitP[@c]		= g_voxelSums[( 30 + @c ) * 64 + v];
+			accEmitN[@c]		= g_voxelSums[( 33 + @c ) * 64 + v];
 		@end
-		accEmitWeight	= g_voxelSums[42 * 64 + v];
-		accKinds		= g_voxelSums[43 * 64 + v];
-		accRoughness	= g_voxelSums[13 * 64 + v];
-		accumWeight		= g_voxelSums[14 * 64 + v];
+		accEmitWeight	= g_voxelSums[36 * 64 + v];
+		accKinds		= g_voxelSums[37 * 64 + v];
+		accRoughness	= g_voxelSums[7 * 64 + v];
+		accumWeight		= g_voxelSums[8 * 64 + v];
 	}
 
 	// Jahshaka fork ad452604a+155a56bf8+0338ca7f2+c4c80b5f7 (was 0065) — ACCUMULATE, THEN RESOLVE, IN ONE DISPATCH.
@@ -905,39 +879,35 @@
 		// position and the casters per half. Only what carries something.
 		uint3 sumAlbedo		= uint3( 0u, 0u, 0u );
 		uint4 sumMetal		= uint4( 0u, 0u, 0u, 0u );
-		uint4 sumNormal		= uint4( 0u, 0u, 0u, 0u );
 		uint4 sumEmissive	= uint4( 0u, 0u, 0u, 0u );
-		uint4 sumFolded		= uint4( 0u, 0u, 0u, 0u );
-		uint  sumRoughness	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 13u ) ).x;
+		uint  sumRoughness	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u ) ).x;
 		// PHOTON-VOXEL-3/-4: the per-half-axis coverage sums (+14 the faces looking +a,
 		// +15 looking -a) and their position-weighted twins (+16, +17), packed.
-		uint  sumAxisP	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 14u ) ).x;
-		uint  sumAxisN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 15u ) ).x;
-		uint  sumPosP	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 16u ) ).x;
-		uint  sumPosN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ) ).x;
+		uint  sumAxisP	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u ) ).x;
+		uint  sumAxisN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 9u ) ).x;
+		uint  sumPosP	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u ) ).x;
+		uint  sumPosN	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 11u ) ).x;
 		// FAR-SUN-1: the casters' coverage (+18 looking +a, +19 looking -a), saturating like the others.
-		uint  sumCasterP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ) ).x,
+		uint  sumCasterP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u ) ).x,
 												accCasterP );
-		uint  sumCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
+		uint  sumCasterN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 13u ) ).x,
 												accCasterN );
 		// JUNCTION-NORMAL-1: the emitters' coverage (+23 looking +a, +24 -a) and weight (+25).
-		uint  sumEmitP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u ) ).x,
+		uint  sumEmitP	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ) ).x,
 											accEmitP );
-		uint  sumEmitN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 24u ) ).x,
+		uint  sumEmitN	= voxelMergeAxisAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ) ).x,
 											accEmitN );
-		uint  sumEmitWeight	= voxelMergeAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 25u ) ).x,
+		uint  sumEmitWeight	= voxelMergeAddSat( OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ) ).x,
 											accEmitWeight );
 		// PHOTON-7 10-4 R7: the kinds of faces (+27), OR-ed - order-free like the sums
-		uint  sumKinds	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 27u ) ).x | accKinds;
+		uint  sumKinds	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 21u ) ).x | accKinds;
 		@foreach( 3, c )
 			sumAlbedo[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ) ).x;
-			sumMetal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 20u + @c ) ).x;
+			sumMetal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 14u + @c ) ).x;
 		@end
 		sumMetal.w	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 3u ) ).x;
 		@foreach( 3, c )
-			sumNormal[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ) ).x;
-			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u + @c ) ).x;
-			sumFolded[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u + @c ) ).x;
+			sumEmissive[@c]	= OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ) ).x;
 		@end
 
 		// SATURATING on the two unsigned sums — a contribution is at most
@@ -972,52 +942,43 @@
 				const uint taken = q < 3u ? jahTakenP[a] : jahTakenN[a];
 				uint sums[5];
 				for( uint k = 0u; k < 5u; ++k )
-					sums[k] = voxelMergeHalfTaken( g_voxelSums[( 44u + q * 5u + k ) * 64u + gl_LocalInvocationIndex],
+					sums[k] = voxelMergeHalfTaken( g_voxelSums[( 38u + q * 5u + k ) * 64u + gl_LocalInvocationIndex],
 												   addAxis, taken );
 				jahHalfWord[2u * q] = voxelMergeHalfAddCentroid(
-					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 28u + 2u * q ) ).x, sums[0], sums[1] );
+					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 22u + 2u * q ) ).x, sums[0], sums[1] );
 				jahHalfWord[2u * q + 1u] = voxelMergeHalfAddNormal(
-					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 29u + 2u * q ) ).x, sums[2], sums[3],
+					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u + 2u * q ) ).x, sums[2], sums[3],
 					sums[4] );
-				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 28u + 2u * q ),
+				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 22u + 2u * q ),
 									uint4( jahHalfWord[2u * q], 0u, 0u, 0u ) );
-				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 29u + 2u * q ),
+				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u + 2u * q ),
 									uint4( jahHalfWord[2u * q + 1u], 0u, 0u, 0u ) );
 			}
 		}
-		// Two's complement: a signed sum kept in a uint wraps the same way in
-		// every order, which is the whole point of doing this in integers — and a
-		// unit vector's quantised component is 4,096, so half a million triangles
-		// in one voxel would be needed to reach the wrap at all.
-		sumNormal.xyz	= uint3( int3( sumNormal.xyz ) + accNormalRaw );
-		sumFolded.xyz	= uint3( int3( sumFolded.xyz ) + accNormalFolded );
+
 
 		@foreach( 3, c )
 			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, @c ),
 								uint4( sumAlbedo[@c], 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 20u + @c ),
+			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 14u + @c ),
 								uint4( sumMetal[@c], 0u, 0u, 0u ) );
 		@end
 		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 3u ), uint4( sumMetal.w, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 13u ),
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u ),
 							uint4( sumRoughness, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 14u ), uint4( sumAxisP, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 15u ), uint4( sumAxisN, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 16u ), uint4( sumPosP, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ), uint4( sumPosN, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ), uint4( sumCasterP, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ), uint4( sumCasterN, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u ), uint4( sumEmitP, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 24u ), uint4( sumEmitN, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 25u ), uint4( sumEmitWeight, 0u, 0u, 0u ) );
-		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 27u ), uint4( sumKinds, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 8u ), uint4( sumAxisP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 9u ), uint4( sumAxisN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u ), uint4( sumPosP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 11u ), uint4( sumPosN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 12u ), uint4( sumCasterP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 13u ), uint4( sumCasterN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 17u ), uint4( sumEmitP, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 18u ), uint4( sumEmitN, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 19u ), uint4( sumEmitWeight, 0u, 0u, 0u ) );
+		OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 21u ), uint4( sumKinds, 0u, 0u, 0u ) );
 		@foreach( 3, c )
 			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 4u + @c ),
-								uint4( sumNormal[@c], 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 7u + @c ),
 								uint4( sumEmissive[@c], 0u, 0u, 0u ) );
-			OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 10u + @c ),
-								uint4( sumFolded[@c], 0u, 0u, 0u ) );
 		@end
 
 		// The divisor of the MEANS, stored back into an R16_UINT: capped at its range
@@ -1028,14 +989,12 @@
 		float3 voxelCoverageN	= voxelMergeAxisResolve( sumAxisN );
 		float3 voxelCoverage	= max( voxelCoverageP, voxelCoverageN );
 		float4 voxelAlbedo		= voxelMergeAlbedo( sumAlbedo, totalWeight, voxelCoverage );
-		float4 voxelNormal		= voxelMergeNormal( sumNormal, sumFolded, totalWeight );
 		float4 voxelEmissive	= voxelMergeEmissive( sumEmissive, sumRoughness, totalWeight,
 												  uintBitsToFloat( g_voxelEmissiveMax[gl_LocalInvocationIndex] ) );
 		float4 voxelMetal		= voxelMergeMetal( sumMetal, totalWeight );
 
 		@property( syntax != hlsl || typed_uav_load )
 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, voxelAlbedo );
-			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, voxelNormal );
 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, voxelEmissive );
 			OGRE_imageWrite3D4( voxelMetalTex, voxelCelUvw, voxelMetal );
 			OGRE_imageWrite3D1( voxelAccumVal, voxelCelUvw, uint4( totalWeight, 0u, 0u, 0u ) );
@@ -1102,7 +1061,6 @@
 			// Voxelizer_cs.hlsl; the emissive clip at 1.0 is what it inherits
 			// until then.
 			OGRE_imageWrite3D4( voxelAlbedoTex, voxelCelUvw, packUnorm4x8( voxelAlbedo ) );
-			OGRE_imageWrite3D4( voxelNormalTex, voxelCelUvw, packUnormRGB10A2( voxelNormal ) );
 			OGRE_imageWrite3D4( voxelEmissiveTex, voxelCelUvw, packUnorm4x8( voxelEmissive ) );
 			OGRE_imageWrite3D4( voxelMetalTex, voxelCelUvw, packUnorm4x8( voxelMetal ) );
 		@end

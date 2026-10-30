@@ -242,10 +242,9 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
         // ---- THE FRAGMENT HALF --------------------------------------------
         material->load();
         pass = material->getTechnique(0)->getPass(0);
-        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 40u; ++u) {
+        for (unsigned short u = 0; u < pass->getNumTextureUnitStates() && u < 32u; ++u) {
             // Unit = kind * 4 + cascade, the kinds FIXED in the program: iso, X, Y,
-            // Z, then the coverage and the position per half-axis (+a, -a), then
-            // (PHOTON-VOXEL-5) level 0's back side and the normal. Cascades past the
+            // Z, then the coverage and the position per half-axis (+a, -a). Cascades past the
             // chain repeat its last one (a descriptor must not be empty). By NAME,
             // PhotonVoxelLighting's indices.
             const unsigned kind = u / 4u;
@@ -255,8 +254,6 @@ bool OgreEngine::voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCo
             if (kind >= 1u && kind <= 3u) listKind = kind;
             else if (kind == 4u || kind == 5u) listKind = vct->coverageIndex(kind - 4u);
             else if (kind == 6u || kind == 7u) listKind = vct->positionIndex(kind - 6u);
-            else if (kind == 8u) listKind = vct->backIndex();
-            else if (kind == 9u) listKind = vct->normalIndex();
             tus->setTexture(volume(listKind, c));
             tus->setSamplerblock(*samplerblock);
         }
