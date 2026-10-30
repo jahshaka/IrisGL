@@ -9215,7 +9215,7 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     {
         std::vector<SurfaceCache::RelitBox> late;
         mSurfaceCache->takeLateRelitBoxes(late);
-        for (const SurfaceCache::RelitBox &b : late) appendRegion(b.scene ? GiRegionKind::CardScene : GiRegionKind::Card, b.box);
+        for (const SurfaceCache::RelitBox &b : late) appendRegion(GiRegionKind::Card, b.box);   // MEASURING ARM (8B, to be reverted): (A) off - every relight lists as Card
     }
     mSurfaceCache->update(view);
     for (const Ogre::Aabb &b : mSurfaceCache->relitInstanceBoxes()) appendRegion(GiRegionKind::Card, b);
