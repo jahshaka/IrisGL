@@ -69,6 +69,8 @@ using cachefile::writeAtomic;
 namespace {
 /// Milliseconds with three decimals (the copy steps are sub-millisecond: an int would print 0).
 std::string fmtMs(double ms) { char b[32]; std::snprintf(b, sizeof b, "%.3f", ms); return b; }
+/// A layer key as the log prints it: its first 16 hex digits (64 bits - enough to tell two keys apart by eye).
+std::string shortKey(const std::string &hex) { return hex.substr(0, 16); }
 
 /// Our container's own format version. Bump it and every existing cache on
 /// every machine is discarded — the escape hatch for a change in THIS file that
@@ -773,6 +775,13 @@ void ShaderCache::load(Ogre::Root *root) {
     if (!mkpath(mDir)) { logLine("cannot create " + mDir + " — cache disabled"); mEnabled = false; return; }
     acquireLock();
 
+    // WHICH KEYS THIS RUN READS AT (URGENT #126, HARNESS-4): one line per boot naming the directory and this build's
+    // three layer keys, so every app, lab and fixture log says which shaders it measured; a dropped layer's line below
+    // names the cache's key beside this build's. (#126's "stale cache" was refuted: each layer is dropped on its own key;
+    // the line makes that visible in the log a measurement is read from.)
+    logLine(mDir + ": this build's layer keys pipeline=" + shortKey(layerKeyFor("pipeline.cache")) +
+            " microcode=" + shortKey(layerKeyFor("microcode.cache")) + " hlms=" + shortKey(layerKeyFor("hlms.1.bin")));
+
     // MICROCODE SAVING MUST BE ENABLED BEFORE THE LOAD. GpuProgramManager's own
     // header says so, and the canonical wiring does it in this order
     // (GraphicsSystem.cpp:648-658). It is also the flag that makes the SAVE side
@@ -789,7 +798,8 @@ void ShaderCache::load(Ogre::Root *root) {
         std::vector<Entry> current;
         for (const Entry &e : files) {
             if (e.key == layerKeyFor(e.name)) { current.push_back(e); continue; }
-            logLine(e.name + ": its layer's key changed — dropped, the other layers stand");
+            logLine(e.name + ": its layer's key changed (the cache's " + shortKey(e.key) + ", this build's " +
+                    shortKey(layerKeyFor(e.name)) + ") — dropped, the other layers stand");
             if (mWriter) ::unlink(path(e.name).c_str());
         }
         files.swap(current);
