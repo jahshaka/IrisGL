@@ -512,8 +512,9 @@ public:
     void takeDemand(std::vector<uint32_t> &slots, const CardSceneView &view);
     /// THE GI FREEZE (PHOTON-2 round 2, M1's measuring arm): this frame captures, relights and traces nothing.
     void freezeFrame();
-    /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3): the world box of every instance this frame's plan
-    /// relights a card of, once per instance (planRelights; empty before the frame's update or after a freeze).
+    /// THE CHANGED-REGION LIST'S CARD PRODUCER (PHOTON-7 stage 3; 8B B1): the world box of every instance a card of which
+    /// LEFT the cache this frame (refreshResidency's departures) or MOVED in the atlas (the compaction) - the voxels answer
+    /// its hits until the card is captured again (empty after a freeze). The plan's relights are not listed here.
     const std::vector<Ogre::Aabb> &relitInstanceBoxes() const { return mRelitBoxes; }
     /// A RELIT INSTANCE's BOX as the list takes it: `scene` = a relight a scene change caused (CardRec::sceneCause) -
     /// listed CardScene, else Card
@@ -805,7 +806,7 @@ private:
     Ogre::UavBufferPacked *mRelightBuffer = nullptr;
     Ogre::UavBufferPacked *mLightBuffer = nullptr;
     std::vector<unsigned> mRelight;          ///< this frame's relight list: indices into mCards
-    std::vector<Ogre::Aabb> mRelitBoxes;     ///< relitInstanceBoxes(): the plan's instances, one box each
+    std::vector<Ogre::Aabb> mRelitBoxes;     ///< relitInstanceBoxes(): the departed and compacted cards' instances
     std::vector<unsigned> mRelitInstances;   ///< ...their instance indices (the late relights' filter)
     std::vector<RelitBox> mLateRelitBoxes;   ///< takeLateRelitBoxes()
     /// ...and each entry's mode (JahCardLight_cs.glsl): 1 march the indirect,
@@ -1063,8 +1064,6 @@ private:
     bool mAsyncShaders = false;
     unsigned long long mBatchPlaceholderAt = 0u;
     unsigned long long mBatchSkipsAt = 0u;
-    /// Batches discarded because a shader was still being built (ASYNC-SHADERS-1).
-    unsigned long long mCapturesDeferredForShaders = 0u;
     /// The subject's flags and LOD as they were before its pass.
     Ogre::uint32 mSubjectFlags = 0u;
     unsigned char mSubjectLod = 0u;

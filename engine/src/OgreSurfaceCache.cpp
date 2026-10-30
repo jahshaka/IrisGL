@@ -1931,7 +1931,6 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
         acc.placeholders += placeholders;
         acc.skips += skips;
         if (placeholders || skips) {
-            ++mCapturesDeferredForShaders;
             // ...NOR IS IT RELIT: planRelights listed this batch's cards as captured this frame
             // (a capture and its relight are one update). Their texels were never copied — on a
             // new scene's first batch the atlas layers are not even initialised (Depth and
