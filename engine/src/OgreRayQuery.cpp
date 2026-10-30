@@ -9052,6 +9052,28 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                     add("vox" + std::to_string(c) + "." + std::to_string(kind), h.voxel[c][kind]);
             add("sky", h.sky);
             add("cloud", h.cloudField);
+            // THE BISECTION BY TEXTURE (JAH_DIAG_HITSET_GROUP: 1 the card layers, 2 the voxel cascades, 3 the sky and the
+            // cloud field; a name prefix after a colon narrows it, e.g. 2:vox0): that group's solver transitions alone,
+            // no copy, no host read - which resource's image dependency orders the race away
+            static const std::string group = std::getenv("JAH_DIAG_HITSET_GROUP") ? std::getenv("JAH_DIAG_HITSET_GROUP") : "";
+            if (!group.empty()) {
+                const char g = group[0];
+                const std::string prefix = group.size() > 2 ? group.substr(2) : std::string();
+                Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+                Ogre::ResourceTransitionArray trans;
+                std::string named;
+                for (const auto &e : texs) {
+                    const bool in = (g == '1' && e.first.rfind("card.", 0) == 0) || (g == '2' && e.first.rfind("vox", 0) == 0) ||
+                                    (g == '3' && (e.first == "sky" || e.first == "cloud"));
+                    if (!in || (!prefix.empty() && e.first.rfind(prefix, 0) != 0)) continue;
+                    solver.resolveTransition(trans, e.second, Ogre::ResourceLayout::CopySrc, Ogre::ResourceAccess::Read, 0u);
+                    named += " " + e.first;
+                }
+                mRs->executeResourceTransition(trans);
+                static bool said = false;
+                if (!said) { said = true; std::fprintf(stderr, "DIAG GROUP %s:%s\n", group.c_str(), named.c_str()); }
+                return;
+            }
             slot->parts.clear();
             size_t total = 0u;
             for (const auto &e : texs) {
