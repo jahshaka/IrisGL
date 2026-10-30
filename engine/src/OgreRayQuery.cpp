@@ -1319,7 +1319,8 @@ private:
                        unsigned long long ubo = 0ull; std::vector<std::pair<std::string, size_t>> parts;
                        unsigned hitW = 0u, idsBpp = 0u, destBpp = 0u, radBpp = 0u; };
         DiagT diagTemp[8];
-        struct DiagP { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull; size_t texels = 0u; };
+        struct DiagP { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull; size_t texels = 0u;
+                       bool counts = false; unsigned half = 0u; };
         DiagP diagP[3][6];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
@@ -7386,7 +7387,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!rv.compactList.buffer) {
         std::string lerr;
         if (!makeBuffer(VkDeviceSize(2u + 2u * kReflectCompactTexels) * 4u,
-                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, false,
+                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT /* (MEASURING ARM C: its counts copied) */, false, false,
                         rv.compactList, lerr)) { bail("the rest's compact list could not be made"); return; }
         rv.compactListFresh = true;
     }
@@ -8935,6 +8937,12 @@ void RayQueryTier::diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned poin
             line += std::string(" ") + names[k] + " " + hx;
             at += d.texels * bpt[k];
         }
+        if (d.counts) {   // (arm C: the compact list's two counts after the tile pass, and this frame's half)
+            uint32_t c[2] = { 0u, 0u };
+            std::memcpy(c, m + at, 8u);
+            line += " compactHalf " + std::to_string(d.half) + " count0 " + std::to_string(c[0]) + " count1 " +
+                    std::to_string(c[1]);
+        }
         std::fprintf(stderr, "%s\n", line.c_str());
     }
     const unsigned long long rfNow = Ogre::Root::getSingleton().getNextFrameNumber();
@@ -8952,6 +8960,8 @@ void RayQueryTier::diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned poin
     const size_t texels = size_t(w) * h * layers;
     size_t total = 0u;
     for (int k = 0; k < 6; ++k) total += texels * bpt[k];
+    const bool counts = point == 0u && rv.compactList.buffer;
+    if (counts) total += 8u;
     if (slot->host.buffer && slot->host.size < total) retire(slot->host);
     std::string err;
     if (!slot->host.buffer && !makeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err)) return;
@@ -8971,6 +8981,13 @@ void RayQueryTier::diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned poin
         vkCmdCopyImageToBuffer(cmd, imgs[k]->image, VK_IMAGE_LAYOUT_GENERAL, slot->host.buffer, 1, &region);
         off += VkDeviceSize(texels) * bpt[k];
     }
+    if (counts) {
+        VkBufferCopy bc{};
+        bc.srcOffset = 0u;
+        bc.dstOffset = off;
+        bc.size = 8u;
+        vkCmdCopyBuffer(cmd, rv.compactList.buffer, slot->host.buffer, 1, &bc);
+    }
     VkMemoryBarrier after{};
     after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
@@ -8981,6 +8998,8 @@ void RayQueryTier::diagPoint(ReflectView &rv, VkCommandBuffer cmd, unsigned poin
     slot->frame = now;
     slot->rf = rfNow;
     slot->texels = texels;
+    slot->counts = counts;
+    slot->half = rv.compactHalf;
 }
 
 // MEASURING ARM (DETERMINISM-1 arm T, to be reverted; JAH_DIAG_TEMP=<from rf>:<to rf>): the temporal pass's every input
