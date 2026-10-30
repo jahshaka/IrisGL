@@ -1317,6 +1317,11 @@ private:
         struct DiagRefl { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull;
                           unsigned w = 0u, h = 0u, layers = 1u; size_t hitBytes = 0u; };
         DiagRefl diagRefl[6];
+        /// MEASURING ARM (DETERMINISM-1 arm 3, to be reverted): the hit set this frame's trace read, and its copies.
+        HitSetSources diagHs;
+        struct DiagSet { RawBuffer host; bool live = false; uint32_t frame = 0u; unsigned long long rf = 0ull;
+                         std::vector<std::pair<std::string, size_t>> parts; };
+        DiagSet diagSet[5];
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
         /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
@@ -6648,6 +6653,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
     rv.scene = scene;
+    rv.diagHs = hs;   // MEASURING ARM (DETERMINISM-1 arm 3, to be reverted)
     // A FRAME THAT DECLINES REPORTS ZERO (second reader, L4). Every early
     // return below leaves the picture correct, but leaving `rays` at the last
     // frame's value makes `giStatus().rayQuery.reflectRays` say a trace is
@@ -8987,6 +8993,126 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
                 slot->h = h;
                 slot->layers = layers;
                 slot->hitBytes = hitBytes;
+            }
+        }
+    }
+    // MEASURING ARM (DETERMINISM-1 arm 3, to be reverted; JAH_DIAG_HITSET=<from rf>:<to rf>): THE HIT SET'S TEXTURES as
+    // this frame left them - the card radiance, depth and view layers, the card table, each cascade's total, back and
+    // direct sides, the sky, the cloud field - copied at the reflection's end (after the trace that read them), read at a
+    // fixed lag, one hash each a frame, inside the window only (the copies are large).
+    static const std::string hitsetWin = std::getenv("JAH_DIAG_HITSET") ? std::getenv("JAH_DIAG_HITSET") : "";
+    if (!hitsetWin.empty()) {
+        const unsigned long long rfNow = Ogre::Root::getSingleton().getNextFrameNumber();
+        const unsigned long long from = std::strtoull(hitsetWin.c_str(), nullptr, 10),
+                                 to = std::strtoull(hitsetWin.c_str() + hitsetWin.find(':') + 1, nullptr, 10);
+        const auto mix = [](unsigned long long x) {
+            x += 0x9E3779B97F4A7C15ull;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+            return x ^ (x >> 31);
+        };
+        const uint32_t now = frameNow(), inFlight = framesInFlight();
+        for (ReflectView::DiagSet &d : rv.diagSet) {
+            if (!d.live || uint32_t(now - d.frame) < inFlight) continue;
+            d.live = false;
+            const unsigned char *m = static_cast<const unsigned char *>(d.host.mapped);
+            std::string line = "DIAG HITSET rf " + std::to_string(d.rf);
+            size_t at = 0u;
+            for (const auto &part : d.parts) {
+                unsigned long long h = 0x51ED270B27u;
+                for (size_t i = 0; i + 8u <= part.second; i += 8u) {
+                    unsigned long long v = 0ull;
+                    std::memcpy(&v, m + at + i, 8u);
+                    h = mix(h ^ v);
+                }
+                char hx[24];
+                std::snprintf(hx, sizeof(hx), "%016llx", h);
+                line += " " + part.first + " " + hx;
+                at += part.second;
+            }
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+        ReflectView::DiagSet *slot = nullptr;
+        for (ReflectView::DiagSet &d : rv.diagSet)
+            if (!d.live) { slot = &d; break; }
+        if (slot && rfNow >= from && rfNow <= to) {
+            const HitSetSources &h = rv.diagHs;
+            std::vector<std::pair<std::string, Ogre::TextureGpu *>> texs;
+            const auto add = [&](const std::string &n, Ogre::TextureGpu *t) {
+                if (!t) return;
+                for (const auto &e : texs)
+                    if (e.second == t) return;   // (one texture, one copy)
+                texs.emplace_back(n, t);
+            };
+            add("card.radiance", h.cardRadiance);
+            add("card.depth", h.cardDepth);
+            for (unsigned k = 0; k < SurfaceCache::kViewLayers; ++k) add("card.view" + std::to_string(k), h.cardView[k]);
+            for (unsigned c = 0; c < h.cascadeCount && c < kGatherMaxCascades; ++c)
+                for (unsigned kind : { 0u, 8u, 10u, 11u })
+                    add("vox" + std::to_string(c) + "." + std::to_string(kind), h.voxel[c][kind]);
+            add("sky", h.sky);
+            add("cloud", h.cloudField);
+            slot->parts.clear();
+            size_t total = 0u;
+            for (const auto &e : texs) {
+                Ogre::TextureGpu *t = e.second;
+                const size_t bytes = size_t(t->getWidth()) * t->getHeight() * t->getDepthOrSlices() *
+                                     Ogre::PixelFormatGpuUtils::getBytesPerPixel(t->getPixelFormat());
+                slot->parts.emplace_back(e.first, bytes);
+                total += bytes;
+            }
+            const VkDescriptorBufferInfo tb = h.cardTable ? rawBufferInfo(h.cardTable) : VkDescriptorBufferInfo{};
+            const size_t tableBytes = h.cardTable ? size_t(h.cardTable->getTotalSizeBytes()) : 0u;
+            if (tableBytes) { slot->parts.emplace_back("card.table", tableBytes); total += tableBytes; }
+            if (slot->host.buffer && slot->host.size < total) retire(slot->host);
+            std::string err;
+            if (total && (slot->host.buffer || makeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, false, slot->host, err))) {
+                {
+                    Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
+                    Ogre::ResourceTransitionArray trans;
+                    for (const auto &e : texs)
+                        solver.resolveTransition(trans, e.second, Ogre::ResourceLayout::CopySrc, Ogre::ResourceAccess::Read, 0u);
+                    mRs->executeResourceTransition(trans);
+                }
+                if (VkCommandBuffer dcmd = frameCmd()) {
+                    VkMemoryBarrier toCopy{};
+                    toCopy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                    toCopy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    vkCmdPipelineBarrier(dcmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toCopy,
+                                         0, nullptr, 0, nullptr);
+                    VkDeviceSize off = 0u;
+                    for (const auto &e : texs) {
+                        Ogre::TextureGpu *t = e.second;
+                        const bool vol = t->getTextureType() == Ogre::TextureTypes::Type3D;
+                        VkBufferImageCopy region{};
+                        region.bufferOffset = off;
+                        region.imageSubresource.aspectMask = Ogre::PixelFormatGpuUtils::isDepth(t->getPixelFormat())
+                                                                 ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+                        region.imageSubresource.layerCount = vol ? 1u : t->getNumSlices();
+                        region.imageExtent = { t->getWidth(), t->getHeight(), vol ? t->getDepth() : 1u };
+                        vkCmdCopyImageToBuffer(dcmd, static_cast<Ogre::VulkanTextureGpu *>(t)->getFinalTextureName(),
+                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->host.buffer, 1, &region);
+                        off += VkDeviceSize(t->getWidth()) * t->getHeight() * t->getDepthOrSlices() *
+                               Ogre::PixelFormatGpuUtils::getBytesPerPixel(t->getPixelFormat());
+                    }
+                    if (tableBytes) {
+                        VkBufferCopy bc{};
+                        bc.srcOffset = tb.offset;
+                        bc.dstOffset = off;
+                        bc.size = tableBytes;
+                        vkCmdCopyBuffer(dcmd, tb.buffer, slot->host.buffer, 1, &bc);
+                    }
+                    VkMemoryBarrier toHost{};
+                    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    vkCmdPipelineBarrier(dcmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr,
+                                         0, nullptr);
+                    slot->live = true;
+                    slot->frame = now;
+                    slot->rf = rfNow;
+                }
             }
         }
     }
