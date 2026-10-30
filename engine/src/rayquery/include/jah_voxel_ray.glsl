@@ -141,7 +141,8 @@ struct JahVoxelRayResult
 ///   front of a floor in the floor's own cell row passes, and a ray that met a surface's relief above its mean plane is
 ///   still caught before it leaves the solid.
 ///   THE START CELL and THE OWN CELL holding faces on several axes (`crossing`): a face where the segment CROSSES its plane.
-///   ANY OTHER CELL: occupancy - stopped from every direction.
+///   ANY OTHER CELL: occupancy - stopped by a face that LOOKS AT the ray (VOXEL-R13 stage 3 (A'): one looking away or
+///   parallel is never met from this side), or by both orientations on one axis (F2: the finer cascade decides).
 bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nLS, float epsJ, vec3 invRes,
 					   bool crossing, bool planar, vec3 pJ, vec3 dS, float tIn, float tOut, uint skip, out int bothAxis )
 {
@@ -215,6 +216,7 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 	// half of the face it meets, jahVoxelRayHitSide); bothAxis that axis)
 	bool hit = false;
 	bool liveP[3] = bool[3]( false, false, false ), liveN[3] = bool[3]( false, false, false );
+	int twoDepthAxis = -1;
 	for( int h = 0; h < 2; ++h )
 	{
 		for( int b = 0; b < 3; ++b )
@@ -226,6 +228,15 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 			if( crossing )
 			{
 				if( dS[b] == 0.0 )
+					continue;
+				// THE SURFACE'S OWN FACES (VOXEL-R13 stage 3): in the start and own cells, a half looking into the surface's
+				// own hemisphere (its direction along the normal) is the surface itself - a coarse cell's per-axis planes of a
+				// TILTED face are means, and a ray leaving the face crossed them: a hit at the start reading nothing
+				// (gi.screen_integrate's turned white box, 34 of 256 rays dark at t 0 in cascade 1). A TWO-DEPTH half holds
+				// another face at another depth of the cell (a shelf above a floor) - a real object - and keeps the crossing
+				// rule (the merge keeps the depth bins' gap as the flag alone, not the bins: no finer skip can be told). A
+				// one-sided sheet seen from behind is the hidden-face rule's (the two-sided bit), not this one's.
+				if( surface && ( h == 0 ? nLS[b] > 0.0 : nLS[b] < 0.0 ) && ( uint( pos[h][b] * 65535.0 + 0.5 ) & 1u ) == 0u )
 					continue;
 				const float tx = ( qb - pJ[b] ) / dS[b];
 				const float slack = 1e-3 * invRes[b] / abs( dS[b] );
@@ -241,7 +252,42 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 			}
 			if( live )
 			{
-				hit = true;
+				// A FACE IS MET ONLY FROM THE SIDE IT LOOKS TO (VOXEL-R13 stage 3, the lead's ruling (A')): of an occupied
+				// cell the ray entered through air, a face looking away from it or parallel to it is never met - the
+				// faces looking +b (h 0) meet a ray travelling -b, those looking -b one travelling +b. (A coarse floor
+				// cell grazed a few centimetres above its face, its only half looking up, stopped a level ray as a black
+				// hit: gi.bounce_series.high (2) 5.1 q dark.) The crossed faces of the start and own cells are met where
+				// they are crossed, as before; F2 reads every live face (a closed object still asks the finer cascade).
+				// ...but a face looking AWAY that the segment CROSSES is a solid's face left from inside it: the ray was in the
+				// solid, and it stops there (a start lifted into a wall, its rays leaving by the outer face: never the sky)
+				bool exits = false;
+				if( !crossing && !( h == 0 ? dS[b] < 0.0 : dS[b] > 0.0 ) && dS[b] != 0.0 )
+				{
+					const float tx = ( qb - pJ[b] ) / dS[b];
+					const float slack = 1e-3 * invRes[b] / abs( dS[b] );
+					exits = tx >= tIn - slack && tx <= tOut + slack;
+				}
+				if( exits )
+					hit = true;
+				// ...and a face looking AT the ray is met only if its plane lies AHEAD of the ray's entry into the cell: a
+				// face the ray has already passed cannot be met (a coarse cell's roof top 1 m above a ray travelling down
+				// from beneath it, its +y half the sky-lit roof: cascade 3's own bounce read 24 % of the roof inside a
+				// sealed room)
+				bool ahead = true;
+				if( !crossing && dS[b] != 0.0 )
+				{
+					const float tx = ( qb - pJ[b] ) / dS[b];
+					ahead = tx >= tIn - 1e-3 * invRes[b] / abs( dS[b] );
+				}
+				if( crossing || ( ahead && ( h == 0 ? dS[b] < 0.0 : dS[b] > 0.0 ) ) )
+				{
+					hit = true;
+					// A TWO-DEPTH HALF (VOXEL-R13 stage 3 (B'); VoxelMerge_piece_cs.any THE HALF'S DEPTHS): its faces lie at
+					// two depths of the cell - one value cannot be both - so the finer cascade marches the segment to find
+					// the face the ray meets (F2's rule); the flag rides the low bit of the half's position channel
+					if( !crossing && ( uint( pos[h][b] * 65535.0 + 0.5 ) & 1u ) != 0u )
+						twoDepthAxis = b;
+				}
 				if( h == 0 ) liveP[b] = true;
 				else liveN[b] = true;
 			}
@@ -249,11 +295,16 @@ bool jahVoxelRayFront( int c, vec3 uvw, ivec3 iv, bool surface, vec3 sJ, vec3 nL
 	}
 	if( hit && !crossing )
 	{
+		// F2 from every live face, as before - only for a cell the ray is stopped by (a face it can meet): a cell whose
+		// two orientations on an axis lie behind the ray, or look away from it, stops nothing (VOXEL-R13 stage 3: the
+		// rule that took such a cell for a hit read a passed roof's top under its ceiling, cascade 3's 24 %)
 		for( int b = 0; b < 3 && bothAxis < 0; ++b )
 		{
 			if( liveP[b] && liveN[b] )
 				bothAxis = b;
 		}
+		if( bothAxis < 0 )
+			bothAxis = twoDepthAxis;
 	}
 	return hit;
 }
@@ -437,6 +488,52 @@ int jahVoxelRayCell( int c, ivec3 iv, vec3 invRes, bool own, bool crossing, bool
 /// orientations on one axis: jahVoxelRayHitSide) asks the finest cascade whose box holds the cell's segment - both its
 /// ends - to march that segment on its own finer cells: its hit is the answer, and a segment it proves empty lets the
 /// ray go on past the coarse cell. With no finer cascade holding it, the coarse cell's own rule answers.
+/// THE LIFT STAYS IN THE AIR (VOXEL-R13 stage 3 (C)): a start lifted `eps` along the surface's normal (or a probe's
+/// along its ray) must not pass the face of another surface looking BACK at it - a metal panel's back face 1 cm before the wall it stands off: a lift of
+/// one 7.8 cm cell put the start inside the wall, whose rays then read its outer face (gi.sealed_sky_noray's crevice, 0.5 %
+/// of the roof inside a sealed room). On the normal's dominant axis, the faces looking against it in the surface's cell
+/// and the next one along the lift (the chain's first cascade, level 0): the nearest in front within the lift halves it.
+float jahVoxelFreeLift( vec3 surfLS, vec3 nLS, float eps )
+{
+	const vec3 ir = JAH_VOX_INVRES( 0 );
+	const vec3 an = abs( nLS );
+	const int a = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
+	if( !( an[a] > 0.0 ) )
+		return eps;
+	const float sg = nLS[a] > 0.0 ? 1.0 : -1.0;
+	const int hBack = nLS[a] > 0.0 ? 1 : 0;   // the faces looking -a (h 1) look back at a surface facing +a
+	float lift = eps;
+	for( int k = 0; k < 2; ++k )
+	{
+		vec3 u = surfLS + nLS * ( float( k ) * min( eps, ir[a] ) );
+		const vec3 cellLS = ( floor( u / ir ) + 0.5 ) * ir;
+		if( any( lessThan( cellLS, vec3( 0.0 ) ) ) || any( greaterThan( cellLS, vec3( 1.0 ) ) ) )
+			break;
+		const float o = jahVoxelCov( 0, hBack, cellLS, 0.0 )[a];
+		if( !( o > 0.0 ) )
+			continue;
+		const float pRaw = jahVoxelPos( 0, hBack, cellLS, 0.0 )[a];
+		// a TWO-DEPTH back half (VoxelMerge_piece_cs.any THE HALF'S DEPTHS): its mean plane is no face's - one of them
+		// may stand anywhere in the cell, so the lift keeps to a sixty-fourth of the cell (half a depth bin)
+		if( ( uint( pRaw * 65535.0 + 0.5 ) & 1u ) != 0u )
+		{
+			lift = min( lift, ir[a] / ( 64.0 * an[a] ) );
+			continue;
+		}
+		const float q = ( floor( cellLS[a] / ir[a] ) + clamp( pRaw / o, 0.0, 1.0 ) ) * ir[a];
+		const float d = ( q - surfLS[a] ) * sg / an[a];   // along the normal, to the face's plane
+		// A FACE PRESSED AGAINST ANOTHER (VOXEL-R13 stage 3): one looking back at the surface within a sixty-fourth of a
+		// cell (the position grid's few steps) of its own plane - a wall's end butted against another wall - is a HIDDEN
+		// face: no light reaches it, and the caller gathers none (-1). Its halves read the far side of the solid it
+		// touches otherwise (gi.sealed_sky_noray: the seams' contact faces at 0.4-1.3 % of the roof, cell-read inside)
+		if( k == 0 && abs( d ) * an[a] <= ir[a] * ( 1.0 / 64.0 ) )
+			return -1.0;
+		if( d > 1e-4 * ir[a] && d < 2.0 * lift )
+			lift = min( lift, 0.5 * d );
+	}
+	return lift;
+}
+
 JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, float epsC0, ivec4 ownCell,
 							   float firstShellC0, float lastShellC0, bool planeTest0 )
 {

@@ -39,7 +39,8 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S THIRTY-FOUR ACCUMULATOR TEXELS ARE ADJACENT IN Z (VOXEL-R13 stage 2's layout - the voxel's two normal
+	/// ONE VOXEL'S FORTY ACCUMULATOR TEXELS ARE ADJACENT IN Z (VOXEL-R13 stage 3: the halves' depth bins at +34..+39, THE
+	/// HALF'S DEPTHS below; stage 2's layout before them - the voxel's two normal
 	/// sums are deleted with the two-side store): albedo sum at +0..2 (rgb), the metal's Fresnel-90 weight at +3, the
 	/// emissive sum at +4..6, the roughness sum at +7, the per-half-axis coverage sums packed into +8 (the faces looking
 	/// +x, +y, +z) and +9 (looking -a), the matching position-weighted sums +10 and +11, the casters' coverage +12 and +13,
@@ -83,7 +84,7 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 34u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 40u + chan );
 	}
 
 
@@ -102,6 +103,45 @@
 	/// Each takes, like the position, the share of its coverage add the coverage field accepted (THE POSITION TAKES WHAT
 	/// THE COVERAGE TAKES), so its fields stay at most the coverage they are recovered against; each field saturates on its
 	/// own (commutative and associative: the merge stays order-independent).
+	/// THE HALF'S DEPTHS (VOXEL-R13 stage 3, the lead's ruling (B')): per half q, a word of 32 bins along the half's own
+	/// axis in its cell, each piece setting the run of bins its triangle spans there (accumulator +34 + q, OR-ed). A half
+	/// is TWO-DEPTH where its bins have a GAP - faces at two depths of the cell, the room's floor top and the ground's top
+	/// outside one coarse cell under the wall, one +y half: one value cannot be both - and a reader's hit on such a half
+	/// asks the finer cascade which face the ray meets (jah_voxel_ray.glsl). A tilted face fills a contiguous run (single
+	/// depth). Faces closer than one bin (1/32 of the cell) read single-depth. The flag rides the low bit of the half's own
+	/// surface-position channel (voxelMergeDepthFlag): every reader of the position reads it at the cell, level 0.
+	INLINE uint voxelMergeDepthBins( float lo, float hi )
+	{
+		const uint a = uint( clamp( floor( min( lo, hi ) * 32.0f ), 0.0f, 31.0f ) );
+		const uint b = uint( clamp( floor( max( lo, hi ) * 32.0f ), 0.0f, 31.0f ) );
+		const uint upTo = b == 31u ? 0xFFFFFFFFu : ( ( 1u << ( b + 1u ) ) - 1u );
+		return upTo & ~( ( 1u << a ) - 1u );
+	}
+	INLINE uint voxelMergeTwoDepth( uint m )
+	{
+		if( m == 0u )
+			return 0u;
+		const uint low = m & ( 0u - m );
+		const uint t = m / low;
+		return ( t & ( t + 1u ) ) != 0u ? 1u : 0u;
+	}
+	/// the resolved position (O x p per axis, [0, 1]) with each axis's two-depth flag in its 16-bit channel's low bit
+	INLINE float3 voxelMergeDepthFlag( float3 pos, uint m0, uint m1, uint m2 )
+	{
+		const uint3 flag = uint3( voxelMergeTwoDepth( m0 ), voxelMergeTwoDepth( m1 ), voxelMergeTwoDepth( m2 ) );
+		const uint3 code = uint3( floor( saturate( pos ) * 65535.0f + 0.5f ) );
+		return float3( ( code & uint3( 0xFFFEu, 0xFFFEu, 0xFFFEu ) ) | flag ) * ( 1.0f / 65535.0f );
+	}
+	/// THE HALF'S TWO SIDES (VOXEL-R13 stage 3): a half holding a two-sided piece's faces (the kinds word's bit 12 + q,
+	/// OR-ed) - its coplanar face looking the other way is its own back, not a surface pressed against it (the bounce's
+	/// hidden-face rule, jah_voxel_ray.glsl jahVoxelFreeLift) - carried in the low bit of its first centroid channel
+	/// (RGBA16_UNORM: the centroid loses at most 1.5e-5 of the cell)
+	INLINE float4 voxelMergeTwoSidedFlag( float4 side, uint twoP, uint twoN )
+	{
+		uint2 cp = uint2( floor( saturate( side.xz ) * 65535.0f + 0.5f ) );
+		cp = ( cp & uint2( 0xFFFEu, 0xFFFEu ) ) | uint2( twoP, twoN );
+		return float4( float( cp.x ) * ( 1.0f / 65535.0f ), side.y, float( cp.y ) * ( 1.0f / 65535.0f ), side.w );
+	}
 	INLINE uint voxelMergeHalfTaken( uint add, uint addAxis, uint taken )
 	{
 		return addAxis > 0u ? ( add * taken + ( addAxis >> 1u ) ) / addAxis : 0u;

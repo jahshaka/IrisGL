@@ -72,9 +72,9 @@ namespace Ogre
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
         // (27 since PHOTON-7 stage 10-3, R2: channel 26 holds the voxel's brightest emissive contribution - the
         // emissive sum's shared exponent; 28 since the merge of PHOTON-7 10-4 R7: channel 27 the kinds of faces; 34 since
-        // VOXEL-R13: the halves' own faces, two a half, and the voxel's two normal sums deleted - VoxelMerge_piece_cs.any
-        // has the layout)
-        constexpr uint32 kMergeAccumTexels = 34u;
+        // VOXEL-R13: the halves' own faces, two a half, and the voxel's two normal sums deleted; 40 since VOXEL-R13 stage 3:
+        // the halves' depth bins, one a half - VoxelMerge_piece_cs.any has the layout)
+        constexpr uint32 kMergeAccumTexels = 40u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at

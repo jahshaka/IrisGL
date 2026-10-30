@@ -403,6 +403,11 @@
 	uint  cHalfFace[30];
 	for( uint jahK = 0u; jahK < 30u; ++jahK )
 		cHalfFace[jahK] = 0u;
+	// VOXEL-R13 stage 3 (B'): THE HALF'S DEPTHS - per half, the 32 bins along its own axis its faces occupy (the piece's
+	// triangle's extent along the axis inside the cell: a contiguous run of bins), OR-ed (VoxelMerge_piece_cs.any)
+	uint  cHalfDepth[6];
+	for( uint jahK = 0u; jahK < 6u; ++jahK )
+		cHalfDepth[jahK] = 0u;
 @property( voxel_emissive_max )
 	// THE MAX PRE-PASS (PHOTON-7 stage 10-3, R2): the voxel's emissive BOUND - the brightest emissive constant of the
 	// materials whose triangles touch it (an emissive map scales it by at most one: the pool's maps are unorm) - the
@@ -563,6 +568,16 @@
 						uint( clamp( w * 0.5f * ( seen * geoN[oa.x] + 1.0f ), 0.0f, 2.0f ) * 512.0f + 0.5f );
 					cHalfFace[q * 5u + 4u] =
 						uint( clamp( w * 0.5f * ( seen * geoN[oa.y] + 1.0f ), 0.0f, 2.0f ) * 512.0f + 0.5f );
+					// VOXEL-R13 stage 3: a TWO-SIDED piece's half (its own back is the coplanar face looking the other way, never
+					// a contact - the bounce's hidden-face rule reads it: VoxelMerge_piece_cs.any THE HALF'S DEPTHS)
+					if( instance.mesh.twoSided != 0u )
+						cKinds |= 1u << ( 12u + q );
+					{
+						const float tLo = min( min( tri.v[0][a], tri.v[1][a] ), tri.v[2][a] );
+						const float tHi = max( max( tri.v[0][a], tri.v[1][a] ), tri.v[2][a] );
+						cHalfDepth[q] = voxelMergeDepthBins( ( tLo - voxelLo[a] ) / p_voxelCellSize[a],
+															 ( tHi - voxelLo[a] ) / p_voxelCellSize[a] );
+					}
 				}
 				// THE OTHER WINDING'S SUMS (PHOTON-5 stage 2): a two-sided piece is written as the
 				// two pieces the same sheet authored as two opposed windings writes, sum for sum -
@@ -674,7 +689,7 @@
 	// scroll, not the partition.)
 	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
 	// broadphase, the octants and the buckets are unchanged.
-	@foreach( 68, k )
+	@foreach( 74, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
 	// THE EMISSIVE'S SHARED EXPONENT (R2): the max pre-pass gathers it from nothing; the sum pass reads what it gathered
@@ -796,6 +811,12 @@
 								{
 									if( cHalfFace[jahK] != 0u )
 										atomicAdd( g_voxelSums[( 38u + jahK ) * 64u + v], cHalfFace[jahK] );
+								}
+								// VOXEL-R13 stage 3 (B'): the halves' depth bins at sums 68..73
+								for( uint jahK = 0u; jahK < 6u; ++jahK )
+								{
+									if( cHalfDepth[jahK] != 0u )
+										atomicOr( g_voxelSums[( 68u + jahK ) * 64u + v], cHalfDepth[jahK] );
 								}
 							}
 						}
@@ -932,6 +953,7 @@
 		// VOXEL-R13 stage 1: THE HALVES' OWN FACES - each half's two words, its sums added at the share of its coverage
 		// add the coverage field took (VoxelMerge_piece_cs.any, THE HALF'S OWN FACES)
 		uint jahHalfWord[12];
+		uint jahHalfDepthMask[6];
 		{
 			const uint3 jahTakenP = voxelMergeAxisUnpack( sumAxisP ) - jahCovBeforeP;
 			const uint3 jahTakenN = voxelMergeAxisUnpack( sumAxisN ) - jahCovBeforeN;
@@ -953,6 +975,11 @@
 									uint4( jahHalfWord[2u * q], 0u, 0u, 0u ) );
 				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 23u + 2u * q ),
 									uint4( jahHalfWord[2u * q + 1u], 0u, 0u, 0u ) );
+				// VOXEL-R13 stage 3 (B'): its depth bins, OR-ed - order-free like the kinds
+				jahHalfDepthMask[q] = OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 34u + q ) ).x |
+									  g_voxelSums[( 68u + q ) * 64u + gl_LocalInvocationIndex];
+				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 34u + q ),
+									uint4( jahHalfDepthMask[q], 0u, 0u, 0u ) );
 			}
 		}
 
@@ -1015,10 +1042,15 @@
 			const float casterShareN = voxelMergeCasterShare( sumCasterN, sumAxisN, ( paneN >> 2u ) & 1u );
 			// PHOTON-VOXEL-4: the surface position per half-axis, O-premultiplied, relative to the voxel's own cell
 			// (PHOTON-7 stage 1: the same bits at every placement of the box).
+			// VOXEL-R13 stage 3 (B'): ...each half's TWO-DEPTH flag in its channel's low bit (voxelMergeDepthFlag)
 			OGRE_imageWrite3D4( voxelPositionPTex, voxelCelUvw,
-								float4( voxelMergePositionResolve( sumPosP, sumAxisP ), casterShareP ) );
+								float4( voxelMergeDepthFlag( voxelMergePositionResolve( sumPosP, sumAxisP ),
+															 jahHalfDepthMask[0], jahHalfDepthMask[1], jahHalfDepthMask[2] ),
+										casterShareP ) );
 			OGRE_imageWrite3D4( voxelPositionNTex, voxelCelUvw,
-								float4( voxelMergePositionResolve( sumPosN, sumAxisN ), casterShareN ) );
+								float4( voxelMergeDepthFlag( voxelMergePositionResolve( sumPosN, sumAxisN ),
+															 jahHalfDepthMask[3], jahHalfDepthMask[4], jahHalfDepthMask[5] ),
+										casterShareN ) );
 			// VOXEL-R13 stage 1: THE HALVES' OWN FACES, per axis both halves (rg the +a half, ba the -a half) - the
 			// centroid across the axis and the normal's hemisphere octahedron, against the half's coverage sum
 			{
@@ -1026,8 +1058,11 @@
 				const uint3 jahSumN = voxelMergeAxisUnpack( sumAxisN );
 				for( uint a = 0u; a < 3u; ++a )
 				{
-					const float4 side = float4( voxelMergeHalfCentroid( jahHalfWord[2u * a], jahSumP[a] ),
-												voxelMergeHalfCentroid( jahHalfWord[2u * ( a + 3u )], jahSumN[a] ) );
+					// (each half's TWO-SIDED bit in the low bit of its first centroid channel - VoxelMerge_piece_cs.any)
+					const float4 side = voxelMergeTwoSidedFlag(
+						float4( voxelMergeHalfCentroid( jahHalfWord[2u * a], jahSumP[a] ),
+								voxelMergeHalfCentroid( jahHalfWord[2u * ( a + 3u )], jahSumN[a] ) ),
+						( sumKinds >> ( 12u + a ) ) & 1u, ( sumKinds >> ( 15u + a ) ) & 1u );
 					const float4 nrm = float4( voxelMergeHalfNormal( jahHalfWord[2u * a + 1u], jahSumP[a] ),
 											   voxelMergeHalfNormal( jahHalfWord[2u * ( a + 3u ) + 1u], jahSumN[a] ) );
 					if( a == 0u )

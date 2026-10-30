@@ -81,11 +81,27 @@ const int kJahPixelDiffuseRays = 8;
 /// THE LAST CALL'S OPEN SHARE (PHOTON-7 10-4 R11): the cosine-weighted share of its rays that left the chain, each by
 /// what the panes it crossed passed (1 with no ray taken) - the no-ray integrate's measured sky visibility (jahSkyVis).
 float gJahRayDiffuseOpen = 1.0;
+/// THE HIDDEN-FACE TEST (VOXEL-R13 stage 3): set by a caller gathering at a ONE-SIDED voxel half (the bounce) - a face
+/// pressed against another surface there gathers nothing (jahRayDiffuse)
+bool gJahRayHiddenTest = false;
 
 vec3 jahRayDiffuse( vec3 surfLS, vec3 nLS, mat3 basis, int rays, float epsC0, ivec4 ownCell,
 					float firstShellC0, float lastShellC0, bool planeTest0 )
 {
 	const int n = max( rays, 1 );
+	epsC0 = jahVoxelFreeLift( surfLS, nLS, epsC0 );
+	if( epsC0 < 0.0 )
+	{
+		// a face looking back on the surface's own plane: a ONE-SIDED face pressed against another surface is HIDDEN and
+		// gathers no light (the caller says it is one: gJahRayHiddenTest); a two-sided sheet's is its own back, and it
+		// lifts a sixty-fourth of the cell
+		if( gJahRayHiddenTest )
+		{
+			gJahRayDiffuseOpen = 0.0;
+			return vec3( 0.0, 0.0, 0.0 );
+		}
+		epsC0 = JAH_VOX_INVRES( 0 ).x * ( 1.0 / 64.0 );
+	}
 	const vec3 startLS = surfLS + nLS * epsC0;
 	const float binCos = 1.0 - 1.0 / float( n );
 	const float binTan = sqrt( max( 1.0 - binCos * binCos, 0.0 ) ) / binCos;

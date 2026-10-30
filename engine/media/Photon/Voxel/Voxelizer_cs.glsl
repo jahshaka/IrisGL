@@ -30,7 +30,7 @@
 // the position per half 3 + 3, the casters' coverage per half 3 + 3, the metal's F0 3 (METAL-BOUNCE-1), the
 // emitters' coverage per half 3 + 3 and their weight (JUNCTION-NORMAL-1), the kinds of faces (PHOTON-7 10-4 R7), and the
 // halves' own faces 6 x 5 (VOXEL-R13) - indexed sum x 64 + voxel. 17 KB.
-shared uint g_voxelSums[68 * 64];
+shared uint g_voxelSums[74 * 64];
 // Jahshaka (PHOTON-7 stage 10-3, R2): THE EMISSIVE'S SHARED EXPONENT - each of the 64 voxels' brightest emissive
 // contribution (float bits: a non-negative float orders as its bits). The max pre-pass (voxel_emissive_max) gathers it
 // into the merge accumulator's channel 26; the sum pass reads it back here and quantises the emissive relative to it.

@@ -206,8 +206,13 @@
 			if( !( o > 0.0f ) )
 				continue;
 			const float3 local = jahHalfFacePoint( a, o, h == 0 ? jahPosP[a] : jahPosN[a], jahHalfNrmPick( jahSide[a], h ) );
+			// (VOXEL-R13 stage 3: a one-sided half - its two-sided bit, the low bit of its first centroid channel, clear -
+			// pressed against another surface gathers nothing: jahRayDiffuse's hidden-face test)
+			const float jahSideFirst = h == 0 ? jahSide[a].x : jahSide[a].z;
+			gJahRayHiddenTest = ( uint( jahSideFirst * 65535.0f + 0.5f ) & 1u ) == 0u;
 			gatheredHalf[q] = jahBounceRays( ( float3( jahCell ) + local ) * p_invVoxelResolution, int3( jahCell ),
 											 jahHalfNormalDecode( jahHalfNrmPick( jahNrm[a], h ), a, h ) );
+			gJahRayHiddenTest = false;
 		}
 	@end
 		// THE BOUNCE RE-EMITS WHAT THE SURFACE RENDERS (PHOTON-WRITER-1): a voxel lit
