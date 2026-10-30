@@ -460,7 +460,6 @@ Scene::Scene()
     // for +0.67 ms at 4K and nothing measurable below it. `checker` stays
     // selectable for a project that wants exactly the old picture.
     ssrMarch = 1;
-    reflectionSources = 0;      // Both: the one estimator
     reflectionResolution = 0;   // Auto: the tier's
     reflectionRoughnessCutoff = 40;
     refractionsMode = 0;

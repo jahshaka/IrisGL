@@ -240,8 +240,6 @@ struct StillnessFrame {
     /// THE REST'S CAPPED TEXELS (commit 8, RayQueryStatus::reflectRestCapped): stopped at their count's ceiling, not by
     /// their standard error - 0 on a healthy rest, -1 none read.
     int                reflRestCapped = -1;
-    /// THE SOURCES THE REFLECTION RAN WITH (RayQueryStatus::reflectSources: the mode label) - -1 none traced.
-    int                reflSources = -1;
     /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e); THE FRAME CLOCK, PHOTON-7 stage 0): the monitor record's BUSY
     /// frame GPU milliseconds (its span less the gaps the GPU waited on a submission - THE one per-frame GPU time the
     /// hitch law reads) and the whole renderOneFrame's wall milliseconds - the CPU's frame, which in a lockstep host
