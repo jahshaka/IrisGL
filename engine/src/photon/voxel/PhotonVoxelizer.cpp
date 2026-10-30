@@ -71,8 +71,10 @@ namespace Ogre
         /// multiplier): the eighteen sums of the merge, the casters' coverage per half (FAR-SUN-1) and
         /// the metal's F0 (METAL-BOUNCE-1; its Fresnel-90 weight took the albedo alpha's dead texel).
         // (27 since PHOTON-7 stage 10-3, R2: channel 26 holds the voxel's brightest emissive contribution - the
-        // emissive sum's shared exponent; 28 since the merge of PHOTON-7 10-4 R7: channel 27 the kinds of faces)
-        constexpr uint32 kMergeAccumTexels = 28u;
+        // emissive sum's shared exponent; 28 since the merge of PHOTON-7 10-4 R7: channel 27 the kinds of faces; 40 since
+        // VOXEL-R13 stage 1: channels 28-39 the halves' own faces, two a half - their centroid across the axis and their
+        // normal, VoxelMerge_piece_cs.any's THE HALF'S OWN FACES)
+        constexpr uint32 kMergeAccumTexels = 40u;
         /// THE MERGE ACCUMULATOR IS SHARED BY SIZE (SPEED-VR-MEM, perf audit M-13). Every
         /// voxeliser used to hold its own for life (W x H x 18D R32_UINT: 18.9 MB at 64^3,
         /// 151 MB at 128^3), yet it is scratch that lives only INSIDE one build(): cleared at
@@ -550,6 +552,17 @@ namespace Ogre
                     GpuPageOutStrategy::Discard,
                     TextureFlags::Uav, TextureTypes::Type3D );
             }
+            // VOXEL-R13 stage 1: THE HALVES' OWN FACES (PhotonVoxelizerSourceBase.h) - level 0 only, one volume an axis.
+            const char *axisName[3] = { "X", "Y", "Z" };
+            for( size_t a = 0u; a < 3u; ++a )
+            {
+                mHalfSideVox[a] = mTextureGpuManager->createTexture(
+                    "VctVoxelizer" + StringConverter::toString( getId() ) + "/HalfSide" + axisName[a],
+                    GpuPageOutStrategy::Discard, TextureFlags::Uav, TextureTypes::Type3D );
+                mHalfNrmVox[a] = mTextureGpuManager->createTexture(
+                    "VctVoxelizer" + StringConverter::toString( getId() ) + "/HalfNrm" + axisName[a],
+                    GpuPageOutStrategy::Discard, TextureFlags::Uav, TextureTypes::Type3D );
+            }
 
         }
 
@@ -653,6 +666,21 @@ namespace Ogre
             mEmitVox[h]->setResolution( mWidth, mHeight, mDepth );
             mEmitVox[h]->setNumMipmaps( 1u );
             mEmitVox[h]->scheduleTransitionTo( GpuResidency::Resident );
+        }
+        // VOXEL-R13 stage 1: the halves' faces, level 0 - 8 B (the two centroids of both halves, 16 bits) + 4 B (both
+        // halves' normals, 8 bits a coordinate) a voxel an axis: 36 B a voxel, 72 MiB at 128^3, 9 MiB at 64^3.
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            mHalfSideVox[a]->scheduleTransitionTo( GpuResidency::OnStorage );
+            mHalfSideVox[a]->setPixelFormat( PFG_RGBA16_UNORM );
+            mHalfSideVox[a]->setResolution( mWidth, mHeight, mDepth );
+            mHalfSideVox[a]->setNumMipmaps( 1u );
+            mHalfSideVox[a]->scheduleTransitionTo( GpuResidency::Resident );
+            mHalfNrmVox[a]->scheduleTransitionTo( GpuResidency::OnStorage );
+            mHalfNrmVox[a]->setPixelFormat( PFG_RGBA8_UNORM );
+            mHalfNrmVox[a]->setResolution( mWidth, mHeight, mDepth );
+            mHalfNrmVox[a]->setNumMipmaps( 1u );
+            mHalfNrmVox[a]->scheduleTransitionTo( GpuResidency::Resident );
         }
 
         for( size_t i = 0; i < sizeof( textures ) / sizeof( textures[0] ); ++i )
@@ -764,6 +792,11 @@ namespace Ogre
             mComputeTools->prepareForUavClear( mResourceTransitions, mPositionVox[h] );
             mComputeTools->prepareForUavClear( mResourceTransitions, mEmitVox[h] );
         }
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            mComputeTools->prepareForUavClear( mResourceTransitions, mHalfSideVox[a] );
+            mComputeTools->prepareForUavClear( mResourceTransitions, mHalfNrmVox[a] );
+        }
         mRenderSystem->executeResourceTransition( mResourceTransitions );
 
         jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mAlbedoVox, fClearValue );
@@ -777,6 +810,13 @@ namespace Ogre
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mCoverageVox[h], fClearValue );
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mPositionVox[h], fClearValue );
             jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mEmitVox[h], fClearValue );
+        }
+        // VOXEL-R13: no face - the centroid at 0 (never read: a half without coverage), the normal the axis (0.5 0.5)
+        const float fClearHalfNrm[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mHalfSideVox[a], fClearValue );
+            jahshaka::engine::detail::photonClearUavFloat( mComputeTools, mHalfNrmVox[a], fClearHalfNrm );
         }
         OgreProfileGpuEnd( "VCT Voxelization Clear" );
     }
@@ -865,6 +905,11 @@ namespace Ogre
             v.coverage[h] = mCoverageVox[h];
             v.position[h] = mPositionVox[h];
             v.emit[h] = mEmitVox[h];
+        }
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            v.halfSide[a] = mHalfSideVox[a];
+            v.halfNrm[a] = mHalfNrmVox[a];
         }
         return v;
     }
@@ -970,6 +1015,18 @@ namespace Ogre
                 uavSlot.pixelFormat = v.emit[h]->getPixelFormat();
                 uavSlot.access = ResourceAccess::Write;
                 mComputeJobs[i]->_setUavTexture( uint8( 12u + h ), uavSlot );
+            }
+            // VOXEL-R13 stage 1: the halves' own faces (14..16 the centroids, 17..19 the normals), written by the resolve.
+            for( size_t a = 0u; a < 3u; ++a )
+            {
+                uavSlot.texture = v.halfSide[a];
+                uavSlot.pixelFormat = v.halfSide[a]->getPixelFormat();
+                uavSlot.access = ResourceAccess::Write;
+                mComputeJobs[i]->_setUavTexture( uint8( 14u + a ), uavSlot );
+                uavSlot.texture = v.halfNrm[a];
+                uavSlot.pixelFormat = v.halfNrm[a]->getPixelFormat();
+                uavSlot.access = ResourceAccess::Write;
+                mComputeJobs[i]->_setUavTexture( uint8( 17u + a ), uavSlot );
             }
 
             DescriptorSetTexture2::BufferSlot texBufSlot(

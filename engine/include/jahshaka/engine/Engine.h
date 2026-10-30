@@ -1111,6 +1111,10 @@ public:
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
     virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// ...ITS HALF STORE (VOXEL-R13 stage 1) - the same TEST AND TOOL readback (flushes and BLOCKS): `halfLight` and
+    /// `halfDirect` (the six half lights and their direct terms), the halves' own faces (`halfSide`, `halfNormal`), the
+    /// coverage and the surface position per half, the voxeliser's `normal`, and the placement; every other member empty.
+    virtual bool giVoxelHalves(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
     /// THE VOXEL SIDES' ESCAPE SHARES of cascade 0 (GiVoxelSideShares; PHOTON-7 11-2 (6)) as the ray tier's last sides'
     /// gathers left them - a host-visible copy, read without a stall (a few frames behind the GPU). False without the ray
     /// tier's sides' gather or before its first cascade-0 pass.

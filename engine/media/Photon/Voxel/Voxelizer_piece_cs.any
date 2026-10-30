@@ -400,6 +400,11 @@
 	// PHOTON-7 10-4 R7: WHAT KIND OF FACES this piece puts in each half-axis (VoxelMerge_piece_cs.any, THE PANE FACES):
 	// bit h x 3 + a a pane's (h 0 the +a half, 1 the -a half), bit 6 + h x 3 + a an occluder's
 	uint  cKinds = 0u;
+	// VOXEL-R13 stage 1: THE HALF'S OWN FACES (VoxelMerge_piece_cs.any) - five sums a half q = h x 3 + a, at q x 5: the
+	// centroid across the axis (two), the normal along the half's direction and the two biased across it
+	uint  cHalfFace[30];
+	for( uint jahK = 0u; jahK < 30u; ++jahK )
+		cHalfFace[jahK] = 0u;
 @property( voxel_emissive_max )
 	// THE MAX PRE-PASS (PHOTON-7 stage 10-3, R2): the voxel's emissive BOUND - the brightest emissive constant of the
 	// materials whose triangles touch it (an emissive map scales it by at most one: the pool's maps are unorm) - the
@@ -554,6 +559,26 @@
 					saturate( ( pieceCentroid - voxelLo ) / p_voxelCellSize );
 				cPosP = voxelMergeAxisQuantize( contribP * cellLocal );
 				cPosN = voxelMergeAxisQuantize( contribN * cellLocal );
+				// VOXEL-R13 stage 1: each half's share of this piece - its centroid across the half's axis and its normal
+				// as the half sees it (the a component the half's way: a one-sided face is in the half it looks to, a
+				// two-sided sheet in both, each side's own), weighted by the piece's coverage contribution to the half
+				for( uint q = 0u; q < 6u; ++q )
+				{
+					const uint a = q % 3u;
+					const bool plusHalf = q < 3u;
+					const float w = plusHalf ? contribP[a] : contribN[a];
+					if( !( w > 0.0f ) )
+						continue;
+					const int2 oa = jahHalfOtherAxes( int( a ) );
+					const float seen = ( plusHalf ? 1.0f : -1.0f ) * ( geoN[a] >= 0.0f ? 1.0f : -1.0f );
+					cHalfFace[q * 5u + 0u] = uint( clamp( w * cellLocal[oa.x], 0.0f, 2.0f ) * 512.0f + 0.5f );
+					cHalfFace[q * 5u + 1u] = uint( clamp( w * cellLocal[oa.y], 0.0f, 2.0f ) * 512.0f + 0.5f );
+					cHalfFace[q * 5u + 2u] = uint( clamp( w * abs( geoN[a] ), 0.0f, 2.0f ) * 256.0f + 0.5f );
+					cHalfFace[q * 5u + 3u] =
+						uint( clamp( w * 0.5f * ( seen * geoN[oa.x] + 1.0f ), 0.0f, 2.0f ) * 512.0f + 0.5f );
+					cHalfFace[q * 5u + 4u] =
+						uint( clamp( w * 0.5f * ( seen * geoN[oa.y] + 1.0f ), 0.0f, 2.0f ) * 512.0f + 0.5f );
+				}
 				// THE OTHER WINDING'S SUMS (PHOTON-5 stage 2): a two-sided piece is written as the
 				// two pieces the same sheet authored as two opposed windings writes, sum for sum -
 				// the halves above already hold both, every weighted mean takes the piece twice and
@@ -671,7 +696,7 @@
 	// scroll, not the partition.)
 	// The reference partition and its arm are deleted; the group vote too (decision 12.5). The
 	// broadphase, the octants and the buckets are unchanged.
-	@foreach( 44, k )
+	@foreach( 74, k )
 		g_voxelSums[@k * 64 + gl_LocalInvocationIndex] = 0u;
 	@end
 	// THE EMISSIVE'S SHARED EXPONENT (R2): the max pre-pass gathers it from nothing; the sum pass reads what it gathered
@@ -790,6 +815,12 @@
 									atomicOr( g_voxelSums[43 * 64 + v], cKinds );
 								atomicAdd( g_voxelSums[13 * 64 + v], cRoughness );
 								atomicAdd( g_voxelSums[14 * 64 + v], cWeight );
+								// VOXEL-R13 stage 1: the halves' own faces at sums 44..73
+								for( uint jahK = 0u; jahK < 30u; ++jahK )
+								{
+									if( cHalfFace[jahK] != 0u )
+										atomicAdd( g_voxelSums[( 44u + jahK ) * 64u + v], cHalfFace[jahK] );
+								}
 							}
 						}
 					}
@@ -924,8 +955,36 @@
 			sumEmissive[@c]	= voxelMergeAddSat( sumEmissive[@c], accEmissive[@c] );
 		@end
 		sumRoughness	= voxelMergeAddSat( sumRoughness, accRoughness );
+		const uint3 jahCovBeforeP = voxelMergeAxisUnpack( sumAxisP );
+		const uint3 jahCovBeforeN = voxelMergeAxisUnpack( sumAxisN );
 		voxelMergeAxisPosAddSat( sumAxisP, sumPosP, accAxisP, accPosP );
 		voxelMergeAxisPosAddSat( sumAxisN, sumPosN, accAxisN, accPosN );
+		// VOXEL-R13 stage 1: THE HALVES' OWN FACES - each half's two words, its sums added at the share of its coverage
+		// add the coverage field took (VoxelMerge_piece_cs.any, THE HALF'S OWN FACES)
+		uint jahHalfWord[12];
+		{
+			const uint3 jahTakenP = voxelMergeAxisUnpack( sumAxisP ) - jahCovBeforeP;
+			const uint3 jahTakenN = voxelMergeAxisUnpack( sumAxisN ) - jahCovBeforeN;
+			for( uint q = 0u; q < 6u; ++q )
+			{
+				const uint a = q % 3u;
+				const uint addAxis = q < 3u ? accAxisP[a] : accAxisN[a];
+				const uint taken = q < 3u ? jahTakenP[a] : jahTakenN[a];
+				uint sums[5];
+				for( uint k = 0u; k < 5u; ++k )
+					sums[k] = voxelMergeHalfTaken( g_voxelSums[( 44u + q * 5u + k ) * 64u + gl_LocalInvocationIndex],
+												   addAxis, taken );
+				jahHalfWord[2u * q] = voxelMergeHalfAddCentroid(
+					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 28u + 2u * q ) ).x, sums[0], sums[1] );
+				jahHalfWord[2u * q + 1u] = voxelMergeHalfAddNormal(
+					OGRE_imageLoad3D( voxelMergeAccum, voxelMergeUvw( voxelCel, 29u + 2u * q ) ).x, sums[2], sums[3],
+					sums[4] );
+				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 28u + 2u * q ),
+									uint4( jahHalfWord[2u * q], 0u, 0u, 0u ) );
+				OGRE_imageWrite3D1( voxelMergeAccum, voxelMergeUvw( voxelCel, 29u + 2u * q ),
+									uint4( jahHalfWord[2u * q + 1u], 0u, 0u, 0u ) );
+			}
+		}
 		// Two's complement: a signed sum kept in a uint wraps the same way in
 		// every order, which is the whole point of doing this in integers — and a
 		// unit vector's quantised component is 4,096, so half a million triangles
@@ -1001,6 +1060,34 @@
 								float4( voxelMergePositionResolve( sumPosP, sumAxisP ), casterShareP ) );
 			OGRE_imageWrite3D4( voxelPositionNTex, voxelCelUvw,
 								float4( voxelMergePositionResolve( sumPosN, sumAxisN ), casterShareN ) );
+			// VOXEL-R13 stage 1: THE HALVES' OWN FACES, per axis both halves (rg the +a half, ba the -a half) - the
+			// centroid across the axis and the normal's hemisphere octahedron, against the half's coverage sum
+			{
+				const uint3 jahSumP = voxelMergeAxisUnpack( sumAxisP );
+				const uint3 jahSumN = voxelMergeAxisUnpack( sumAxisN );
+				for( uint a = 0u; a < 3u; ++a )
+				{
+					const float4 side = float4( voxelMergeHalfCentroid( jahHalfWord[2u * a], jahSumP[a] ),
+												voxelMergeHalfCentroid( jahHalfWord[2u * ( a + 3u )], jahSumN[a] ) );
+					const float4 nrm = float4( voxelMergeHalfNormal( jahHalfWord[2u * a + 1u], jahSumP[a] ),
+											   voxelMergeHalfNormal( jahHalfWord[2u * ( a + 3u ) + 1u], jahSumN[a] ) );
+					if( a == 0u )
+					{
+						OGRE_imageWrite3D4( voxelHalfSideXTex, voxelCelUvw, side );
+						OGRE_imageWrite3D4( voxelHalfNrmXTex, voxelCelUvw, nrm );
+					}
+					else if( a == 1u )
+					{
+						OGRE_imageWrite3D4( voxelHalfSideYTex, voxelCelUvw, side );
+						OGRE_imageWrite3D4( voxelHalfNrmYTex, voxelCelUvw, nrm );
+					}
+					else
+					{
+						OGRE_imageWrite3D4( voxelHalfSideZTex, voxelCelUvw, side );
+						OGRE_imageWrite3D4( voxelHalfNrmZTex, voxelCelUvw, nrm );
+					}
+				}
+			}
 		@else
 			// JAHSHAKA fork ad452604a+155a56bf8 (was 0087): THE BRANCH THAT CANNOT FOLLOW THE FLOAT STORE.
 			// This is D3D11 without typed UAV loads, where each texel is packed

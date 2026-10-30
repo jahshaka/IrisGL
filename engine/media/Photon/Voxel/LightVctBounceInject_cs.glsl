@@ -73,6 +73,15 @@ vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D directBackVoxel;
 vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D voxelMetalTex;
 @add( vctTexUnit, 1 )
 
+// VOXEL-R13 stage 1: THE HALF STORE's DIRECT TERMS per axis after the metal (VctLighting::setupBounceTextures): each half's
+// fixed point L_q = D_q + rho G_q (plain Load3Ds at the voxel written).
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D halfDirectX;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D halfDirectY;
+@add( vctTexUnit, 1 )
+vulkan_layout( ogre_t@value(vctTexUnit) ) uniform texture3D halfDirectZ;
+@add( vctTexUnit, 1 )
+
 // JAHSHAKA (PHOTON-ENV-1): THE ONE ENVIRONMENT, at the unit after `directVoxel`
 // (VctLighting::setupBounceTextures binds it last, and only while the host set a
 // cube - the job property jah_env). Sampled with vctProbeSampler.
@@ -94,19 +103,28 @@ uniform restrict image3D lightVoxel;
 // pass reads back what it wrote (the store's own rounding: an image of the store's format, never a packed buffer).
 layout( vulkan( ogre_u1 ) vk_comma rgba16f )
 uniform restrict image2D backScratch;
+// VOXEL-R13 stage 1: THE HALF STORE per axis (u2..u4), written IN PLACE - no gather of this pass reads a half (the ray
+// tier's ran before it over the same list; the voxel rays read the two sides and the directional chain) - and read back
+// (the store's own rounding: the pass's move and the derived sides).
+layout( vulkan( ogre_u2 ) vk_comma rgba16f )
+uniform restrict image3D halfLightX;
+layout( vulkan( ogre_u3 ) vk_comma rgba16f )
+uniform restrict image3D halfLightY;
+layout( vulkan( ogre_u4 ) vk_comma rgba16f )
+uniform restrict image3D halfLightZ;
 // PHOTON-7 stage 3, THE BRICK MASK (LightInjection_cs.glsl's buffer, word [1] of a brick): the most this frame's pass
 // moved a voxel's total (relative), max-reduced per 8^3 brick - the feedback's per-brick change (stage 4).
-layout( std430, ogre_U2 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
+layout( std430, ogre_U5 ) restrict coherent buffer jahBrickLayout { uint jahBrickMask[]; };
 // PHOTON-7 stage 4, THE FEEDBACK (PhotonBrickFeedback_cs.glsl): the ACTIVE bricks this pass covers (8 groups of 4^3 a
 // brick, an indirect dispatch), and their state - words 4 (the most a voxel's total moved, absolute) and 5 (the brick's
 // sensitivity: its voxels' re-emission over their own code) written here.
-layout( std430, ogre_U3 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
-layout( std430, ogre_U4 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
+layout( std430, ogre_U6 ) restrict readonly buffer jahFbListLayout { uint jahFbList[]; };
+layout( std430, ogre_U7 ) restrict coherent buffer jahFbStateLayout { uint jahFbState[]; };
 @property( jah_vct_tlas )
 // PHOTON-7 stage 10, 10-2b: THE SIDES' GATHER BY TLAS RAYS (rayquery/rq_voxel_sides.comp, dispatched before this job over the
 // same list): per listed brick slot, per voxel of it (x + 8 y + 64 z), per side, the gathered radiance as two
 // packHalf2x16 words - read at the ray tier in place of the voxel rays.
-layout( std430, ogre_U5 ) restrict readonly buffer jahSideGatherLayout { uint jahSideGather[]; };
+layout( std430, ogre_U8 ) restrict readonly buffer jahSideGatherLayout { uint jahSideGather[]; };
 @end
 
 layout( local_size_x = @value( threads_per_group_x ),

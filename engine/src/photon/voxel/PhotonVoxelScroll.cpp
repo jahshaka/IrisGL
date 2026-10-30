@@ -51,7 +51,7 @@ namespace Ogre
         }
 
         /// The live store's volumes, in one fixed order: the shift, the copy-in and the clear walk it.
-        constexpr size_t kVolumes = 11u;
+        constexpr size_t kVolumes = 17u;
         void volumeList( const PhotonVoxelizer::VolumeSet &v, TextureGpu *out[kVolumes] )
         {
             out[0] = v.albedo;
@@ -65,14 +65,27 @@ namespace Ogre
             out[8] = v.metal;     // METAL-BOUNCE-1
             out[9] = v.emit[0];   // JUNCTION-NORMAL-1
             out[10] = v.emit[1];
+            for( size_t a = 0u; a < 3u; ++a )   // VOXEL-R13 stage 1: the halves' own faces
+            {
+                out[11u + a] = v.halfSide[a];
+                out[14u + a] = v.halfNrm[a];
+            }
         }
         const char *const kVolumeNames[kVolumes] = { "Albedo",    "Emissive",  "Normal",
                                                       "AccumVal",  "CoverageP", "CoverageN",
                                                       "PositionP", "PositionN", "Metal",
-                                                      "EmitP",     "EmitN" };
+                                                      "EmitP",     "EmitN",     "HalfSideX",
+                                                      "HalfSideY", "HalfSideZ", "HalfNrmX",
+                                                      "HalfNrmY",  "HalfNrmZ" };
         /// What a whole build clears each volume to (PhotonVoxelizer::clearVoxels): zero, the normal's 0.5 bias.
         const float kZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         const float kNormalClear[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
+        /// ...and the halves' normals' (VOXEL-R13: 0.5 0.5 is a half's own axis), every other volume zero.
+        const float kHalfNrmClear[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        const float *clearOf( size_t i )
+        {
+            return i == 2u ? kNormalClear : ( i >= 14u && i < 17u ? kHalfNrmClear : kZero );
+        }
 
         /// The copy job's parameters, EVERY one each dispatch (a clone keeps its last values): `clear` null = a copy,
         /// else the box is written with that value (PhotonScrollCopy_cs.glsl's clear).
@@ -156,6 +169,11 @@ namespace Ogre
         mVolumes.metal = dst[8];
         mVolumes.emit[0] = dst[9];
         mVolumes.emit[1] = dst[10];
+        for( size_t a = 0u; a < 3u; ++a )
+        {
+            mVolumes.halfSide[a] = dst[11u + a];
+            mVolumes.halfNrm[a] = dst[14u + a];
+        }
 
         // THE SCROLL'S JOBS ARE BUILT HERE, AT THE CHAIN'S BUILD (vr.warmup: no shader is compiled on a frame a headset
         // is shown, and a scroll is what the first head movement does): every format's shift and copy dispatched once
@@ -298,7 +316,7 @@ namespace Ogre
         volumeList( live, to );
         for( size_t i = 0u; i < kVolumes; ++i )
             if( to[i] )
-                clearBox( hlmsManager, renderSystem, to[i], origin, size, i == 2u ? kNormalClear : kZero );
+                clearBox( hlmsManager, renderSystem, to[i], origin, size, clearOf( i ) );
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelScroll::begin()
@@ -319,8 +337,7 @@ namespace Ogre
             if( PixelFormatGpuUtils::isInteger( dst[i]->getPixelFormat() ) )
                 jahshaka::engine::detail::photonClearUavUint( mComputeTools, dst[i], uZero );
             else
-                jahshaka::engine::detail::photonClearUavFloat( mComputeTools, dst[i],
-                                                               i == 2u ? kNormalClear : kZero );
+                jahshaka::engine::detail::photonClearUavFloat( mComputeTools, dst[i], clearOf( i ) );
         }
         OgreProfileGpuEnd( "Photon scroll begin" );
     }
@@ -351,8 +368,7 @@ namespace Ogre
             {
                 if( i < kVolumes )
                 {
-                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], false,
-                                 i == 2u ? kNormalClear : kZero );
+                    shiftVolume( mHlmsManager, mRenderSystem, to[i], a, shift[a], false, clearOf( i ) );
                 }
                 else
                 {

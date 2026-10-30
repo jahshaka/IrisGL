@@ -39,7 +39,8 @@
 #define VOXEL_MERGE_SCALE 4096.0f
 #define VOXEL_MERGE_CLAMP 16.0f
 
-	/// ONE VOXEL'S TWENTY-EIGHT ACCUMULATOR TEXELS ARE ADJACENT IN Z: albedo sum at
+	/// ONE VOXEL'S FORTY ACCUMULATOR TEXELS ARE ADJACENT IN Z (twenty-eight below, and since VOXEL-R13 stage 1 the
+	/// halves' own faces at +28..+39, two a half: THE HALF'S OWN FACES, below): albedo sum at
 	/// z*28+0..2 (rgb), THE METAL'S Fresnel-90 weight at +3 and its F0 at +20..22 (rgb;
 	/// METAL-BOUNCE-1 - +3 summed the diffuse colour's alpha, which no resolve read),
 	/// RAW normal sum at +4..6 (xyz, two's complement),
@@ -76,9 +77,61 @@
 	/// more per 64^3 volume, resident.
 	INLINE uint3 voxelMergeUvw( uint3 voxelCel, uint chan )
 	{
-		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 28u + chan );
+		return uint3( voxelCel.x, voxelCel.y, voxelCel.z * 40u + chan );
 	}
 
+
+	/// THE HALF'S OWN FACES (VOXEL-R13 stage 1; jah_voxel_halves.glsl says why). Per half q = h x 3 + a, two sums over
+	/// its pieces, each weighted by the piece's coverage contribution w to that half (the coverage's own sum, so a face the
+	/// half barely sees barely counts): WHERE ITS FACES LIE ACROSS THE AXIS - the sums of w c_b and w c_c, c the piece's
+	/// centroid in the cell's own [0, 1] on the two other axes - and WHICH WAY THEY LOOK - the sum of w |n_a| along the
+	/// half's direction and the sums of w ( n_b + 1 ) / 2 and w ( n_c + 1 ) / 2 across it, n the face's geometric normal as
+	/// the half sees it (its a component looks the half's way; a two-sided sheet's other side is the other half's). The
+	/// across-axis normal sums are BIASED so every field is a non-negative integer: the mean's components are recovered
+	/// against the half's coverage sum S, n_b ~ 2 B_b - S. Two accumulator texels a half (+28 + 2 q, +29 + 2 q):
+	///   the centroid word: w c_b in bits 0-15, w c_c in 16-31, on the coverage's 1/512 grid (at most S, under 4: far
+	///   below the field's cap);
+	///   the normal word: B_b in bits 0-10, B_c in 11-21 (the 1/512 grid, at most S), w |n_a| in 22-31 on a 1/256 grid
+	///   (at most S: 4.0 within the field).
+	/// Each takes, like the position, the share of its coverage add the coverage field accepted (THE POSITION TAKES WHAT
+	/// THE COVERAGE TAKES), so its fields stay at most the coverage they are recovered against; each field saturates on its
+	/// own (commutative and associative: the merge stays order-independent).
+	INLINE uint voxelMergeHalfTaken( uint add, uint addAxis, uint taken )
+	{
+		return addAxis > 0u ? ( add * taken + ( addAxis >> 1u ) ) / addAxis : 0u;
+	}
+	INLINE uint voxelMergeHalfAddCentroid( uint packed, uint addB, uint addC )
+	{
+		const uint b = min( ( packed & 0xFFFFu ) + addB, 0xFFFFu );
+		const uint c = min( ( packed >> 16u ) + addC, 0xFFFFu );
+		return b | ( c << 16u );
+	}
+	INLINE uint voxelMergeHalfAddNormal( uint packed, uint addAlong, uint addB, uint addC )
+	{
+		const uint b = min( ( packed & 0x7FFu ) + addB, 0x7FFu );
+		const uint c = min( ( ( packed >> 11u ) & 0x7FFu ) + addC, 0x7FFu );
+		const uint along = min( ( packed >> 22u ) + addAlong, 0x3FFu );
+		return b | ( c << 11u ) | ( along << 22u );
+	}
+	/// THE RESOLVE of one half from its two words and its coverage sum S (the field, on the 1/512 grid): the centroid
+	/// across the axis in the cell's [0, 1] (the cell's centre with no coverage), and the normal's hemisphere octahedron
+	/// (jahHalfNormalEncode: the axis with none).
+	INLINE float2 voxelMergeHalfCentroid( uint packed, uint coverageSum )
+	{
+		if( coverageSum == 0u )
+			return float2( 0.5f, 0.5f );
+		return min( float2( float( packed & 0xFFFFu ), float( packed >> 16u ) ) / float( coverageSum ),
+					float2( 1.0f, 1.0f ) );
+	}
+	INLINE float2 voxelMergeHalfNormal( uint packed, uint coverageSum )
+	{
+		if( coverageSum == 0u )
+			return float2( 0.5f, 0.5f );
+		const float s = float( coverageSum );
+		const float along = 2.0f * float( packed >> 22u );
+		const float2 across = float2( 2.0f * float( packed & 0x7FFu ) - s, 2.0f * float( ( packed >> 11u ) & 0x7FFu ) - s );
+		return jahHalfNormalEncode( along, across );
+	}
 
 	/// THE PANE FACES (PHOTON-7 10-4 R7; the lead's cell rule, 2026-10-27). A PANE - a face whose material blends with
 	/// what is behind it - transmits a ray, attenuated by its coverage (its projected area x its alpha: the coverage's own

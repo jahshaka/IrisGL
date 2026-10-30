@@ -744,7 +744,8 @@ public:
     /// flush and a whole-volume download — a test and tool path (Engine.h).
     GiVoxelStats giVoxelStats(int cascade);
     bool giFieldAtlas(GiFieldAtlas &out);
-    bool giVoxelVolume(int cascade, GiVoxelVolume &out, bool lightOnly = false);
+    /// `part`: 0 the whole door (Scene::giVoxelVolume), 1 the light alone (giVoxelLight), 2 the half store (giVoxelHalves)
+    bool giVoxelVolume(int cascade, GiVoxelVolume &out, int part = 0);
     bool giFeedbackBricks(int cascade, GiFeedbackBricks &out);
     /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC; OgreGi.cpp).
     /// `probeGridByRays` is the rule — the tier's facts say its reflections

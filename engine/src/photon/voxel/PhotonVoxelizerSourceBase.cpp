@@ -121,6 +121,15 @@ namespace Ogre
                 mPositionVox[h] = 0;
                 mEmitVox[h] = 0;
             }
+            for( size_t a = 0u; a < 3u; ++a )
+            {
+                if( mHalfSideVox[a] )
+                    mTextureGpuManager->destroyTexture( mHalfSideVox[a] );
+                if( mHalfNrmVox[a] )
+                    mTextureGpuManager->destroyTexture( mHalfNrmVox[a] );
+                mHalfSideVox[a] = 0;
+                mHalfNrmVox[a] = 0;
+            }
 
             mAlbedoVox = 0;
             mEmissiveVox = 0;

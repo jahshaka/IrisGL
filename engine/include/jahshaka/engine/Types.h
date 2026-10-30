@@ -6216,6 +6216,17 @@ struct GiVoxelVolume {
     /// level 0 reads: step 0 composites them from the level-0 light and step 1 builds the levels, so they are a function
     /// of the level-0 light - gi.scroll_slab D compares a commit's with a whole regeneration (gi.regenerateDirectional).
     std::vector<std::vector<float>> directional[3];
+    /// THE HALF STORE (VOXEL-R13 stage 1; Scene::giVoxelHalves fills these with the coverage, the position, the normal
+    /// and the placement): level 0's six HALF LIGHTS, per axis a one volume `halfLight[a]` 2 x width wide (x fastest),
+    /// the -a half's texel at x, the +a half's at width + x, RGBA decoded: (radiance x k, k), k the half's coverage capped
+    /// at 1 - each half lit and gathered from its own faces; `halfDirect[a]` their direct terms (empty without a bounce).
+    /// And THE HALVES' OWN FACES per axis at the volume's own size: `halfSide[a]` (rg the +a half's, ba the -a half's
+    /// centroid across the axis in the cell's [0, 1], the other two axes in increasing order) and `halfNormal[a]` (the
+    /// same halves' mean normal as a hemisphere octahedron about the half's own direction; 0.5 0.5 the axis).
+    std::vector<float> halfLight[3];
+    std::vector<float> halfDirect[3];
+    std::vector<float> halfSide[3];
+    std::vector<float> halfNormal[3];
 };
 
 // ---------------------------------------------------------------------------

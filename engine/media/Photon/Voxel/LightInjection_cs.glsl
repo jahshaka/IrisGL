@@ -69,6 +69,30 @@ uniform restrict image3D backVoxel;
 	uniform restrict writeonly image3D dirOut2;
 @end
 @add( jahInjUav, 1 )
+// VOXEL-R13 stage 1: THE HALF STORE - level 0's six half lights (jah_voxel_halves.glsl: one volume an axis, the -a half
+// in [0, W), the +a half in [W, 2W)), each (radiance x k, k) with k the half's capped coverage; with a bounce their
+// direct terms beside them (the bounce's fixed point per half, the delta's old terms). Read-write: the delta and the
+// brick mask compare each half's direct term with the one it replaces.
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict image3D halfLightX;
+@add( jahInjUav, 1 )
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict image3D halfLightY;
+@add( jahInjUav, 1 )
+layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+uniform restrict image3D halfLightZ;
+@add( jahInjUav, 1 )
+@property( vct_keep_direct )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D halfDirectX;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D halfDirectY;
+	@add( jahInjUav, 1 )
+	layout( vulkan( ogre_u@value(jahInjUav) ) vk_comma rgba16f )
+	uniform restrict image3D halfDirectZ;
+	@add( jahInjUav, 1 )
+@end
 // PHOTON-7 stage 2, THE WORK LAW'S DOOR: a delta injection counts the voxels it lit, cumulatively - word 0 those inside
 // the scroll's slab (outside the box the scroll kept), word 1 those outside it (the voxels whose direct term changed:
 // the band), word 2 the injections, word 3 (stage 4) the voxels it MARCHED. A UAV buffer after the textures, read back by a routed buffer copy.
@@ -94,12 +118,21 @@ vulkan_layout( ogre_t3 ) uniform texture3D voxelMetalTex;
 // (looking -a): what each half's faces emit over the voxel's area mean (VoxelMerge_piece_cs.any).
 vulkan_layout( ogre_t4 ) uniform texture3D voxelEmitPTex;
 vulkan_layout( ogre_t5 ) uniform texture3D voxelEmitNTex;
+// VOXEL-R13 stage 1: THE HALVES' OWN FACES at t6..t8 (where each half's faces lie across its axis) and t9..t11 (their
+// mean normal), both halves an axis (PhotonVoxelizerSourceBase.h): a half's lamp march starts on its own faces and its
+// cosine takes its own normal.
+vulkan_layout( ogre_t6 ) uniform texture3D voxelHalfSideX;
+vulkan_layout( ogre_t7 ) uniform texture3D voxelHalfSideY;
+vulkan_layout( ogre_t8 ) uniform texture3D voxelHalfSideZ;
+vulkan_layout( ogre_t9 ) uniform texture3D voxelHalfNrmX;
+vulkan_layout( ogre_t10 ) uniform texture3D voxelHalfNrmY;
+vulkan_layout( ogre_t11 ) uniform texture3D voxelHalfNrmZ;
 
 // Jahshaka (PHOTON-7 stage 1, L1: LIGHT IS A WORLD FUNCTION): THE CHAIN'S GEOMETRY - every cascade's coverage per
 // half-axis (the faces looking +a, -a) and surface position per half, level 0, as four arrays over the WHOLE tier
 // chain (one permutation per chain length; this cascade is entry chainSelf, the ones inside it bound but never read):
 // the shadow march runs through the chain on fixed shells (JahInjectionReader's jahInjectVisibility).
-@pset( jahInjTex, 6 )
+@pset( jahInjTex, 12 )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovP[@value( hlms_num_vct_cascades )];
 @add( jahInjTex, hlms_num_vct_cascades )
 vulkan_layout( ogre_t@value(jahInjTex) ) uniform texture3D chainCovN[@value( hlms_num_vct_cascades )];

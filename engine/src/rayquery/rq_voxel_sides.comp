@@ -15,12 +15,13 @@
 // jah_ray_set.glsl) traced through the scene's TLAS instead of the voxel chain, for every voxel of the bricks the
 // feedback LISTED this pass (its list and its indirect arguments: 8 groups of 4^3 a brick, group y the list slot, x the
 // octant - the bounce's own dispatch shape), into the chain's SIDE-GATHER scratch the bounce then reads (its property
-// jah_vct_tlas) - per listed slot, per voxel (x + 8 y + 64 z inside the brick), per side, two packHalf2x16 words.
-// THE SIDE'S START, the bounce's: along the axis the side's normal is dominant on, the voxel's faces looking that way
-// (that half's surface position over its coverage), the cell's centre across it - in world metres, lifted along the
-// side's normal by the voxel side's surface bound, the finest cascade's cell (the ONE origin law's third case,
-// jah_ray_origin.glsl: the store keeps a cell's surfaces as one mean position). A TWO-SIDED voxel gathers both
-// hemispheres (its back the normal reversed); a one-sided voxel's back is the inside of a solid and gathers nothing.
+// jah_vct_tlas) - per listed slot, per voxel (x + 8 y + 64 z inside the brick), per HALF (VOXEL-R13 stage 1: the six half
+// lights, jah_voxel_halves.glsl), two packHalf2x16 words.
+// THE HALF'S START: its own faces' point - along its axis their surface position over its coverage, across it their
+// centroid - in world metres, lifted along THEIR OWN mean normal by the surface bound, the finest cascade's cell (the ONE
+// origin law's third case, jah_ray_origin.glsl: the store keeps a half's faces as one mean position). A half with no
+// coverage holds no face and gathers nothing. (The two sides' starts - the side normal's dominant half along it, the
+// cell's centre across - put some inside faces' gathers outside the room at a coarse cell's corner: VOXEL-R13 stage 0.)
 // A RAY'S ANSWER, the world caches' law (rq_card_gather.comp's head): a front face reads jahHitRadianceStore - THE
 // CASCADES ALONE: the cache is bound as its stand-ins with zero slots (the lead's R1 - the cards read the voxels, so a voxel
 // that read a card closed a loop; RayQueryTier::gatherVoxelSides), never Sourced -, a back face of a one-sided surface 0,
@@ -55,6 +56,10 @@ layout( std430, set = 0, binding = 4 ) buffer Counts { uint counts[]; };
 /// grid (the bricks x 8 a side) - bits 0-7 the front side's share of its cosine rays that EXIT the world (the sky), 8-15
 /// the back side's, bit 16 written, bit 17 two-sided, 18-31 the front normal's octahedral map (Engine.h GiVoxelSideShares)
 layout( std430, set = 0, binding = 37 ) buffer SideShare { uint jahSideShare[]; };
+/// VOXEL-R13 stage 1: THIS CASCADE's HALVES' OWN FACES per axis (PhotonVoxelizerSourceBase.h): where each half's faces lie
+/// across its axis (rg the +a half, ba the -a half) and their mean normal's hemisphere octahedron
+layout( set = 0, binding = 38 ) uniform sampler3D halfSide[3];
+layout( set = 0, binding = 41 ) uniform sampler3D halfNrm[3];
 
 // ---- THE HIT SET (ScreenProbeGather.h HitSetSources; RayQueryTier::gatherCards' kCardGatherHitSlots) ----------------
 layout( set = 0, binding = 5 ) uniform sampler3D voxelIso[kMaxCascades];
@@ -118,6 +123,7 @@ void jahCardLobeHemi( float r, out float a, out float b )
 #define JAH_RAY_ORIGIN_BURIED
 #include "jah_ray_origin.glsl"
 #include "jah_oct_dir.glsl"
+#include "jah_voxel_halves.glsl"
 
 const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
 		   kCountTexels = 6u, kCountEmpty = 7u, kCountBuried = 8u;
@@ -217,11 +223,17 @@ void main()
 	const uint sub = gl_WorkGroupID.x;
 	const uvec3 cell = brick * 8u + uvec3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
 	const uvec3 inBrick = cell - brick * 8u;
-	const uint base = ( gl_WorkGroupID.y * 512u + inBrick.x + 8u * inBrick.y + 64u * inBrick.z ) * 4u;
+	const uint base = ( gl_WorkGroupID.y * 512u + inBrick.x + 8u * inBrick.y + 64u * inBrick.z ) * 12u;
 	const int cc = int( p.cascade.x );
 	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
-	vec3 gathered[2] = vec3[2]( vec3( 0.0 ), vec3( 0.0 ) );
-	float shares[2] = float[2]( 0.0, 0.0 );
+	// VOXEL-R13 stage 1: EACH HALF GATHERS FROM ITS OWN FACES (jah_voxel_halves.glsl) - along its axis where they lie (its
+	// surface position), across it where their centroid lies, along their own mean normal: a half of a cell holding a
+	// box's corner starts on its own face, inside the room or outside it as that face is (the side's start at the cell's
+	// centre across its axis started some inside faces' gathers outside the room: VOXEL-R13 stage 0's B). A half with no
+	// coverage holds no face and gathers nothing.
+	vec3 gathered[6] = vec3[6]( vec3( 0.0 ), vec3( 0.0 ), vec3( 0.0 ), vec3( 0.0 ), vec3( 0.0 ), vec3( 0.0 ) );
+	float shares[6] = float[6]( 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 );
+	float halfK[6] = float[6]( 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 );
 	bool twoSidedV = false;
 	vec3 frontN = vec3( 0.0, 0.0, 1.0 );
 	const ivec3 ic = ivec3( cell );
@@ -229,47 +241,63 @@ void main()
 	if( coverage > 0.0 )
 	{
 		const vec4 normalVal = texelFetch( voxelNrm[cc], ic, 0 );
-		const bool twoSided = normalVal.a > 0.0;
-		twoSidedV = twoSided;
-		const vec3 n0 = normalize( normalVal.xyz * 2.0 - 1.0 );
-		frontN = n0;
+		twoSidedV = normalVal.a > 0.0;
+		frontN = normalize( normalVal.xyz * 2.0 - 1.0 );
 		const vec3 invSize = p.hit.voxelInvSize[cc].xyz;
 		const vec3 invRes = invSize * p.hit.voxelInvSize[cc].w;   // 1 / the resolution per axis
-		for( int side = 0; side < ( twoSided ? 2 : 1 ); ++side )
+		const vec4 covP = texelFetch( voxelCovP[cc], ic, 0 ), covN = texelFetch( voxelCovN[cc], ic, 0 );
+		const vec4 posP = texelFetch( voxelPosP[cc], ic, 0 ), posN = texelFetch( voxelPosN[cc], ic, 0 );
+		// ONE call site of the gather (a heavy function's rule, DOCS/traps/ENGINE.md): one loop over the six halves
+		for( int q = 0; q < 6; ++q )
 		{
-			const vec3 nWorld = side == 0 ? n0 : -n0;
-			// the side's surface along its dominant axis (in this cascade's normalised space), the cell's centre across
-			const vec3 normalLS = nWorld * invSize;
-			const vec3 an = abs( normalLS );
-			const int a = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
-			vec3 surfaceLS = ( vec3( cell ) + 0.5 ) * invRes;
-			const bool plus = normalLS[a] > 0.0;
-			const float o = ( plus ? texelFetch( voxelCovP[cc], ic, 0 ) : texelFetch( voxelCovN[cc], ic, 0 ) )[a];
-			const float pO = ( plus ? texelFetch( voxelPosP[cc], ic, 0 ) : texelFetch( voxelPosN[cc], ic, 0 ) )[a];
-			if( o > 0.0 )
-				surfaceLS[a] = ( float( cell[a] ) + clamp( pO / o, 0.0, 1.0 ) ) * invRes[a];
-			const vec3 P = p.hit.voxelOrigin[cc].xyz + surfaceLS / invSize;
-			// THE POSITION's QUANTUM along the axis, in metres: p = pO / o from a 16-bit position (O-premultiplied) over a
-			// 10-bit coverage (PhotonVoxelizer.cpp's formats) - half a step of each, through the quotient; the cell's
-			// centre where the half holds nothing
+			const int a = q % 3, h = q / 3;
+			const float o = h == 0 ? covP[a] : covN[a];
+			halfK[q] = min( o, 1.0 );
+			if( !( o > 0.0 ) )
+				continue;
+			const float pO = h == 0 ? posP[a] : posN[a];
+			const vec4 sv = texelFetch( halfSide[a], ic, 0 );
+			const vec4 nv = texelFetch( halfNrm[a], ic, 0 );
+			const vec3 nWorld = jahHalfNormalDecode( h == 0 ? nv.xy : nv.zw, a, h );
+			const vec3 local = jahHalfFacePoint( a, o, pO, h == 0 ? sv.xy : sv.zw );
+			const vec3 P = p.hit.voxelOrigin[cc].xyz + ( ( vec3( cell ) + local ) * invRes ) / invSize;
+			// THE POSITION's QUANTUM along the half's normal, in metres: along the axis p = pO / o from a 16-bit position
+			// (O-premultiplied) over a 10-bit coverage (PhotonVoxelizer.cpp's formats) - half a step of each, through the
+			// quotient; across it the centroid's 16 bits and its 1/512 sums (half a step of the sum over the coverage's)
 			const float cellW = invRes[a] / invSize[a];
-			const float posQ = o > 0.0 ? cellW * ( 0.5 / 65535.0 + 0.5 / 1023.0 * clamp( pO / o, 0.0, 1.0 ) ) / o : 0.5 * cellW;
-			gathered[side] = jahSideGatherTlas( P, nWorld, posQ, c, shares[side] );
+			const float posQ = cellW * ( 0.5 / 65535.0 + 0.5 / 1023.0 * clamp( pO / o, 0.0, 1.0 ) ) / o +
+							   cellW * ( 0.5 / 512.0 ) / max( o, 1.0 / 512.0 ) *
+								   ( 1.0 - abs( nWorld[a] ) );
+			gathered[q] = jahSideGatherTlas( P, nWorld, posQ, c, shares[q] );
 		}
 	}
 	if( p.cascade.w == 1u && coverage > 0.0 )
 	{
+		// (the openings' instrument keeps its two sides this stage: each side's share the coverage-weighted mean of its
+		// halves', jahHalfSideWeight - VOXEL-R13 stage 2 re-reads it per half)
+		float sf = 0.0, sb = 0.0, wf = 0.0, wb = 0.0;
+		for( int q = 0; q < 6; ++q )
+		{
+			const float f = jahHalfSideWeight( frontN, twoSidedV, q / 3, q % 3, 0 ) * halfK[q];
+			const float b = jahHalfSideWeight( frontN, twoSidedV, q / 3, q % 3, 1 ) * halfK[q];
+			sf += f * shares[q];
+			wf += f;
+			sb += b * shares[q];
+			wb += b;
+		}
+		sf = wf > 0.0 ? sf / wf : 0.0;
+		sb = wb > 0.0 ? sb / wb : 0.0;
 		const uint w = p.cascade.y * 8u, h = p.cascade.z * 8u;
 		const uint idx = cell.x + w * ( cell.y + h * cell.z );
 		if( idx < uint( jahSideShare.length() ) )
-			jahSideShare[idx] = uint( round( clamp( shares[0], 0.0, 1.0 ) * 255.0 ) ) |
-								( uint( round( clamp( shares[1], 0.0, 1.0 ) * 255.0 ) ) << 8u ) | ( 1u << 16u ) |
+			jahSideShare[idx] = uint( round( clamp( sf, 0.0, 1.0 ) * 255.0 ) ) |
+								( uint( round( clamp( sb, 0.0, 1.0 ) * 255.0 ) ) << 8u ) | ( 1u << 16u ) |
 								( twoSidedV ? ( 1u << 17u ) : 0u ) | jahShareNormalBits( frontN );
 	}
-	for( int side = 0; side < 2; ++side )
+	for( int q = 0; q < 6; ++q )
 	{
-		jahSideGather[base + 2u * uint( side )] = packHalf2x16( gathered[side].xy );
-		jahSideGather[base + 2u * uint( side ) + 1u] = packHalf2x16( vec2( gathered[side].z, 0.0 ) );
+		jahSideGather[base + 2u * uint( q )] = packHalf2x16( gathered[q].xy );
+		jahSideGather[base + 2u * uint( q ) + 1u] = packHalf2x16( vec2( gathered[q].z, 0.0 ) );
 	}
 	for( uint k = 0u; k < 9u; ++k )
 	{

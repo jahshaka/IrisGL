@@ -28,8 +28,9 @@
 // partition): 36 integers for each of the 64 voxels - albedo 3 and the metal's Fresnel-90 weight, the raw
 // and the folded normal 3 + 3, the emissive 3, the roughness, the area weight, the coverage per half 3 + 3,
 // the position per half 3 + 3, the casters' coverage per half 3 + 3, the metal's F0 3 (METAL-BOUNCE-1), the
-// emitters' coverage per half 3 + 3 and their weight (JUNCTION-NORMAL-1) - indexed sum x 64 + voxel. 11 KB.
-shared uint g_voxelSums[44 * 64];
+// emitters' coverage per half 3 + 3 and their weight (JUNCTION-NORMAL-1), the kinds of faces (PHOTON-7 10-4 R7), and the
+// halves' own faces 6 x 5 (VOXEL-R13 stage 1) - indexed sum x 64 + voxel. 18.5 KB.
+shared uint g_voxelSums[74 * 64];
 // Jahshaka (PHOTON-7 stage 10-3, R2): THE EMISSIVE'S SHARED EXPONENT - each of the 64 voxels' brightest emissive
 // contribution (float bits: a non-negative float orders as its bits). The max pre-pass (voxel_emissive_max) gathers it
 // into the merge accumulator's channel 26; the sum pass reads it back here and quantises the emissive relative to it.
@@ -96,6 +97,20 @@ layout( vulkan( ogre_u12 ) vk_comma @insertpiece(uav12_pf_type) )
 uniform restrict writeonly image3D voxelEmitPTex;
 layout( vulkan( ogre_u13 ) vk_comma @insertpiece(uav13_pf_type) )
 uniform restrict writeonly image3D voxelEmitNTex;
+// VOXEL-R13 stage 1: THE HALVES' OWN FACES per axis - the centroid across the axis (14..16) and the normal (17..19)
+// of both halves, written by the resolve (VoxelMerge_piece_cs.any, THE HALF'S OWN FACES).
+layout( vulkan( ogre_u14 ) vk_comma @insertpiece(uav14_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideXTex;
+layout( vulkan( ogre_u15 ) vk_comma @insertpiece(uav15_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideYTex;
+layout( vulkan( ogre_u16 ) vk_comma @insertpiece(uav16_pf_type) )
+uniform restrict writeonly image3D voxelHalfSideZTex;
+layout( vulkan( ogre_u17 ) vk_comma @insertpiece(uav17_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmXTex;
+layout( vulkan( ogre_u18 ) vk_comma @insertpiece(uav18_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmYTex;
+layout( vulkan( ogre_u19 ) vk_comma @insertpiece(uav19_pf_type) )
+uniform restrict writeonly image3D voxelHalfNrmZTex;
 
 
 
@@ -123,6 +138,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 @end
 
 
+// VOXEL-R13 stage 1: the half-axes' one text (jah_voxel_halves.glsl), before the merge's resolve that encodes a half's normal
+@insertpiece( JahVoxelHalves )
 @insertpiece( DeclVoxelMerge )
 
 @insertpiece( HeaderCS )

@@ -61,6 +61,10 @@ namespace Ogre
         uint32 rays = 16u;
         float reach = 0.0f;
         float lift = 0.0f;
+        /// VOXEL-R13 stage 1: the cascade's halves' own faces per axis (PhotonVoxelizerSourceBase.h) - each half's gather
+        /// starts on its faces along their normal
+        TextureGpu *halfSide[3] = { nullptr, nullptr, nullptr };
+        TextureGpu *halfNrm[3] = { nullptr, nullptr, nullptr };
     };
 
     class PhotonVoxelizerSourceBase;
@@ -293,6 +297,13 @@ namespace Ogre
         /// the bounce's fixed point and step 0 need per side and per half.
         TextureGpu *mLightDirectBack;
         TextureGpu *mLightDirectDir[3];
+        /// VOXEL-R13 stage 1: THE HALF STORE - level 0's six HALF LIGHTS (jah_voxel_halves.glsl): per axis one volume
+        /// twice the voxels wide (the -a half's light in [0, W), the +a half's in [W, 2W)), RGBA16F (radiance x k, k) with
+        /// k the half's capped coverage - each half lit and gathered from its own faces; the directional chain's level 0
+        /// is composited from them (AnisotropicMipVctStep0). mHalfDirect[a] their direct terms (born with the bounce,
+        /// like mLightDirect: the fixed point per half, a delta's old term). 48 B a voxel each set.
+        TextureGpu *mHalfLight[3] = { nullptr, nullptr, nullptr };
+        TextureGpu *mHalfDirect[3] = { nullptr, nullptr, nullptr };
         ShaderParams::Param *mInjectHigherMipHalfWidth;
         /// Jahshaka (PHOTON-7 stage 1): the injection's chain - this cascade's entry and, per entry, its box
         /// corner relative to this one's with its cell and its resolution with its shell's end (setChainIndex).
@@ -750,7 +761,9 @@ namespace Ogre
         /// The injection job's texture units before the cloud field's (OgreScene::bindCloudInjection binds that
         /// one at this unit): the albedo, normal, emissive, metal and emissive factor per half, then the chain's
         /// coverage and position per half and its direct pair (front, back), six arrays of getChainLength().
-        uint8 injectionTexUnits() const { return static_cast<uint8>( 6u + 6u * getChainLength() ); }
+        /// (VOXEL-R13 stage 1: units 6..11 the halves' own faces, LightInjection_cs.glsl; the chain from kInjectChainUnit)
+        static constexpr uint32 kInjectChainUnit = 12u;
+        uint8 injectionTexUnits() const { return static_cast<uint8>( kInjectChainUnit + 6u * getChainLength() ); }
 
         /** THE CASCADE CHAIN'S PARAMETERS, the one definition every reader of the chain
             takes them from (Jahshaka, PHOTON-READER-1): the pixel shader's pass buffer
@@ -810,11 +823,14 @@ namespace Ogre
         TextureGpu **getLightVoxelTextures() { return mLightVoxel; }
         /** THE SCROLL'S LIGHT (PHOTON-7 stage 2, AB S4): the level-0 textures a scroll's commit shifts in place with the
             geometry - the total, its back side, the direct term, its back side, and the directional level 0's direct
-            part per axis (half resolution, both signs packed along x: `halfRes` true). The directional volumes are not
-            among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch. Fills `out`
-            and returns 7, or 0 on a lighting that cannot bounce (no direct term to shift).
+            part per axis (half resolution, both signs packed along x: `cellsPerTexel` 2, `packed` true), and (VOXEL-R13
+            stage 1) the half store and its direct terms (full resolution, both halves packed along x). The directional
+            volumes are not among them: step 0 rebuilds their level 0 from exactly these; the bounce's target is scratch.
+            Fills `out` and returns kScrollLightTextures, or 0 on a lighting that cannot bounce (no direct term to shift).
         */
-        size_t scrollLightTextures( TextureGpu *out[7], bool halfRes[7] ) const;
+        static constexpr size_t kScrollLightTextures = 13u;
+        size_t scrollLightTextures( TextureGpu *out[kScrollLightTextures], uint32 cellsPerTexel[kScrollLightTextures],
+                                    bool packed[kScrollLightTextures] ) const;
         /// JAHSHAKA PATCH: THE DIRECT TERM'S VOLUME (fork ae2ed529f+155a56bf8 (was 0076)'s D term), or null
         /// on a PhotonVoxelLighting that cannot bounce. Read-only, and it exists so a host
         /// can MEASURE the store -- the normalisation's own self-check is "the
@@ -823,6 +839,9 @@ namespace Ogre
         TextureGpu  *getLightDirectTexture() const { return mLightDirect; }
         /// ...and the back side's direct term (PHOTON-7 stage 2: the store door's `directBack`).
         TextureGpu  *getLightDirectBackTexture() const { return mLightDirectBack; }
+        /// VOXEL-R13: the half store's axis-a volume and its direct terms' (null without a bounce)
+        TextureGpu  *getHalfLightTexture( size_t a ) const { return mHalfLight[a]; }
+        TextureGpu  *getHalfDirectTexture( size_t a ) const { return mHalfDirect[a]; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
         /// The light volumes a reader binds per cascade: the total (level 0) and its three
         /// directional axes, then the coverage per half-axis (+a, -a; PHOTON-VOXEL-3/-4),

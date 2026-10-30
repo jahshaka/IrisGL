@@ -120,6 +120,39 @@
 	@else
 		#define jahStoreDirect( x ) jahRoundHalf( x )
 	@end
+	// VOXEL-R13 stage 1: THE HALF STORE's per-axis volumes (jah_voxel_halves.glsl's packing)
+	@insertpiece( JahVoxelHalves )
+	INLINE float4 jahHalfLightLoad( int a, int3 t )
+	{
+		return a == 0 ? OGRE_imageLoad3D( halfLightX, t )
+					  : ( a == 1 ? OGRE_imageLoad3D( halfLightY, t ) : OGRE_imageLoad3D( halfLightZ, t ) );
+	}
+	/// (each store rounds the half float to nearest itself - REDS-1's rule, through the store macros: callers pass the f32)
+	INLINE void jahHalfLightStore( int a, int3 t, float4 v )
+	{
+		if( a == 0 )
+			OGRE_imageWrite3D4( halfLightX, t, jahStoreLight( v ) );
+		else if( a == 1 )
+			OGRE_imageWrite3D4( halfLightY, t, jahStoreLight( v ) );
+		else
+			OGRE_imageWrite3D4( halfLightZ, t, jahStoreLight( v ) );
+	}
+	@property( vct_keep_direct )
+	INLINE float4 jahHalfDirectLoad( int a, int3 t )
+	{
+		return a == 0 ? OGRE_imageLoad3D( halfDirectX, t )
+					  : ( a == 1 ? OGRE_imageLoad3D( halfDirectY, t ) : OGRE_imageLoad3D( halfDirectZ, t ) );
+	}
+	INLINE void jahHalfDirectStore( int a, int3 t, float4 v )
+	{
+		if( a == 0 )
+			OGRE_imageWrite3D4( halfDirectX, t, jahStoreDirect( v ) );
+		else if( a == 1 )
+			OGRE_imageWrite3D4( halfDirectY, t, jahStoreDirect( v ) );
+		else
+			OGRE_imageWrite3D4( halfDirectZ, t, jahStoreDirect( v ) );
+	}
+	@end
 @end
 
 //in uvec3 gl_NumWorkGroups;
@@ -195,10 +228,10 @@
 	// read and the probe rays), and a voxel holding several walls - every wall voxel of a room at
 	// the coarse cascades - handed one wall's inner face the other's outer light. So each HALF-AXIS
 	// (the faces looking +a or -a, whose coverage the voxeliser keeps apart) takes its own light: its
-	// side's normal, its own exact march from its own face; the directional level 0 is composited
-	// from those (the corner class closes there - the coarse readers read per half). Level 0 keeps
-	// the two SIDES for the level-0 readers (the rays, the hit read): the front by the canonical
-	// normal and the back, each marched from its dominant half's face.
+	// own faces' normal, its own exact march from its own faces (VOXEL-R13 stage 1: where they lie
+	// across the axis too); the half store holds it at level 0 and the directional level 0 is
+	// composited from it. Level 0's two SIDES for the level-0 readers (the rays, the hit read) are
+	// derived from the halves this stage (below; stage 2 moves those readers onto the halves).
 	const float3 covP0 = OGRE_Load3D( chainCovP[p_chainSelf], voxelId, 0 ).xyz;
 	const float3 covN0 = OGRE_Load3D( chainCovN[p_chainSelf], voxelId, 0 ).xyz;
 	// JUNCTION-NORMAL-1: THE EMISSIVE PER HALF-AXIS - each half emits what its own faces emit, the area
@@ -208,13 +241,17 @@
 							  floor( OGRE_Load3D( voxelEmitNTex, voxelId, 0 ).xyz * 1023.0f + 0.5f ) / 1022.0f };
 	const float3 posP0 = OGRE_Load3D( chainPosP[p_chainSelf], voxelId, 0 ).xyz;
 	const float3 posN0 = OGRE_Load3D( chainPosN[p_chainSelf], voxelId, 0 ).xyz;
-	const float3 an = abs( normalVal.xyz );
-	const int dom = an.x >= an.y ? ( an.x >= an.z ? 0 : 2 ) : ( an.y >= an.z ? 1 : 2 );
-	// the half the normal's dominant axis points to (the front's face) and the other
-	const int hFront = nrm[dom] >= 0.0f ? 0 : 1;
+	// VOXEL-R13 stage 1: EACH HALF FROM ITS OWN FACES (jah_voxel_halves.glsl) - its march starts where they lie (along
+	// its axis their surface position, across it their centroid) and its cosine takes their mean normal
+	float4 jahHalfSide[3];
+	float4 jahHalfNrm[3];
+	jahHalfSide[0] = OGRE_Load3D( voxelHalfSideX, jahInjCell, 0 );
+	jahHalfSide[1] = OGRE_Load3D( voxelHalfSideY, jahInjCell, 0 );
+	jahHalfSide[2] = OGRE_Load3D( voxelHalfSideZ, jahInjCell, 0 );
+	jahHalfNrm[0] = OGRE_Load3D( voxelHalfNrmX, jahInjCell, 0 );
+	jahHalfNrm[1] = OGRE_Load3D( voxelHalfNrmY, jahInjCell, 0 );
+	jahHalfNrm[2] = OGRE_Load3D( voxelHalfNrmZ, jahInjCell, 0 );
 
-	float3 front = float3( 0.0f, 0.0f, 0.0f );
-	float3 back = float3( 0.0f, 0.0f, 0.0f );
 	float3 halfLight[6];
 	for( int q = 0; q < 6; ++q )
 		halfLight[q] = float3( 0.0f, 0.0f, 0.0f );
@@ -313,14 +350,8 @@
 					if( !( o > 0.0f ) )
 						continue;
 					const float hs = h == 0 ? 1.0f : -1.0f;
-					float3 nn = float3( 0.0f, 0.0f, 0.0f );
-					const float along = hs * nrm[a];
-					if( along > 0.0f )
-						nn = normalVal.xyz;
-					else if( along < 0.0f && twoSided )
-						nn = -normalVal.xyz;
-					else
-						nn[a] = hs;
+					// the half's own normal (its faces' coverage-weighted mean, VoxelMerge_piece_cs.any)
+					const float3 nn = jahHalfNormalDecode( h == 0 ? jahHalfNrm[a].xy : jahHalfNrm[a].zw, a, h );
 					float cosL = dot( nn, lightDir );
 					@property( hlms_lights_area_ltc )
 						if( isLtc )
@@ -336,8 +367,12 @@
 						// the half's face: its place in this voxel's own cell (PHOTON-7 stage 1), in this cascade's cells
 						// (the origin plane's coordinate) and in metres from its box's corner (the march's start)
 						const float pa = float( voxelId[a] ) + ( h == 0 ? posP0[a] : posN0[a] ) / o;
-						float3 s = voxelAabbCenter;
-						s[a] = pa * p_voxelCellSize[a];
+						// ...and across the axis where its faces' centroid lies (VOXEL-R13: the cell's centre there let a
+						// coarse cell's half start outside the room its faces bound)
+						const float3 s = ( float3( voxelId ) +
+										   jahHalfFacePoint( a, o, h == 0 ? posP0[a] : posN0[a],
+															 h == 0 ? jahHalfSide[a].xy : jahHalfSide[a].zw ) ) *
+										 p_voxelCellSize;
 						visH[q] = jahInjectVisibility( s, marchD, marchEnd, voxelId, a, pa, hs );
 						@property( hlms_lights_area_ltc )
 						// AN AREA LIGHT'S FRACTIONAL VISIBILITY - A MEASURING ARM (gi.voxelAreaStrata, PHOTON-7 stage 5's
@@ -390,58 +425,84 @@
 				}
 			}
 
-			// THE TWO SIDES (level 0): the front along the (canonical) normal, the back against it
-			// - the back only on a two-sided voxel - each through its dominant half's march.
-			float cosF = dot( normalVal.xyz, lightDir );
-			float cosB = -cosF;
-			@property( hlms_lights_area_ltc )
-				if( isLtc )
-				{
-					const float3x3 ltcI = buildFloat3x3( float3( 1, 0, 0 ), float3( 0, 1, 0 ), float3( 0, 0, 1 ) );
-					cosF = LTC_Evaluate( normalVal.xyz, float3( 0, 1, 0 ), voxelAabbCenter.xyz, ltcI,
-										 lights[lightIdx].points, doubleSidedLtc );
-					cosB = LTC_Evaluate( -normalVal.xyz, float3( 0, 1, 0 ), voxelAabbCenter.xyz, ltcI,
-										 lights[lightIdx].points, doubleSidedLtc );
-				}
-			@end
-			for( int side = 0; side < 2; ++side )
-			{
-				const float cosS = side == 0 ? cosF : cosB;
-				if( !( cosS > 0.0f ) || ( side == 1 && !twoSided ) )
-					continue;
-				const int h = side == 0 ? hFront : 1 - hFront;
-				const int q = h * 3 + dom;
-				// the per-half loop above marched this side's dominant half already (the same
-				// cosine: the side normal of the half along the normal's dominant axis IS the
-				// side's); a side with no face along it has no light of its own here
-				if( visH[q] < 0.0f )
-					visH[q] = 0.0f;
-				const float cosSide = saturate( side == 0 ? dot( normalVal.xyz, lightDir ) : -dot( normalVal.xyz, lightDir ) );
-				float3 lit = cosS * jahDiffuseAlbedo( cosSide, voxelRoughness ) * lightCol * visH[q];
-				if( metalVoxel )
-				{
-					float sa, sb;
-					jahSpecularAlbedo( cosSide, voxelRoughness, sa, sb );
-					lit += cosS * ( metalVal.xyz * sa + metalVal.w * sb ) * lightRaw * visH[q];
-				}
-				if( side == 0 )
-					front += lit;
-				else
-					back += lit;
-			}
 		}
 	}
-	// A ONE-SIDED VOXEL'S BACK IS THE INSIDE OF A SOLID (PHOTON-7 stage 10, 10-1; the spec's ONE-SIDED WRITE; L9): it
-	// stores 0 - a ray that meets the face from behind reads nothing (a back face is 0), where the one light written to
-	// both sides let a sunlit outer face light the room behind it. Its emission is the front's alone too.
-
 	const float3 emissive = emissiveVal.xyz;
 	wshort3 voxelCelUvw = wshort3( jahInjCell );
-	// LEVEL 0 HOLDS THE TWO SIDES (PHOTON-7 stage 7): the FRONT here (lightVoxel and its direct copy) and the back
-	// beside it (backVoxel, below) - their mean is taken at the read, never a side derived from a stored mean
-	// (jah_voxel_sample.glsl says why). A one-sided voxel's back holds 0 (above).
-	float4 injectedVoxel = float4( ( front + emissive ) * c, c );
-	const float4 backVoxelVal = float4( twoSided ? ( back + emissive ) * c : float3( 0, 0, 0 ), c );
+	// VOXEL-R13 stage 1: THE HALF LIGHTS - each half's direct light and what its own faces emit (JUNCTION-NORMAL-1's
+	// factor), (radiance x k, k) with k the half's coverage capped at 1: the half store's texel (and with a bounce its
+	// direct term's), and the fused step 0's input below (the directional level 0 is composited from the same values).
+	float4 jahHalfVal[6];
+	for( int h = 0; h < 2; ++h )
+	{
+		for( int a = 0; a < 3; ++a )
+		{
+			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
+			jahHalfVal[h * 3 + a] = k > 0.0f && c > 0.0f
+										? float4( ( halfLight[h * 3 + a] +
+													emissive * ( emitU[h][a] / ( 1.0f - emitU[h][a] ) ) ) * k, k )
+										: float4( 0.0f, 0.0f, 0.0f, 0.0f );
+		}
+	}
+	// LEVEL 0's TWO SIDES (PHOTON-7 stage 7) ARE DERIVED FROM THE HALVES this stage (VOXEL-R13 stage 1; deleted with the
+	// two-side store at stage 2): each the coverage-weighted mean of the halves whose faces look its way along the
+	// canonical normal (jahHalfSideWeight) - the FRONT here (lightVoxel and its direct copy), the back beside it
+	// (backVoxel); a one-sided voxel's back is the inside of a solid and stores 0 (PHOTON-7 stage 10's ONE-SIDED WRITE).
+	float3 front = float3( 0.0f, 0.0f, 0.0f );
+	float3 back = float3( 0.0f, 0.0f, 0.0f );
+	{
+		float wFront = 0.0f, wBack = 0.0f;
+		for( int h = 0; h < 2; ++h )
+		{
+			for( int a = 0; a < 3; ++a )
+			{
+				const float4 v = jahHalfVal[h * 3 + a];
+				const float wf = jahHalfSideWeight( nrm, twoSided, h, a, 0 );
+				const float wb = jahHalfSideWeight( nrm, twoSided, h, a, 1 );
+				front += wf * v.xyz;
+				wFront += wf * v.w;
+				back += wb * v.xyz;
+				wBack += wb * v.w;
+			}
+		}
+		front = wFront > 0.0f ? front / wFront : float3( 0.0f, 0.0f, 0.0f );
+		back = wBack > 0.0f ? back / wBack : float3( 0.0f, 0.0f, 0.0f );
+	}
+	float4 injectedVoxel = float4( front * c, c );
+	const float4 backVoxelVal = float4( twoSided ? back * c : float3( 0, 0, 0 ), c );
+	// THE HALVES' WRITES (VOXEL-R13 stage 1) and the most any half's direct term moved (the brick mask's and the absolute
+	// move's share, below): a whole injection writes each half whole, a delta (a scroll's commit) replaces its old direct
+	// term inside its total against its own store's read-back (the sides' rule, below)
+	const int jahHalfW = imageSize( halfLightX ).x >> 1;
+	float jahHalfDirChange = 0.0f;
+	float3 jahHalfAbs = float3( 0.0f, 0.0f, 0.0f );
+	float3 jahHalfNew = float3( 0.0f, 0.0f, 0.0f );
+	for( int h = 0; h < 2; ++h )
+	{
+		for( int a = 0; a < 3; ++a )
+		{
+			const int3 t = jahHalfTexel( voxelId, h, jahHalfW );
+			const float4 v = jahHalfVal[h * 3 + a];
+@property( vct_keep_direct )
+			const float4 hdOld = jahHalfDirectLoad( a, t );
+			jahHalfDirectStore( a, t, v );
+			const float4 hdNew = jahHalfDirectLoad( a, t );
+	@property( jah_inject_delta )
+			if( any( notEqual( floatBitsToUint( hdNew ), floatBitsToUint( hdOld ) ) ) )
+				jahHalfLightStore( a, t, jahHalfLightLoad( a, t ) + ( hdNew - hdOld ) );
+	@else
+			jahHalfLightStore( a, t, v );
+	@end
+@else
+			const float4 hdOld = jahHalfLightLoad( a, t );
+			jahHalfLightStore( a, t, v );
+			const float4 hdNew = jahHalfLightLoad( a, t );
+@end
+			jahHalfDirChange = max( jahHalfDirChange, jahBrickChange( hdOld.xyz, hdNew.xyz ) );
+			jahHalfAbs = max( jahHalfAbs, abs( hdNew.xyz - hdOld.xyz ) );
+			jahHalfNew = max( jahHalfNew, abs( hdNew.xyz ) );
+		}
+	}
 @property( jah_inject_delta )
 	// THE DELTA (PHOTON-7 stage 2; PREFLIGHT_1_2 W1): at a scroll's commit the direct term REPLACES ITS OLD SELF inside
 	// each side - front += Df_new - Df_old, back += Db_new - Db_old, each against ITS OWN store's read-back (never one
@@ -504,7 +565,8 @@
 	@end
 @end
 	// THE BRICK MASK (PHOTON-7 stage 3): the most this voxel's direct term (either side) changed, relative.
-	const float jahDirChange = max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) );
+	const float jahDirChange = max( max( jahBrickChange( dOld.xyz, dNew.xyz ), jahBrickChange( dbOld.xyz, dbNew.xyz ) ),
+									jahHalfDirChange );
 	// ...and ABSOLUTE (PHOTON-7 stage 5): the most either side moved with it (a delta adds exactly this to each side),
 	// the brick state's word 7 - a non-finite change saturates. ITS REFERENCE IS WHAT A READER READ AT THIS
 	// WORLD POINT BEFORE (5-4, the lead's ruling): the old direct term - but a CLEARED voxel (a scroll's slab: outside
@@ -532,7 +594,10 @@
 			}
 		}
 	}
-	const float3 jahAbsDir3 = max( abs( dNew.xyz - jahRefD.xyz ), abs( dbNew.xyz - jahRefDb.xyz ) );
+	// (VOXEL-R13: a half's move counts against its own old term; a CLEARED voxel's halves against nothing - the whole of
+	// the new term, a bound from above: the next cascade out keeps no halves to read the old reading from)
+	const float3 jahAbsDir3 = max( max( abs( dNew.xyz - jahRefD.xyz ), abs( dbNew.xyz - jahRefDb.xyz ) ),
+								   jahCleared ? jahHalfNew : jahHalfAbs );
 	float jahAbsDir = max( max( jahAbsDir3.x, jahAbsDir3.y ), jahAbsDir3.z );
 	if( ( floatBitsToUint( jahAbsDir ) & 0x7F800000u ) == 0x7F800000u )
 		jahAbsDir = 1.0e30;
@@ -544,10 +609,7 @@
 		for( int a = 0; a < 3; ++a )
 		{
 			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
-			jahHalfLight[li * 6u + uint( h * 3 + a )] =
-				k > 0.0f && c > 0.0f ? float4( ( halfLight[h * 3 + a] +
-												 emissive * ( emitU[h][a] / ( 1.0f - emitU[h][a] ) ) ) * k, k )
-									 : float4( 0.0f, 0.0f, 0.0f, 0.0f );
+			jahHalfLight[li * 6u + uint( h * 3 + a )] = jahHalfVal[h * 3 + a];
 		}
 	}
 	memoryBarrierShared();

@@ -1703,7 +1703,8 @@ bool PhotonComponent::giFeedbackBricks(int cascadeIdx, GiFeedbackBricks &out) {
     return false;
 }
 
-bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lightOnly) {
+bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part) {
+    const bool lightOnly = part == 1;
     out = GiVoxelVolume();
     JAH_TRY {
         Ogre::PhotonVoxelLighting *lighting = nullptr;
@@ -1791,6 +1792,27 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, bool lig
             for (int k = 0; k < 3; ++k) { out.origin[k] = o[size_t(k)]; out.cell[k] = c[size_t(k)]; }
             out.available = true;
         };
+        // VOXEL-R13 stage 1: THE HALF STORE (Scene::giVoxelHalves) - the six half lights, their direct terms, the halves'
+        // own faces, the coverage and position per half and the normal
+        if (part == 2) {
+            out.normal.clear();
+            Ogre::TextureGpu *nrm = voxelizer->getNormalVox();
+            if (!nrm || !grab(nrm, out.normal)) return false;
+            if (!grab(coverage[0], out.coverageP) || !grab(coverage[1], out.coverageN) ||
+                !grab(position[0], out.positionP) || !grab(position[1], out.positionN))
+                return false;
+            for (size_t a = 0; a < 3u; ++a) {
+                Ogre::TextureGpu *hl = lighting->getHalfLightTexture(a);
+                if (!hl || !grab(hl, out.halfLight[a])) return false;
+                if (Ogre::TextureGpu *hd = lighting->getHalfDirectTexture(a))
+                    if (!grab(hd, out.halfDirect[a])) return false;
+                if (!grab(voxelizer->getHalfSideVox(a), out.halfSide[a]) ||
+                    !grab(voxelizer->getHalfNrmVox(a), out.halfNormal[a]))
+                    return false;
+            }
+            placement();
+            return true;
+        }
         // THE TWO SIDES (PHOTON-7 stage 7: the store holds the front and the back): `lightFront` and `lightBack` as
         // stored, and `light` THE VOXEL'S LIGHT - a two-sided voxel's the sides' mean (what a read edge-on takes), a
         // one-sided voxel's its front (its back is the inside of a solid and stores 0: PHOTON-7 stage 10's one-sided
@@ -6404,14 +6426,16 @@ void PhotonComponent::stepScroll(size_t idx, bool commit, bool *committed) {
         const bool fault = mEngine && mEngine->armRegistry().value(ArmId::GiCascadeFaultCommit) == double(idx);
         monitor::CacheScope copy(CacheKind::Gi, WorkReason::Moved, (unsigned long long)idx,
                                  kScrollCopyRowNames[std::min(idx, size_t(7))], mRoot->getRenderSystem());
-        Ogre::TextureGpu *light[7] = {};
-        bool halfRes[7] = {};
-        const size_t numLight = c.lighting ? c.lighting->scrollLightTextures(light, halfRes) : 0u;
-        Ogre::PhotonVoxelScroll::LightVolume lv[7];
+        constexpr size_t kLight = Ogre::PhotonVoxelLighting::kScrollLightTextures;
+        Ogre::TextureGpu *light[kLight] = {};
+        Ogre::uint32 cellsPerTexel[kLight] = {};
+        bool packed[kLight] = {};
+        const size_t numLight = c.lighting ? c.lighting->scrollLightTextures(light, cellsPerTexel, packed) : 0u;
+        Ogre::PhotonVoxelScroll::LightVolume lv[kLight];
         for (size_t i = 0; i < numLight; ++i) {
             lv[i].texture = light[i];
-            lv[i].cellsPerTexel = halfRes[i] ? 2u : 1u;
-            lv[i].packedHalves = halfRes[i];
+            lv[i].cellsPerTexel = cellsPerTexel[i];
+            lv[i].packedHalves = packed[i];
         }
         std::vector<Ogre::PhotonVoxelScroll::Slab> slabs;
         for (const VctCascade::Scroll::Slab &s : sc.slabs) {

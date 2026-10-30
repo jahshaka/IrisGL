@@ -19,6 +19,18 @@
 	@else
 		#define jahStoreLight( x ) jahRoundHalf( x )
 	@end
+	// VOXEL-R13 stage 1: the half store's texel and its per-axis volumes
+	@insertpiece( JahVoxelHalves )
+	INLINE float4 jahStep0HalfLight( int a, int3 t )
+	{
+		return a == 0 ? OGRE_Load3D( inHalfLightX, t, 0 )
+					  : ( a == 1 ? OGRE_Load3D( inHalfLightY, t, 0 ) : OGRE_Load3D( inHalfLightZ, t, 0 ) );
+	}
+	INLINE float4 jahStep0HalfDirect( int a, int3 t )
+	{
+		return a == 0 ? OGRE_Load3D( inHalfDirectX, t, 0 )
+					  : ( a == 1 ? OGRE_Load3D( inHalfDirectY, t, 0 ) : OGRE_Load3D( inHalfDirectZ, t, 0 ) );
+	}
 @end
 
 @piece( BodyCS )
@@ -26,12 +38,11 @@
 	// injection composites the directional level 0 itself, from each voxel's light PER HALF-AXIS
 	// (LightInjection_piece_cs.any, the fused step 0); with a bounce it writes the DIRECT part of
 	// it into its own volumes (`dirDirect0..2`) and this pass, after every bounce, adds the
-	// bounce's: per child and half the side's light minus the side's direct term - the front or
-	// the back, each STORED (PHOTON-7 stage 7: never twice a stored mean minus the back, which
-	// cancelled on a dim side), the side the half's faces look to through the canonical normal -
-	// composited with the same pairs and the same coverages. The
-	// composite is linear in the colours for given coverages, so the sum is the composite of the
-	// sums; the opacity is the coverages' composite, as the injection's.
+	// bounce's: per child and half THAT HALF'S OWN bounce - its stored light minus its stored direct term (VOXEL-R13
+	// stage 1: the level-0 half store, each half its own fixed point; the side a half took by the sign of the voxel's one
+	// normal is deleted) - composited with the same pairs and the same coverages. The composite is linear in the colours
+	// for given coverages, so the sum is the composite of the sums; the opacity is the coverages' composite, as the
+	// injection's.
 	JAH_DIR_OFFSETS;
 	JAH_DIR_FRONT;
 	JAH_DIR_BACK;
@@ -51,28 +62,16 @@
 	@end
 	int3 iSourceUvw = int3( jahTexel << 1u );
 
-	float3 bounceF[8];
-	float3 bounceB[8];
-	float3 nrms[8];
-	bool twoSided[8];
+	// (the half store's halves are (radiance x k, k) - each child's bounce part per half is the stored light minus the
+	// stored direct term, already premultiplied by the half's own coverage, as the composite's pair wants it)
+	const int jahHalfW = 2 * p_higherMipHalfWidth;
 	float3 coveragesP[8];
 	float3 coveragesN[8];
 	for( int n = 0; n < 8; ++n )
 	{
 		const int3 uvw = iSourceUvw + jahDirOffsets[n];
-		const float4 front = OGRE_Load3D( inLightFront, uvw, 0 );
-		const float4 back = OGRE_Load3D( inLightBack, uvw, 0 );
-		const float4 dFront = OGRE_Load3D( inDirectFront, uvw, 0 );
-		const float4 dBack = OGRE_Load3D( inDirectBack, uvw, 0 );
-		const float4 nrm = OGRE_Load3D( inNormal, uvw, 0 );
 		coveragesP[n] = OGRE_Load3D( inCoveragePTex, uvw, 0 ).xyz;
 		coveragesN[n] = OGRE_Load3D( inCoverageNTex, uvw, 0 ).xyz;
-		nrms[n] = nrm.xyz * 2.0f - 1.0f;
-		twoSided[n] = nrm.w > 0.0f;
-		const float c = front.w;
-		const float invC = c > 0.0f ? 1.0f / c : 0.0f;
-		bounceB[n] = max( back.xyz - dBack.xyz, float3( 0, 0, 0 ) ) * invC;
-		bounceF[n] = max( front.xyz - dFront.xyz, float3( 0, 0, 0 ) ) * invC;
 	}
 
 	wshort3 outIUvw;
@@ -81,7 +80,6 @@
 		const int axis = dir >> 1;
 		// the -a texel (even) is read travelling +a: the faces looking -a; the +a one the +a faces
 		const bool plusHalf = ( dir & 1 ) != 0;
-		const float hs = plusHalf ? 1.0f : -1.0f;
 		float4 accumVal = float4( 0, 0, 0, 0 );
 		for( int p = 0; p < 4; ++p )
 		{
@@ -90,13 +88,10 @@
 			{
 				const int n = e == 0 ? jahDirFront[dir * 4 + p] : jahDirBack[dir * 4 + p];
 				const float k = min( plusHalf ? coveragesP[n][axis] : coveragesN[n][axis], 1.0f );
-				const float along = hs * nrms[n][axis];
-				float3 b = 0.5f * ( bounceF[n] + bounceB[n] );
-				if( along > 0.0f || !twoSided[n] )
-					b = bounceF[n];
-				else if( along < 0.0f )
-					b = bounceB[n];
-				pair[e] = k > 0.0f ? float4( b * k, k ) : float4( 0, 0, 0, 0 );
+				const int3 t = jahHalfTexel( iSourceUvw + jahDirOffsets[n], plusHalf ? 0 : 1, jahHalfW );
+				const float3 b = max( jahStep0HalfLight( axis, t ).xyz - jahStep0HalfDirect( axis, t ).xyz,
+									  float3( 0, 0, 0 ) );
+				pair[e] = k > 0.0f ? float4( b, k ) : float4( 0, 0, 0, 0 );
 			}
 			accumVal += compositeAlongAxis( pair[0], pair[1] );
 		}
