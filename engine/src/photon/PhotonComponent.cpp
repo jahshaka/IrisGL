@@ -1,6 +1,4 @@
 // PHOTON, THE COMPONENT (photon/PhotonComponent.h has the design).
-#include <cstdio>
-#include <cstdlib>
 #include "photon/PhotonComponent.h"
 
 #include "EnginePrivate.h"
@@ -525,13 +523,6 @@ void PhotonComponent::closeRegions() {
         r.cascadeMask = e.mask;
         c.regions.push_back(r);
     }
-    // MEASURING ARM (8B's determinism catch, to be reverted): every close's regions, kind and box (mm)
-    if (std::getenv("JAH_DIAG_REGIONS"))
-        for (const GiChangedRegion &r : c.regions)
-            std::fprintf(stderr, "DIAG REGION close %llu frame %llu kind %d box %d %d %d %d %d %d overflow %u\n",
-                         (unsigned long long)mRegionCloses, (unsigned long long)frame, int(r.kind), int(r.lo.x * 1000.0f),
-                         int(r.lo.y * 1000.0f), int(r.lo.z * 1000.0f), int(r.hi.x * 1000.0f), int(r.hi.y * 1000.0f),
-                         int(r.hi.z * 1000.0f), c.overflow);
     ++mRegionCloses;
     mRegionCloseFrame = frame;
     if (!c.regions.empty() || c.overflow || c.restart) ++mRegionClosesListing;

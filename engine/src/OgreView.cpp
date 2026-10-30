@@ -24,7 +24,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>   // MEASURING ARM (DETERMINISM-1 stage 0)
 #include <cstdlib>
 #include <string>
 
@@ -2095,8 +2094,6 @@ void OgreView::setAsyncShaders(bool on) {
         Ogre::LogManager::getSingleton().logMessage("Jahshaka view '" + mIdentityName + "': shaders compile " +
                                                     (on ? "in the background" : "blocking (in the frame)"));
     if (on != mAsyncShaders) detail::noteAsyncView(on);
-    if (on != mAsyncShaders && std::getenv("JAH_DIAG_REGIONS"))   // MEASURING ARM (DETERMINISM-1 stage 0)
-        std::fprintf(stderr, "DIAG ASYNC view '%s' shaders compile %s\n", mIdentityName.c_str(), on ? "in the background" : "blocking");
     mAsyncShaders = on;
     if (mScene) mScene->setAsyncShaders(on);   // its captures follow (SurfaceCache)
     if (mWorkspace) mWorkspace->setAsyncShaderCompile(on);
