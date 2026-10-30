@@ -1719,6 +1719,9 @@ constexpr ArmDef kArms[] = {
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
       "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
       "0 = shipped." },
+    { ArmId::VkDownloadWarBarrier, 1.0, 0.0, 1.0,
+      "MEASURING ARM (DETERMINISM-1, to be reverted): 1 = shipped, a UAV buffer's download blocks the shader stages after "
+      "it (the fork's write-after-read barrier); 0 = upstream's pure download - its cost by paired arms in one process." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
