@@ -1637,13 +1637,10 @@ struct ChainDesc {
     /// ...the prepass a TRACE reads (the SSR stage, the gather, the sun contact) - the hit decode's condition: the
     /// no-ray producer's prepass appends no hit.
     bool tracedPrepass() const;
-    /// THE SCREEN SOURCES (PHOTON-7 stage 6): does the chain carry this view's previous picture, the depth it was drawn
-    /// at, the editor helpers' mask and the object motion - the raster march's inputs? The SSR stage on a chain that
-    /// traces NO rays, never STEREO (the copies are not per layer): the reflection has no mode (PostFxDesc::ssr,
-    /// PHOTON-7-9A) - a ray chain reflects by its rays alone. `build` declares them on this answer.
-    bool screenSources() const;
-    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
-    /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.
+    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve) and its SCREEN
+    /// SOURCES - this view's previous picture, the depth it was drawn at, the editor helpers' mask: the SSR stage on a
+    /// chain that traces NO rays, never STEREO (the copies are not per layer). The reflection has no mode
+    /// (PostFxDesc::ssr, PHOTON-7-9A): a ray chain reflects by its rays alone and builds none of them.
     bool rasterMarch() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.

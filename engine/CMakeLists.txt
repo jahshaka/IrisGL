@@ -228,29 +228,6 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h.d"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
-    # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
-    add_custom_command(
-        OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_motion_spv.h.d" --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
-                --vn krq_motionSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion.comp"
-        DEPFILE "${JAH_RQ_GEN_DIR}/rq_motion_spv.h.d"
-        COMMENT "Compiling the screen march's object-motion compute shader at SPIR-V 1.4"
-        VERBATIM)
-    # ...and its POSED twin (SKINNED-VELOCITY-1, REFLECT-EDGE-2): the pixels the id
-    # pass does not draw, identified through the TLAS while a pose moves; same rule.
-    add_custom_command(
-        OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
-        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h.d" --target-env spirv1.4 -S comp -x
-                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include"
-                --vn krq_motionSkinSpv -o "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_motion_skin.comp"
-        DEPFILE "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h.d"
-        COMMENT "Compiling the march's posed object-motion compute shader at SPIR-V 1.4"
-        VERBATIM)
     # ...and R5's spatial filter + composite (round C), same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
@@ -595,8 +572,6 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"

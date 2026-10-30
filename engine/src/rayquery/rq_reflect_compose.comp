@@ -14,8 +14,8 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
 #include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
-/// THE DENOISER SPACE'S EXPOSURE (the trace's binding 50 and its rule, rq_reflect.comp exposureOf).
-layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+/// THE DENOISER SPACE'S EXPOSURE (the trace's binding 47 and its rule, rq_reflect.comp exposureOf).
+layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
 float gExposure = 1.0;
 #define JAH_DENOISE_EXPOSURE gExposure
 
@@ -23,8 +23,8 @@ layout( rgba16f, set = 0, binding = 6 ) uniform image2DArray historyPrev;
 layout( rgba16f, set = 0, binding = 7 ) uniform readonly image2DArray historyCur;
 layout( rg32ui, set = 0, binding = 8 ) uniform uimage2DArray statePrev;
 layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
-/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl jahRefineShown): the break composes what the texel SHOWS.
-layout( rgba32ui, set = 0, binding = 62 ) uniform readonly uimage2DArray restRefine;
+/// THE REFINEMENT (binding 59, jah_reflect_rest.glsl jahRefineShown): the break composes what the texel SHOWS.
+layout( rgba32ui, set = 0, binding = 59 ) uniform readonly uimage2DArray restRefine;
 
 // NaN AND INF BY THEIR BITS (trap 5: x == x is folded away): the one copy (and kMaxRadiance, the rest's fold reads it).
 #include "jah_rq_finite.glsl"

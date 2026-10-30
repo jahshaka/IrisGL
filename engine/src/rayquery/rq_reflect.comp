@@ -1,19 +1,17 @@
 #version 460
 // PHOTON R5 — RAY-TRACED REFLECTIONS: THE ONE ESTIMATOR (PHOTON-7 stage 6, law L5; AB E2, S5).
 //
-// ONE DIRECTION A PIXEL A FRAME, ONE ANSWER FOR IT, from the first source that has it (Lumen's order):
-//   1. THE SCREEN TRACE along that direction through this frame's depth (jah_ssr_march.glsl, the raster march's own
-//      core), answered from the PREVIOUS frame's picture at the hit's reprojected point where the screen vouches for
-//      it - a screen hit is a real shaded pixel of this scene, the sharpest source there is;
-//   2. THE TLAS near ray (the meshes' level 0) where the screen has no answer - off screen, behind an occluder, past
-//      the screen's fades - its hit shaded from the surface cache or the Photon voxels, or, where neither holds it (a
-//      mover, a rigged item, outside every cascade), by the visibility-buffer decode (PHOTON-HIT-SHADE-1);
-//   3. THE FAR COPIES (each mesh's coarsest level) for a ray that escaped the near length, as the gather continues;
-//   4. THE SKY.
-// The screen's fades (the frame's edge, the ray's range, the thickness margin, the arrival angle) are the PROBABILITY
-// that the screen answers this sample, else the ray does: an unbiased mixture of two estimates of one radiance, and
-// no weight is left to composite. There is no second image: the raster march and its resolve do not run on a ray
-// chain (OgreChain.cpp), and the filter writes the mean alone (rq_reflect_filter.comp).
+// ONE DIRECTION A PIXEL A FRAME, ONE ANSWER FOR IT, from the first source that has it:
+//   1. THE TLAS near ray (the meshes' level 0), its hit shaded from the surface cache or the Photon voxels, or, where
+//      neither holds it (a mover, a rigged item, outside every cascade), by the visibility-buffer decode
+//      (PHOTON-HIT-SHADE-1);
+//   2. THE FAR COPIES (each mesh's coarsest level) for a ray that escaped the near length, as the gather continues;
+//   3. THE SKY.
+// THE REFLECTION HAS NO MODE (PHOTON-7-9A): the screen trace that answered first where the previous picture could vouch
+// for a hit (the "Both" estimator) is deleted with its screen sources - on the desktop glass walk the rays alone were the
+// cheaper arm at rest and walking (ledger 3916), and the screen's moving slide was a different picture. The raster
+// march and its resolve do not run on a ray chain (OgreChain.cpp), and the filter writes the mean alone
+// (rq_reflect_filter.comp).
 //
 // WHERE THE ANSWER GOES. Into `jahSsrReflection`, the RGBA16F texture HlmsPbs samples as `ssrTexture` and composites
 // with fork 16d8e29d4 (was 0036)'s single lerp:
@@ -57,12 +55,12 @@ layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
 /// others its workers - instead of the 8 x 8 tile; and, on a frame whose count is past the path's bound L, DENSE: one
 /// lane a listed texel with the tile pass's batch, deal and allowance (main(), compactDense).
 layout( constant_id = 0 ) const bool kCompactPass = false;
-/// THE REST'S COMPACT LIST (binding 52, OgreRayQuery.cpp kCompactList*): [0..1] the halves' counts, [2..4] the compact
+/// THE REST'S COMPACT LIST (binding 49, OgreRayQuery.cpp kCompactList*): [0..1] the halves' counts, [2..4] the compact
 /// pass's indirect dispatch { groups, 1, 1 } (the tile pass raises the groups as it lists: the larger of the two modes'
 /// needs - a warp a slot up to L, a lane a slot past it), [5] the hit list's record count
 /// after the tile pass (the host's copy: the compact pass's record budget), [6..7] unused, then the two halves' texel
 /// indices (x | y << 16) - each half as long as the trace grid, so a listing can never overflow it.
-layout( std430, set = 0, binding = 52 ) buffer JahCompactList { uint compactWords[]; };
+layout( std430, set = 0, binding = 49 ) buffer JahCompactList { uint compactWords[]; };
 const uint kCompactHeaderWords = 8u;
 const uint kCompactDispatchWord = 2u;
 const uint kCompactRecordsWord = 5u;
@@ -94,24 +92,6 @@ EyeImage eyeNow( int eye )
 		e.camPos = p.camPos.xyz; e.perspective = p.camPos.w;
 		e.rayTL = p.rayTL.xyz; e.rayRight = p.rayRight.xyz;
 		e.rayDown = p.rayDown.xyz; e.fwd = p.fwd.xyz;
-	}
-	return e;
-}
-
-EyeImage eyeBefore( int eye )
-{
-	EyeImage e;
-	if( eye == 1 )
-	{
-		e.camPos = p.prevCamPos2.xyz; e.perspective = p.prevCamPos2.w;
-		e.rayTL = p.prevRayTL2.xyz; e.rayRight = p.prevRayRight2.xyz;
-		e.rayDown = p.prevRayDown2.xyz; e.fwd = p.prevFwd2.xyz;
-	}
-	else
-	{
-		e.camPos = p.prevCamPos.xyz; e.perspective = p.prevCamPos.w;
-		e.rayTL = p.prevRayTL.xyz; e.rayRight = p.prevRayRight.xyz;
-		e.rayDown = p.prevRayDown.xyz; e.fwd = p.prevFwd.xyz;
 	}
 	return e;
 }
@@ -161,7 +141,7 @@ layout( set = 0, binding = 30 ) uniform sampler3D voxelHalfNrmX[kMaxCascades];  
 layout( set = 0, binding = 40 ) uniform sampler3D voxelHalfNrmY[kMaxCascades];   // ...y
 #define JAH_VOX_SAMPLE_DIRECT( c, u, l ) textureLod( voxelHalfDirect[c], u, l )
 // ...and its BACK side (48, PHOTON-7 stage 7: the direct store holds the two sides; the hit's share reads their mean)
-layout( set = 0, binding = 54 ) uniform sampler3D voxelHalfNrmZ[kMaxCascades];   // (the last binding: OgreRayQuery.cpp kReflectDirectBackBinding)
+layout( set = 0, binding = 51 ) uniform sampler3D voxelHalfNrmZ[kMaxCascades];   // (the last binding: OgreRayQuery.cpp kReflectDirectBackBinding)
 #define JAH_VOX_SAMPLE_HALF_NRM( c, a, h, u, l ) jahHalfNrmPick( ( a ) == 0 ? textureLod( voxelHalfNrmX[c], u, l ) : ( ( a ) == 1 ? textureLod( voxelHalfNrmY[c], u, l ) : textureLod( voxelHalfNrmZ[c], u, l ) ), h )
 /// THE AIR'S TABLE (PHOTON-I-1 fix 5): the aerial-perspective volume the colour
 /// passes read, or a stand-in while they read none — the set's last binding.
@@ -172,15 +152,7 @@ layout( rgba16f, set = 0, binding = 45 ) uniform writeonly image2DArray reflectS
 /// ...AND ITS NEE PART (PHOTON-7 stage 11, 11-1b): the next-event estimate inside that sample (rgb; 0 where none) - the
 /// resolve reuses a neighbour's BRDF part by its density ratio and the NEE parts apart (the preflight's gap G2: an
 /// NEE + MIS sample is two directions, the ratio is one's).
-layout( rgba16f, set = 0, binding = 55 ) uniform writeonly image2DArray reflectNee;
-/// THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): the previous frame's linear radiance
-/// (`jahSsrPrev`) and the depth it was drawn at (`jahSsrPrevDepth`, -1 under an editor helper: no surface), both the
-/// end-of-frame copies, and the object motion at a pixel of a moving slot (`jahSsrVelocity`, rq_motion.comp, recorded
-/// in front of this trace; w = 0 the camera path). MONO 2D images - a stereo chain builds no screen source - and 1 x 1
-/// stand-ins wherever the chain runs no screen trace (p.screen.x = 0).
-layout( set = 0, binding = 47 ) uniform sampler2D ssrPrevColour;
-layout( set = 0, binding = 48 ) uniform sampler2D ssrPrevDepth;
-layout( set = 0, binding = 49 ) uniform sampler2D ssrVelocity;
+layout( rgba16f, set = 0, binding = 52 ) uniform writeonly image2DArray reflectNee;
 
 /// The same ceiling JahSsrResolve_ps.glsl and JahSsrHistory_ps.glsl hold the
 /// SSR loop to, and for the same reason: about twelve stops above white, six
@@ -242,7 +214,6 @@ const vec4 kPhotonSky     = vec4( 0.2, 0.95, 1.0, 1.0 );
 const vec4 kPhotonList    = vec4( 1.0, 0.2, 1.0, 1.0 );
 const vec4 kPhotonDropped = vec4( 1.0, 0.1, 0.05, 1.0 );
 const vec4 kPhotonRest    = vec4( 0.35, 0.35, 0.35, 1.0 );   // a texel that STOPPED at rest (R1): no ray
-const vec4 kPhotonScreen  = vec4( 1.0, 0.85, 0.1, 1.0 );    // the screen trace answered (PHOTON-7 stage 6)
 /// (Under the edge-class overlay the source colours give way to the class colour,
 /// written with w = 2.5 so it passes here, and stored at 1.)
 void photonHit( ivec2 tc, vec4 c )
@@ -272,7 +243,7 @@ void photonHit( ivec2 tc, vec4 c )
 #include "jah_reproject.glsl"
 /// THE DENOISER SPACE (commit 8: the rest's batch folds its samples into the rest mean here, in that space) - its
 /// exposure the chain's measured history, as the temporal pass reads it.
-layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
 float gExposure = 1.0;
 #define JAH_DENOISE_EXPOSURE gExposure
 #include "jah_reflect_denoise.glsl"
@@ -285,15 +256,15 @@ float exposureOf()
 }
 /// THE CHANGED-REGION LIST (PHOTON-7 8B, B2: jah_rest_regions.glsl; OgreRayQuery.cpp kReflectRegionsBinding) and THE
 /// BRICK MASKS, one binding a cascade in the hit set's order (stand-ins where none is this frame's: restBrickDims.w 0).
-#define JAH_REST_REGIONS_BINDING 57
+#define JAH_REST_REGIONS_BINDING 54
 #include "jah_rest_regions.glsl"
-layout( std430, set = 0, binding = 58 ) readonly buffer JahRestBricks0 { uint w[]; } restBricks0;
-layout( std430, set = 0, binding = 59 ) readonly buffer JahRestBricks1 { uint w[]; } restBricks1;
-layout( std430, set = 0, binding = 60 ) readonly buffer JahRestBricks2 { uint w[]; } restBricks2;
-layout( std430, set = 0, binding = 61 ) readonly buffer JahRestBricks3 { uint w[]; } restBricks3;
-/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl kRefine*): the trace marks an estimate-only reach of any texel at rest
+layout( std430, set = 0, binding = 55 ) readonly buffer JahRestBricks0 { uint w[]; } restBricks0;
+layout( std430, set = 0, binding = 56 ) readonly buffer JahRestBricks1 { uint w[]; } restBricks1;
+layout( std430, set = 0, binding = 57 ) readonly buffer JahRestBricks2 { uint w[]; } restBricks2;
+layout( std430, set = 0, binding = 58 ) readonly buffer JahRestBricks3 { uint w[]; } restBricks3;
+/// THE REFINEMENT (binding 59, jah_reflect_rest.glsl kRefine*): the trace marks an estimate-only reach of any texel at rest
 /// (kRefineReach, this frame's), and counts a stopped texel still refining as active.
-layout( rgba32ui, set = 0, binding = 62 ) uniform uimage2DArray restRefine;
+layout( rgba32ui, set = 0, binding = 59 ) uniform uimage2DArray restRefine;
 /// A BRICK's CHANGE this frame by its CAUSE (PHOTON-7 8B, the lead's ruling): 2 its DIRECT word moved (word 0: the most
 /// a voxel's direct term changed in the frame's injections - the direct term moves only when a light, a shadow or the
 /// geometry does: the world changing, over every frame its injection is spread across), 1 only its FEEDBACK word moved
@@ -492,168 +463,6 @@ vec3 worldAt( EyeImage e, vec2 uv, float dist )
 	return e.camPos + plane * dist;
 }
 
-/// ---- THE SCREEN TRACE (PHOTON-7 stage 6, THE ONE ESTIMATOR's first source) ------------------------------------------
-/// The march's core is the raster march's own text (jah_ssr_march.glsl): this file hosts it through the depth it reads
-/// - this frame's, at the eye's own layer, point-sampled - and the view distance.
-#define JAH_SSR_SCENE_DEPTH( uv ) textureLod( sceneDepth, vec3( ( uv ), float( gEye ) ), 0.0 ).x
-#define JAH_SSR_VIEW_DISTANCE( d ) viewDistance( d )
-#include "jah_ssr_march.glsl"
-/// THE SAME SURFACE IN THE PREVIOUS PICTURE (the no-ray resolve's test, JahSsrResolve_ps.glsl "THE SAME SURFACE", in
-/// view distance): a texel of the previous picture shows the hit only if the depth it was drawn at is the hit's, within
-/// twice the hit's local depth slope plus 0.2 % of its distance, never more than 3 %.
-const float kSsrSameSurfaceRel = 2e-3;
-const float kSsrSameSurfaceCeil = 3e-2;
-/// ...and the previous picture's frame edge, faded over 3 % of it (the resolve's kHistoryEdgeFade).
-const float kSsrHistoryEdgeFade = 0.03;
-
-/// THE SCREEN'S ANSWER FOR DIRECTION `L` from the surface `world` this pixel `px` shows: the march along L in the
-/// eye's own frame (right / down / forward: z the view distance, the image coordinate h.xy / h.w through the eye's
-/// basis - worldAt's inverse), then at a crossing the resolve's tests on the hit: its point last frame (the object
-/// motion at the hit, a moving slot's previous pose), reprojected through the previous camera (jah_reproject.glsl),
-/// the previous picture's texels around it that show the SAME SURFACE, bilinear over those, re-fogged for the
-/// reflection's leg (jahSsrRefog). `coin` takes it with the probability the screen vouches for it - the envelope, the
-/// arrival angle and the previous picture's edge (jah_ssr_march.glsl); false hands the sample to the ray. `travelled`
-/// is the hit's distance along L; `moving` / `was` say whether the hit moved and where it was; `vouch` = how much the
-/// screen vouches for an answer it gave (0 where it gave none: the mirror's blend weight, main's (1)).
-bool screenAnswer( EyeImage e, EyeImage before, vec3 world, vec3 L, vec3 V, ivec2 px, ivec2 fullRes, float coin,
-				   out vec3 radiance, out float travelled, out vec3 hitPos, out bool moving, out vec3 was,
-				   out float vouchOut )
-{
-	vouchOut = 0.0;
-	radiance = vec3( 0.0 );
-	travelled = 0.0;
-	hitPos = world;
-	moving = false;
-	was = world;
-	// THE MARCH'S SPACE: the eye's right / down / forward axes; the image coordinate of a point (x, y, z) of it is
-	// ((x / z - rTL) / |rayRight|, (y / z - dTL) / |rayDown|) through a perspective eye (rTL, dTL: the top-left ray's
-	// components), ((x - rTL) / |rayRight|, ...) through an orthographic one - the matrix below, column by column.
-	const float rR = length( e.rayRight ), rD = length( e.rayDown );
-	const vec3 right = e.rayRight / max( rR, 1e-20 ), down = e.rayDown / max( rD, 1e-20 );
-	const float rTL = dot( e.rayTL, right ), dTL = dot( e.rayTL, down );
-	const mat4 viewToTex = e.perspective > 0.5
-		? mat4( vec4( 1.0 / rR, 0.0, 0.0, 0.0 ), vec4( 0.0, 1.0 / rD, 0.0, 0.0 ),
-				vec4( -rTL / rR, -dTL / rD, 1.0, 1.0 ), vec4( 0.0 ) )
-		: mat4( vec4( 1.0 / rR, 0.0, 0.0, 0.0 ), vec4( 0.0, 1.0 / rD, 0.0, 0.0 ),
-				vec4( 0.0, 0.0, 1.0, 0.0 ), vec4( -rTL / rR, -dTL / rD, 0.0, 1.0 ) );
-	const vec3 rel = world - e.camPos;
-	const vec3 o = vec3( dot( rel, right ), dot( rel, down ), dot( rel, e.fwd ) );
-	const vec3 d = vec3( dot( L, right ), dot( L, down ), dot( L, e.fwd ) );
-	const vec3 toSurface = -vec3( dot( V, right ), dot( V, down ), dot( V, e.fwd ) );
-	const float maxDistance = p.screen2.x;
-	const JahSsrMarch m = jahSsrMarch( viewToTex, o, d, maxDistance, p.screen2.y, p.screen.z,
-									   jahSsrJitter( vec2( px ), p.screen.w ), p.screen.w );
-	if( m.hit <= 0.0 )
-		return false;
-	// THE CROSSING ITSELF (jahSsrSecant): this trace answers the crossing's own point - one estimator, its hit is the
-	// pixel's reflection - not the bisection's back end a fraction of a step past it (~10 px at 1 m on a face met steeply).
-	float tCross;
-	const vec2 hitUv = jahSsrSecant( viewToTex, o, d, m, tCross );
-	// THE HIT: the depth of the texel the crossing landed in (the resolve's), its point and its normal.
-	const ivec2 hitPx = clamp( ivec2( hitUv * vec2( fullRes ) ), ivec2( 0 ), fullRes - 1 );
-	const float hitRaw = texelFetch( sceneDepth, ivec3( hitPx, gEye ), 0 ).x;
-	if( hitRaw <= 0.0 || hitRaw >= 1.0 )
-		return false;
-	const float hitDist = viewDistance( hitRaw );
-	hitPos = worldAt( e, hitUv, hitDist );
-	// THE HIT'S LOCAL DEPTH SLOPE in this frame: per axis the smaller one-sided step to a neighbour (a silhouette's
-	// texel keeps its own surface's), the two axes summed.
-	float slope = 0.0;
-	{
-		const ivec2 dMax = fullRes - 1;
-		float s[4];
-		const ivec2 nb[4] = ivec2[4]( ivec2( -1, 0 ), ivec2( 1, 0 ), ivec2( 0, -1 ), ivec2( 0, 1 ) );
-		for( int k = 0; k < 4; ++k )
-		{
-			const float r = texelFetch( sceneDepth, ivec3( clamp( hitPx + nb[k], ivec2( 0 ), dMax ), gEye ), 0 ).x;
-			s[k] = r > 0.0 && r < 1.0 ? abs( viewDistance( r ) - hitDist ) : 3.0e38;
-		}
-		slope = min( min( s[0], s[1] ), 1.0e30 ) + min( min( s[2], s[3] ), 1.0e30 );
-	}
-	// THE CROSSING LIES ON THE SURFACE THE SCREEN SHOWS - or the screen does not answer. The march's own acceptance
-	// is the raster march's (a crossing up to ssrThickness, 0.5 m, behind the depth: a screen-only estimator's hole
-	// filler), so a ray that passed BEHIND an object - the wall beyond a pillar, hidden from the eye by it - "hit" the
-	// object and took its colour. Here a miss costs nothing (the ray answers it, from the origin), so the screen
-	// vouches only for a crossing whose own depth is the hit texel's within the depth buffer's resolution there: its
-	// local slope (twice, the texel's centre against the crossing's point inside it) plus 0.2 % of the distance, never
-	// more than 3 % - the same-surface tolerance below. A crossing at a depth discontinuity lies between the two
-	// surfaces, on neither, and goes to the ray.
-	if( !( abs( o.z + d.z * tCross - hitDist ) <=
-		   min( 2.0 * slope + kSsrSameSurfaceRel * hitDist, kSsrSameSurfaceCeil * hitDist ) ) )
-		return false;
-	float arrival = 0.0;
-	{
-		vec3 hn = texelFetch( gBufNormals, ivec3( hitPx, gEye ), 0 ).xyz * 2.0 - 1.0;
-		if( dot( hn, hn ) > 1e-6 )
-		{
-			hn = normalize( hn );
-			arrival = -dot( L, normalize( p.viewAxisX.xyz * hn.x + p.viewAxisY.xyz * hn.y + p.viewAxisZ.xyz * hn.z ) );
-		}
-	}
-	// THE VOUCH (jah_ssr_march.glsl jahSsrVouchRays): the frame's edge, the march's range end, the camera reversal and
-	// the arrival - the terms with a measured reason; the raster envelope's distance and thickness fades are not the one
-	// estimator's (the on-surface test above is its validity).
-	float vouch = jahSsrVouchRays( m, d, toSurface, 0.0 ) * jahSsrFaceFade( arrival );
-	if( !( vouch > coin ) )
-		return false;
-	// THE HIT LAST FRAME: a moving slot's previous pose (the object motion at the hit's texel, in this image), else
-	// where it is.
-	{
-		const vec4 vel = texelFetch( ssrVelocity, min( hitPx, textureSize( ssrVelocity, 0 ) - 1 ), 0 );
-		if( vel.w > 0.5 )
-		{
-			const float wasRaw = hitRaw + vel.z;
-			if( wasRaw > 0.0 && wasRaw < 1.0 )
-			{
-				was = worldAt( e, hitUv + vel.xy, viewDistance( wasRaw ) );
-				moving = true;
-			}
-		}
-		if( !moving )
-			was = hitPos;
-	}
-	vec2 puv;
-	float pz;
-	if( jahReproject( was, before.camPos, before.perspective, before.rayTL, before.rayRight, before.rayDown,
-					  before.fwd, puv, pz ) != 0 )
-		return false;
-	const vec2 inside = min( puv, vec2( 1.0 ) - puv );
-	vouch *= smoothstep( 0.0, kSsrHistoryEdgeFade, min( inside.x, inside.y ) );
-	if( !( vouch > coin ) )
-		return false;
-	// THE SAME SURFACE, PER TAP of the bilinear footprint: the previous picture's depth at each against the hit's
-	// distance there, the tolerance from the hit's local depth slope in THIS frame (above).
-	const float tol = min( 2.0 * slope + kSsrSameSurfaceRel * pz, kSsrSameSurfaceCeil * pz );
-	const ivec2 prevRes = textureSize( ssrPrevColour, 0 );
-	const vec2 at = puv * vec2( prevRes ) - 0.5;
-	const ivec2 base = ivec2( floor( at ) );
-	const vec2 f = at - vec2( base );
-	vec3 sum = vec3( 0.0 );
-	float wSame = 0.0;
-	for( int k = 0; k < 4; ++k )
-	{
-		const ivec2 o4 = ivec2( k & 1, k >> 1 );
-		const ivec2 tc = clamp( base + o4, ivec2( 0 ), prevRes - 1 );
-		const float w = ( o4.x == 1 ? f.x : 1.0 - f.x ) * ( o4.y == 1 ? f.y : 1.0 - f.y );
-		if( w <= 0.0 )
-			continue;
-		const float wasRaw = texelFetch( ssrPrevDepth, tc, 0 ).x;
-		if( !( wasRaw > 0.0 && wasRaw < 1.0 ) || abs( viewDistance( wasRaw ) - pz ) > tol )
-			continue;
-		const vec3 c = texelFetch( ssrPrevColour, tc, 0 ).xyz;
-		if( !finite3( c ) )
-			continue;
-		sum += clamp( c, vec3( 0.0 ), vec3( kMaxRadiance ) ) * w;
-		wSame += w;
-	}
-	if( !( wSame > 0.0 ) )
-		return false;
-	radiance = jahSsrRefog( sum / wSame, e.camPos, world, hitPos );
-	travelled = tCross;
-	vouchOut = clamp( vouch, 0.0, 1.0 );
-	return finite3( radiance );
-}
-
 /// THE DRAW (the sequence, the VNDF sample, its density, the mirror ramp): jah_reflect_draw.glsl, the one text the
 /// resolve re-derives a neighbour's direction from.
 #include "jah_reflect_draw.glsl"
@@ -757,11 +566,11 @@ struct JahReflectTexel
 // ONE SAMPLE'S ANSWER: what main's frame-sample logic reads, and the resume test's verdict (in: the texel's own).
 struct JahReflectSample
 {
-	vec3 L, traced, recN, screenRadiance;
+	vec3 L, traced, recN;
 	vec3 nee;        // the sample's NEE part (PHOTON-7 11-1b; inside `traced`, and the write-back's for a record)
 	vec3 recDelta;   // a RECORD's addend at the write-back: the NEE part less the BRDF's share of the emission it found
 	vec2 recBary;
-	float hitT, sampleT, screenT, blendVouch;
+	float hitT, sampleT;
 	float sunVis;   // a record's: the sun's visibility at its hit (the list's word; one call site, here)
 	uint areaVis;   // ...and its area lights' (L9 (b1): jahHitAreaVisWord, the list's word 10)
 	float recGain;  // a RECORD's estimator gain (PHOTON-7 11-2 (1)): the write-back's factor on the decoded ray share
@@ -773,7 +582,7 @@ struct JahReflectSample
 	vec3 c2Brdf, c2Portal, c2Spec, c2Mirror, cut;
 	uint c2MirrorSlot;
 	uint recSlot, recPrim, recGeom, photonSource;
-	bool ok, record, recFar, slotHit, screenHit, noSample, blend, centre, vndf, folded, resume;
+	bool ok, record, recFar, slotHit, centre, vndf, folded, resume;
 	bool card;   // (B2: this sample's resume is an ESTIMATE CONVERGING's alone - the caches: restHitKind 1)
 };
 JahReflectSample jahReflectSampleNone( JahReflectTexel x )
@@ -782,14 +591,11 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.L = x.worldN;
 	o.traced = vec3( 0.0 );
 	o.recN = -x.worldN;
-	o.screenRadiance = vec3( 0.0 );
 	o.nee = vec3( 0.0 );
 	o.recDelta = vec3( 0.0 );
 	o.recBary = vec2( 0.0 );
 	o.hitT = p.knobs.y * 2.0;
 	o.sampleT = o.hitT;
-	o.screenT = 0.0;
-	o.blendVouch = 1.0;
 	o.sunVis = 1.0;
 	o.areaVis = 0u;
 	o.recGain = 1.0;
@@ -805,12 +611,12 @@ JahReflectSample jahReflectSampleNone( JahReflectTexel x )
 	o.cut = vec3( 0.0 );
 	o.c2MirrorSlot = 0xFFFFFFFFu;
 	o.recSlot = 0u; o.recPrim = 0u; o.recGeom = 0u; o.photonSource = 0u;
-	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false; o.screenHit = false; o.noSample = false;
-	o.blend = false; o.centre = false; o.vndf = false; o.folded = false; o.resume = false; o.card = false;
+	o.ok = false; o.record = false; o.recFar = false; o.slotHit = false;
+	o.centre = false; o.vndf = false; o.folded = false; o.resume = false; o.card = false;
 	return o;
 }
-// THE SAMPLE at index `frame` (every random input of it is keyed on it: the draw, the screen's coin, the mover gate's turn).
-void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec2 fullRes, bool atRest, uint frame,
+// THE SAMPLE at index `frame` (every random input of it is keyed on it: the draw, the mover gate's turn).
+void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, ivec2 fullRes, bool atRest, uint frame,
 					  inout JahReflectSample o )
 {
 	const vec3 world = x.world;
@@ -839,14 +645,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	vec2 recBary = vec2( 0.0 );
 	vec3 recN = -L;
 	uint photonSource = 0u;
-	bool screenHit = false, screenMoving = false;
-	vec3 screenWas = world, screenPos = world;
 	jahC2Seg[0] = jahC2Seg[1] = jahC2Seg[2] = vec4( 0.0 );   // (C2's segments: this sample's alone - B2's resume test)
 	jahC2HitR = 0.0;
-	vec3 screenRadiance = vec3( 0.0 );
-	float screenT = 0.0;
-	float blendVouch = 1.0;
-	bool noSample = false, blend = false;
 	float sampleT = hitT;
 	L = jahReflectDraw( worldN, V, alpha, seedPix, frame + uint( p.denoiser.z ), centreChance, centre, vndf );
 	// ...AND THE GEOMETRIC PLANE (READ_A W4): a normal-mapped lobe seen at grazing can point below the surface the ray
@@ -876,11 +676,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	// q the folded draw's density (the VNDF branch's: the centre ray's chance is the mixture's, unchanged), p_l the table's
 	// (jahNeePick), E the emission of the FIRST surface along the direction (jahNeeEmission - one function on both
 	// strategies, so the split is exact whatever answered the BRDF's hit: the card, the voxels or the decode), each times
-	// the fog's transmittance along its own leg and - in Both - its RAY SHARE 1 - v: the screen vouches along the NEE's
-	// direction too (the preflight's gap G1; its one call site is the loop of two below). The analytic lights are not
+	// the fog's transmittance along its own leg. The analytic lights are not
 	// geometry (no ray meets one): their light stays the hit's and the pixel's, never counted twice; the sky is never E.
 	// Every random input is keyed on the sample index `frame` (jahNeeSample3): the rest stays deterministic.
-	const bool neeArm = p.knobs.w > 0.5 && !( p.screen.x > 0.5 && p.screen.y > 0.5 ) && p.denoiser.w < 0.5;
+	const bool neeArm = p.knobs.w > 0.5 && p.denoiser.w < 0.5;
 	JahNeePick nee;
 	nee.ok = false; nee.W = 0.0; nee.pdfB = 0.0; nee.L = geomN; nee.pdfL = 0.0; nee.slot = 0xFFFFFFFFu;
 	float neeQB = 0.0;
@@ -895,7 +694,6 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	const float neeWb = neeActive ? neeQB / ( neeQB + nee.pdfB ) : 1.0;
 	const float neeQL = nee.ok ? jahReflectFoldedPdf( worldN, geomN, V, nee.L, lobeAlpha ) : 0.0;
 	const bool neeTrace = neeActive && nee.ok && neeQL > 0.0;    // (a draw under the surface is a sample of 0: no ray)
-	float neeVouch = 0.0;   // the screen's vouch along L_l (Both)
 	vec3 neeEb = vec3( 0.0 );   // E at the BRDF's hit (only where p_l( L ) > 0)
 	traced = vec3( 0.0 );
 	ok = false;
@@ -915,69 +713,9 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	recSlot = 0u; recPrim = 0u; recGeom = 0u;
 	recBary = vec2( 0.0 );
 	recN = -L;
-	photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceStore); 3 the sky; 4 the screen
-	// (1) THE SCREEN TRACE, where the chain runs one, and THE COIN'S EXPECTATION for EVERY sample (READ_B F2; the lead's
-	// round-3 ruling (i), built after the rest's tail diagnostic): a random choice between the screen's answer and the
-	// ray's, on the screen's vouch, is replaced by its MEAN - where the screen vouches fully (vouch 1) its answer alone,
-	// where it gives none the ray's alone, and in between (the fade band) BOTH, blended vouch x screen + (1 - vouch) x ray.
-	// Rao-Blackwell: an expectation never raises the variance, and where the two disagree it removes v (1 - v) (S - R)^2
-	// from every sample (a fixed coin of one half made every fade a hard seam that moved with the camera; a per-sample
-	// coin left that variance in every rest at a reflected edge - the hold's tail). ONE rule for the mirror's centre ray
-	// and the lobe's draw alike. Screen mode (p.screen.y, the screen-alone measuring arm) keeps its coin: a draw on the
-	// vouch, the centre ray's fixed one half.
-	screenHit = false; screenMoving = false;
-	screenWas = world; screenPos = world;
-	screenRadiance = vec3( 0.0 );
-	screenT = 0.0;
-	blendVouch = 1.0;   // the screen's share of a centre ray's sample; 1 = the screen's alone
-	if( p.screen.x > 0.5 )
+	photonSource = 0u;   // 1 card, 2 voxels (jahHitRadianceStore); 3 the sky
 	{
-		// (Screen mode keeps its coin: the screen-alone arm is unchanged)
-		const bool screenAlone = p.screen.y > 0.5;
-		const float coin = !screenAlone ? 0.0 : centre ? 0.5
-			: float( jahReflectPcg( uint( seedPix.x ) * 7919u + uint( seedPix.y ) * 104729u + frame * 15485863u +
-									0x9E3779B9u ) & 0xFFFFFFu ) * ( 1.0 / 16777216.0 );
-		// (a loop of two, ONE call site of the march - ENGINE.md's inlining trap: the draw's direction, then the NEE's,
-		// whose vouch alone is read)
-		for( int k = 0; k < 2; ++k )
-		{
-			if( k == 1 && !( neeTrace && !screenAlone ) )
-				break;
-			vec3 kRadiance, kPos, kWas;
-			float kT, kVouch;
-			bool kMoving;
-			const bool kHit = screenAnswer( thisEye, before, world, k == 0 ? L : nee.L, V, px, fullRes,
-											k == 0 ? coin : 0.0, kRadiance, kT, kPos, kMoving, kWas, kVouch );
-			if( k == 1 )
-			{
-				neeVouch = kHit ? clamp( kVouch, 0.0, 1.0 ) : 0.0;
-				continue;
-			}
-			screenHit = kHit;
-			screenRadiance = kRadiance;
-			screenT = kT;
-			screenPos = kPos;
-			screenMoving = kMoving;
-			screenWas = kWas;
-			if( screenHit )
-			{
-				ok = true;
-				hitT = screenT;
-				traced = screenRadiance;
-				photonSource = 4u;
-				if( !screenAlone )
-					blendVouch = kVouch;
-			}
-		}
-	}
-	// THE SCREEN ALONE (PostFxDesc::reflectSources Screen): a sample the screen does not answer is NO SAMPLE - no ray
-	// follows it (biased by construction: the measuring arm the agreement row reads Both against Rays beside).
-	noSample = !screenHit && p.screen.y > 0.5;
-	// THE BLEND: the screen answered with partial trust, so the ray answers the rest.
-	blend = screenHit && blendVouch < 1.0;
-	if( ( !screenHit || blend ) && !noSample )
-	{
-		// (2) THE TLAS NEAR RAY from the origin above (lifted along the geometric normal by the float error and the
+		// (1) THE TLAS NEAR RAY from the origin above (lifted along the geometric normal by the float error and the
 		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
 		rayQueryEXT rq;
 		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
@@ -1000,7 +738,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
 		}
 		jahPanesInFront( panes, slotHit ? t : maxT );
-		if( !slotHit && p.screen2.w > maxT )
+		if( !slotHit && p.farQuery.y > maxT )
 		{
 			// (3) THE FAR COPIES for an escape (kRayMaskFar, each mesh's coarsest level), from the near length less
 			// the widest coarse-vs-fine hand-over gap to the far plane - the gather's continuation (rq_probe_gather.comp):
@@ -1008,8 +746,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// queries, and a coarse hit in that overlap is honest (the near query proved no fine surface lies there).
 			// A far hit names no near row and no card: the cascades answer it, else the decode.
 			rayQueryEXT rqFar;
-			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, L,
-								   p.screen2.w );
+			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.farQuery.x, L,
+								   p.farQuery.y );
 			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
 			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
@@ -1021,7 +759,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				recBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
 			}
 			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
-			jahPanesBetween( panesFar, maxT, slotHit ? t : p.screen2.w );
+			jahPanesBetween( panesFar, maxT, slotHit ? t : p.farQuery.y );
 		}
 		// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl)
 		float through = 1.0;
@@ -1148,35 +886,18 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			photonSource = 3u;
 		}
 	}
-	// THE BLEND (1): the screen's share and the ray's, one sample - its distance the shares' mean, so the hit history's
-	// virtual point moves continuously across the fade. A ray whose answer is no evidence leaves the screen's whole; a
-	// ray that needs a RECORD leaves its share to the write-back (below).
 	sampleT = hitT;
-	if( blend && !record )
-	{
-		if( finite3( traced ) )
-		{
-			traced = blendVouch * screenRadiance + ( 1.0 - blendVouch ) * traced;
-			sampleT = blendVouch * screenT + ( 1.0 - blendVouch ) * hitT;
-		}
-		else
-		{
-			traced = screenRadiance;
-			sampleT = screenT;
-		}
-	}
-	// THE BRDF's SAMPLE AT ITS GAIN (11-2 (1)): every radiance of the draw - the ray's, the screen's, their blend; a record's
-	// ray share takes it at the write-back (the record's gain word)
+	// THE BRDF's SAMPLE AT ITS GAIN (11-2 (1)): the ray's radiance; a record's takes it at the write-back (the record's
+	// gain word)
 	if( !record && finite3( traced ) )
 		traced *= gainB;
-	screenRadiance *= gainB;
 	// ---- THE NEE's SAMPLE AND THE PAIR COMBINED (11-1b) -------------------------------------------------------------------
 	// ONE CLOSEST-HIT RAY along L_l (the near copies, then the far ones for an escape - the BRDF ray's own route, so E( L )
-	// is one function of the direction), where the screen does not vouch for it whole.
+	// is one function of the direction).
 	vec3 neePart = vec3( 0.0 ), recDelta = vec3( 0.0 );
 	float neeT = 0.0;
 	bool neeHitMoving = false;
-	if( neeTrace && !noSample && neeVouch < 1.0 )
+	if( neeTrace )
 	{
 		rayQueryEXT nq;
 		rayQueryInitializeEXT( nq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, nee.L, maxT );
@@ -1199,12 +920,12 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			jahHitSurf = JahHitSurface( nSlot, nGeom, nPrim, nBary, nToWorld, neeT, false, nKnown );
 			El = jahNeeEmission( reflectFootprint( lobeAlpha, neeT ) );
 		}
-		else if( p.screen2.w > maxT )
+		else if( p.farQuery.y > maxT )
 		{
 			// (a far copy's hit has no material row at the hit: E 0 - and the BRDF's far hit reads none either)
 			rayQueryEXT nqFar;
-			rayQueryInitializeEXT( nqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, nee.L,
-								   p.screen2.w );
+			rayQueryInitializeEXT( nqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.farQuery.x, nee.L,
+								   p.farQuery.y );
 			JAH_RQ_PROCEED( nqFar )
 			if( rayQueryGetIntersectionTypeEXT( nqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
 			{
@@ -1222,7 +943,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 									  jahFogAlong( vec3( 0.0 ), world.y, nee.L, lenL, eyeD ),
 								  vec3( 0.0 ) );
 			// (at the NEE direction's own gain: the target t( L_l ) = q( L_l ) gain( L_l ), 11-2 (1))
-			neePart = ( 1.0 - neeVouch ) * ElT * ( neeQL / ( neeQL + nee.pdfL ) ) *
+			neePart = ElT * ( neeQL / ( neeQL + nee.pdfL ) ) *
 					  reflectGainAt( worldN, geomN, V, nee.L, lobeAlpha );
 		}
 		// THE CONE'S HIT RATE (the lead's condition): the NEE rays, and those whose first hit is the target drawn
@@ -1244,16 +965,15 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		if( !neeHit )
 			neeT = maxT;
 	}
-	if( neeActive && !noSample )
+	if( neeActive )
 	{
-		// THE BRDF's SHARE OF THE EMISSION IT FOUND taken out where the NEE covers it: ( 1 - v ) ( 1 - w_b ) E T
+		// THE BRDF's SHARE OF THE EMISSION IT FOUND taken out where the NEE covers it: ( 1 - w_b ) E T
 		vec3 corrB = vec3( 0.0 );
 		if( slotHit && any( greaterThan( neeEb, vec3( 0.0 ) ) ) )
 		{
-			const float vb = screenHit ? blendVouch : 0.0;
 			const float lenB = length( origin + L * hitT - world );
 			const float eyeD = length( world - thisEye.camPos );
-			corrB = -gainB * ( 1.0 - vb ) * ( 1.0 - neeWb ) *
+			corrB = -gainB * ( 1.0 - neeWb ) *
 					max( jahFogAlong( neeEb, world.y, L, lenB, eyeD ) - jahFogAlong( vec3( 0.0 ), world.y, L, lenB, eyeD ),
 						 vec3( 0.0 ) );
 		}
@@ -1262,17 +982,17 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		else if( finite3( traced ) )
 			traced = max( traced + corrB + neePart, vec3( 0.0 ) );
 	}
-	// THE RECORD's TRACED LOBE (C2) at the sample's gain and its ray share (the screen's share is the trace's own)
+	// THE RECORD's TRACED LOBE (C2) at the sample's gain
 	if( record && recTraced )
-		recDelta += gainB * ( blend ? 1.0 - blendVouch : 1.0 ) * recLobe;
+		recDelta += gainB * recLobe;
 	// THE REST'S RESUME TEST (G6; PHOTON-7 8B, B2: against the changed-region list), the ray just traced: a GEOMETRY
 	// region across its segment, the lobe's mean segment (the throw), the hit's sun leg, the NEE's segment (11-1b) or
 	// C2's secondary rays (its BRDF draw's, its portals' and its image draw's), or the hit itself on a moving slot; or
 	// a LIGHT region or a changed brick at its hit, the mean segment's end or C2's hit - resumes the texel.
 	if( atRest && !resume && ( p.restLists.x > 0.5 || p.restLists.y > 0.5 || p.restLists.z > 0.5 || p.motion.w > 0.5 ) )
 	{
-		bool hitMoving = screenHit && screenMoving && p.motion.w > 0.5;
-		if( !hitMoving && slotHit && !recFar && p.motion.w > 0.5 )
+		bool hitMoving = false;
+		if( slotHit && !recFar && p.motion.w > 0.5 )
 		{
 			vec3 was;
 			hitMoving = hitPrevPoint( recSlot, recGeom, recPrim, recBary, origin + L * hitT, was );
@@ -1298,12 +1018,12 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			o.card = most == 1u;
 		}
 	}
-	o.L = L; o.traced = traced; o.recN = recN; o.screenRadiance = screenRadiance; o.recBary = recBary;
+	o.L = L; o.traced = traced; o.recN = recN; o.recBary = recBary;
 	o.nee = neePart; o.recDelta = recDelta;
-	o.hitT = hitT; o.sampleT = sampleT; o.screenT = screenT; o.blendVouch = blendVouch;
+	o.hitT = hitT; o.sampleT = sampleT;
 	o.recSlot = recSlot; o.recPrim = recPrim; o.recGeom = recGeom; o.photonSource = photonSource;
-	o.ok = ok; o.record = record; o.recFar = recFar; o.slotHit = slotHit; o.screenHit = screenHit;
-	o.noSample = noSample; o.blend = blend; o.centre = centre; o.vndf = vndf; o.folded = folded; o.resume = resume;
+	o.ok = ok; o.record = record; o.recFar = recFar; o.slotHit = slotHit;
+	o.centre = centre; o.vndf = vndf; o.folded = folded; o.resume = resume;
 	// A RECORD'S SUN (the list's word, the write-back's direct light at the hit): a FAR copy's hit is recorded as one
 	// (READ_B finding 1, the gather's rule) and its sun leg lifts by the far copy's hand-over.
 	o.recGain = gainB;
@@ -1319,10 +1039,10 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	}
 }
 
-// THE PICK (binding 56, the reds' instrument: jahlab pick; OgreRayQuery.cpp kReflectPickBinding): while alpha.y's bits
+// THE PICK (binding 53, the reds' instrument: jahlab pick; OgreRayQuery.cpp kReflectPickBinding): while alpha.y's bits
 // name a full-resolution pixel (x | y << 12 | the ring's slot << 24 | 1 << 30), the trace texel holding it writes its
 // frame's sample into its slot's words 0-31 and the temporal pass its rest terms into 32-47.
-layout( std430, set = 0, binding = 56 ) buffer JahPick { uint jahPick[]; };
+layout( std430, set = 0, binding = 53 ) buffer JahPick { uint jahPick[]; };
 int jahPickSlot( ivec2 tc )
 {
 	const uint w = floatBitsToUint( p.alpha.y );
@@ -1341,10 +1061,10 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 		return;
 	const uint b = uint( slot ) * 64u;
 	jahPick[b + 0u] = 1u;   // written
+	// (bits 16, 32 and 2048 and words 17-18 were the screen trace's: retired with it, PHOTON-7-9A)
 	jahPick[b + 1u] = ( s.ok ? 1u : 0u ) | ( s.record ? 2u : 0u ) | ( s.recFar ? 4u : 0u ) | ( s.slotHit ? 8u : 0u ) |
-					  ( s.screenHit ? 16u : 0u ) | ( s.noSample ? 32u : 0u ) | ( s.centre ? 64u : 0u ) |
-					  ( s.vndf ? 128u : 0u ) | ( s.resume ? 256u : 0u ) | ( s.recTraced ? 512u : 0u ) |
-					  ( atRest ? 1024u : 0u ) | ( s.blend ? 2048u : 0u );
+					  ( s.centre ? 64u : 0u ) | ( s.vndf ? 128u : 0u ) | ( s.resume ? 256u : 0u ) |
+					  ( s.recTraced ? 512u : 0u ) | ( atRest ? 1024u : 0u );
 	jahPick[b + 2u] = s.recSlot;
 	jahPick[b + 3u] = s.photonSource;
 	jahPick[b + 4u] = floatBitsToUint( s.hitT );
@@ -1360,8 +1080,6 @@ void jahPickSample( ivec2 tc, JahReflectSample s, uint vNow, uint restStop, bool
 	jahPick[b + 14u] = floatBitsToUint( s.nee.x );
 	jahPick[b + 15u] = floatBitsToUint( s.nee.y );
 	jahPick[b + 16u] = floatBitsToUint( s.nee.z );
-	jahPick[b + 17u] = floatBitsToUint( s.screenRadiance.x );
-	jahPick[b + 18u] = floatBitsToUint( s.blendVouch );
 	jahPick[b + 19u] = floatBitsToUint( s.recGain );
 	jahPick[b + 20u] = floatBitsToUint( s.recDelta.x );
 	jahPick[b + 21u] = vNow;
@@ -1397,10 +1115,6 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	const vec2 recBary = s.recBary;
 	const vec3 recN = s.recN;
 	const uint photonSource = s.photonSource;
-	const vec3 screenRadiance = s.screenRadiance;
-	const float screenT = s.screenT;
-	const float blendVouch = s.blendVouch;
-	const bool noSample = s.noSample, blend = s.blend;
 	const float sampleT = s.sampleT;
 	// THE BATCH'S FOLDS STORED (the rest half in place, and the residual where the frozen half is free for it - else, for
 	// a centre texel, its plain mean there: every reader composes M, the temporal pass's rule for its own fold).
@@ -1457,15 +1171,13 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
-		photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
-					   photonSource == 4u ? kPhotonScreen : kPhotonSky );
+		photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 		return;
 	}
-	if( noSample || ( !record && !finite3( traced ) ) )
+	if( !record && !finite3( traced ) )
 	{
-		// NO SAMPLE THIS FRAME - a non-finite answer is no evidence about this pixel, nor is a sample the screen alone
-		// left unanswered (noSample): the resolve reconstructs the texel from its neighbours' samples, else the temporal
-		// pass carries its history (or finds it holds no answer).
+		// NO SAMPLE THIS FRAME - a non-finite answer is no evidence about this pixel: the resolve reconstructs the texel
+		// from its neighbours' samples, else the temporal pass carries its history (or finds it holds no answer).
 		imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -1477,21 +1189,16 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 		// THE RECORD: the write-back (rq_hit_composite) writes the decoded radiance and its distance as this frame's
 		// SAMPLE - the radiance arriving one pass later, before the resolve reads it. A record the decode leaves
 		// unshaded, or one a full list dropped (counted), is no sample.
-		// (A BLENDED sample's record: the screen's share is written here, the write-back adds the ray's - the record's
-		// weight - or, unshaded, takes the screen's answer whole.)
-		imageStore( reflectSample, ivec3( tc, gEye ),
-					jahRoundHalf( blend ? vec4( blendVouch * screenRadiance, blendVouch * screenT ) : vec4( 0.0 ) ) );
+		imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( 0.0 ) ) );
 		const vec3 hitPos = origin + L * hitT;
 		// A FAR COPY'S HIT IS RECORDED AS ONE (READ_B finding 1, the gather's rule): the decode reads the coarsest
 		// level's triangle `prim` (bit 27) and the sun leg lifts by the far copy's hand-over - a near-flagged record
 		// shaded triangle `prim` of level 0, another place of the mesh.
 		const float sunVis = s.sunVis;   // (reflectSampleAt's: the sun leg at the hit)
 		const bool appended = jahHitAppend( recSlot, recFar, recPrim, recBary, L, sunVis, reflectFootprint( lobeAlpha, hitT ),
-											blend ? 1.0 - blendVouch : 1.0, jahHitDestPack( tc, false, gEye ), world.y,
+											1.0, jahHitDestPack( tc, false, gEye ), world.y,
 											length( hitPos - world ), length( world - thisEye.camPos ), s.recDelta, s.recGain,
 											s.recPane, s.recTraced, s.areaVis );
-		if( blend && !appended )   // a full list: the screen's answer whole, never its share alone
-			imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( screenRadiance, screenT ) ) );
 		// (the NEE part rides the record's delta into the sample; here it is the resolve's - none for a sample short of it)
 		imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( appended ? s.nee : vec3( 0.0 ), 0.0 ) ) );
 		imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
@@ -1503,8 +1210,7 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 	imageStore( reflectSample, ivec3( tc, gEye ), jahRoundHalf( vec4( clamp( traced, vec3( 0.0 ), vec3( kMaxRadiance ) ), sampleT ) ) );
 	imageStore( reflectNee, ivec3( tc, gEye ), jahRoundHalf( vec4( clamp( s.nee, vec3( 0.0 ), vec3( kMaxRadiance ) ), 0.0 ) ) );
 	imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
-	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel :
-				   photonSource == 4u ? kPhotonScreen : kPhotonSky );
+	photonHit( tc, photonSource == 1u ? kPhotonCard : photonSource == 2u ? kPhotonVoxel : kPhotonSky );
 }
 
 void main()
@@ -1802,9 +1508,8 @@ void main()
 		}
 	}
 
-	// ---- THE ONE ESTIMATOR (PHOTON-7 stage 6): the screen, the TLAS near ray, the far copies, the sky ----------------
+	// ---- THE ONE ESTIMATOR (PHOTON-7 stage 6): the TLAS near ray, the far copies, the sky -----------------------------
 	const float maxT = p.knobs.y;
-	const EyeImage before = eyeBefore( eye );
 	gExposure = exposureOf();
 	// THE REST'S BATCH (commit 8, PREFLIGHT_R section 3): at rest IN PLACE a texel still converging traces the tier's
 	// rest count of rays a frame (p.rest.z), each the rest sequence's NEXT sample (v + i: the sample index, never the
@@ -1817,7 +1522,7 @@ void main()
 	// otherwise - moving, the first rest frame, a DETERMINISTIC sample (below), the reference arm, the freeze.
 	// The batch's rays are DEALT across the subgroup's lanes (below), its folds made in this order all the same.
 	// A DETERMINISTIC SAMPLE (DETERMINISM-1, the R13 tail): a lobe under a texel draws its centre ray every time
-	// (centreChance 1: no lobe draw, the screen's coin fixed, no NEE - the NEE pairs only a VNDF draw), but its SAMPLE is
+	// (centreChance 1: no lobe draw, no NEE - the NEE pairs only a VNDF draw), but its SAMPLE is
 	// still stochastic wherever the HIT's shading is: C2's traced lobe at the hit (its own VNDF draw, keyed on the sample
 	// index) and the hit's area-light stratum (jahHitAreaSeq / the rest's cycle) - known only once the hit is. Measured on
 	// photon-glass: the far wall's mirror texels reflecting the r0.3 floor pane read a card (~0.0107, constant) and ALL
@@ -1907,11 +1612,7 @@ void main()
 	const uint vStart = vNow;
 	// THE RECORD RUN (the lead's ruling after the S diagnostic): a batching texel may hand up to `allowance` of its
 	// records a frame to the list as ONE contiguous run, in sample order - the write-back folds them into its
-	// rest mean (rq_hit_composite.comp). A BLENDED record rides it too (the lead's ruling after the Both-at-S probe: on a
-	// silhouette in the screen's fade the batch ended at the first one, ~4 folds of 64 a frame): the record carries the
-	// screen's share and the write-back folds the WHOLE sample, vouch x screen + ( 1 - vouch ) x ray, as one (the mean is
-	// linear in its parts, the moments the stop reads are not); the trace writes nothing of it into the texel's sample.
-	// A record past the allowance, or one the list cannot hold, ends the batch as
+	// rest mean (rq_hit_composite.comp). A record past the allowance, or one the list cannot hold, ends the batch as
 	// before. allowance = min( k_active, capacity / batching ) (the host's, p.rest.w): the list's existing capacity is
 	// the count. A texel's run is the records of ONE round of the deal (one reservation): the rounds after it end at a
 	// record. THE COMPACT PASS's share is of what the list has LEFT after the records in it before this pass (the host's
@@ -1985,7 +1686,7 @@ void main()
 		JahReflectSample s = jahReflectSampleNone( x );
 		s.resume = mine && resume;
 		if( job || ( mine && !batchFull ) )
-			reflectSampleAt( x, thisEye, before, fullRes, atRest,
+			reflectSampleAt( x, thisEye, fullRes, atRest,
 							 job ? uint( p.knobs.z ) + first + index
 								 : atRest ? uint( p.knobs.z ) + vNow + runUsed : uint( p.knobs.z ),
 							 s );
@@ -1994,10 +1695,10 @@ void main()
 		if( total > 0u )
 		{
 			const uint bits = ( job ? 1u : 0u ) |
-							  ( s.resume || s.record || s.noSample || !finite3( s.traced ) ? 2u : 0u ) |
+							  ( s.resume || s.record || !finite3( s.traced ) ? 2u : 0u ) |
 							  ( s.centre ? 4u : 0u ) | ( s.vndf ? 8u : 0u ) | ( s.folded ? 16u : 0u ) |
 							  ( s.photonSource << 5u ) |
-							  ( s.record && !s.resume && !s.noSample ? 256u : 0u );   // a run's candidate
+							  ( s.record && !s.resume ? 256u : 0u );   // a run's candidate
 			const uint mySlots = ahead >= laneCount ? 0u : min( remaining, laneCount - ahead );
 			if( whole )
 			{
@@ -2052,10 +1753,10 @@ void main()
 							jahHitWrite( li, s.recSlot, s.recFar, s.recPrim, s.recBary, s.L,
 										 s.sunVis,
 										 reflectFootprint( max( x.alpha, 1e-4 ), s.hitT ),
-										 s.blend ? -( 1.0 - s.blendVouch ) : -1.0,
+										 -1.0,
 										 jahHitDestPack( ownerTc, false, gEye ), x.world.y, length( hitPos - x.world ),
 										 length( x.world - thisEye.camPos ),
-										 s.blend ? s.blendVouch * vec4( s.screenRadiance, s.screenT ) : vec4( 0.0 ), s.recDelta,
+										 vec4( 0.0 ), s.recDelta,
 										 s.recGain, s.recPane, s.recTraced, s.areaVis );
 							fit = 1u;
 						}

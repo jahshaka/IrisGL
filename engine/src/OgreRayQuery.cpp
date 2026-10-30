@@ -90,8 +90,6 @@
 #include "rayquery/rq_reflect_temporal_spv.h"
 #include "rayquery/rq_reflect_resolve_spv.h"
 #include "rayquery/rq_reflect_compose_spv.h"
-#include "rayquery/rq_motion_spv.h"
-#include "rayquery/rq_motion_skin_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
 #include "rayquery/rq_area_vis_spv.h"
@@ -290,7 +288,7 @@ constexpr unsigned kReflectStopFrames = 8u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 63u;
+constexpr unsigned kReflectBindings = 60u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -345,20 +343,19 @@ constexpr unsigned kReflectSampleBinding = kReflectCloudBinding + 1u;
 /// each texel's raw rest samples, 1 x 1 unless the arm is on.
 constexpr unsigned kReflectReferenceBinding = kReflectSampleBinding + 1u;
 // (THE REST'S SECOND MOMENT rides the rest half's alpha since PHOTON-7 stage 6 - its R16F image is deleted.)
-/// ...and THE SCREEN TRACE'S PICTURE (47-49, PHOTON-7 stage 6, the one estimator): the chain's previous picture, the
-/// depth it was drawn at and the object motion (rq_reflect.comp's screenAnswer), or 1 x 1 stand-ins with `screen.x` 0.
-constexpr unsigned kReflectScreenBinding = kReflectReferenceBinding + 1u;   // then 48 the depth, 49 the motion
-/// ...and THE EXPOSURE (50, PHOTON-7 stage 6 commit 6): the chain's measured exposure history (a 1 x 1, the multiplier
+/// (THE SCREEN TRACE'S PICTURE - the previous picture, its depth and the object motion at 47-49 - is deleted with the Both
+/// estimator, PHOTON-7-9A: the bindings after it moved down by its three.)
+/// ...and THE EXPOSURE (47, PHOTON-7 stage 6 commit 6): the chain's measured exposure history (a 1 x 1, the multiplier
 /// the tonemapper scaled the last frame by) - the denoiser space is Lumen's on pre-exposed colour
 /// (jah_reflect_denoise.glsl) - or a stand-in where the multiplier is a constant (ReflectParams::denoiser).
-constexpr unsigned kReflectExposureBinding = kReflectScreenBinding + 3u;
-/// ...and THE REST'S STOP SHARE (51, PHOTON-7 stage 6; jah_reflect_rest.glsl's stop): a trace texel's share of the
+constexpr unsigned kReflectExposureBinding = kReflectReferenceBinding + 1u;
+/// ...and THE REST'S STOP SHARE (48, PHOTON-7 stage 6; jah_reflect_rest.glsl's stop): a trace texel's share of the
 /// one-code display budget - the MIN over the pixels that read it of each one's (r32ui, a positive float's bits, by
 /// the filter's atomic min at rest; all ones = no pixel measured it) - read and reset by the next frame's temporal
 /// pass, which stops the texel when its own standard error is within it. A STATISTIC read for the stop, never colour
 /// fed back.
 constexpr unsigned kReflectShareBinding = kReflectExposureBinding + 1u;
-/// ...and THE REST'S COMPACT LIST (52, PHOTON-7 stage 6, the lead's compact path): a header (the halves' counts, the
+/// ...and THE REST'S COMPACT LIST (49, PHOTON-7 stage 6, the lead's compact path): a header (the halves' counts, the
 /// compact pass's indirect dispatch, the hit list's record count after the tile pass: kCompactList*) and two halves of
 /// texel indices, each as long as the trace grid - the tile pass lists, in the half of this frame, each texel still
 /// converging, and when last frame's count was within kReflectCompactTexels leaves them to the COMPACT PASS, one warp a
@@ -366,19 +363,19 @@ constexpr unsigned kReflectShareBinding = kReflectExposureBinding + 1u;
 /// converging count rose 8,827 -> 83,695 in a frame, and the texels past it were traced by neither pass, which ones by
 /// the atomics' order).
 constexpr unsigned kReflectCompactBinding = kReflectShareBinding + 1u;
-/// ...and THE MOVING SE INSTRUMENT (53, PHOTON-7 stage 6, the lag law's row): a float a trace texel - the temporal pass'
+/// ...and THE MOVING SE INSTRUMENT (50, PHOTON-7 stage 6, the lag law's row): a float a trace texel - the temporal pass'
 /// standard error of the texel's moving mean in DISPLAY CODES (its luma variance over its frames, carried through the
 /// denoiser space's slope to the display table) - copied beside the state by the history readback (the arm
 /// reflect.historyReadback) into RayQueryStatus::reflectHistorySe. Sized only while the arm is on: a 16-byte stand-in
 /// else, and the pass writes nothing past its length.
 constexpr unsigned kReflectMovingSeBinding = kReflectCompactBinding + 1u;
-/// ...and THE DIRECT TERM's BACK side per cascade (54, PHOTON-7 stage 7: the direct store holds the two sides, and the
+/// ...and THE DIRECT TERM's BACK side per cascade (51, PHOTON-7 stage 7: the direct store holds the two sides, and the
 /// hit's share and its mover gate read their mean - jah_rq_hit.glsl; moved past stage 6's bindings at the merge).
 constexpr unsigned kReflectDirectBackBinding = kReflectMovingSeBinding + 1u;
-/// ...and THE SAMPLE's NEE PART (55, PHOTON-7 stage 11, 11-1b): the next-event estimate inside this frame's sample, which
+/// ...and THE SAMPLE's NEE PART (52, PHOTON-7 stage 11, 11-1b): the next-event estimate inside this frame's sample, which
 /// the resolve keeps apart from the BRDF part its density ratio reweights (rq_reflect_resolve.comp).
 constexpr unsigned kReflectNeeBinding = kReflectDirectBackBinding + 1u;
-/// ...and THE PICK (56, PHOTON-7 11-2: the reds' instrument, jahlab's `pick`): one trace texel's sample and rest terms,
+/// ...and THE PICK (53, PHOTON-7 11-2: the reds' instrument, jahlab's `pick`): one trace texel's sample and rest terms,
 /// a frame a slot of a 64-slot host-visible ring (kReflectPickWords words a slot), while the arm reflect.pick names it.
 constexpr unsigned kReflectPickBinding = kReflectNeeBinding + 1u;
 constexpr unsigned kReflectPickSlots = 64u, kReflectPickWords = 64u;
@@ -386,12 +383,12 @@ constexpr unsigned kReflectPickSlots = 64u, kReflectPickWords = 64u;
 /// a frame a slot - word 0 the fragments recorded, then four records of 31 words - over 256 frames (a stillness window's
 /// 120 and its move's trail fit; the lab reads it back by each slot's engine frame).
 constexpr unsigned kColourPickSlots = 256u, kColourPickWords = 128u;
-/// ...and THE CHANGED-REGION LIST (57, PHOTON-7 8B, B2: jah_rest_regions.glsl; the gather's resume reads the same buffer)
-/// and THE BRICK MASKS (58-61, one a cascade in the hit set's order): a resting texel resumes when a geometry region
+/// ...and THE CHANGED-REGION LIST (54, PHOTON-7 8B, B2: jah_rest_regions.glsl; the gather's resume reads the same buffer)
+/// and THE BRICK MASKS (55-58, one a cascade in the hit set's order): a resting texel resumes when a geometry region
 /// crosses one of its segments, or a light region or a changed brick lies at one of its hits (rq_reflect.comp).
 constexpr unsigned kReflectRegionsBinding = kReflectPickBinding + 1u;
 constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
-/// ...and THE REFINEMENT (62, PHOTON-7 8B, B2's no-pop hand-over; jah_reflect_rest.glsl kRefine*): rgba32ui a trace
+/// ...and THE REFINEMENT (59, PHOTON-7 8B, B2's no-pop hand-over; jah_reflect_rest.glsl kRefine*): rgba32ui a trace
 /// texel and eye - a texel reached at rest by a CARD region alone re-rests in the background showing its answer, then
 /// walks to the new one at a code a frame (the gather's B3, the reflection's form).
 constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
@@ -1156,12 +1153,6 @@ public:
     /// the composite, in front of the opaque pass — after the hit write-back has
     /// completed the temporal mean of every texel whose ray the decode shaded.
     void finishReflect(const ReflectPassListener *key);
-    /// THE SCREEN SOURCES' OBJECT MOTION (REFLECT-MOVERS-1): writes `jahSsrVelocity`
-    /// at every pixel of a slot that moved this frame (rq_motion.comp), in front of
-    /// the trace whose screen hits read it (traceRayJobs, PHOTON-7 stage 6). Does
-    /// nothing — the chain's clear stands, the camera path — when the chain carries
-    /// no id pass or the switch is off.
-    void recordMotion(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass);
     /// Frees a view's reflection resources. Called from ~ReflectPassListener.
     void forgetReflect(const ReflectPassListener *key);
     /// How many rays the last recorded trace dispatched, and the GPU
@@ -1178,15 +1169,6 @@ private:
     using EyeBasisF = CameraImageF;
 
     struct ReflectView {
-        /// THE SCREEN SOURCES' OBJECT MOTION (REFLECT-MOVERS-1, rq_motion.comp): its
-        /// own ring of sets and parameter buffers, recorded in front of the trace.
-        VkDescriptorSet motionSets[3] = {};
-        RawBuffer       motionParams[3];
-        /// The per-slot geometry rows the POSED motion job reads (SKINNED-VELOCITY-1),
-        /// a copy per ring slot like the trace's own.
-        RawBuffer       motionGeomRowOfSlot[3];
-        unsigned        motionFrame = 0;
-        /// Its GPU time is the monitor row "rq.reflect.motion" (owner = the key).
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
         unsigned        framesSinceMoverMoved = 1000u;
@@ -1210,16 +1192,16 @@ private:
         /// THIS FRAME'S RAW SAMPLE (PHOTON-2 1b): one image (not a pair — written and read within the frame), the
         /// temporal pass' neighbourhood and blend input. 8 bytes a trace texel.
         ReflectImage sample;
-        /// ...and ITS NEE PART (PHOTON-7 11-1b, binding 55): the same size and format; the resolve's.
+        /// ...and ITS NEE PART (PHOTON-7 11-1b, binding 52): the same size and format; the resolve's.
         ReflectImage nee;
         /// THE REST'S REFERENCE (R1 (f)'s arm "reflect.restReference"): rgba32f, the texel's raw rest samples' mean and
         /// count; the trace's size under the arm, 1 x 1 otherwise (`referenceFull`).
         ReflectImage reference;
-        /// THE REST'S STOP SHARE (binding 51): r32ui a trace texel, a float's bits.
+        /// THE REST'S STOP SHARE (binding 48): r32ui a trace texel, a float's bits.
         ReflectImage share;
-        /// THE REFINEMENT (binding 62, B2's no-pop hand-over): rgba32ui a trace texel, jah_reflect_rest.glsl's layout.
+        /// THE REFINEMENT (binding 59, B2's no-pop hand-over): rgba32ui a trace texel, jah_reflect_rest.glsl's layout.
         ReflectImage refine;
-        /// THE REST'S COMPACT LIST (binding 52, kReflectCompactBinding): [0..1] the halves' counts, then the halves; the
+        /// THE REST'S COMPACT LIST (binding 49, kReflectCompactBinding): [0..1] the halves' counts, then the halves; the
         /// half this frame lists into flips each traced frame.
         RawBuffer compactList;
         unsigned compactCap = 0u;        ///< a half's texels: the trace grid the list was made for
@@ -1332,12 +1314,12 @@ private:
         Ogre::TextureGpu *passReads[4] = {};
         std::vector<unsigned short> histHost;
         unsigned histHostW = 0u, histHostH = 0u, histHostFrame = 0u;
-        /// THE MOVING SE INSTRUMENT (binding 53): the temporal pass' buffer (the arm's size, else 16 bytes), its host
+        /// THE MOVING SE INSTRUMENT (binding 50): the temporal pass' buffer (the arm's size, else 16 bytes), its host
         /// ring beside histReadback (a slot a frame, the state's slot) and the decoded copy (the state's grid).
         RawBuffer movingSe;
         RawBuffer seReadback;
         std::vector<float> histHostSe;
-        /// THE PICK (binding 56, the arm reflect.pick): the ring the passes write the picked texel into
+        /// THE PICK (binding 53, the arm reflect.pick): the ring the passes write the picked texel into
         RawBuffer pick;
         uint32_t pickFrames[64] = {};   ///< each slot's dispatch frame (the lab orders the ring by it)
     };
@@ -1370,17 +1352,6 @@ private:
         bool held = false;
     };
     std::unordered_map<const OgreScene *, ForgottenReflect> mForgottenReflects;
-    bool makeMotionPipeline(std::string &err);
-    VkDescriptorSetLayout mMotionSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout      mMotionPipeLayout = VK_NULL_HANDLE;
-    VkPipeline            mMotionPipeline = VK_NULL_HANDLE;
-    VkShaderModule        mMotionModule = VK_NULL_HANDLE;
-    /// THE POSED TWIN (rq_motion_skin.comp, SKINNED-VELOCITY-1): the same layout and
-    /// set; null when it could not be made (the rigid job runs alone).
-    VkPipeline            mMotionSkinPipeline = VK_NULL_HANDLE;
-    VkShaderModule        mMotionSkinModule = VK_NULL_HANDLE;
-    VkDescriptorPool      mMotionPool = VK_NULL_HANDLE;
-    bool                  mMotionFailed = false;
     /// Rebuilds `sa`'s alpha table from the feed's alpha-tested slots (the masks: the GPU scene's table).
     void updateAlphaTable(OgreScene *scene, SceneAs &sa);
     /// Rebuilds `sa`'s hit table (FAR-SUN-2) from the scene's lights and material rows.
@@ -3089,17 +3060,6 @@ void RayQueryTier::close() {
     mCardParityPool = VK_NULL_HANDLE; mCardParityPipeline = VK_NULL_HANDLE;
     mCardParityModule = VK_NULL_HANDLE; mCardParityPipeLayout = VK_NULL_HANDLE;
     mCardParitySetLayout = VK_NULL_HANDLE;
-    if (mMotionPool) vkDestroyDescriptorPool(mVk, mMotionPool, nullptr);
-    if (mMotionPipeline) vkDestroyPipeline(mVk, mMotionPipeline, nullptr);
-    if (mMotionPipeLayout) vkDestroyPipelineLayout(mVk, mMotionPipeLayout, nullptr);
-    if (mMotionSetLayout) vkDestroyDescriptorSetLayout(mVk, mMotionSetLayout, nullptr);
-    if (mMotionModule) vkDestroyShaderModule(mVk, mMotionModule, nullptr);
-    if (mMotionSkinPipeline) vkDestroyPipeline(mVk, mMotionSkinPipeline, nullptr);
-    if (mMotionSkinModule) vkDestroyShaderModule(mVk, mMotionSkinModule, nullptr);
-    mMotionSkinPipeline = VK_NULL_HANDLE; mMotionSkinModule = VK_NULL_HANDLE;
-    mMotionPool = VK_NULL_HANDLE; mMotionPipeline = VK_NULL_HANDLE;
-    mMotionPipeLayout = VK_NULL_HANDLE; mMotionSetLayout = VK_NULL_HANDLE;
-    mMotionModule = VK_NULL_HANDLE; mMotionFailed = false;
     if (mReflectPool) vkDestroyDescriptorPool(mVk, mReflectPool, nullptr);
     if (mReflectPipeline) vkDestroyPipeline(mVk, mReflectPipeline, nullptr);
     if (mReflectCompactPipeline) vkDestroyPipeline(mVk, mReflectCompactPipeline, nullptr);
@@ -5886,14 +5846,12 @@ struct ReflectParams {
     float restLists[4] = {};
     float restBrickOrigin[GatherRestInputs::kCascades][4] = {};
     float restBrickDims[GatherRestInputs::kCascades][4] = {};
-    /// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6; rq_reflect.comp's screen, screen2): [0] = 1 the screen trace runs,
-    /// [1] = 1 the screen alone (reflectSources Screen), [2] its steps, [3] its phase rule; screen2: the march's length
-    /// and thickness, the far copies' query from / to (0 = none).
-    float screen[4] = {};
-    float screen2[4] = {};
+    /// THE FAR COPIES' QUERY (rq_reflect.comp's farQuery): from / to (0 = none); [2], [3] unused. (The screen trace's
+    /// two blocks before it are deleted with the Both estimator, PHOTON-7-9A.)
+    float farQuery[4] = {};
     /// THE DENOISER SPACE'S EXPOSURE (PHOTON-7 stage 6 commit 6; the resolve's and the temporal pass' `denoiser`): [0] =
     /// the view's exposure multiplier where it is a constant (a fixed tonemap: the chain's cleared 1 x 1; 1 with no
-    /// tonemap), [1] = 1 when the chain's measured history is bound at binding 50 instead.
+    /// tonemap), [1] = 1 when the chain's measured history is bound at binding 47 instead.
     float denoiser[4] = {};
     /// THE DISPLAY'S CODE SLOPE (commit 8's hold, lever (i)): 64 entries, d(display code) / d(ln x) of a grey at the
     /// PRE-EXPOSED luma x = E L over ln x in [kDisplayLnMin, kDisplayLnMin + 63 kDisplayLnStep] - through the grade, the
@@ -6137,22 +6095,19 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         kHitSetSlot,                                     // 44 (the hit set) the cloud field (FAR-SUN-2)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 45 this frame's raw sample (PHOTON-2 1b)
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 46 the rest's reference (PHOTON-2 round 2, R1 (f))
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 47 the previous picture (PHOTON-7 stage 6)
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 48 ...the depth it was drawn at
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 49 ...the object motion
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 50 the exposure history (PHOTON-7 stage 6 commit 6)
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 51 the rest's stop share
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 52 the rest's compact list
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 53 the moving SE instrument
-        kHitSetSlot,                                     // 54 (the hit set) voxelDirectBack[] (PHOTON-7 stage 7)
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 55 the sample's NEE part (PHOTON-7 stage 11, 11-1b)
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 56 the pick (PHOTON-7 11-2, the reds' instrument)
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 57 the changed-region list (PHOTON-7 8B, B2)
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 58 the brick mask of cascade 0
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 59 ...1
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 60 ...2
-        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 61 ...3
-        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 62 the refinement word (PHOTON-7 8B, B2's hand-over)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 47 the exposure history (PHOTON-7 stage 6 commit 6)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 48 the rest's stop share
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 49 the rest's compact list
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 50 the moving SE instrument
+        kHitSetSlot,                                     // 51 (the hit set) voxelDirectBack[] (PHOTON-7 stage 7)
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 52 the sample's NEE part (PHOTON-7 stage 11, 11-1b)
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 53 the pick (PHOTON-7 11-2, the reds' instrument)
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               // 54 the changed-region list (PHOTON-7 8B, B2)
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 55 the brick mask of cascade 0
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 56 ...1
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 57 ...2
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 58 ...3
+        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 59 the refinement word (PHOTON-7 8B, B2's hand-over)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6412,12 +6367,6 @@ void RayQueryTier::clearReflectImages(ReflectView &rv, VkCommandBuffer cmd) {
 }
 
 void RayQueryTier::dropReflect(ReflectView &rv) {
-    for (unsigned i = 0; i < 3u; ++i) {
-        if (rv.motionSets[i]) retireSet(rv.motionSets[i], mMotionPool);
-        rv.motionSets[i] = VK_NULL_HANDLE;
-        retire(rv.motionParams[i]);
-        retire(rv.motionGeomRowOfSlot[i]);
-    }
     for (unsigned i = 0; i < kReflectRing; ++i) {
         retireSet(rv.sets[i]);
         rv.sets[i] = VK_NULL_HANDLE;
@@ -6466,7 +6415,6 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (tr >= 0.0f || fi >= 0.0f || te >= 0.0f || re >= 0.0f)
             st.reflectMs = std::max(st.reflectMs, std::max(tr, 0.0f) + std::max(re, 0.0f) + std::max(te, 0.0f) +
                                                       std::max(fi, 0.0f));
-        st.reflectMotionMs = std::max(st.reflectMotionMs, monitor::lastGpuMs("rq.reflect.motion", kv.first));
         // THE HISTORY COUNT (PHOTON-2 stage 0): the view that holds a decoded copy (one view per scene in the
         // stillness door's use; with several, the last in the map's order that holds one).
         if (!kv.second.histHost.empty()) {
@@ -6561,8 +6509,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             return;
         }
         Ogre::LogManager::getSingleton().logMessage(
-            "Jahshaka: ray-traced reflections ON (PHOTON R5) — one estimator: the screen trace "
-            "answers what it can vouch for, rays answer the rest");
+            "Jahshaka: ray-traced reflections ON (PHOTON R5) — the rays answer every reflected sample");
     }
 
     // THE CHAIN'S TEXTURES, by the names OgreChain.cpp declares them under. A
@@ -6606,25 +6553,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             idDepthTex->getHeight() != idTex->getHeight())
             idTex = idDepthTex = nullptr;
     }
-    // THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): this view's previous picture,
-    // the depth it was drawn at and the object motion — declared only where the chain carries its SCREEN SOURCES
-    // (ChainDesc::screenSources: none on a ray chain since PHOTON-7-9A), and asked only of such a chain (Ogre logs
-    // every getDefinedTexture miss). All three present and the picture the view's size, or the screen trace is off this
-    // frame and the rays answer alone.
     const ChainDesc chainD = view->chainDesc();
-    Ogre::TextureGpu *prevColourTex = nullptr, *prevDepthTex = nullptr, *velocityTex = nullptr;
-    if (chainD.screenSources() && !view->stereo()) {
-        try {
-            prevColourTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrev"));
-            prevDepthTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrevDepth"));
-            velocityTex = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
-        } catch (Ogre::Exception &) { prevColourTex = prevDepthTex = velocityTex = nullptr; }
-        if (!prevColourTex || !prevDepthTex || !velocityTex || prevColourTex->getWidth() != ssrTex->getWidth() ||
-            prevColourTex->getHeight() != ssrTex->getHeight() || prevDepthTex->getWidth() != ssrTex->getWidth() ||
-            prevDepthTex->getHeight() != ssrTex->getHeight())
-            prevColourTex = prevDepthTex = velocityTex = nullptr;
-    }
-    const bool screenTrace = prevColourTex != nullptr;
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
     // texture declared without it has no storage-image usage and the view
     // creation below would be a validation error, so a chain built while the
@@ -6829,21 +6758,12 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE NEE (PHOTON-7 11-1b): 1 = next-event estimation toward the emitter table with the BRDF draw by the balance
     // heuristic; the arm "reflect.nee" 0 = the BRDF-only estimator (the acceptance's reference)
     pp.knobs[3] = arm(ArmId::ReflectNee, true) ? 1.0f : 0.0f;
-    // THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): the screen trace (its march: the chain's length, thickness, steps
-    // and phase rule - the raster march's own numbers, PostFxDesc::ssr*), the screen alone, and the FAR COPIES' query
-    // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
-    // continuation, OgreScreenProbeGather.cpp).
-    pp.screen[0] = screenTrace ? 1.0f : 0.0f;
-    pp.screen[1] = 0.0f;
-    pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
-                                       : (chainD.ssr >= 2 ? 96.0f : 48.0f);
-    pp.screen[3] = float(chainD.ssrMarchPhase);
-    pp.screen2[0] = chainD.ssrMaxDistance;
-    pp.screen2[1] = chainD.ssrThickness;
+    // THE FAR COPIES' QUERY for an escape (from the near length less the far copies' widest hand-over gap to the far
+    // plane: the gather's continuation, OgreScreenProbeGather.cpp).
     {
         const float farPlane = cam->getFarClipDistance() > 0.0f ? float(cam->getFarClipDistance()) : 1000.0f;
-        pp.screen2[2] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, sa.farOverlap));
-        pp.screen2[3] = farPlane > pp.knobs[1] ? farPlane : 0.0f;
+        pp.farQuery[0] = std::max(0.001f, pp.knobs[1] - std::max(0.0f, sa.farOverlap));
+        pp.farQuery[1] = farPlane > pp.knobs[1] ? farPlane : 0.0f;
     }
     // THE RAY ORIGIN'S DRAWN TERM (PHOTON-7 stage 6, AB E15, READ_B F3 - the one law, Types.h): the view's pixel
     // tolerance (the World Mode's atomPixelError, Scene::pixelTolerance) x the LOD bias - what the id pass's cut and
@@ -6945,8 +6865,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE ARM THAT RE-MEASURES THE CLAIM (the shape of "reflect.monoEyes" beside it):
     // the arm "reflect.motion" = 0 switches EVERY branch of REFLECT-MOVERS-1 off at once —
     // the id image withheld (a surface's own motion), motion.w = 0 (a hit's motion,
-    // the reflected image, the mover restarts, the filter's restart band) and the
-    // march's velocity job (recordMotion) — so the paired cost arm of
+    // the reflected image, the mover restarts, the filter's restart band) — so the paired cost arm of
     // gi.reflect_mover measures all of it, latched per frame so ONE process can hold
     // both arms (trap 12). Off is the pre-lane picture up to the mover age's six
     // low bits in the history's mean length (a 2^-17 relative change of a length).
@@ -6978,8 +6897,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         rv.framesSincePoseMoved = poseMoved ? 0u : std::min(rv.framesSincePoseMoved + 1u, 1000u);
     }
     // THE POSED IDENTIFICATION'S ARM ("reflect.posed", latched per frame so one
-    // process holds both arms of gi.reflect_mover --cost-posed): off, the trace and the
-    // march's velocity take the id image alone, the pre-lane motion for a character.
+    // process holds both arms of gi.reflect_mover --cost-posed): off, the trace takes the
+    // id image alone, the pre-lane motion for a character.
     const bool posedOn = arm(ArmId::ReflectPosed, true);
     pp.motion[3] = !motionOn ? 0.0f
                    : (posedOn && rv.framesSincePoseMoved <= 2u) ? 3.0f
@@ -7079,7 +6998,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // later lane added, a per-frame one included, and broke the rest on it): what a ray's answer depends on, member
         // by member - the projection and the targets, the gate and the reach, the cascades, the sky, the card and hit
         // tables, the sun legs, the id pass's image, the alpha table, the origin's terms, the fog, the metal route, the
-        // clouds, the rest's own arms, the screen trace's and the denoiser's. NOT the eye (`sameEye` compares its basis
+        // clouds, the rest's own arms, the far query's and the denoiser's. NOT the eye (`sameEye` compares its basis
         // bit for bit), nor what a still frame changes by construction: the frame index (knobs.z), the rest frame
         // (knobs2.x), the view's age (stereo.y), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
         // (motion.w: a move, which breaks per texel) and the list's capacity (hitList.x: it grows in place).
@@ -7121,7 +7040,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // (the rest block's freeze and reference arms; NOT its ray count, rest.z - the rest's own budget, which moves
         // inside a rest by design - nor rest.w, unused)
         foldF(pp.rest[0]); foldF(pp.rest[1]);
-        fold4(pp.screen); fold4(pp.screen2);
+        fold4(pp.farQuery);
         fold4(pp.denoiser);
         const unsigned long long restKey = reflectRestKey(scene, sa);
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
@@ -7335,7 +7254,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!sampleImg.imageView) { bail("the sample view is null"); return; }
     w[kReflectSampleBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectSampleBinding].pImageInfo = &sampleImg;
-    // ...AND ITS NEE PART (55, PHOTON-7 11-1b).
+    // ...AND ITS NEE PART (52, PHOTON-7 11-1b).
     VkDescriptorImageInfo neeImg{};
     neeImg.imageView = rv.nee.view;
     neeImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -7349,21 +7268,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!referenceImg.imageView) { bail("the reference view is null"); return; }
     w[kReflectReferenceBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectReferenceBinding].pImageInfo = &referenceImg;
-    // THE SCREEN TRACE'S PICTURE (47-49, PHOTON-7 stage 6): the chain's three, point-sampled (the trace reads them by
-    // texel), or the flat stand-in with `screen.x` 0.
-    VkDescriptorImageInfo screenImgs[3] = {};
-    {
-        Ogre::TextureGpu *const src[3] = { prevColourTex, prevDepthTex, velocityTex };
-        for (int i = 0; i < 3; ++i) {
-            screenImgs[i].sampler = mPointSampler;
-            screenImgs[i].imageView = screenTrace ? sampledView(src[i]) : mDummyFlat.view;
-            screenImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!screenImgs[i].imageView) { bail("a screen-trace binding is null"); return; }
-            w[kReflectScreenBinding + i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            w[kReflectScreenBinding + i].pImageInfo = &screenImgs[i];
-        }
-    }
-    // THE EXPOSURE (50, PHOTON-7 stage 6 commit 6): the chain's measured history, or the flat stand-in with
+    // THE EXPOSURE (47, PHOTON-7 stage 6 commit 6): the chain's measured history, or the flat stand-in with
     // `denoiser.y` 0.
     VkDescriptorImageInfo exposureImg{};
     exposureImg.sampler = mPointSampler;
@@ -7372,14 +7277,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!exposureImg.imageView) { bail("the exposure binding is null"); return; }
     w[kReflectExposureBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w[kReflectExposureBinding].pImageInfo = &exposureImg;
-    // THE REST'S STOP SHARE (51): the filter writes it, the temporal pass reads it.
+    // THE REST'S STOP SHARE (48): the filter writes it, the temporal pass reads it.
     VkDescriptorImageInfo shareImg{};
     shareImg.imageView = rv.share.view;
     shareImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!shareImg.imageView) { bail("the rest's stop-share binding is null"); return; }
     w[kReflectShareBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectShareBinding].pImageInfo = &shareImg;
-    // THE REFINEMENT WORD (62, B2): the trace marks a card-only reach, the temporal pass runs the hand-over, the filter
+    // THE REFINEMENT WORD (59, B2): the trace marks a card-only reach, the temporal pass runs the hand-over, the filter
     // and the compose read the answer it shows
     VkDescriptorImageInfo refineImg{};
     refineImg.imageView = rv.refine.view;
@@ -7387,7 +7292,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
     w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectRefineBinding].pImageInfo = &refineImg;
-    // THE REST'S COMPACT LIST (52): a half a trace grid (every texel the tile pass can list - it can never overflow),
+    // THE REST'S COMPACT LIST (49): a half a trace grid (every texel the tile pass can list - it can never overflow),
     // re-made when the trace size changes. 8 bytes a trace texel: 4.15 MB at a 960 x 540 trace.
     {
         const unsigned cap = traceW * traceH;
@@ -7407,7 +7312,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     compactInfo.range = VK_WHOLE_SIZE;
     w[kReflectCompactBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectCompactBinding].pBufferInfo = &compactInfo;
-    // THE MOVING SE INSTRUMENT (53): a float a texel while the readback's arm is on, else the 16-byte stand-in
+    // THE MOVING SE INSTRUMENT (50): a float a texel while the readback's arm is on, else the 16-byte stand-in
     {
         const VkDeviceSize need = arm(ArmId::ReflectHistoryReadback, false)
                                       ? VkDeviceSize(traceW) * traceH * rv.layers * 4u : VkDeviceSize(16u);
@@ -7426,7 +7331,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     movingSeInfo.range = VK_WHOLE_SIZE;
     w[kReflectMovingSeBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectMovingSeBinding].pBufferInfo = &movingSeInfo;
-    // THE PICK (56): the ring, host-visible and zeroed at its making (written only while the arm names a texel)
+    // THE PICK (53): the ring, host-visible and zeroed at its making (written only while the arm names a texel)
     if (!rv.pick.buffer) {
         std::string perr;
         const VkDeviceSize bytes = VkDeviceSize(kReflectPickSlots) * kReflectPickWords * 4u;
@@ -7441,7 +7346,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pickInfo.range = VK_WHOLE_SIZE;
     w[kReflectPickBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[kReflectPickBinding].pBufferInfo = &pickInfo;
-    // THE CHANGED-REGION LIST (57) and THE BRICK MASKS (58-61), B2 - stand-ins where none closed (the count reads 0) or a
+    // THE CHANGED-REGION LIST (54) and THE BRICK MASKS (55-58), B2 - stand-ins where none closed (the count reads 0) or a
     // cascade has no mask (its dims read 0: never indexed)
     VkDescriptorBufferInfo regionInfo{};
     regionInfo.buffer = restIn.regions ? restIn.regions : mRestRegionStandIn.buffer;
@@ -7498,11 +7403,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         if (idDepthTex)
             solver.resolveTransition(trans, idDepthTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
-        // THE SCREEN TRACE'S PICTURE: the copies the last frame wrote, the motion this frame's job wrote (a UAV) ahead.
-        if (screenTrace)
-            for (Ogre::TextureGpu *t : { prevColourTex, prevDepthTex, velocityTex })
-                solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture,
-                                         Ogre::ResourceAccess::Read, computeStage);
         if (exposureTex)
             solver.resolveTransition(trans, exposureTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
@@ -7623,101 +7523,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.rays = hold ? 0u : traceW * traceH;
     if (!hold) ++rv.frame;
     if (!inPlace) ++rv.flip;
-}
-
-// ---- THE SCREEN MARCH'S OBJECT MOTION (REFLECT-MOVERS-1) ----------------------
-namespace {
-/// rq_motion.comp's set 0, one type a binding — and rq_motion_skin.comp's, which
-/// reads 0-5 and the ray's three after them. The rigid job never reads 6-8, so a
-/// frame with no pose moving leaves them unwritten (a binding a pipeline does not
-/// statically use need not hold a valid descriptor).
-constexpr unsigned kMotionBindings = 9u;
-constexpr unsigned kMotionRigidBindings = 6u;
-constexpr VkDescriptorType kMotionTypes[kMotionBindings] = {
-    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,           // 0 params
-    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 1 depth
-    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 2 the id image
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 3 the GPU scene's instances
-    VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,            // 4 jahSsrVelocity
-    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,   // 5 the id pass's own depth (ID-DEPTH-1)
-    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   // 6 the scene's TLAS (posed job)
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 7 the per-slot geometry rows
-    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,           // 8 the GPU scene's geometry rows
-};
-/// rq_motion.comp's Params, member for member.
-struct MotionParams {
-    float camPos[4] = {};
-    float rayTL[4] = {};
-    float rayRight[4] = {};
-    float rayDown[4] = {};
-    float fwd[4] = {};
-    float projParams[4] = {};
-    float resolution[4] = {};
-    /// rq_motion_skin.comp's: x = 1 when it runs, y = the per-slot row entries.
-    float skin[4] = {};
-};
-/// Sets in the pool: a ring a view, for as many views as the reflection pool serves.
-constexpr unsigned kMotionRing = 3u;
-}   // namespace
-
-bool RayQueryTier::makeMotionPipeline(std::string &err) {
-    VkDescriptorSetLayoutBinding b[kMotionBindings] = {};
-    for (unsigned i = 0; i < kMotionBindings; ++i) {
-        b[i].binding = i;
-        b[i].descriptorType = kMotionTypes[i];
-        b[i].descriptorCount = 1;
-        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    // THE LAYOUT AND ITS POOL LINE IN ONE CALL (VkDescriptorPools.h).
-    DescriptorPoolPlan plan;
-    if (!plan.makeLayout(mVk, b, kMotionBindings, kMaxTimedScenes * kMotionRing, mMotionSetLayout, err, "rayquery/motion")) return false;
-    VkPipelineLayoutCreateInfo pli{};
-    pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pli.setLayoutCount = 1;
-    pli.pSetLayouts = &mMotionSetLayout;
-    if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mMotionPipeLayout) != VK_SUCCESS) {
-        err = "rayquery/motion: vkCreatePipelineLayout failed";
-        return false;
-    }
-    VkShaderModuleCreateInfo smi{};
-    smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    smi.codeSize = sizeof(krq_motionSpv);
-    smi.pCode = krq_motionSpv;
-    if (vkCreateShaderModule(mVk, &smi, nullptr, &mMotionModule) != VK_SUCCESS) {
-        err = "rayquery/motion: vkCreateShaderModule failed";
-        return false;
-    }
-    VkComputePipelineCreateInfo cpi{};
-    cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-    cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    cpi.stage.module = mMotionModule;
-    cpi.stage.pName = "main";
-    cpi.layout = mMotionPipeLayout;
-    if (createComputePipeline(cpi, &mMotionPipeline, "motion") != VK_SUCCESS) {
-        err = "rayquery/motion: vkCreateComputePipelines failed";
-        return false;
-    }
-    // THE POSED TWIN, same layout. A failure is logged and leaves the rigid job whole.
-    {
-        VkShaderModuleCreateInfo ssi{};
-        ssi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        ssi.codeSize = sizeof(krq_motionSkinSpv);
-        ssi.pCode = krq_motionSkinSpv;
-        VkComputePipelineCreateInfo spi = cpi;
-        if (vkCreateShaderModule(mVk, &ssi, nullptr, &mMotionSkinModule) == VK_SUCCESS) {
-            spi.stage.module = mMotionSkinModule;
-            if (createComputePipeline(spi, &mMotionSkinPipeline, "motion skin") != VK_SUCCESS)
-                mMotionSkinPipeline = VK_NULL_HANDLE;
-        }
-        if (!mMotionSkinPipeline)
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: the march's posed object motion off — its pipeline could not be made");
-    }
-    // The pool its layout planned (VkDescriptorPools.h): a ring a view.
-    if (!plan.create(mVk, "rayquery/motion", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mMotionPool, err))
-        return false;
-    return ensureSamplers(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -8628,224 +8433,6 @@ uint64_t RayQueryTier::alphaTableOf(const OgreScene *scene) const {
     if (!arm(ArmId::ReflectAlphaTested, true)) return 0u;
     const SceneAs *sa = asOf(scene);
     return sa ? uint64_t(sa->alphaAddress) : 0u;
-}
-
-void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
-                                Ogre::CompositorPass *pass) {
-    if (!isOpen() || mMotionFailed || !view || !pass) return;
-    // THE ARM ("reflect.motion", latched per frame so one process holds both arms):
-    // off, the chain's clear stands and the resolve takes the camera path.
-    if (!arm(ArmId::ReflectMotion, true)) return;
-    OgreScene *scene = view->ogreScene();
-    Ogre::Camera *cam = view->camera();
-    if (!scene || !cam || view->stereo()) return;
-    const Ogre::CompositorNode *node = pass->getParentNode();
-    if (!node) return;
-    // (the chain declares both only with the march and the id pass: never ask it
-    // otherwise — a miss is logged as an exception every frame)
-    if (!view->chainDesc().atomDraw) return;
-    Ogre::TextureGpu *vel = nullptr, *ids = nullptr, *depth = nullptr, *idDepth = nullptr;
-    try {
-        vel = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
-        ids = node->getDefinedTexture(Ogre::IdString(kAtomIdTexture));
-        depth = node->getDefinedTexture(Ogre::IdString("jahDepth"));
-        // THE ID PASS'S OWN DEPTH (ID-DEPTH-1; the chain copies it every frame on a
-        // chain whose job runs — OgreChain.cpp, the atom id depth).
-        idDepth = node->getDefinedTexture(Ogre::IdString("jahAtomViewDepth"));
-    } catch (Ogre::Exception &) { return; }
-    if (!vel || !ids || !depth || !idDepth || !vel->isUav()) return;
-    const unsigned w = vel->getWidth(), h = vel->getHeight();
-    if (!w || !h || ids->getWidth() != w || ids->getHeight() != h || depth->getWidth() != w ||
-        depth->getHeight() != h || idDepth->getWidth() != w || idDepth->getHeight() != h)
-        return;
-    detail::GpuScene &gs = scene->gpuScene();
-    Ogre::UavBufferPacked *instances = gs.live() ? gs.instanceBuffer() : nullptr;
-    if (!instances || !gs.slotCount()) return;
-    std::string err;
-    if (!mMotionPipeline) {
-        if (!makeMotionPipeline(err)) {
-            mMotionFailed = true;
-            Ogre::LogManager::getSingleton().logMessage("Jahshaka: the march's object motion off — " + err);
-            return;
-        }
-    }
-    ReflectView &rv = mReflects[key];
-    const unsigned ring = rv.motionFrame % kMotionRing;
-    if (!rv.motionParams[ring].buffer &&
-        !makeBuffer(sizeof(MotionParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false,
-                    rv.motionParams[ring], err))
-        return;
-    if (!rv.motionSets[ring]) {
-        VkDescriptorSetAllocateInfo dai{};
-        dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dai.descriptorPool = mMotionPool;
-        dai.descriptorSetCount = 1;
-        dai.pSetLayouts = &mMotionSetLayout;
-        if (vkAllocateDescriptorSets(mVk, &dai, &rv.motionSets[ring]) != VK_SUCCESS) {
-            rv.motionSets[ring] = VK_NULL_HANDLE;
-            return;
-        }
-    }
-    // THE PARAMETERS: this camera's image basis expanded to the target (the trace's
-    // own form, so the two reconstruct one world point from one depth).
-    MotionParams mp{};
-    {
-        const bool ortho = cam->getProjectionType() == Ogre::PT_ORTHOGRAPHIC;
-        Ogre::Real fl = 0, fr = 0, ft = 0, fb = 0;
-        cam->getFrustumExtents(fl, fr, ft, fb, ortho ? Ogre::FET_PROJ_PLANE_POS : Ogre::FET_TAN_HALF_ANGLES);
-        EyeBasisF e = eyeBasis(ortho, cam->getDerivedPosition(), cam->getDerivedOrientation(), float(fl),
-                               float(fr), float(ft), float(fb));
-        expandEyeToTarget(e, view->chainDesc(), w, h);
-        memcpy(mp.camPos, e.camPos, sizeof(mp.camPos));
-        memcpy(mp.rayTL, e.rayTL, sizeof(mp.rayTL));
-        memcpy(mp.rayRight, e.rayRight, sizeof(mp.rayRight));
-        memcpy(mp.rayDown, e.rayDown, sizeof(mp.rayDown));
-        memcpy(mp.fwd, e.fwd, sizeof(mp.fwd));
-        const Ogre::Vector2 ab = cam->getProjectionParamsAB();
-        mp.projParams[0] = ab.x;
-        mp.projParams[1] = ab.y;
-        mp.resolution[0] = float(w);
-        mp.resolution[1] = float(h);
-        mp.resolution[2] = float(gs.slotCount());
-    }
-    // THE POSED JOB (SKINNED-VELOCITY-1): only while a POSE moved in the last two
-    // frames (the skin pass' own stamp) and the scene holds a TLAS to ask; its rows
-    // are the ones the TLAS was written with, flushed first (a row staged but not
-    // uploaded is a zero address — the GPU SCENE TABLES rule).
-    SceneAs *skinSa = nullptr;
-    Ogre::UavBufferPacked *skinGeomRows = nullptr;
-    uint32_t skinGeomSlots = 0u;
-    if (mMotionSkinPipeline && arm(ArmId::ReflectPosed, true)) {
-        SceneAs *sit = asOf(scene);
-        const uint32_t vaoFrame = mRs->getVaoManager()->getFrameCount();
-        if (sit && sit->tlas && sit->st.enabled &&
-            sit->skinPosedFrame != 0xFFFFFFFFu && uint32_t(vaoFrame - sit->skinPosedFrame) <= 2u) {
-            skinSa = sit;
-            gs.flushGeomRows();
-            skinGeomRows = gs.geomBuffer();
-            skinGeomSlots = skinGeomRows ? uint32_t(skinSa->geomRowOfSlot.size()) : 0u;
-            if (skinGeomSlots) {
-                RawBuffer &rb = rv.motionGeomRowOfSlot[ring];
-                const VkDeviceSize want = VkDeviceSize(skinGeomSlots) * sizeof(uint32_t);
-                if (rb.buffer && rb.size < want) retire(rb);
-                if (!rb.buffer && !makeBuffer(std::max<VkDeviceSize>(want, 1024u), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              true, false, rb, err))
-                    skinGeomSlots = 0u;
-                else
-                    std::memcpy(rb.mapped, skinSa->geomRowOfSlot.data(), size_t(want));
-            }
-            if (!skinGeomSlots) skinSa = nullptr;
-        }
-    }
-    mp.skin[0] = skinSa ? 1.0f : 0.0f;
-    mp.skin[1] = float(skinGeomSlots);
-    memcpy(rv.motionParams[ring].mapped, &mp, sizeof(mp));
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
-    VkDescriptorBufferInfo ub{};
-    ub.buffer = rv.motionParams[ring].buffer;
-    ub.range = sizeof(MotionParams);
-    VkDescriptorImageInfo img[4] = {};
-    img[0].sampler = mPointSampler;
-    img[0].imageView = sampledView(depth);
-    img[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    img[3].sampler = mPointSampler;
-    img[3].imageView = sampledView(idDepth);
-    img[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    img[1].sampler = mPointSampler;
-    img[1].imageView = sampledView(ids);
-    img[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = vel;
-        slot.access = Ogre::ResourceAccess::Write;
-        slot.pixelFormat = vel->getPixelFormat();
-        img[2].imageView = static_cast<Ogre::VulkanTextureGpu *>(vel)->createView(slot, false);
-        retireView(img[2].imageView);
-        img[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    }
-    if (!img[0].imageView || !img[1].imageView || !img[2].imageView || !img[3].imageView) return;
-    VkDescriptorBufferInfo instInfo{};
-    {
-        auto *bi = static_cast<Ogre::VulkanBufferInterface *>(instances->getBufferInterface());
-        instInfo.buffer = bi->getVboName();
-        instInfo.offset = VkDeviceSize(instances->_getFinalBufferStart()) * instances->getBytesPerElement();
-        instInfo.range = instances->getTotalSizeBytes();
-    }
-    VkWriteDescriptorSet wr[kMotionBindings] = {};
-    for (unsigned i = 0; i < kMotionBindings; ++i) {
-        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wr[i].dstSet = rv.motionSets[ring];
-        wr[i].dstBinding = i;
-        wr[i].descriptorCount = 1;
-        wr[i].descriptorType = kMotionTypes[i];
-    }
-    wr[0].pBufferInfo = &ub;
-    wr[1].pImageInfo = &img[0];
-    wr[2].pImageInfo = &img[1];
-    wr[3].pBufferInfo = &instInfo;
-    wr[4].pImageInfo = &img[2];
-    wr[5].pImageInfo = &img[3];
-    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
-    VkDescriptorBufferInfo geomBufs[2] = {};
-    if (skinSa) {
-        asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-        asWrite.accelerationStructureCount = 1;
-        asWrite.pAccelerationStructures = &skinSa->tlas;
-        wr[6].pNext = &asWrite;
-        geomBufs[0].buffer = rv.motionGeomRowOfSlot[ring].buffer;
-        geomBufs[0].range = VK_WHOLE_SIZE;
-        auto *gbi = static_cast<Ogre::VulkanBufferInterface *>(skinGeomRows->getBufferInterface());
-        geomBufs[1].buffer = gbi->getVboName();
-        geomBufs[1].offset = VkDeviceSize(skinGeomRows->_getFinalBufferStart()) * skinGeomRows->getBytesPerElement();
-        geomBufs[1].range = skinGeomRows->getTotalSizeBytes();
-        wr[7].pBufferInfo = &geomBufs[0];
-        wr[8].pBufferInfo = &geomBufs[1];
-    }
-    vkUpdateDescriptorSets(mVk, skinSa ? kMotionBindings : kMotionRigidBindings, wr, 0, nullptr);
-    // THE LAYOUTS through Ogre's solver, before the command buffer is taken: the
-    // velocity (cleared by the chain as a render target) as a UAV; the resolve's own
-    // barrier analysis, after this early pre-execute, takes it back to a texture.
-    {
-        const Ogre::uint8 computeStage = 1u << Ogre::GPT_COMPUTE_PROGRAM;
-        Ogre::BarrierSolver &solver = mRs->getBarrierSolver();
-        Ogre::ResourceTransitionArray trans;
-        solver.resolveTransition(trans, vel, Ogre::ResourceLayout::Uav, Ogre::ResourceAccess::Write,
-                                 computeStage);
-        for (Ogre::TextureGpu *t : { depth, ids, idDepth })
-            solver.resolveTransition(trans, t, Ogre::ResourceLayout::Texture, Ogre::ResourceAccess::Read,
-                                     computeStage);
-        solver.resolveTransition(trans, instances, Ogre::ResourceAccess::Read, computeStage);
-        mRs->executeResourceTransition(trans);
-    }
-    VkCommandBuffer cmd = frameCmd();
-    if (!cmd) return;
-    monitor::CacheScope motionJob(CacheKind::Gi, WorkReason::Camera, 0, "rq.reflect.motion", mRs, key);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionPipeLayout, 0, 1,
-                            &rv.motionSets[ring], 0, nullptr);
-    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
-    vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
-    if (skinSa) {
-        // THE POSED PIXELS, after the rigid ones: the two write disjoint pixels (the
-        // id pass drew them or it did not), ordered anyway so no write races a write.
-        VkMemoryBarrier waw{};
-        waw.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        waw.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        waw.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
-                             &waw, 0, nullptr, 0, nullptr);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mMotionSkinPipeline);
-        JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
-        vkCmdDispatch(cmd, (w + 7u) / 8u, (h + 7u) / 8u, 1u);
-    }
-    motionJob.close();
-    ++rv.motionFrame;
 }
 
 void RayQueryTier::finishReflect(const ReflectPassListener *key) {
@@ -12384,14 +11971,6 @@ void RayQueryTier::traceRayJobs(const ReflectPassListener *key, OgreView *view, 
     } else {
         hitStandIns(hit);
         hv.live = false;
-    }
-    // THE OBJECT MOTION FIRST (REFLECT-MOVERS-1; moved here from the raster resolve's pass with PHOTON-7 stage 6's one
-    // estimator): `jahSsrVelocity` at every pixel of a slot that moved this frame, which the trace's screen hits read
-    // (rq_reflect.comp's screenAnswer) - on a ray chain whose screen sources exist (ChainDesc::screenSources: no
-    // capture workspace reaches here, so no job runs twice).
-    {
-        const ChainDesc cd = view->chainDesc();
-        if (cd.rayReflect && cd.screenSources() && cd.atomDraw && !view->stereo()) recordMotion(key, view, next);
     }
     // THE TRACES (their records are what the decode shades). The sun contact rides
     // the same pass: it reads the camera before the next pass re-aspects anything,

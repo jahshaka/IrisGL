@@ -27,7 +27,7 @@
 //
 // THE NEE PART (PHOTON-7 stage 11, 11-1b; the preflight's gap G2): a sample of the next-event estimation is TWO directions
 // - the BRDF's draw (its answer less the emission share the NEE covers) and the NEE's - so the density ratio above is the
-// BRDF part's alone: the trace writes the NEE part apart (binding 55), the ratio reuses each sample's BRDF part, and the
+// BRDF part's alone: the trace writes the NEE part apart (binding 52), the ratio reuses each sample's BRDF part, and the
 // NEE parts are averaged beside it by the plane weight and the reuse's fade (a neighbour's NEE estimate is read as this
 // texel's, as its radiance is). At rest the own sample passes whole, as before; with no emitter the NEE parts are 0 and
 // the resolve is the one before it, bit for bit.
@@ -58,9 +58,9 @@ layout( rg32ui, set = 0, binding = 8 ) uniform readonly uimage2DArray statePrev;
 /// THIS FRAME'S SAMPLES (the trace's, the write-back's): rgb = the radiance, w = the hit distance (> 0), 0 = no sample.
 layout( rgba16f, set = 0, binding = 45 ) uniform readonly image2DArray reflectSample;
 /// ...and their NEE parts (rgb; 0 where none - PHOTON-7 11-1b).
-layout( rgba16f, set = 0, binding = 55 ) uniform readonly image2DArray reflectNee;
+layout( rgba16f, set = 0, binding = 52 ) uniform readonly image2DArray reflectNee;
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
-layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
+layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
 
 #include "jah_rq_finite.glsl"
 #include "jah_reflect_state.glsl"

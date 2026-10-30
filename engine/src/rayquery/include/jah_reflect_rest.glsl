@@ -25,7 +25,7 @@
 // centre's 1 + sum w_i; Q_p = sum of the squared weights of those whose answer has a variance - a centre ray's has
 // none): it is under ONE CODE when every such tap's SE is under W_p / sqrt( Q_p ) codes - sqrt( n_eff ), >= 1 as
 // ( sum w )^2 >= sum w^2. A texel feeds several pixels, so its share is the MIN over the pixels that read it (the
-// filter's atomic min, binding 51): then EVERY pixel's displayed SE is under one code whatever its neighbours' n_eff
+// filter's atomic min, binding 48): then EVERY pixel's displayed SE is under one code whatever its neighbours' n_eff
 // and slopes, and NO TEXEL WAITS ON ANOTHER (the rule (ii) it replaces stopped a texel on its pixel's combined SE, and
 // one whose stopped neighbours kept a 4-7 code SE never could: measured on photon-glass, its own SE 0.09 codes at
 // v 35,901 under a displayed 1.18).

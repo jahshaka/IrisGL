@@ -5674,10 +5674,6 @@ struct RayQueryStatus {
     /// between them is a pass row of its own) — -1 unless a capture is running,
     /// and until measured.
     float reflectMs = -1.0f;
-    /// GPU milliseconds of the screen march's OBJECT-MOTION job (REFLECT-MOVERS-1,
-    /// rq_motion.comp, in front of the SSR resolve): the "rq.reflect.motion" row,
-    /// the same reading; -1 too on a chain that carries no march or no id pass.
-    float reflectMotionMs = -1.0f;
     /// THE REFLECTION HISTORY'S COUNT (PHOTON-2 stage 0; the arm "reflect.historyReadback") — an INSTRUMENT:
     /// per texel of the trace's grid, row-major (reflectHistoryW x reflectHistoryH, the eye layers side by side),
     /// the temporal mean's sample count (its state texel's N + v, whole; 0 = no answer this frame, capped at 4096)
