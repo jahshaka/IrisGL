@@ -24,7 +24,6 @@
 // is, which is every Linux build.
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanRenderSystem.h"
-#include "OgreVulkanQueue.h"   // MEASURING ARM (DETERMINISM-1)
 #endif
 
 #include <cctype>
@@ -1070,8 +1069,6 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // THE MEASUREMENT ARMS (lane TEST-1) take what was set since the last frame:
         // one value of each for the whole of this one.
         mArms.latch();
-        // MEASURING ARM (DETERMINISM-1, to be reverted): the fork's UAV-download barrier on or off for this frame
-        Ogre::VulkanQueue::msJahUavDownloadBlocks = mArms.value(ArmId::VkDownloadWarBarrier) > 0.5;
         // THE MISFIT COUNTER'S NEGATIVE CONTROL (stage 5's read W5; the arm shader.forceParamsMisfit): each time the arm
         // comes on, the fork refuses the next compute dispatch as a misfit (HlmsCompute::_jahForceParamsMisfits)
         {
