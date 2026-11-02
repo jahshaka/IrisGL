@@ -1644,6 +1644,12 @@ struct ChainDesc {
     /// chain that traces NO rays, never STEREO (the copies are not per layer). The reflection has no mode
     /// (PostFxDesc::ssr, PHOTON-7-9A): a ray chain reflects by its rays alone and builds none of them.
     bool rasterMarch() const;
+    /// THE COMPOSED SCENE (PHOTON-7-9A): the chain's last LINEAR picture before the tonemap - the opaque and blended
+    /// composite (jahRt0), or the refraction, distortion or AO pass's copy over it, whichever runs last (`build`'s
+    /// `sceneResult`, one rule). On a ray chain it is KEPT across frames (not DiscardableContent): the reflection
+    /// filter reads frame t-1's composite in photon_resolve - before this frame's first writer of jahRt0, the screen
+    /// decode or the opaque pass, clears it - to judge the rest's stop at the displayed pixel's own colour.
+    const char *composedTexture() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);

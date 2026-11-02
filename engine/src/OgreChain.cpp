@@ -652,6 +652,11 @@ bool ChainDesc::rasterMarch() const {
     return ssr > 0 && !rayReflect && !stereo;
 }
 
+const char *ChainDesc::composedTexture() const {
+    // `build`'s sceneResult, in its order: refraction, then distortion, then the AO apply, each over the one before.
+    return ssao ? chain::kAoApplied : distortion ? chain::kDistorted : refractions ? chain::kRefractOut : chain::kRt0;
+}
+
 bool ChainDesc::prepass() const {
     // The SSR stage runs for the march or for the rays; the TRAVERSAL runs for it,
     // for the gather and for the sun contact (build's `prepass`, the one text).
@@ -2718,6 +2723,16 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // carries the build's shape. With the id pass's occlusion on too, this is the
     // pyramid the next frame's first cull reads.
     if (desc.hzb && desc.hzbLevels > 0u) addHzbBuild(n, desc, "Jahshaka HZB ");
+
+    // THE COMPOSED SCENE IS KEPT ON A RAY CHAIN (PHOTON-7-9A; ChainDesc::composedTexture): the reflection filter reads
+    // frame t-1's composite at the frame's start (photon_resolve, before the screen decode or the opaque pass clears
+    // jahRt0), so it must not be DiscardableContent - Ogre's default, under which a texture nothing wrote yet this
+    // frame is Undefined to the barrier solver (the colour history's rule, below).
+    if (desc.rayReflect) {
+        const Ogre::IdString composed(desc.composedTexture());
+        for (auto &td : n->getLocalTextureDefinitionsNonConst())
+            if (td.getName() == composed) td.textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+    }
 
     // The scene result the post passes read. (No MSAA resolve stands here any
     // more: the chain renders at 1x by construction — see ChainDesc — and the
