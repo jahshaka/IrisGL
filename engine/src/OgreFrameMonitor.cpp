@@ -1719,9 +1719,6 @@ constexpr ArmDef kArms[] = {
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
       "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
       "0 = shipped." },
-    { ArmId::GiSharePickOnly, 0.0, 0.0, 1.0,
-      "MEASURING ARM (BISTRO-REST-1, the price A/B; reverted): 1 = every hit read's bounce share reads its pick texel alone "
-      "(the base's usual cost: its trust skipped the rings), 0 = the shipped footprint, the pick and its rings whole." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

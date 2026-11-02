@@ -148,11 +148,7 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, float lod, vec4 tIso,
 	const vec3 n0 = jahHalfNormalDecode( JAH_VOX_SAMPLE_HALF_NRM( c, ax, hh, ( cell0 + 0.5 ) * ir, 0.0 ), ax, hh );
 #endif
 	// THE FOOTPRINT's RINGS: a function of the read's level alone (static at a still scene), always summed whole
-	int rings = clamp( int( exp2( floor( max( lod, 0.0 ) ) ) ), 1, 3 );
-#ifdef JAH_SHARE_PICK_ONLY
-	if( JAH_SHARE_PICK_ONLY )
-		rings = 0;   // MEASURING ARM (BISTRO-REST-1, the price A/B)
-#endif
+	const int rings = clamp( int( exp2( floor( max( lod, 0.0 ) ) ) ), 1, 3 );
 	for( int ring = 1; ring <= rings; ++ring )
 	{
 		for( int du = -ring; du <= ring; ++du )
