@@ -294,7 +294,7 @@ constexpr unsigned kReflectStopFrames = 8u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 60u;
+constexpr unsigned kReflectBindings = 61u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -398,7 +398,11 @@ constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
 /// texel and eye - a texel reached at rest by a CARD region alone re-rests in the background showing its answer, then
 /// walks to the new one at a code a frame (the gather's B3, the reflection's form).
 constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
-static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement word is the reflection set's last binding");
+/// ...and THE COMPOSED SCENE (60, PHOTON-7-9A stage 2; ChainDesc::composedTexture): frame t-1's linear composite - the
+/// displayed pixel's colour at rest - read by the filter for the rest's stop share, judged at the pixel the user sees
+/// (rq_reflect_filter.comp); kept across frames on a ray chain, and read before the frame's first writer clears it.
+constexpr unsigned kReflectComposedBinding = kReflectRefineBinding + 1u;
+static_assert(kReflectBindings == kReflectComposedBinding + 1u, "the composed scene is the reflection set's last binding");
 /// THE COMPACT PATH'S BOUND L (the lead's ruling): 16,384 texels - at or below this count last frame the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU). The path's ENTRY bound,
@@ -6379,6 +6383,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 57 ...2
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 58 ...3
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 59 the refinement word (PHOTON-7 8B, B2's hand-over)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 60 the composed scene, frame t-1 (PHOTON-7-9A stage 2)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6827,6 +6832,13 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
             idTex = idDepthTex = nullptr;
     }
     const ChainDesc chainD = view->chainDesc();
+    // THE COMPOSED SCENE (60; ChainDesc::composedTexture): frame t-1's linear composite, the displayed pixel at rest -
+    // the stop share's colour (rq_reflect_filter.comp). Kept across frames on a ray chain (OgreChain.cpp); a texture of
+    // another size or shape this frame (a resize) is declined: the flat stand-in, the reflection term alone.
+    Ogre::TextureGpu *composedTex = nullptr;
+    try {
+        composedTex = node->getDefinedTexture(Ogre::IdString(chainD.composedTexture()));
+    } catch (Ogre::Exception &) { composedTex = nullptr; }
     // THE UAV FLAG IS THE CONTRACT (OgreChain.cpp, ChainDesc::rayReflect). A
     // texture declared without it has no storage-image usage and the view
     // creation below would be a validation error, so a chain built while the
@@ -7571,6 +7583,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
     w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectRefineBinding].pImageInfo = &refineImg;
+    // THE COMPOSED SCENE (60): every eye's layer, or the flat array stand-in (its luma 0: the reflection term alone)
+    if (composedTex && (composedTex->getWidth() != fullW || composedTex->getHeight() != fullH ||
+                        composedTex->getNumSlices() != eyeLayers))
+        composedTex = nullptr;
+    VkDescriptorImageInfo composedImg{};
+    composedImg.sampler = mPointSampler;
+    composedImg.imageView = composedTex ? layerView(composedTex, false) : mDummyFlatArrayView;
+    composedImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!composedImg.imageView) { bail("the composed scene's binding is null"); return; }
+    w[kReflectComposedBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectComposedBinding].pImageInfo = &composedImg;
     // THE REST'S COMPACT LIST (49): a half a trace grid (every texel the tile pass can list - it can never overflow),
     // re-made when the trace size changes. 8 bytes a trace texel: 4.15 MB at a 960 x 540 trace.
     {
@@ -7684,6 +7707,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                      Ogre::ResourceAccess::Read, computeStage);
         if (exposureTex)
             solver.resolveTransition(trans, exposureTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        // (THE COMPOSED SCENE, frame t-1's: the frame's first writer - the screen decode or the opaque pass - comes after
+        // the filter and takes it back to a target)
+        if (composedTex)
+            solver.resolveTransition(trans, composedTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         // THE HIT SET (the one order: hitSetTransitions), and the rest's brick masks
         hitSetTransitions(solver, trans, hs);
