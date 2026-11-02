@@ -43,7 +43,6 @@ struct JahHitParams
 };
 
 #define JAH_VOX_COUNT        int( JAH_HIT_PARAMS.counts.x )
-#define JAH_D_TAPS_OFF       ( JAH_HIT_PARAMS.counts.w > 0.5 )   // MEASURING ARM (BISTRO-REST-1, form 3's price)
 #define JAH_VOX_ORIGIN( c )  JAH_HIT_PARAMS.voxelOrigin[c]
 #define JAH_VOX_INVSIZE( c ) JAH_HIT_PARAMS.voxelInvSize[c]
 #define JAH_SKY_ON           ( JAH_HIT_PARAMS.counts.y > 0.5 )

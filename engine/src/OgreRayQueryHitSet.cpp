@@ -225,7 +225,6 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         out.voxelInvSize[c][3] = n ? src.voxelCell[from] : 1.0f;
     }
     out.counts[0] = float(n);
-    out.counts[3] = src.directTapsOff ? 1.0f : 0.0f;   // MEASURING ARM (BISTRO-REST-1): the direct taps skipped
     for (int k = 0; k < 3; ++k) {
         out.worldMin[k] = src.worldMin[k];
         out.worldMax[k] = src.worldMax[k];
