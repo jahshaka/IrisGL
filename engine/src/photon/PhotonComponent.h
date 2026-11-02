@@ -789,8 +789,6 @@ public:
     bool giInputsOwed() const;
     /// The chain's own owed work, the field aside (GiStatus::chainOwed; giInputsOwed = it or the field busy).
     bool chainWorkOwed() const;
-    bool chainRebuildOwed() const;
-    bool lightSourcesOwed() const;
     /// EVERY MATERIAL EDIT the scene's writer reports (noteMaterialChanged), counted (ENGINE-UPGRADE-U5
     /// stage 3): the ray tier re-writes its alpha table only when this, its slots or its masks moved.
     unsigned long long materialEditSerial() const { return mMaterialEditSerial; }
