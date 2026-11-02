@@ -931,36 +931,70 @@ private:
     VkResult createComputePipeline(const VkComputePipelineCreateInfo &cpi, VkPipeline *out, const char *name);
     unsigned mPipelinesBuilt = 0;
     double   mPipelineBuildMs = 0.0;
-    /// THE HEAVY PIPELINES ARE BUILT AHEAD, ON WORKERS (the lead's ruling, 2026-10-27; samples.cold_open): the
-    /// driver's compile of the ray pipelines was ~14 s of every cold boot, SERIAL on the render thread at each
-    /// feature's first frame. open() starts the four whose setup is pure Vulkan of our own - the reflection's six
-    /// (rq_reflect and its compact twin, ~8 s cold), the cards' gather and movers, the voxel sides - each its
-    /// make*Pipeline on its own std::thread: our VkPipeline / layout / module / pool objects only (DOCS/traps/
-    /// ENGINE.md, OGRE_THREAD_SUPPORT IS 0: no Ogre object is made or touched there - the shared samplers are made
-    /// on the render thread before), the device's VkPipelineCache (internally synchronised: Ogre creates it without
-    /// EXTERNALLY_SYNCHRONIZED). A worker LOGS NOTHING (Ogre's log is not thread-safe here): its builds' lines and
-    /// the shader cache's dirt note are written by the render thread when it JOINS - at the first function that
-    /// reads the setup's members (joinAhead), before any of them is read. The same create infos, the same cache
+    /// THE HEAVY PIPELINES ARE BUILT ON WORKERS (the lead's ruling, 2026-10-27; samples.cold_open): the driver's
+    /// compile of the ray pipelines was ~14 s of every cold boot, SERIAL on the render thread at each feature's first
+    /// frame. Five setups are pure Vulkan of our own - the reflection's six (rq_reflect and its compact twin, ~8 s
+    /// cold), the cards' gather and movers, the voxel sides, the blended passes' escapes - each its make*Pipeline on
+    /// its own std::thread: our VkPipeline / layout / module / pool objects only (DOCS/traps/ENGINE.md,
+    /// OGRE_THREAD_SUPPORT IS 0: no Ogre object is made or touched there - the shared samplers are made on the render
+    /// thread before), the device's VkPipelineCache (internally synchronised: Ogre creates it without
+    /// EXTERNALLY_SYNCHRONIZED). A worker LOGS NOTHING (Ogre's log is not thread-safe here): its builds' lines and the
+    /// shader cache's dirt note are written by the render thread when it JOINS. The same create infos, the same cache
     /// key, the same pipelines: the picture and the shader cache are unchanged.
+    /// A BUILD STARTS ON ITS NEED, NEVER BEFORE (ORPHAN-REDS-1, 2026-11-03): the tier's open used to start all five
+    /// whether any view needed them or not, and close() joins every build it started - so a fixture that never drew a
+    /// reflection waited at teardown for three cold driver compiles (frame.monitor_pop / frame.streaming_picture /
+    /// meshbake.archive_bakes red at the cap for five days; the dump: spikes/orphan-reds-1/item1-dump/). Now a build
+    /// starts where its consumer is certain to run: the reflection's when a drawn view's chain carries the ray
+    /// reflection (OgreEngine::updateRayQuery, before the frame's passes - the same point of frame 1 the open used),
+    /// every build at its consumer's first call (aheadReady). A build in flight at a consumer is the scene's ONE
+    /// async-shader rule's (OgreScene::compilesInBackground): where the scene compiles in the background the consumer
+    /// takes its own "not this frame" path and the build counts as pending (asyncShaderStats; waitForAsyncShaders joins
+    /// it); everywhere else the consumer joins it in the frame, so the frames are what they were.
     enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadGlassEscape, kAheadCount };
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
+        std::atomic<bool> done{ false };   // the worker's last write (the render thread joins a finished build at once)
         std::string err;
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
     };
     Ahead mAhead[kAheadCount];
     void startAhead();
-    void launchAhead(AheadId id, bool (RayQueryTier::*make)(std::string &));
+    /// Starts build `id` on its worker (once; the shared samplers made here first). False when it cannot start (the
+    /// samplers refused, or it was built on the render thread already): the consumer's make*Pipeline builds now.
+    bool launchAhead(AheadId id);
     void joinAhead(AheadId id);
-    /// make*Pipeline's front door: the ahead build's answer once joined, else the build now.
+public:
+    /// THE REFLECTION's NEED (ORPHAN-REDS-1): a drawn view's chain carries the ray reflection, so its recordReflect
+    /// runs this frame - its build starts now, if it is not started (the render thread; no wait), before the passes.
+    void needReflectAhead() { launchAhead(kAheadReflect); }
+    /// The finished builds joined, their lines logged (each frame, the render thread: a finished build never waits for
+    /// its consumer to be counted done).
+    void harvestAhead();
+    /// Every build in flight joined (Engine::waitForAsyncShaders: a wait for the background compiles waits for these).
+    void joinAllAhead() { for (unsigned i = 0; i < kAheadCount; ++i) joinAhead(AheadId(i)); }
+    /// The builds started and not joined: AsyncShaderStats::pending counts them.
+    unsigned aheadInFlight() const;
+private:
+    /// THE CONSUMER's DOOR (ORPHAN-REDS-1): its build started if it was not; true = joined (or never startable - the
+    /// make*Pipeline's own build now): read the setup; false = in flight in a scene that compiles in the background
+    /// (the ONE rule, OgreScene::compilesInBackground): the consumer's own "not this frame" path.
+    bool aheadReady(AheadId id, const OgreScene *scene);
+    /// make*Pipeline's front door: the ahead build's answer once joined, else the build now (marked taken: a worker
+    /// never builds it again).
     template <class F> bool aheadOr(AheadId id, std::string &err, F now) {
         joinAhead(id);
-        if (mAhead[id].started) {
-            if (!mAhead[id].ok) err = mAhead[id].err;
-            return mAhead[id].ok;
+        Ahead &a = mAhead[id];
+        if (a.started) {
+            if (!a.ok) err = a.err;
+            return a.ok;
         }
-        return now(err);
+        a.started = a.joined = true;
+        a.done.store(true);
+        a.ok = now(err);
+        a.err = err;
+        return a.ok;
     }
 public:
     /// THE MEASUREMENT ARMS (lane TEST-1): the engine's registry, latched each frame.
@@ -2292,6 +2326,7 @@ void RayQueryTier::retireView(VkImageView v) {
 }
 
 void RayQueryTier::retireSet(VkDescriptorSet set) {
+    if (!set) return;           // (a set exists only from a joined build's pool)
     joinAhead(kAheadReflect);   // (mReflectPool is the ahead build's)
     retireSet(set, mReflectPool);
 }
@@ -2756,29 +2791,54 @@ bool RayQueryTier::open(Ogre::RenderSystem *rs, std::string &err) {
 }
 
 void RayQueryTier::startAhead() {
-    // THE SHARED SAMPLERS FIRST, HERE (the setups read them; a worker never makes a shared object)
+    // THE SHARED SAMPLERS FIRST, HERE (the setups read them; a worker never makes a shared object). NO BUILD STARTS AT
+    // THE OPEN (ORPHAN-REDS-1): each starts on its need (needAhead, aheadReady).
     std::string err;
-    if (!ensureSamplers(err)) return;   // every setup would fail the same way: they run now, as before
-    const auto launch = [this](AheadId id, bool (RayQueryTier::*make)(std::string &)) { launchAhead(id, make); };
-    launch(kAheadReflect, &RayQueryTier::makeReflectPipelineNow);
-    launch(kAheadCardGather, &RayQueryTier::makeCardGatherPipelineNow);
-    launch(kAheadCardMovers, &RayQueryTier::makeCardMoverPipelineNow);
-    launch(kAheadVoxelSides, &RayQueryTier::makeVoxelSidePipelineNow);
-    // THE BLENDED PASSES' ESCAPES (PHOTON-7 10-4 R4): at the tier's open too, never later - a build launched when the
-    // first blended material arrived let the picture change seconds after it rested (the cold driver compile: the
-    // blended passes lit by the environment until it was done; gi.glass_escape's settle read that as the rest)
-    launch(kAheadGlassEscape, &RayQueryTier::makeGlassEscapePipelinesNow);
+    ensureSamplers(err);   // refused: every launch refuses too and the consumers build now, as before
 }
 
-void RayQueryTier::launchAhead(AheadId id, bool (RayQueryTier::*make)(std::string &)) {
+bool RayQueryTier::launchAhead(AheadId id) {
     Ahead &a = mAhead[id];
-    if (a.started) return;
+    if (a.started) return false;
+    std::string err;
+    if (!ensureSamplers(err)) return false;   // the consumer's make*Pipeline builds now (and says why)
+    static bool (RayQueryTier::*const kMake[kAheadCount])(std::string &) = {
+        &RayQueryTier::makeReflectPipelineNow, &RayQueryTier::makeCardGatherPipelineNow,
+        &RayQueryTier::makeCardMoverPipelineNow, &RayQueryTier::makeVoxelSidePipelineNow,
+        &RayQueryTier::makeGlassEscapePipelinesNow };
+    bool (RayQueryTier::*make)(std::string &) = kMake[id];
     a.started = true;
     a.th = std::thread([this, &a, make]() {
         tAheadNotes = &a.notes;
         a.ok = (this->*make)(a.err);
         tAheadNotes = nullptr;
+        a.done.store(true, std::memory_order_release);
     });
+    return true;
+}
+
+bool RayQueryTier::aheadReady(AheadId id, const OgreScene *scene) {
+    Ahead &a = mAhead[id];
+    launchAhead(id);
+    if (!a.started || a.joined) return true;
+    // IN FLIGHT: the scene's ONE async-shader rule decides - not this frame where it compiles in the background,
+    // the frame waits for it everywhere else
+    if (!a.done.load(std::memory_order_acquire) && scene && scene->compilesInBackground()) return false;
+    joinAhead(id);
+    return true;
+}
+
+void RayQueryTier::harvestAhead() {
+    for (unsigned i = 0; i < kAheadCount; ++i) {
+        const Ahead &a = mAhead[i];
+        if (a.started && !a.joined && a.done.load(std::memory_order_acquire)) joinAhead(AheadId(i));
+    }
+}
+
+unsigned RayQueryTier::aheadInFlight() const {
+    unsigned n = 0;
+    for (const Ahead &a : mAhead) n += (a.started && !a.joined) ? 1u : 0u;
+    return n;
 }
 
 void RayQueryTier::joinAhead(AheadId id) {
@@ -6732,7 +6792,9 @@ void RayQueryTier::expandEyeToTarget(EyeBasisF &e, const ChainDesc &cd, unsigned
 
 void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  Ogre::CompositorPass *pass, const HitListBinding &hit) {
-    joinAhead(kAheadReflect);   // (its members are read below: the ahead build is joined first)
+    // THE NEED's DOOR (ORPHAN-REDS-1): the build started if it was not, joined - or, in flight in a scene that compiles
+    // in the background, NOT THIS FRAME: `jahSsrReflection` holds what the resolve wrote, the returns below' contract
+    if (!aheadReady(kAheadReflect, view ? view->ogreScene() : nullptr)) return;
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -9049,7 +9111,9 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
 }
 
 void RayQueryTier::finishReflect(const ReflectPassListener *key) {
-    joinAhead(kAheadReflect);   // (its members are read below: the ahead build is joined first)
+    // (its members are read below: only after a JOINED build - a frame whose recordReflect took the not-this-frame
+    // path left nothing to finish, and a build in flight is never waited for here)
+    if (!mAhead[kAheadReflect].joined) return;
     auto it = mReflects.find(key);
     if (it == mReflects.end() || !it->second.finishPending) return;
     ReflectView &rv = it->second;
@@ -10877,10 +10941,12 @@ bool RayQueryTier::makeCardMoverPipelineNow(std::string &err) {
 }
 
 bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) {
-    joinAhead(kAheadCardMovers);   // (its members are read below: the ahead build is joined first)
     if (!isOpen() || !scene || !job.count || !job.records || !job.depth || !job.normal || !job.vis ||
         !job.shadowRough || !job.lights || !job.sunVis || !job.open)
         return false;
+    // THE NEED's DOOR (ORPHAN-REDS-1), before its members are read: in flight in a scene that compiles in the
+    // background, the false below' "not traced this frame" (the cards hold the still world's sun term)
+    if (!aheadReady(kAheadCardMovers, scene)) return false;
     Ogre::UavBufferPacked *geomRowsSrc = nullptr;   // (the buried test's rows, when bound: the solver's read below)
     SceneAs *saP = asOf(scene);
     if (!saP) return false;
@@ -11276,10 +11342,12 @@ void RayQueryTier::foldCardGatherCounts(CardGatherView &v) {
 }
 
 CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTrace &job) {
-    joinAhead(kAheadCardGather);   // (its members are read below: the ahead build is joined first)
     // THE TIER: a scene that does not trace (the project's rays off, or no device) gathers by the voxel rays.
     if (!isOpen() || !scene || !scene->rayTracingResolved() || mCgFailed) return CardGatherResult::NoRays;
     if (!job.count || !job.records || !job.gather || !job.reads) return CardGatherResult::Wait;
+    // THE NEED's DOOR (ORPHAN-REDS-1), before its members are read: in flight in a scene that compiles in the
+    // background, Wait - the answer for a traced scene whose structure is not there this frame
+    if (!aheadReady(kAheadCardGather, scene)) return CardGatherResult::Wait;
     // ...and one that traces but whose structure is not there this frame waits (never the voxel rays here).
     SceneAs *saP = asOf(scene);
     if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u) return CardGatherResult::Wait;
@@ -11638,13 +11706,15 @@ void RayQueryTier::foldVoxelSideCounts(VoxelSideView &v) {
 }
 
 int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSideTrace &job, unsigned cascade) {
-    joinAhead(kAheadVoxelSides);   // (its members are read below: the ahead build is joined first)
     // THE TIER: a scene that does not trace keeps the voxel rays (the no-ray route); one whose structure is not there
     // this pass WAITS (the voxel rays this pass, counted)
     if (!isOpen() || !scene || !scene->rayTracingResolved() || mVsFailed) return 0;
     VoxelSideView &v = mVoxelSides[scene];
     const auto wait = [&v]() { ++v.total.waits; return 2; };
     if (!job.list || !job.args || !job.scratch) return wait();
+    // THE NEED's DOOR (ORPHAN-REDS-1), before its members are read: in flight in a scene that compiles in the
+    // background, the pass WAITS (the voxel rays this pass, counted)
+    if (!aheadReady(kAheadVoxelSides, scene)) return wait();
     SceneAs *saP = asOf(scene);
     if (!saP || !saP->tlas || !saP->st.enabled || saP->instanceCount == 0u) return wait();
     SceneAs &sa = *saP;
@@ -13139,7 +13209,11 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     // ONLY WHERE A RECORD CAN BE MADE: a scene with no blended material appends none and holds no list (the pixels'
     // sums are 12 bytes a pixel). Its pipelines were built ahead at the tier's open (startAhead).
     if (!scene->hasBlended()) return;
-    joinAhead(kAheadGlassEscape);   // (the worker writes mEscPipeline: joined before it is read - the read's F10)
+    // THE NEED's DOOR (ORPHAN-REDS-1; the worker writes mEscPipeline: joined before it is read - the read's F10): in
+    // flight in a scene that compiles in the background, no list this frame (the blended passes lit as without the
+    // escape) and the build PENDING - every rest predicate waits for it (10-4 R4's picture change after a rest is
+    // why a pending build counts, never a silent late landing)
+    if (!aheadReady(kAheadGlassEscape, scene)) return;
     std::string err;
     if (!mEscPipeline && !makeGlassEscapePipelines(err)) {
         mEscFailed = true;
@@ -13255,7 +13329,7 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
     if (scene) FogHlmsListener::setGlassEscape(scene->sceneManager(), false, 0ull, 0u);
     auto it = mEscape.find(key);
     if (it == mEscape.end() || !scene || !pass || which > 1u || !isOpen()) return;
-    joinAhead(kAheadGlassEscape);
+    if (!mAhead[kAheadGlassEscape].joined) return;   // (a list is made only after a joined build: prepareGlassEscape)
     EscapeView &ev = it->second;
     EscapeList &l = ev.lists[which];
     if (!l.ready) return;
@@ -13641,6 +13715,16 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     if (!mRayTracingWanted || mHeadless || !mRoot) return;
     ensureRayTier();
     if (!mRayTier) return;
+    // THE RAY PIPELINES' BUILDS (ORPHAN-REDS-1): a finished one joined (its lines, its pending count gone); the
+    // reflection's started where a drawn view's chain carries it - here, before the frame's passes, where the tier's
+    // open used to start all five whether a view needed them or not (the other four start at their consumers' first
+    // call: RayQueryTier::aheadReady)
+    mRayTier->harvestAhead();
+    for (const auto &v : mViews) {
+        OgreScene *vs = v ? v->ogreScene() : nullptr;
+        if (!vs || !vs->rayTracingResolved() || std::find(drawn.begin(), drawn.end(), vs) == drawn.end()) continue;
+        if (v->chainRayReflect()) { mRayTier->needReflectAhead(); break; }
+    }
     // A scene whose project row says OFF must cost nothing, not just look the
     // same (world.rayTracing's contract): no gather, no BLAS/TLAS for it. The
     // structures it may already hold were released when the row flipped
@@ -13887,6 +13971,12 @@ void registerPhotonRayPasses(AtomPassProvider *provider) {
     });
 }
 
+unsigned OgreEngine::rayAheadInFlight() const { return mRayTier ? mRayTier->aheadInFlight() : 0u; }
+
+void OgreEngine::joinRayAhead() {
+    if (mRayTier) mRayTier->joinAllAhead();
+}
+
 void OgreEngine::shutdownRayQuery() {
     if (!mRayTier) return;
     for (auto &sc : mScenes)
@@ -14023,6 +14113,8 @@ void OgreEngine::ensureRayTier() {}
 // (no ray tier: no swept box and no posed slot, and none of the list's mover consumers - the cards, the gather, the
 // reflection, the hits - runs without it; movers are not voxel geometry)
 void OgreEngine::listRayMovers(const std::vector<OgreScene *> &) {}
+unsigned OgreEngine::rayAheadInFlight() const { return 0u; }
+void OgreEngine::joinRayAhead() {}
 void OgreEngine::shutdownRayQuery() {}
 void registerPhotonRayPasses(AtomPassProvider *) {}
 struct RaySceneStructures {};

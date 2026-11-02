@@ -3538,7 +3538,8 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     const Ogre::HlmsAsyncCompiler *c = mRoot->getHlmsManager()->getAsyncCompiler();
     out.running   = c->isRunning();
     out.threads   = c->getNumThreads();
-    out.pending   = c->getNumOutstanding();
+    // THE RAY PIPELINES IN FLIGHT COUNT (ORPHAN-REDS-1): the async-shader rule's other compiles (RayQueryTier::aheadReady)
+    out.pending   = c->getNumOutstanding() + rayAheadInFlight();
     out.completed = c->getNumCompleted();
     out.failed    = c->getNumFailed();
     out.placeholderDraws = mRetiredPlaceholderDraws;
@@ -3569,6 +3570,7 @@ void OgreEngine::waitForAsyncShaders() {
     JAH_HOST_CALL("Engine::waitForAsyncShaders");
     if (!mRoot) return;
     mRoot->getHlmsManager()->getAsyncCompiler()->waitForAll();
+    joinRayAhead();   // ...and the ray pipelines' builds in flight (ORPHAN-REDS-1: the same rule's compiles)
 }
 
 ShaderCacheStats OgreEngine::shaderCacheStats() const {

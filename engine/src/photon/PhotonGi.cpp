@@ -790,11 +790,7 @@ struct InjectionRows final : Ogre::PhotonVoxelLighting::PhaseListener {
 // (View::setAsyncShaders), on a frame that does not owe the whole picture (FramePace::Complete), with the compiler running -
 // giDeferrable's rule. Everywhere else the commit compiles in its own frame, so when a commit lands is a function of the
 // frames, never of a compile's wall time (the selftest and every fixture: cascadeCommitShaderWaits 0).
-bool PhotonComponent::commitShaderAsync() const {
-    if (!mScene.asyncShaders() || mScene.framePace() == FramePace::Complete) return false;
-    Ogre::HlmsManager *hm = mRoot ? mRoot->getHlmsManager() : nullptr;
-    return hm && hm->getComputeHlms() && hm->getAsyncCompiler() && hm->getAsyncCompiler()->isRunning();
-}
+bool PhotonComponent::commitShaderAsync() const { return mScene.compilesInBackground(); }   // the ONE rule (OgreScene)
 
 bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *commit) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;

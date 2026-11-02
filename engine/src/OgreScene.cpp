@@ -14,6 +14,9 @@
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
+#include <OgreHlmsAsyncCompiler.h>
+#include <OgreHlmsManager.h>
+#include <OgreRoot.h>
 #include <OgreHlmsDatablock.h>
 #include <OgreItem.h>
 #include <Animation/OgreTagPoint2.h>
@@ -43,6 +46,12 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
 // THE SCENE A HOST'S createScene MADE IS ADOPTED HERE (U3 stage 4a, decision 39 b): the object was the host's handle
 // from the call on; its manager is made by the create message on the engine's side, and bound now.
 bool OgreScene::hostPosts() const { return mEngine && mEngine->hostPosts(); }
+
+bool OgreScene::compilesInBackground() const {
+    if (!mAsyncShaders || mFramePace == FramePace::Complete || !mRoot) return false;
+    Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+    return hm && hm->getComputeHlms() && hm->getAsyncCompiler() && hm->getAsyncCompiler()->isRunning();
+}
 void OgreScene::postSceneMessage(SceneMessage &&m) { mEngine->post(this, std::move(m)); }
 void OgreScene::requestOnEngine(const std::function<void()> &f) { mEngine->request([&](Engine &) { f(); }, nullptr); }
 
