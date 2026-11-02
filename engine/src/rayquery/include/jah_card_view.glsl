@@ -118,77 +118,70 @@ vec3 jahCardLobeShare( vec3 cached, vec3 diffuseLobe, vec3 specLobe, bvec3 hasDi
 /// `direct` (the lights' E x diffuse, before kD) and its indirect - MARCHED (mode bit 1: `irradiance`, the gather's
 /// envColourD), CACHED (neither bit: `cachedIn`, the Indirect layer's texel) or none yet (mode bit 2) - the Indirect
 /// layer's value `cached`, the FLAT term (the emissive and the lobe's re-emission) and the RADIANCE, each times the
-/// texel's open fraction `openF` (the area mean, PHOTON-7 11-2 (5)) - the half-float value the Flat layer's a holds
-/// (jahHalfStored: the read multiplies by the same one). `nearMirror`: the lobe stores nothing.
-/// ONE DEFINITION FOR BOTH PATHS (BISTRO-REST-1): the march's indirect is the value the Indirect layer WILL HOLD
-/// (jahHalfStored), and the diffuse half and the lobe share are taken from it as a cached relight and the read take
-/// them - so the flat term's lobe part is exactly openF x jahCardLobeShare( the layer ), the cut the read takes
-/// (jahCardReadView). (The march once took the share from the unrounded irradiance and the read cut a share without
-/// openF from a flat term that carries it: F - cut went negative at a part-open specular texel in shade, and a card
-/// gathering it stored negative radiance - spikes/bistro-rest-1/stage1/cards-census.)
+/// texel's open fraction `openF` (the area mean, PHOTON-7 11-2 (5)). `nearMirror`: the lobe stores nothing.
 void jahCardStoreTerms( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, vec3 kD, vec3 diffuseLobe,
 						vec3 specLobe, bool nearMirror, vec3 emissive, float openF, out vec3 cached, out vec3 flatTerm,
 						out vec3 radiance )
 {
 	const bvec3 hasDiffuse = greaterThan( kD, vec3( 0.0, 0.0, 0.0 ) );
+	vec3 indirect = vec3( 0.0, 0.0, 0.0 );
+	vec3 specIndirect = vec3( 0.0, 0.0, 0.0 );
 	cached = vec3( 0.0, 0.0, 0.0 );
-	if( ( mode & 1u ) != 0u )   // THE CACHE: the diffuse half where the channel has one, the lobe's share where not
-		cached = jahHalfStored( irradiance * mix( specLobe, diffuseLobe, hasDiffuse ) );
+	if( ( mode & 1u ) != 0u )
+	{
+		indirect = irradiance * diffuseLobe;
+		specIndirect = irradiance * specLobe;
+		// THE CACHE: the diffuse half where the channel has one, the lobe's share where not
+		cached = mix( specIndirect, indirect, hasDiffuse );
+	}
 	else if( ( mode & 2u ) == 0u )
+	{
 		cached = cachedIn;
-	const vec3 indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
-	// the lobe's share, recovered from the layer (kD > 0) or the layer itself; a near-mirror's is 0 by the rule above
-	const vec3 specIndirect = nearMirror ? vec3( 0.0, 0.0, 0.0 ) : jahCardLobeShare( cached, diffuseLobe, specLobe, hasDiffuse );
+		indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
+		// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
+		specIndirect = jahCardLobeShare( cached, diffuseLobe, specLobe, hasDiffuse );
+		if( nearMirror )
+			specIndirect = vec3( 0.0, 0.0, 0.0 );   // (a near-mirror's cached lobe share is 0 by the rule above)
+	}
 	// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
 	flatTerm = ( emissive + specIndirect ) * openF;
 	radiance = ( direct * kD + indirect ) * openF + flatTerm;
 }
 
 /// THE READ OF A CARD TEXEL TOWARD V (jah_rq_card.glsl jahCardRadiance; gi.card_law drives the same text): the stored
-/// RADIANCE `R`, INDIRECT `stored` and FLAT `F` layers (F.w the texel's open fraction, the factor the relight's terms
-/// carry: jahCardStoreTerms), the albedo, the specular texel `spec` (F0's encoding, w), the roughness (alpha and r), the
-/// lobe's integrals ( A-bar `sa`, B-bar `sb` ) and the stored normal and light direction. The indirect diffuse half the
-/// view restore weighs is the layer's times F.w, as the radiance holds it. `traced`: the reader traces the hit's lobe
-/// itself (jahHitTracedLobe, C2) - the lobe's INDIRECT share is left out (`cutLobe`, handed back) from the radiance and
-/// the flat term alike, so the direct half is untouched: F.w x jahCardLobeShare( the layer ), THE FLAT TERM'S OWN LOBE
-/// PART (the same layer, the same factor, the same function) - so F - cut = E F.w plus F's one rounding. THE CLAMP
-/// BELOW TAKES ONLY THAT ROUNDING: F's store is to nearest, so F - cut >= -1/2 a half-float step of F (a whole 2^-24
-/// among the denormals, where the store truncates) - gi.card_law (i) measures the residual before it. The lights' lobe
+/// RADIANCE `R`, INDIRECT `stored` and FLAT `F` layers, the albedo, the specular texel `spec` (F0's encoding, w), the
+/// roughness (alpha and r), the lobe's integrals ( A-bar `sa`, B-bar `sb` ) and the stored normal and light direction.
+/// `traced`: the reader traces the hit's lobe itself (jahHitTracedLobe, C2) - the lobe's INDIRECT share is left out
+/// (`cutLobe`, handed back) from the radiance and the flat term alike, so the direct half is untouched. The lights' lobe
 /// toward V is the caller's (not a cache).
-vec3 jahCardReadView( vec3 R, vec3 stored, vec4 F, vec3 albedo, vec4 spec, float alpha, float r, float sa, float sb,
+vec3 jahCardReadView( vec3 R, vec3 stored, vec3 F, vec3 albedo, vec4 spec, float alpha, float r, float sa, float sb,
 					  bool traced, float nearMirrorAlpha, vec3 N, vec3 L, vec3 V, out vec3 cutLobe )
 {
 	const bvec3 hasDiffuse = greaterThan( albedo, vec3( 0.0 ) );
-	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse ) * F.w;
+	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );
 	cutLobe = vec3( 0.0 );
 	if( traced && alpha > nearMirrorAlpha && spec.w > 0.0 )
 	{
 		const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
 		const vec3 diffuseLobe = albedo * 3.141592654 * jahDiffuseAlbedoHemi( r );
-		cutLobe = F.w * jahCardLobeShare( stored, diffuseLobe, specLobe, hasDiffuse );
+		cutLobe = jahCardLobeShare( stored, diffuseLobe, specLobe, hasDiffuse );
 	}
-	// (the flat term less its lobe part: E F.w, the clamp F's one rounding's - above)
-	const vec3 flatLeft = max( F.xyz - cutLobe, vec3( 0.0 ) );
-	return jahCardViewRadiance( R - cutLobe, indirect, flatLeft, N, L, r, V );
+	return jahCardViewRadiance( R - cutLobe, indirect, F - cutLobe, N, L, r, V );
 }
 
 /// THE RELIGHT'S MOVE (JahCardLight_cs.glsl, 10-2c; gi.card_law drives the same text): the texel's stored radiance's
 /// largest channel `S` against the value it last REPORTED `ref` (the Gather layer's a) - reported when they differ by
-/// more than ONE CODE (1 % of the larger of the two, over the store's floor), or whole when there is NO REFERENCE: the
-/// card captured this frame (`fresh`, the capture's own flag - the capture's report sets the reference), or a reference
-/// whose BITS are not a finite float (trap 5: the reserved class, which no stored radiance takes - a non-finite S raises
-/// the frame's flag word and reports). EVERY FINITE VALUE IS A REFERENCE (BISTRO-REST-1: a negative one read as "none"
-/// reported a 3e38 move at every march - spikes/bistro-rest-1/stage1/cards-census). `move` the reported move (the slot
-/// word's), `codes` the move in codes (the frame's word). True: report.
+/// more than ONE CODE (1 % of the larger of the two, over the store's floor), or whole when the card was captured this
+/// frame (`fresh`). `move` the reported move (the slot word's), `codes` the move in codes (the frame's word). True: report.
 bool jahCardMoveReport( float S, float ref, bool fresh, out float move, out float codes )
 {
-	const bool refOk = !fresh && ( floatBitsToUint( ref ) & 0x7F800000u ) != 0x7F800000u;
+	const bool refOk = ( floatBitsToUint( ref ) & 0x7F800000u ) != 0x7F800000u && ref >= 0.0;
 	const float d = refOk ? abs( S - ref ) : 3.0e38;
 	const float code = 0.01 * max( max( S, refOk ? ref : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
-	// (no reference: the whole value moved, as a capture's)
-	codes = ( refOk ? d : S ) / code;
-	move = refOk ? d : S;
-	return !refOk || d > code;
+	// (no reference yet: the whole value moved, as a capture's)
+	codes = ( fresh || !refOk ? S : d ) / code;
+	move = fresh ? S : d;
+	return fresh || d > code;
 }
 
 #endif   // JAH_CARD_VIEW_GLSL
