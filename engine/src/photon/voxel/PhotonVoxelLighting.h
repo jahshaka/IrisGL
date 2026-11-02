@@ -451,8 +451,10 @@ namespace Ogre
         /// The directional levels from level 0 (step 0 with a bounce, then step 1 per level) - over the cells
         /// [regionLo, regionHi) of level 0 and what covers them at every coarser level (PHOTON-7 stage 2), or whole;
         /// or (`brickList`, PHOTON-7 stage 4) over the feedback's listed bricks, an indirect dispatch per level.
+        /// `withDirect` (BISTRO-REST-1, the bounce read's form 3): the DIRECT directional chain's levels too (mLightDirectDir,
+        /// the same step-1 jobs over the same texels) - every injection, the one writer of its level 0.
         void generateAnisotropicMips( const uint32 *regionLo = nullptr, const uint32 *regionHi = nullptr,
-                                      bool brickList = false );
+                                      bool brickList = false, bool withDirect = false );
 
         /// THE FEEDBACK'S BOUNCE PASS (PHOTON-7 stage 4): new = direct + rho * ( G( total ) + the sky in the cones'
         /// escape ) over the frame's ACTIVE bricks only (an indirect dispatch, 8 groups of 4^3 a brick), from the
@@ -633,7 +635,7 @@ namespace Ogre
         void setCommitLight( const PhotonCommitLight *commit );
         /** THE DIRECTIONAL LEVELS, WHOLE, FROM THE LEVEL-0 LIGHT AS IT STANDS (PHOTON-7 stage 2's read D1; the test door
             gi.regenerateDirectional): step 0 (with a bounce) and step 1 over the whole volume - nothing else written. */
-        void regenerateDirectional() { generateAnisotropicMips(); }
+        void regenerateDirectional() { generateAnisotropicMips( nullptr, nullptr, false, true ); }
         /** THE BRICK MASK'S OLDEST LANDED READING (PHOTON-7 stage 3), taken: `words` two per brick (x fastest over `dims`),
             `origin` the box corner the update ran at. False while none has landed. */
         bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] );
@@ -816,8 +818,8 @@ namespace Ogre
         /// VOXEL-R13: the half store and its direct terms (null without a bounce) - a host's door measures the store by them
         TextureGpu  *getHalfLightTexture() const { return mHalfLight; }
         TextureGpu  *getHalfDirectTexture() const { return mHalfDirect; }
-        /// THE DIRECT DIRECTIONAL LEVEL 0 of axis a (BISTRO-REST-1: a ray hit's bounce part is the total's level-0 read less
-        /// this one's); null without a bounce
+        /// THE DIRECT DIRECTIONAL CHAIN of axis a (its levels the total's step-1 jobs' - BISTRO-REST-1 form 3: a ray read's
+        /// bounce part is the total's read less this one's); null without a bounce
         TextureGpu  *getDirectDirTexture( uint8 a ) const { return a < 3u ? mLightDirectDir[a] : nullptr; }
         TextureGpu **getLightVoxelTextures( const size_t cascadeIdx );
         /// The light volumes a reader binds per cascade: the half store (level 0, VOXEL-R13) and the three directional

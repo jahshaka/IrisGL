@@ -34,9 +34,10 @@ struct JahHitParams
 	                        // address (float bits; jah_rq_alpha.glsl's JahTierCounters, 0 = none)
 	vec4 cloudMap;          // the cloud layer's 1 / tile, strength, scroll x, z
 	vec4 cloudSun;          // ...its sun throw x, z, altitude, 1 / mu_s
-	vec4 levelCam;          // THE LEVEL RULE: the GI camera (xyz); w 1 a view's level by the camera (10-2e), 0 the box
-	                        // rule - a cache's (10-3: camera-independent) or no camera (HitReader, C++)
-	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera)
+	vec4 levelCam;          // THE LEVEL RULE: the GI camera (xyz); w 1 a view's level by the camera (10-2e), 2 a cache's
+	                        // by its ray's footprint (10-3: camera-independent), 0 the box rule (HitReader, C++)
+	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera),
+	                        // z its coarsest footprint level K (its placement quantum's)
 	vec4 worldMin;          // THE WORLD's BOX (PHOTON-7 10-3 R4): the traced instances' union - its corner (xyz), w 1 = known
 	vec4 worldMax;          // ...its far corner
 };
@@ -49,6 +50,7 @@ struct JahHitParams
 #define JAH_CARD_SLOTS       uint( JAH_HIT_PARAMS.cards.x )
 #define JAH_CARD_RECORDS     uint( JAH_HIT_PARAMS.cards.y )
 #define JAH_GEOM_SLOTS       uint( JAH_HIT_PARAMS.counts.z )
+#define JAH_HIT_FOOTPRINT_ON ( JAH_HIT_PARAMS.counts.w > 0.5 )   // MEASURING ARM (BISTRO-REST-1; deleted next commit)
 #define JAH_HIT_ON           ( JAH_HIT_PARAMS.hitList.w > 0.5 )
 #define JAH_HIT_CAPACITY     uint( JAH_HIT_PARAMS.hitList.x )
 #define JAH_HIT_LIST_W       max( uint( JAH_HIT_PARAMS.hitList.y ), 1u )
@@ -63,7 +65,8 @@ struct JahHitParams
 #define JAH_HIT_CLOUD_ON     ( JAH_HIT_PARAMS.surface.y > 0.5 )
 #define JAH_HIT_CLOUD_MAP    JAH_HIT_PARAMS.cloudMap
 #define JAH_HIT_CLOUD_SUN    JAH_HIT_PARAMS.cloudSun
-#define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 )
+#define JAH_VOX_LEVEL_ON     ( JAH_HIT_PARAMS.levelCam.w > 0.5 && JAH_HIT_PARAMS.levelCam.w < 1.5 )
+#define JAH_VOX_LEVEL_FOOTPRINT ( JAH_HIT_PARAMS.levelCam.w > 1.5 )
 #define JAH_VOX_LEVEL_CAM    JAH_HIT_PARAMS.levelCam.xyz
 #define JAH_VOX_LEVEL( c )   JAH_HIT_PARAMS.level[c]
 #define JAH_WORLD_ON         ( JAH_HIT_PARAMS.worldMin.w > 0.5 )

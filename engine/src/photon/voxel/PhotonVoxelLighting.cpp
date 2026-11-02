@@ -943,7 +943,8 @@ namespace Ogre
         }
     }  // namespace
 
-    void PhotonVoxelLighting::generateAnisotropicMips( const uint32 *regionLo, const uint32 *regionHi, bool brickList )
+    void PhotonVoxelLighting::generateAnisotropicMips( const uint32 *regionLo, const uint32 *regionHi, bool brickList,
+                                                      bool withDirect )
     {
         RenderSystem *renderSystem = mVoxelizer->getRenderSystem();
         renderSystem->debugAnnotationPush( "VctLighting Anisotropic Mips" );
@@ -1003,21 +1004,25 @@ namespace Ogre
         }
 
         // STEP 1'S JOBS ARE THE POOL'S (BUGS-6 stage 3): this lighting's volumes bound per dispatch,
-        // level i read through the texture slots and level i + 1 written through the UAVs.
+        // level i read through the texture slots and level i + 1 written through the UAVs - the total's chain, then
+        // (withDirect, BISTRO-REST-1 form 3) the direct's, by the same jobs over the same texels
+        const bool directChain = withDirect && mLightDirectDir[0] && mLightDirectDir[1] && mLightDirectDir[2];
+        for( size_t pass = 0u; pass < ( directChain ? 2u : 1u ); ++pass )
         for( size_t i = 0u; i < mAnisoGeneratorStep1.size(); ++i )
         {
             HlmsComputeJob *mipJob = mAnisoGeneratorStep1[i];
             DescriptorSetTexture2::TextureSlot texSlot( DescriptorSetTexture2::TextureSlot::makeEmpty() );
             DescriptorSetUav::TextureSlot uavSlot( DescriptorSetUav::TextureSlot::makeEmpty() );
+            TextureGpu *const *chain = pass == 0u ? &mLightVoxel[1] : &mLightDirectDir[0];
             for( uint8 axis = 0; axis < 3u; ++axis )
             {
-                texSlot.texture = mLightVoxel[axis + 1u];
+                texSlot.texture = chain[axis];
                 texSlot.mipmapLevel = uint8( i );
                 texSlot.numMipmaps = 1u;
                 mipJob->setTexture( axis, texSlot );
 
                 uavSlot.access = ResourceAccess::Write;
-                uavSlot.texture = mLightVoxel[axis + 1u];
+                uavSlot.texture = chain[axis];
                 uavSlot.mipmapLevel = uint8( i + 1u );
                 uavSlot.pixelFormat = jahLightVoxelUavFormat();  // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080)
                 mipJob->_setUavTexture( axis, uavSlot );
@@ -1576,8 +1581,10 @@ namespace Ogre
                     TextureFlags::Uav, TextureTypes::Type3D );
                 t->setResolution( mLightVoxel[1]->getWidth(), mLightVoxel[1]->getHeight(),
                                   mLightVoxel[1]->getDepth() );
-                // (level 0 alone: a hit reads the store's bounce part as T - D at its own level-0 half - BISTRO-REST-1)
-                t->setNumMipmaps( 1u );
+                // BISTRO-REST-1 (THE BOUNCE READ, form 3): the directional chain's own levels - a hit read takes the
+                // store's bounce part as T - D through ONE reader, the direct's levels built by the same step-1 jobs
+                // as the total's (generateAnisotropicMips' withDirect), at every injection
+                t->setNumMipmaps( mLightVoxel[1]->getNumMipmaps() );
                 t->setPixelFormat( jahLightVoxelFormat() );
                 t->scheduleTransitionTo( GpuResidency::Resident );
                 mLightDirectDir[i] = t;
@@ -1915,7 +1922,7 @@ namespace Ogre
             // volume. (Regenerating only over the delta's boxes left the kept interior - 53 % of Epic c0 - holding light
             // displaced by the step, growing a step a commit: gi.scroll_slab D. The shift-exact form - step 0 shifted in
             // place with the even s, the levels above regenerated - is the optimisation round's.)
-            generateAnisotropicMips();
+            generateAnisotropicMips( nullptr, nullptr, false, true );   // (and the direct's levels: form 3's reader)
 
         }
 

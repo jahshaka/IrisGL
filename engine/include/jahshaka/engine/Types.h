@@ -3427,6 +3427,9 @@ inline float giPlacementQuantumCells(float stepCells)
     while (q * 2.0f <= stepCells + 1.0f) q *= 2.0f;
     return q;
 }
+/// ...and the coarsest level a hit reads in a cascade of that quantum: K = log2 Q (a footprint past it hands to the
+/// next cascade out).
+inline float giPlacementLevelK(float quantumCells) { return std::floor(std::log2(std::max(quantumCells, 1.0f)) + 0.5f); }
 constexpr float kGiHitLevelBandCells = 6.0f;
 inline float giHitLevelMarginCells(double armValue) { return armValue >= 0.0 ? float(armValue) : kGiHitLevelMarginCells; }
 /// THE STEP TEST'S BAND (PhotonGi.cpp's planCascades): a cascade re-centres once the camera is more than (0.5 + h) of
