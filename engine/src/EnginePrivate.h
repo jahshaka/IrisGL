@@ -5128,6 +5128,7 @@ public:
     GpuWalk gpuWalk() const override;
     TraceSun traceSun() const override;
     GiPlan giPlan() const override;
+    int giUpdateBudget() const override { return mPhoton.giParams().updateBudget; }
     bool rayNearLevels(std::vector<int> &levels) const override;
     bool rayNearAddresses(std::vector<unsigned long long> &addresses) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
@@ -7925,6 +7926,7 @@ public:
     bool hiddenAreaMask() const { return mHiddenAreaMask; }
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
+    inspect::ViewRoutes routes() const override { return inspect::ViewRoutes{ mChainProbeGather, mChainScreenIntegrate, mChainRayReflect }; }
     void setOffscreenContract(OffscreenContract c) override;
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).

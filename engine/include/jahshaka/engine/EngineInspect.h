@@ -152,11 +152,14 @@ public:
     /// structure its near copy references in the device-written instance array (0 = untraced) - what a camera walk or a
     /// teleport may not change for a still world (the same TOOL path).
     virtual bool rayNearAddresses(std::vector<unsigned long long> &addresses) const = 0;
+    virtual int giUpdateBudget() const = 0;   ///< GiParams::updateBudget as the scene took it (0 = GI paused)
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);
 
 /// The view's record of the host's pushes (setters and the record's view part, as applied).
+/// THE ROUTES THE VIEW'S LAST BUILT CHAIN CARRIES (URGENT #146): ChainDesc's decided flags as the chain was built (OgreView mChainProbeGather / mChainScreenIntegrate / mChainRayReflect) - a fixture asserts the route it measures.
+struct ViewRoutes { bool probeGather = false; bool screenIntegrate = false; bool rayReflect = false; };
 class ViewEcho {
 public:
     virtual ~ViewEcho() = default;
@@ -171,6 +174,7 @@ public:
     virtual const ViewOverlayDesc &overlay() const = 0;
     virtual const ViewPipDesc     &pip() const = 0;
     virtual bool                   asyncShaders() const = 0;
+    virtual ViewRoutes             routes() const = 0;
 };
 /// The view's record; null for a view this engine did not make.
 const ViewEcho *view(const View *v);
