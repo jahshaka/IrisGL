@@ -8695,8 +8695,8 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
             out.voxel[c][6 + h] = tex[lighting->positionIndex(h)];
         }
         // VOXEL-R13 stage 2: kind 0 the half store, 8 its direct terms (the readers' list); 9..11 THE DIRECT DIRECTIONAL
-        // CHAINS (BISTRO-REST-1 form 3: a ray read's bounce part is the total's read less the same read of these - without
-        // a bounce the total's own chains, so the difference is 0, as kind 8 is the half store itself there)
+        // LEVEL 0 (BISTRO-REST-1: a ray hit's bounce part is the total's level-0 read less the same read of these - without
+        // a bounce the total's own, so the difference is 0, as kind 8 is the half store itself there)
         out.voxel[c][8] = tex[lighting->halfDirectIndex()];
         for (unsigned a = 0; a < 3u; ++a)
             out.voxel[c][9 + a] = lighting->getDirectDirTexture(Ogre::uint8(a)) ? lighting->getDirectDirTexture(Ogre::uint8(a))
