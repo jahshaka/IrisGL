@@ -1534,6 +1534,8 @@ float jahTailRate( bool dense, uint n, vec2 prev, float rampK )
 	if( dense )
 		return rampK;
 	const float share = p.compact.y / float( max( n, 1u ) );
+	if( p.alpha.x > 0.5 )   // (MEASURING ARM reflect.tailRamp 0: the pre-ramp jump)
+		return clamp( floor( share ), 1.0, 64.0 );
 	const float grow = 1.0 + prev.x / max( prev.y, prev.x );
 	return clamp( min( share, prev.x * grow * grow ), 1.0, 64.0 );
 }
