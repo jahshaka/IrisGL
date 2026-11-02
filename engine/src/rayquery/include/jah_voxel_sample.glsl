@@ -233,6 +233,9 @@ vec3 jahVoxelAnisoUvw( vec3 posLS, float texelU )
 /// same uvw, level and clamp - and takes the store's bounce part as the difference of the two reads (jah_rq_hit.glsl's
 /// jahVoxelRadiance). `jahVoxReadD` turns jahVoxelAxisSample to the direct chain for the second tap; `jahVoxPlaneD` is
 /// the plane's direct colour under the total's weights; `jahVoxSampleD` jahVoxelSample's, under its normalisation.
+#ifndef JAH_D_TAPS_OFF
+#define JAH_D_TAPS_OFF false   // (MEASURING ARM, BISTRO-REST-1: a reader without the hit params)
+#endif
 bool jahVoxReadD = false;
 vec3 jahVoxPlaneD = vec3( 0.0 );
 vec3 jahVoxSampleD = vec3( 0.0 );
@@ -338,9 +341,12 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		aA = v.w;
 		cA = v.xyz;
 #ifdef JAH_VOX_SAMPLE_DX
-		jahVoxReadD = true;
-		cAD = jahVoxelReadAxis( c, axis, posLS, dir[axis] > 0.0, mip ).xyz;   // (premultiplied like the total's)
-		jahVoxReadD = false;
+		if( !JAH_D_TAPS_OFF )
+		{
+			jahVoxReadD = true;
+			cAD = jahVoxelReadAxis( c, axis, posLS, dir[axis] > 0.0, mip ).xyz;   // (premultiplied like the total's)
+			jahVoxReadD = false;
+		}
 #endif
 		if( n == axis || w < 1.0 )
 		{
@@ -365,7 +371,7 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );   // (the half's radiance at the plane's opacity)
 #ifdef JAH_VOX_SAMPLE_DX
 		// (the half's direct term at the same uvw, at the total's opacity: the half store's own direct volume)
-		cAD = ( s.w > 0.0 ) ? JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( posLS, ha, axis, invRes.x ), 0.0 ).xyz * ( aA / s.w )
+		cAD = ( s.w > 0.0 && !JAH_D_TAPS_OFF ) ? JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( posLS, ha, axis, invRes.x ), 0.0 ).xyz * ( aA / s.w )
 							: vec3( 0.0 );
 #endif
 		if( n == axis || w < 1.0 )
@@ -427,10 +433,13 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 			x += xb;
 			colour += xb * rad;
 #ifdef JAH_VOX_SAMPLE_DX
-			jahVoxReadD = true;
-			const vec3 vD = jahVoxelReadAxis( c, b, kernelLS, hb, max( lk - 1.0, 0.0 ) ).xyz;
-			jahVoxReadD = false;
-			colourD += xb * ( ( v.w > 0.0 ) ? vD * ( 1.0 / v.w ) : vec3( 0.0 ) );   // (at the total's opacity)
+			if( !JAH_D_TAPS_OFF )
+			{
+				jahVoxReadD = true;
+				const vec3 vD = jahVoxelReadAxis( c, b, kernelLS, hb, max( lk - 1.0, 0.0 ) ).xyz;
+				jahVoxReadD = false;
+				colourD += xb * ( ( v.w > 0.0 ) ? vD * ( 1.0 / v.w ) : vec3( 0.0 ) );   // (at the total's opacity)
+			}
 #endif
 		}
 	}

@@ -8637,6 +8637,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     out = HitSetSources{};
     out.hit = hit;
     out.tlas = sa.tlas;
+    out.directTapsOff = arm(ArmId::GiBounceReadDirectOff, false);   // MEASURING ARM (BISTRO-REST-1, form 3's price)
     // THE WORLD's BOX: every item a ray can hit (its GPU-scene slot: the TLAS's instance set), its world AABB - the
     // sky is a pass, never an instance, and an instance's extent IS world a ray can hit. Once a frame (SceneAs::
     // worldBoxFrame), every job of the frame reading the same.
