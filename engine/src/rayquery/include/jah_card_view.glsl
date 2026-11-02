@@ -159,13 +159,13 @@ vec3 jahCardReadView( vec3 R, vec3 stored, vec4 F, vec3 albedo, vec4 spec, float
 					  bool traced, float nearMirrorAlpha, vec3 N, vec3 L, vec3 V, out vec3 cutLobe )
 {
 	const bvec3 hasDiffuse = greaterThan( albedo, vec3( 0.0 ) );
-	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );   // MEASURING ARM (BISTRO-REST-1): no open fraction
+	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse ) * F.w;
 	cutLobe = vec3( 0.0 );
 	if( traced && alpha > nearMirrorAlpha && spec.w > 0.0 )
 	{
 		const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
 		const vec3 diffuseLobe = albedo * 3.141592654 * jahDiffuseAlbedoHemi( r );
-		cutLobe = jahCardLobeShare( stored, diffuseLobe, specLobe, hasDiffuse );   // MEASURING ARM (BISTRO-REST-1): no open fraction
+		cutLobe = F.w * jahCardLobeShare( stored, diffuseLobe, specLobe, hasDiffuse );
 	}
 	// (the flat term less its lobe part: E F.w, the clamp F's one rounding's - above)
 	const vec3 flatLeft = max( F.xyz - cutLobe, vec3( 0.0 ) );
