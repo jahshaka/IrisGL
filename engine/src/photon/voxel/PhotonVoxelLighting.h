@@ -65,9 +65,6 @@ namespace Ogre
         /// starts on its faces along their normal
         TextureGpu *halfSide[3] = { nullptr, nullptr, nullptr };
         TextureGpu *halfNrm[3] = { nullptr, nullptr, nullptr };
-        /// MEASURING ARM (BISTRO-REST-1 stage 0, reverted): xyz a world point, w = 1 + the cascade whose voxel there logs
-        /// every side ray (gi.sidePick); 0 = off
-        float pick[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     };
 
     class PhotonVoxelizerSourceBase;

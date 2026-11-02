@@ -11351,7 +11351,6 @@ struct VoxelSideParams {
     HitSetParams hit;          ///< THE HIT SET'S UNIFORMS (hitSetParams)
     float knobs[4] = {};       ///< the rays a side, the reach, the start's lift, the ray mask
     uint32_t cascade[4] = {};  ///< the cascade's place in the hit set's chain, its bricks along x and y
-    float pick[4] = {};        ///< MEASURING ARM (BISTRO-REST-1): xyz a world point, w = 1 + the cascade picked (0 off)
 };
 /// The job's own four (the params, the list, the scratch, the counts), the hit set at 0 and 5..36 (the cards'
 /// gather's slots) and the escape shares at 37 (PHOTON-7 11-2 (6)).
@@ -11363,9 +11362,6 @@ constexpr unsigned kVoxelSideHalfBinding = 38u;
 static_assert(kVoxelSideBindings == kHitSetBindings + 5u + 6u,
               "the sides' gather set is the hit set, its own four, the shares and the halves' six");
 constexpr unsigned kVoxelSideCounts = 9u;
-/// MEASURING ARM (BISTRO-REST-1 stage 0, reverted): the counts buffer carries the pick's records after the counts - per
-/// half q a header at 16 + 8 q (marker, taken, the mean rgb, k), per ray i < 32 sixteen words at 64 + 16 (32 q + i)
-constexpr unsigned kVoxelSidePickWords = 64u + 6u * 32u * 16u;
 }   // namespace
 
 bool RayQueryTier::makeVoxelSidePipelineNow(std::string &err) {
@@ -11442,28 +11438,6 @@ void RayQueryTier::foldVoxelSideCounts(VoxelSideView &v) {
         v.total.sides += w[6];
         v.total.emptySides += w[7];
         v.total.buried += w[8];
-        // MEASURING ARM (BISTRO-REST-1 stage 0, reverted): the pick's records, one log line a ray
-        for (unsigned q = 0; q < 6u; ++q) {
-            const uint32_t *h = w + 16u + 8u * q;
-            if (!h[0]) continue;
-            const float *hf = reinterpret_cast<const float *>(h);
-            char line[512];
-            std::snprintf(line, sizeof line, "JAH SIDEPICK frame %u half %u taken %.0f mean %.9g %.9g %.9g k %.6g",
-                          v.countsFrame[i], q, double(hf[1]), double(hf[2]), double(hf[3]), double(hf[4]), double(hf[5]));
-            Ogre::LogManager::getSingleton().logMessage(line);
-            for (unsigned r = 0; r < 32u; ++r) {
-                const uint32_t *e = w + 64u + 16u * (32u * q + r);
-                if (!e[0]) continue;
-                const float *f = reinterpret_cast<const float *>(e);
-                std::snprintf(line, sizeof line,
-                              "JAH SIDEPICK frame %u half %u ray %u kind %u t %.5g hitc %d cell %.0f %.0f %.0f k %.6g T %.9g D %.9g "
-                              "trust %.6g share %.6g rad %.9g bounce %.9g answer %.9g %.9g %.9g",
-                              v.countsFrame[i], q, r, e[0], double(f[1]), int(e[2]) - 1, double(f[3]), double(f[4]),
-                              double(f[5]), double(f[6]), double(f[7]), double(f[8]), double(f[9]), double(f[10]),
-                              double(f[11]), double(f[12]), double(f[13]), double(f[14]), double(f[15]));
-                Ogre::LogManager::getSingleton().logMessage(line);
-            }
-        }
         ++v.total.dispatches;
         v.countsPending[i] = false;
     }
@@ -11496,7 +11470,7 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     if ((!v.params[slot].buffer &&
          !makeBuffer(sizeof(VoxelSideParams), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, false, v.params[slot], err)) ||
         (!v.counts[slot].buffer &&
-         !makeBuffer(kVoxelSidePickWords * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+         !makeBuffer(kVoxelSideCounts * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                      true, false, v.counts[slot], err)))
         return wait();
     if (!v.sets[slot]) {
@@ -11555,7 +11529,6 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     pp.cascade[0] = cascade;
     pp.cascade[1] = job.brickDims[0];
     pp.cascade[2] = job.brickDims[1];
-    for (int k = 0; k < 4; ++k) pp.pick[k] = job.pick[k];   // MEASURING ARM (BISTRO-REST-1)
     // THE ESCAPE SHARES (PHOTON-7 11-2 (6)): cascade 0 writes its voxels' words into the scene's host-visible copy (its
     // grid's voxel dims; re-made, zeroed, when they change); every other cascade binds the same buffer and writes nothing
     {
@@ -11603,7 +11576,7 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     ub.buffer = v.params[slot].buffer;
     ub.range = sizeof(VoxelSideParams);
     cb.buffer = v.counts[slot].buffer;
-    cb.range = kVoxelSidePickWords * sizeof(uint32_t);
+    cb.range = kVoxelSideCounts * sizeof(uint32_t);
     const auto own = [&](uint32_t binding, VkDescriptorType type) -> VkWriteDescriptorSet & {
         VkWriteDescriptorSet &e = w[binding];
         e.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -11667,7 +11640,7 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     {
         // THE COUNTS, zeroed; and THE ARGUMENTS the select wrote visible to the indirect read (the solver orders the
         // compute reads; the indirect stage is this dispatch's own)
-        vkCmdFillBuffer(cmd, v.counts[slot].buffer, 0, kVoxelSidePickWords * sizeof(uint32_t), 0u);
+        vkCmdFillBuffer(cmd, v.counts[slot].buffer, 0, kVoxelSideCounts * sizeof(uint32_t), 0u);
         VkMemoryBarrier fb{};
         fb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;

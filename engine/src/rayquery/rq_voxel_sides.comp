@@ -43,7 +43,6 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 	JahHitParams hit;   // THE HIT SET'S UNIFORMS (the one text)
 	vec4 knobs;		// x = the rays a side N, y = the reach (metres), z = the start's lift (the finest cell, metres), w = the mask
 	uvec4 cascade;	// x = this cascade's place in the hit set's chain, yz = its bricks along x and y, w = write the escape shares
-	vec4 pick;		// MEASURING ARM (BISTRO-REST-1, reverted): xyz a world point, w = 1 + the cascade whose voxel there logs its rays
 } p;
 #include "jah_world_exit.glsl"
 
@@ -133,31 +132,6 @@ void jahCardLobeHemi( float r, out float a, out float b )
 const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, kCountNoSample = 4u, kCountSky = 5u,
 		   kCountTexels = 6u, kCountEmpty = 7u, kCountBuried = 8u;
 
-/// MEASURING ARM (BISTRO-REST-1 stage 0, reverted): the record base of the picked half being gathered (-1 none)
-int jahPickBase = -1;
-void jahPickRecord( int i, uint kind, float t, vec3 answer, float bounce )
-{
-	if( jahPickBase < 0 || i >= 32 )
-		return;
-	const uint b = uint( jahPickBase ) + 16u * uint( i );
-	counts[b] = kind;
-	counts[b + 1u] = floatBitsToUint( t );
-	counts[b + 2u] = uint( jahVoxelAnswerCascade + 1 );
-	counts[b + 3u] = floatBitsToUint( jahDbgCell.x );
-	counts[b + 4u] = floatBitsToUint( jahDbgCell.y );
-	counts[b + 5u] = floatBitsToUint( jahDbgCell.z );
-	counts[b + 6u] = floatBitsToUint( jahDbgK );
-	counts[b + 7u] = floatBitsToUint( jahDbgT );
-	counts[b + 8u] = floatBitsToUint( jahDbgD );
-	counts[b + 9u] = floatBitsToUint( jahDbgTrust );
-	counts[b + 10u] = floatBitsToUint( jahDbgShare );
-	counts[b + 11u] = floatBitsToUint( jahDbgRad );
-	counts[b + 12u] = floatBitsToUint( bounce );
-	counts[b + 13u] = floatBitsToUint( answer.x );
-	counts[b + 14u] = floatBitsToUint( answer.y );
-	counts[b + 15u] = floatBitsToUint( answer.z );
-}
-
 /// THE SIDE'S GATHER (the head of this file): the mean of the N rays' answers from world point P along the side's
 /// world normal n; `sky` counts the misses. A BURIED side (jahRayOriginBuried: its lift crosses a front face - its
 /// origin behind a surface, inside a solid) gathers nothing; `pointError` its stored position's quantum along n.
@@ -200,7 +174,6 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 			taken += 1.0;
 			share += 1.0 / float( rays );   // an exit: the sky (the escape share, 11-2 (6))
 			++c[kCountSky];
-			jahPickRecord( i, 1u, tMax, paneLight + through * jahEnvCone( dir, binTan ), 0.0 );
 			continue;
 		}
 		const float tHit = rayQueryGetIntersectionTEXT( rq, true );
@@ -216,14 +189,10 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 			sum += paneLight;
 			taken += 1.0;
 			++c[kCountBack];
-			jahPickRecord( i, 2u, rayQueryGetIntersectionTEXT( rq, true ), paneLight, 0.0 );
 			continue;
 		}
 		const vec3 hitN = known ? ( dot( wound, dir ) > 0.0 ? -wound : wound ) : -dir;
 		jahHitSurf = JahHitSurface( slot, geomIdx, prim, bary, toWorld, tHit, false, known );
-		jahDbgCell = vec3( -1.0 );   // MEASURING ARM (BISTRO-REST-1)
-		jahDbgK = jahDbgT = jahDbgD = jahDbgRad = 0.0;
-		jahDbgTrust = jahDbgShare = -1.0;
 		jahHitAreaSeq = floatBitsToUint( P.x ) * 73856093u ^ floatBitsToUint( P.z ) * 19349663u ^ uint( i ) * 83492791u;
 		bool ok = false;
 		uint source = 0u;
@@ -232,10 +201,8 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 		if( !ok || !finite3( radiance ) )
 		{
 			++c[kCountNoSample];
-			jahPickRecord( i, 3u, tHit, vec3( 0.0 ), 0.0 );
 			continue;
 		}
-		jahPickRecord( i, 4u + source * 16u, tHit, paneLight + through * radiance, jahVoxelBounceOut.x );
 		sum += paneLight + through * radiance;
 		taken += 1.0;
 		++c[source == 1u ? kCountCard : kCountVoxel];
@@ -295,26 +262,7 @@ void main()
 			const float posQ = cellW * ( 0.5 / 65535.0 + 0.5 / 1023.0 * clamp( pO / o, 0.0, 1.0 ) ) / o +
 							   cellW * ( 0.5 / 512.0 ) / max( o, 1.0 / 512.0 ) *
 								   ( 1.0 - abs( nWorld[a] ) );
-			// MEASURING ARM (BISTRO-REST-1): this voxel the picked one - its half's rays recorded, its header written
-			bool picked = false;
-			if( p.pick.w > 0.5 && int( p.pick.w + 0.5 ) - 1 == int( p.cascade.x ) )
-			{
-				const vec3 pc = floor( ( p.pick.xyz - p.hit.voxelOrigin[cc].xyz ) * invSize / invRes );
-				picked = all( equal( pc, vec3( cell ) ) );
-			}
-			jahPickBase = picked ? int( 64u + 16u * 32u * uint( q ) ) : -1;
 			gathered[q] = jahSideGatherTlas( P, nWorld, posQ, c, shares[q] );
-			if( picked )
-			{
-				const uint h = 16u + 8u * uint( q );
-				counts[h] = 1u;
-				counts[h + 1u] = floatBitsToUint( float( max( int( p.knobs.x ), 1 ) ) );
-				counts[h + 2u] = floatBitsToUint( gathered[q].x );
-				counts[h + 3u] = floatBitsToUint( gathered[q].y );
-				counts[h + 4u] = floatBitsToUint( gathered[q].z );
-				counts[h + 5u] = floatBitsToUint( halfK[q] );
-			}
-			jahPickBase = -1;
 		}
 	}
 	if( p.cascade.w == 1u && coverage > 0.0 )

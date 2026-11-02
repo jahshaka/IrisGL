@@ -117,10 +117,6 @@ int jahVoxelAnswerCascade = -1;
 /// no bounce and no sky in the store it is exactly 0; where the store holds only bounce, the read.
 /// A hit whose direct light is computed at the hit adds this, and nothing else of the store.
 vec3 jahVoxelBounceOut = vec3( 0.0 );
-/// MEASURING ARM (BISTRO-REST-1 stage 0, reverted): the first answering cascade's read - its pick cell, coverage (the
-/// read's w), the pick half's T and D, the first footprint's trust, the share and the read's radiance (red channel)
-vec3 jahDbgCell = vec3( -1.0 );
-float jahDbgK = 0.0, jahDbgT = 0.0, jahDbgD = 0.0, jahDbgTrust = -1.0, jahDbgShare = -1.0, jahDbgRad = 0.0;
 
 #ifdef JAH_VOX_SAMPLE_DIRECT
 /// THE STORE'S QUANTUM at a value's level, per channel: the half's 2^-10 of the value, 2^-24 under its smallest normal.
@@ -169,9 +165,6 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 	vec3 share = vec3( 0.0 );
 	{
 		const vec3 tr = jahShareTrust( tIso.xyz, q, rad );
-		jahDbgT = tIso.x;   // MEASURING ARM (BISTRO-REST-1)
-		jahDbgD = dIso.x;
-		jahDbgTrust = tr.x;
 		share += left * tr * clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
 		left *= vec3( 1.0 ) - tr;
 	}
@@ -374,13 +367,6 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			// (THE SHARE BY PRECISION, the ruling (B): its footprint grows where the pick texel cannot carry it; one that
 			// never can is the empty texel's case)
 			const vec3 share = jahVoxelShareFootprint( c, lsPick, dir, rad, lod, tIso, dIso );
-			if( !ok )   // MEASURING ARM (BISTRO-REST-1): the first answering cascade's read
-			{
-				jahDbgCell = floor( lsPick / irS );
-				jahDbgK = s.w;
-				jahDbgShare = share.x;
-				jahDbgRad = rad.x;
-			}
 			// ( T - D ) / T, NOT 1 - D / T: at an EMPTY texel (T = D = 0 - the texel picked along
 			// the ray holds nothing and the read's light came through the kernel's other axes) the
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
