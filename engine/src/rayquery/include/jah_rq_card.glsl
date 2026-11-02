@@ -60,7 +60,7 @@
 //     JAH_CARD_INSTANCE(slot)     uvec4  (firstCard, cardCount, 0, 0)
 //     JAH_CARD_DEPTH(texel)       float  the Depth layer at an atlas texel
 //     JAH_CARD_RADIANCE(texel)    vec3   the Radiance layer at an atlas texel
-//     JAH_CARD_INDIRECT / _EMISSIVE / _SHADOW_ROUGH / _ALBEDO / _NORMAL (texel)
+//     JAH_CARD_INDIRECT / _FLAT / _SHADOW_ROUGH / _ALBEDO / _NORMAL (texel)
 //                                        the view term's five layers
 // and the card table as `jahCards[]` — jah_rq_card_bindings.glsl declares all
 // of it at the caller's JAH_CARD_BINDING_BASE and JAH_CARD_VIEW_BINDING_BASE.
@@ -73,6 +73,7 @@
 // The fork's diffuse lobe (JahBrdf, JahDiffuseAlbedo — unwrapped from its Pbs
 // media by the build) and the view term built on it.
 #include "jah_fork_brdf.glsl"
+#include "jah_half_round.glsl"
 #include "jah_card_view.glsl"
 
 // ONE CARD, as SurfaceCache::syncBuffers writes it (std430, 80 bytes;
@@ -318,7 +319,7 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 		lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w, JAH_CARD_SUN_VIS( pick.texel ),
 								  JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
 	vec3 cutLobe;
-	const vec3 viewed = jahCardReadView( JAH_CARD_RADIANCE( pick.texel ), stored, JAH_CARD_EMISSIVE( pick.texel ),
+	const vec3 viewed = jahCardReadView( JAH_CARD_RADIANCE( pick.texel ), stored, JAH_CARD_FLAT( pick.texel ),
 										 albedo.xyz, spec, alpha, r, sa, sb, cut, kJahCardNearMirrorAlpha, N, L, V,
 										 cutLobe );
 	jahCardPickCut = cutLobe;

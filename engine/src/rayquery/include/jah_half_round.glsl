@@ -28,4 +28,22 @@ float jahRoundHalf( float v )
 {
 	return jahRoundHalf( vec3( v ) ).x;
 }
+/// WHAT AN RGBA16F STORE OF jahRoundHalf( v ) HOLDS (BISTRO-REST-1: the cards' relight builds its flat term from the
+/// Indirect layer's own value, so the read's cut is the stored term's own lobe part): the rounded value TRUNCATED to the
+/// half float as the store converts - its 10-bit mantissa (the float's low 13 bits cleared) at or above the half's
+/// smallest normal 2^-14, a whole multiple of 2^-24 below it (the denormals; jahRoundHalf's residue there, stated
+/// above). Finite and within +-65504 by jahRoundHalf's clamp; an Inf or a NaN is returned as it came.
+vec3 jahHalfStored( vec3 v )
+{
+	const vec3 r = jahRoundHalf( v );
+	const uvec3 b = floatBitsToUint( r );
+	const bvec3 finite = lessThan( b & uvec3( 0x7FFFFFFFu ), uvec3( 0x7F800000u ) );
+	const vec3 normal = uintBitsToFloat( b & uvec3( 0xFFFFE000u ) );
+	const vec3 denormal = sign( r ) * floor( abs( r ) * 16777216.0 ) * ( 1.0 / 16777216.0 );
+	return mix( r, mix( denormal, normal, greaterThanEqual( abs( r ), vec3( 6.1035156e-5 ) ) ), finite );
+}
+float jahHalfStored( float v )
+{
+	return jahHalfStored( vec3( v ) ).x;
+}
 #endif   // JAH_HALF_ROUND_GLSL
