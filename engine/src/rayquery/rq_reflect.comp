@@ -60,10 +60,32 @@ layout( constant_id = 0 ) const bool kCompactPass = false;
 /// THE REST'S COMPACT LIST (binding 52, OgreRayQuery.cpp kCompactList*): [0..1] the halves' counts, [2..4] the compact
 /// pass's indirect dispatch { groups, 1, 1 } (the tile pass raises the groups as it lists: the larger of the two modes'
 /// needs - a warp a slot up to L, a lane a slot past it), [5] the hit list's record count
-/// after the tile pass (the host's copy: the compact pass's record budget), [6..7] unused, then the two halves' texel
-/// indices (x | y << 16) - each half as long as the trace grid, so a listing can never overflow it.
+/// after the tile pass (the host's copy: the compact pass's record budget), [6..7] unused, [8 + 2h] / [9 + 2h] THE TAIL's
+/// RAMP written in the frame of half h (float bits: the rate R a converging texel batched at, the samples V a texel
+/// batching since the rest began holds at most - jahTailRamp), then the two halves' texel indices (x | y << 16) - each
+/// half as long as the trace grid, so a listing can never overflow it.
 layout( std430, set = 0, binding = 52 ) buffer JahCompactList { uint compactWords[]; };
-const uint kCompactHeaderWords = 8u;
+const uint kCompactHeaderWords = 12u;
+const uint kCompactRampWord = 8u;
+/// THE TAIL's RAMP (PHOTON-7-9A, the hand-over's one-frame rise, §3980; the lead's ruling (a)): a converging rest mean of
+/// v samples that folds k more moves its displayed answer by sigma sqrt( k ) / ( v + k ) a frame, so raising the rate
+/// from the tile pass's k to the compact pass's share in ONE frame made the glass's step RISE (+50 % of the mean change,
+/// up to 2 codes a pixel) - the no-flicker law's defect. The rate may rise only while the step stays NON-INCREASING:
+/// k_t <= k_{t-1} ( 1 + k_{t-1} / v )^2 (exact for k_t >= k_{t-1}, v the samples before the frame) - taken at the LARGEST
+/// v a texel can hold (V: every rest frame's rate summed, the texels batching since the rest began), the smallest growth,
+/// so every texel's step is non-increasing. One rule, every frame: the tile pass's frames ride it at R = k (rest.z).
+/// R is real: a texel takes floor( R ) or floor( R ) + 1 by a hash of its sample index (the mean rate R).
+vec2 jahTailRampPrev( uint listHalf )
+{
+	const uint w = kCompactRampWord + 2u * ( listHalf ^ 1u );
+	return vec2( uintBitsToFloat( compactWords[w] ), uintBitsToFloat( compactWords[w + 1u] ) );
+}
+void jahTailRampStore( uint listHalf, float R, float V )
+{
+	const uint w = kCompactRampWord + 2u * listHalf;
+	compactWords[w] = floatBitsToUint( R );
+	compactWords[w + 1u] = floatBitsToUint( V );
+}
 const uint kCompactDispatchWord = 2u;
 const uint kCompactRecordsWord = 5u;
 
@@ -1502,6 +1524,27 @@ void reflectFinish( ivec2 tc, float dist, vec3 world, vec3 origin, vec3 prevSurf
 				   photonSource == 4u ? kPhotonScreen : kPhotonSky );
 }
 
+/// The eye of this invocation is the first (the ramp's record is one eye's: a stereo chain runs no compact path).
+bool gEyeZero() { return gl_GlobalInvocationID.z == 0u; }
+/// THIS FRAME'S TAIL RATE R (jahTailRampPrev's rule): the compact pass's share of the tail's rays a listed texel - the
+/// tail's budget over the count - held to the last rate's non-increasing-step growth at the largest V; the DENSE mode and
+/// the tile pass batch at the tile's k.
+float jahTailRate( bool dense, uint n, vec2 prev, float rampK )
+{
+	if( dense )
+		return rampK;
+	const float share = p.compact.y / float( max( n, 1u ) );
+	const float grow = 1.0 + prev.x / max( prev.y, prev.x );
+	return clamp( min( share, prev.x * grow * grow ), 1.0, 64.0 );
+}
+/// A texel's whole rate from the real R: floor( R ) or one more, by a hash of its texel and its sample index.
+uint jahTailK( float R, ivec2 tc, uint v )
+{
+	const float h = float( jahReflectPcg( uint( tc.x ) * 7919u + uint( tc.y ) * 104729u + v * 2654435761u ) & 0xFFFFFFu ) *
+					( 1.0 / 16777216.0 );
+	return clamp( uint( floor( R ) ) + ( fract( R ) > h ? 1u : 0u ), 1u, 64u );
+}
+
 void main()
 {
 	const ivec2 traceRes = ivec2( p.resolution.xy );
@@ -1520,6 +1563,15 @@ void main()
 	const uint compactBase = kCompactHeaderWords + compactHalf * compactCap;
 	const uint compactPrev = compactWords[compactHalf ^ 1u];
 	const bool compactOn = p.compact.w > 0.5 && compactPrev > 0u && compactPrev <= compactL;
+	// THE TAIL's RAMP (jahTailRampPrev): last frame's rate R and the samples V; a new rest (knobs2.x <= 1: its first
+	// frame) restarts V, and a missing record (0) starts R at the tile pass's k.
+	const float rampK = max( p.rest.z, 1.0 );
+	vec2 rampPrev = jahTailRampPrev( compactHalf );
+	if( p.knobs2.x < 1.5 || !( rampPrev.x > 0.0 ) || !( rampPrev.y >= 0.0 ) )
+		rampPrev = vec2( rampK, p.knobs2.x < 1.5 ? 0.0 : max( rampPrev.y, 0.0 ) );
+	// ...the tile pass's frames (no compact pass this frame) ride the ramp at the tile's k: its record, one lane
+	if( !kCompactPass && !compactOn && all( equal( gl_GlobalInvocationID, uvec3( 0u ) ) ) )
+		jahTailRampStore( compactHalf, rampK, rampPrev.y + rampK );
 	ivec2 gid = ivec2( gl_GlobalInvocationID.xy );
 	bool compactOwner = true;
 	uint compactN = 0u;
@@ -1536,6 +1588,12 @@ void main()
 		compactDense = compactN > compactL;
 		if( !compactOn )
 			return;
+		// THE RAMP's RECORD for the next frame (one lane: every lane computes the same R)
+		if( gl_WorkGroupID.x == 0u && gl_LocalInvocationIndex == 0u && gEyeZero() )
+		{
+			const float Rt = jahTailRate( compactDense, compactN, rampPrev, rampK );
+			jahTailRampStore( compactHalf, Rt, rampPrev.y + Rt );
+		}
 		uint slot;
 		if( compactDense )
 		{
@@ -1825,10 +1883,11 @@ void main()
 	const bool restBatch = live && restInPlace && !resume && p.rest.x < 0.5 && p.rest.y < 0.5 && !centreFixed &&
 						   p.rest.z > 1.5;
 	// THE BATCH: the tile pass's k (the rest's first frame's), the compact pass's the tail's rays a frame shared by the
-	// listed texels, k = min( 64, ( count / 8 ) / listed ) - each texel's samples over its own warp's lanes.
+	// listed texels, k = min( 64, ( count / 8 ) / listed ) HELD TO THE TAIL's RAMP (jahTailRate: the displayed step
+	// never rises) - each texel's samples over its own warp's lanes.
 	// (the DENSE mode takes the tile pass's k: its texels are the tile pass's own, handed over)
 	const bool compactWarp = kCompactPass && !compactDense;
-	const uint compactK = compactWarp ? clamp( uint( p.compact.y ) / max( compactN, 1u ), 1u, 64u ) : 0u;
+	const uint compactK = compactWarp ? jahTailK( jahTailRate( false, compactN, rampPrev, rampK ), tc, inPlace.v ) : 0u;
 	const uint batchRays = restBatch ? ( compactWarp ? compactK : uint( p.rest.z ) ) : 1u;
 	uint vNow = restInPlace ? inPlace.v : 0u;   // the samples the rest mean holds
 	float restT = restInPlace ? inPlace.hitT : throwT;   // the rest's mean length

@@ -414,8 +414,10 @@ constexpr unsigned kReflectCompactTexels = 16384u;
 /// THE COMPACT LIST'S HEADER (rq_reflect.comp's twins): words [0..1] the halves' counts, [2..4] the compact pass's
 /// VkDispatchIndirectCommand (the tile pass raises its groups with an atomicMax - the larger of the warp mode's and the
 /// dense mode's needs; y = z = 1), [5] the hit list's record
-/// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused; the halves after it.
-constexpr unsigned kCompactListHeaderWords = 8u;
+/// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused, [8..11] THE TAIL's
+/// RAMP - a half's rate R and samples V as float bits, written in that half's frame, read the next (rq_reflect.comp
+/// jahTailRampPrev: PHOTON-7-9A, the hand-over's one-frame rise); the halves after it.
+constexpr unsigned kCompactListHeaderWords = 12u;
 constexpr unsigned kCompactListDispatchWord = 2u;
 constexpr unsigned kCompactListRecordsWord = 5u;
 /// THE HIT LIST'S BUFFER LAYOUT (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords, 800.Atom_piece_ps.any's read):
