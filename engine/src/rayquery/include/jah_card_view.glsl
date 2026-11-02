@@ -182,7 +182,7 @@ vec3 jahCardReadView( vec3 R, vec3 stored, vec4 F, vec3 albedo, vec4 spec, float
 /// word's), `codes` the move in codes (the frame's word). True: report.
 bool jahCardMoveReport( float S, float ref, bool fresh, out float move, out float codes )
 {
-	const bool refOk = !fresh && ( floatBitsToUint( ref ) & 0x7F800000u ) != 0x7F800000u && ref >= 0.0;   // MEASURING ARM (BISTRO-REST-1): the sign test back
+	const bool refOk = !fresh && ( floatBitsToUint( ref ) & 0x7F800000u ) != 0x7F800000u;
 	const float d = refOk ? abs( S - ref ) : 3.0e38;
 	const float code = 0.01 * max( max( S, refOk ? ref : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
 	// (no reference: the whole value moved, as a capture's)
