@@ -1719,6 +1719,13 @@ constexpr ArmDef kArms[] = {
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
       "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
       "0 = shipped." },
+    { ArmId::GiSidePick, 0.0, 0.0, 8.0,
+      "MEASURING ARM (BISTRO-REST-1 stage 0, reverted): 1 + the cascade whose voxel at (gi.sidePickX, Y, Z) writes every "
+      "side ray of every TLAS-route pass that lists it - the hit's cascade, cell, read coverage, T, D, trust, share and "
+      "answer - into the Ogre log (JAH SIDEPICK lines). 0 = off." },
+    { ArmId::GiSidePickX, 0.0, -100000.0, 100000.0, "MEASURING ARM (BISTRO-REST-1): gi.sidePick's world x." },
+    { ArmId::GiSidePickY, 0.0, -100000.0, 100000.0, "MEASURING ARM (BISTRO-REST-1): gi.sidePick's world y." },
+    { ArmId::GiSidePickZ, 0.0, -100000.0, 100000.0, "MEASURING ARM (BISTRO-REST-1): gi.sidePick's world z." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

@@ -835,7 +835,14 @@ bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *com
             if (c.lighting == t.lighting) { index = k; found = true; break; }
             ++k;
         }
-        return found ? mScene.gatherVoxelSides(t, index) : 0;
+        Ogre::PhotonVoxelSideTrace job = t;
+        if (mEngine && mEngine->armRegistry().on(ArmId::GiSidePick)) {   // MEASURING ARM (BISTRO-REST-1 stage 0)
+            job.pick[0] = float(mEngine->armRegistry().value(ArmId::GiSidePickX));
+            job.pick[1] = float(mEngine->armRegistry().value(ArmId::GiSidePickY));
+            job.pick[2] = float(mEngine->armRegistry().value(ArmId::GiSidePickZ));
+            job.pick[3] = float(mEngine->armRegistry().value(ArmId::GiSidePick));
+        }
+        return found ? mScene.gatherVoxelSides(job, index) : 0;
     });
     lighting->setLightFrame(frame);
     // A WHOLE INJECTION (a first build, a jump, a new placement) WRITES THE TOTAL FROM ITS DIRECT TERM: the volume's

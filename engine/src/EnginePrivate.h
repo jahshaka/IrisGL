@@ -2290,7 +2290,11 @@ private:
     X(CardDemandCount, "cards.demandCount") /* the card readers count their carded and uncarded hits (a measuring arm, PHOTON-7 stage 5) */ \
     X(CardGatherLate, "cards.gatherLate") /* the gather's demand stamps within N frames of a demand change dropped: a late first reader (a test door) */ \
     X(CardForce, "cards.force") /* one card FORCED resident (+(node x 64 + card)) or absent (-(node x 64 + card)); card 63 = every card of the node: L1's test door (PHOTON-7 stage 10) */ \
-    X(GiTruthRays, "gi.truthRays") /* the cards' indirect gather and the voxel sides' gather at N rays (0 = the tier's; the high-sample truth, PHOTON-7 stage 10 (8)) */
+    X(GiTruthRays, "gi.truthRays") /* the cards' indirect gather and the voxel sides' gather at N rays (0 = the tier's; the high-sample truth, PHOTON-7 stage 10 (8)) */ \
+    X(GiSidePick, "gi.sidePick") /* MEASURING ARM (BISTRO-REST-1 stage 0, reverted): 1 + the cascade whose voxel at gi.sidePickX/Y/Z logs every side ray of every pass */ \
+    X(GiSidePickX, "gi.sidePickX") /* ...its world x */ \
+    X(GiSidePickY, "gi.sidePickY") /* ...its world y */ \
+    X(GiSidePickZ, "gi.sidePickZ") /* ...its world z */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
