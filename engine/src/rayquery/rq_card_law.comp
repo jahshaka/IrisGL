@@ -10,8 +10,8 @@
 //     stored as the relight stores them (rounded to nearest, then the half-float store's truncation), READ toward
 //     three directions by a reader that traces the lobe (the cut taken: C2), RE-MARCHED unchanged, and its read
 //     answer gathered by a RECEIVER texel (a dielectric of albedo 0.5) captured then re-marched unchanged:
-//       a = ( the least channel of the read over the directions, the cut's residual F - cut in units of F's one rounding
-//             (half a step; 2^-24 among the denormals) - its least channel, BEFORE any clamp -, the re-march reported (1) or not (0), the receiver's
+//       a = ( the least channel of the read over the directions, the cut's residual F - cut in half-float steps of the
+//             flat term - its least channel, BEFORE any clamp -, the re-march reported (1) or not (0), the receiver's
 //             re-march reported ), b = ( the receiver's re-march move, the receiver's S, the flat term's largest
 //             channel, the cut's largest channel );
 //   mode 1, THE REFERENCE: a stored radiance's largest channel S = q.x against a last reported value q.y (any finite
@@ -35,8 +35,8 @@ layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answe
 layout( std430, set = 0, binding = 2 ) readonly buffer CountBuf { uint questionCount; };
 
 #include "jah_fork_brdf.glsl"
-#include "jah_half_round.glsl"
 #include "jah_card_view.glsl"
+#include "jah_half_round.glsl"
 
 const float kNearMirrorAlpha = 0.0011;   // (jah_rq_card.glsl kJahCardNearMirrorAlpha, JahCardLight_cs.glsl's)
 
@@ -76,8 +76,7 @@ void jahFixLobeHemi( float r, out float a, out float b )
 /// layers as stored
 struct FixTexel
 {
-	vec3 cached, radiance;
-	vec4 flatTerm;   // (a: the open fraction its terms carry, as the Flat layer's a)
+	vec3 cached, flatTerm, radiance;
 };
 FixTexel jahFixRelight( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, vec3 kD, vec4 spec, float alpha,
 						vec3 emissive, float openF )
@@ -95,12 +94,10 @@ FixTexel jahFixRelight( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, 
 		specLobe = specF0 * sa + specW * sb;
 	}
 	FixTexel t;
-	const float open = jahHalfStored( openF );   // (the relight's: JahCardLight_cs.glsl)
-	vec3 flatTerm;
-	jahCardStoreTerms( mode, irradiance, cachedIn, direct, kD, diffuseLobe, specLobe, nearMirror, emissive, open,
-					   t.cached, flatTerm, t.radiance );
+	jahCardStoreTerms( mode, irradiance, cachedIn, direct, kD, diffuseLobe, specLobe, nearMirror, emissive, openF,
+					   t.cached, t.flatTerm, t.radiance );
 	t.cached = jahFixStore( t.cached );
-	t.flatTerm = vec4( jahFixStore( flatTerm ), open );
+	t.flatTerm = jahFixStore( t.flatTerm );
 	t.radiance = jahFixStore( t.radiance );
 	return t;
 }
@@ -174,12 +171,9 @@ void main()
 		const vec3 v = jahFixRead( t, kD, spec, alpha, Vs[k], cut );
 		least = min( least, min( min( v.x, v.y ), v.z ) );
 		answer = min( answer, v );
-		const vec3 res = t.flatTerm.xyz - cut;
-		// (in units of F's ONE ROUNDING, per channel: half a step where the half float is normal - the store to nearest -,
-		// a whole 2^-24 among its denormals, where the store truncates - jah_half_round.glsl)
+		const vec3 res = t.flatTerm - cut;
 		for( int c = 0; c < 3; ++c )
-			residual = min( residual, res[c] / ( abs( t.flatTerm[c] ) < 6.1035156e-5 ? 5.9604645e-8
-																					: 0.5 * jahFixStep( t.flatTerm[c] ) ) );
+			residual = min( residual, res[c] / jahFixStep( t.flatTerm[c] ) );
 		cutMax = max( cutMax, max( max( cut.x, cut.y ), cut.z ) );
 	}
 	const FixTexel t2 = jahFixRelight( 0u, vec3( 0.0 ), t.cached, direct, kD, spec, alpha, emissive, openF );
