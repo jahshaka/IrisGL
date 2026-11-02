@@ -8716,14 +8716,12 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
             const float marginCells = giHitLevelMarginCells(mArms ? mArms->value(ArmId::GiHitLevelMargin) : -1.0);
             out.levelRadius[c] = giHitLevelRadius(v.shape, marginCells);
             out.levelBand[c] = kGiHitLevelBandCells * v.cell;
-            out.levelMaxLod[c] = giPlacementLevelK(v.shape.stepCells);
         }
         ++out.cascadeCount;
     }
     {
         Ogre::Vector3 cam;
         out.levelOn = scene->photon().giCameraPos(cam);
-        out.footprintOn = arm(ArmId::GiHitFootprint, false);   // MEASURING ARM (BISTRO-REST-1; deleted next commit)
         out.levelCam[0] = cam.x; out.levelCam[1] = cam.y; out.levelCam[2] = cam.z;
     }
     // ---- THE ONE ENVIRONMENT (PHOTON-ENV-1): the sky's captured cube, or the flat environment when there is no

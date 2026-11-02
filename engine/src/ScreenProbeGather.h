@@ -97,7 +97,7 @@ inline bool isCameraCut(const float *prevPos, const float *prevRight, const floa
 constexpr unsigned kGatherMaxCascades = 4u;
 
 /// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the half store (VOXEL-R13), X, Y, Z,
-/// coverage +/-, position +/-, the half store's direct terms, the direct directional chains (three: BISTRO-REST-1).
+/// coverage +/-, position +/-, the half store's direct terms, the direct directional level 0 (three: BISTRO-REST-1).
 constexpr unsigned kGatherVoxelKinds = 12u;
 /// The octahedral probe map is at most 8x8, because one ray is one thread of
 /// the trace's 8x8 workgroup (the shaders' `kOctResMax`).
@@ -231,11 +231,7 @@ struct HitSetSources {
     float levelCam[3] = {};
     float levelRadius[kGatherMaxCascades] = {};
     float levelBand[kGatherMaxCascades] = {};
-    /// ...and the coarsest footprint level it answers, K (its placement quantum's: giPlacementLevelK - every level up to
-    /// it world-anchored); a footprint past it hands to the next one out
-    float levelMaxLod[kGatherMaxCascades] = {};
     bool levelOn = false;
-    bool footprintOn = false;   ///< MEASURING ARM (BISTRO-REST-1; deleted next commit): gi.hitFootprint
     /// THE ONE ENVIRONMENT (PHOTON-ENV-1, OgreScene::rayEnvironment): the sky's captured cube (null: the flat colour).
     Ogre::TextureGpu *sky = nullptr;
     float skyColour[3] = { 0.0f, 0.0f, 0.0f };
@@ -310,9 +306,8 @@ static_assert(sizeof(HitSetParams) == 25u * 16u, "JahHitParams is twenty-five ve
 ///  - View: a VIEW reader (the gather, the reflection) reads the level by the GI CAMERA (10-2e): its picture may depend
 ///    on its pose, and two placements the engine can reach at one pose read one level (levelCam.w = 1; 0 without a
 ///    camera: the box rule).
-///  - Cache: a CACHE's rays (the cards' gather, the voxel sides) read a level that is CAMERA-INDEPENDENT - the ray's
-///    own footprint at the hit (the clipmap law: a cascade's world-anchored levels up to K carry it, fading out between
-///    K - 1 and K to the next one out), in the finest box holding the hit, its edge blend (levelCam.w = 2). A cache's
+///  - Cache: a CACHE's rays (the cards' gather, the voxel sides) read a level that is CAMERA-INDEPENDENT - the finest
+///    box holding the hit, its edge blend (levelCam.w = 0; every hit reads its own level-0 half, BISTRO-REST-1). A cache's
 ///    store is a world function: under the camera's level it was a function of where the camera stood (the sealed
 ///    box's c1 cells inside held 0.040 at the outside pose and 0.0029 at the inside rest) and a teleport read the stale
 ///    part through the walls for a hundred frames (gi.sealed_sky (8)).

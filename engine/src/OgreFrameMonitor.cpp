@@ -1719,9 +1719,6 @@ constexpr ArmDef kArms[] = {
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
       "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
       "0 = shipped." },
-    { ArmId::GiHitFootprint, 0.0, 0.0, 1.0,
-      "MEASURING ARM (BISTRO-REST-1, the level-0 read's ABBA; deleted in the next commit): 1 = every hit read takes the "
-      "old footprint level (form 3's), 0 = the hit's own level-0 half (shipped)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
