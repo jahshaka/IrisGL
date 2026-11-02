@@ -1639,10 +1639,14 @@ struct ChainDesc {
     /// ...the prepass a TRACE reads (the SSR stage, the gather, the sun contact) - the hit decode's condition: the
     /// no-ray producer's prepass appends no hit.
     bool tracedPrepass() const;
-    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve) and its SCREEN
-    /// SOURCES - this view's previous picture, the depth it was drawn at, the editor helpers' mask: the SSR stage on a
-    /// chain that traces NO rays, never STEREO (the copies are not per layer). The reflection has no mode
-    /// (PostFxDesc::ssr, PHOTON-7-9A): a ray chain reflects by its rays alone and builds none of them.
+    /// THE SCREEN SOURCES (PHOTON-7 stage 6; PHOTON-7-9A's hybrid): does the chain carry this view's previous picture,
+    /// the depth it was drawn at, the editor helpers' mask and the object motion - the screen trace's inputs (the
+    /// hybrid's screen half on a ray chain, rq_reflect.comp) and the raster march's? The SSR stage, never STEREO (the
+    /// copies are not per layer: a stereo chain's rays answer alone). The reflection has no mode (PostFxDesc::ssr).
+    /// `build` declares them on this answer and the ray tier binds them on it.
+    bool screenSources() const;
+    /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
+    /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.
     bool rasterMarch() const;
     /// THE COMPOSED SCENE (PHOTON-7-9A): the chain's last LINEAR picture before the tonemap - the opaque and blended
     /// composite (jahRt0), or the refraction, distortion or AO pass's copy over it, whichever runs last (`build`'s
@@ -1650,6 +1654,11 @@ struct ChainDesc {
     /// filter reads frame t-1's composite in photon_resolve - before this frame's first writer of jahRt0, the screen
     /// decode or the opaque pass, clears it - to judge the rest's stop at the displayed pixel's own colour.
     const char *composedTexture() const;
+    /// THE SCREEN TRACE's SOURCE (PHOTON-7-9A's hybrid): the last LINEAR stage before the camera-side passes - the
+    /// refractives' copy where refraction runs, else jahRt0; never the distortion's warp (a camera-side pass a reflection
+    /// would read at the wrong place) nor the AO apply (the camera's screen-space estimate; the hit's radiance is the
+    /// GI's own). Kept across frames on a ray chain, read in place by the trace (no colour copy).
+    const char *screenTraceSource() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);

@@ -129,10 +129,14 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// grid's corner, w a brick in metres; and xyz its bricks per axis, w 1 = its mask is this frame's.
 	vec4 restBrickOrigin[4];
 	vec4 restBrickDims[4];
-	/// THE FAR COPIES' QUERY (PHOTON-7 stage 6): x = where it starts (the near length less the far copies' widest
-	/// hand-over gap, the gather's rule), y = where it ends (the far plane; 0 = no far query); zw unused. (The screen
-	/// trace's two blocks before it are deleted with the Both estimator, PHOTON-7-9A.)
-	vec4 farQuery;
+	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
+	/// sources are bound: the hybrid's screen half on a mono chain, ChainDesc::screenSources), y unused (the screen-alone
+	/// arm is deleted with the mode, PHOTON-7-9A), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
+	/// screen2.x = the march's length (ssrMaxDistance), y = its thickness (ssrThickness), z = where the FAR COPIES' query
+	/// starts (the near length less the far copies' widest hand-over gap, the gather's rule), w = where it ends (the far
+	/// plane; 0 = no far query).
+	vec4 screen;
+	vec4 screen2;
 	/// x, y: the denoiser space's exposure (the resolve's, the temporal pass'); z = THE LOBE DRAW'S SEED OFFSET (the arm
 	/// reflect.seedOffset, 0 shipped): added to the frame index the draw takes; w = 1 under the measuring arm
 	/// reflect.flatHits (every hit answered by a constant of its instance).

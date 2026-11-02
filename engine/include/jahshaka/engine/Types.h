@@ -5693,6 +5693,10 @@ struct RayQueryStatus {
     /// between them is a pass row of its own) — -1 unless a capture is running,
     /// and until measured.
     float reflectMs = -1.0f;
+    /// GPU milliseconds of the screen march's OBJECT-MOTION job (REFLECT-MOVERS-1,
+    /// rq_motion.comp, in front of the SSR resolve): the "rq.reflect.motion" row,
+    /// the same reading; -1 too on a chain that carries no march or no id pass.
+    float reflectMotionMs = -1.0f;
     /// THE REFLECTION HISTORY'S COUNT (PHOTON-2 stage 0; the arm "reflect.historyReadback") — an INSTRUMENT:
     /// per texel of the trace's grid, row-major (reflectHistoryW x reflectHistoryH, the eye layers side by side),
     /// the temporal mean's sample count (its state texel's N + v, whole; 0 = no answer this frame, capped at 4096)
@@ -7640,14 +7644,14 @@ struct PostFxDesc {
     /// lean on translucent panes should leave SSR off until the prepass learns
     /// a visibility split.
     ///
-    /// THE REFLECTION HAS NO MODE (PHOTON-7-9A): it is the chain's RAYS where they run (the world through the
-    /// acceleration structure, rq_reflect.comp: no screen source - no previous picture, no march - is built for it, on
-    /// the desktop and in stereo alike) and the raster MARCH where they do not (Low, Medium, a machine or a project
-    /// without rays: the march and its resolve, the march's screen sources with them). A stereo chain never marches
-    /// (its copies and the march's passes are not per layer), so a stereo view without rays reflects the probe and the
-    /// sky. The "Both" estimator (the screen trace first, the ray for the rest) is deleted: on the desktop glass walk
-    /// the rays alone were the cheaper arm at rest and walking (ledger 3916) and the screen trace's moving slide was a
-    /// different picture.
+    /// THE REFLECTION HAS NO MODE - THE HYBRID IS THE ONE SHAPE (PHOTON-7-9A, the owner's ruling; Unreal's shape): on a
+    /// MONO chain that traces rays, each reflected sample is answered by THE SCREEN FIRST (this view's previous picture
+    /// through the depth it was drawn at, where the screen vouches for the hit) and THE RAYS for the rest (the world
+    /// through the acceleration structure, rq_reflect.comp); a STEREO chain's rays answer alone (the screen sources are
+    /// not per layer); a chain without rays marches the screen alone (until NO-RAY-CUT-1). No "Both" / "Rays" / "Screen"
+    /// switch exists: on the desktop glass walk the rays alone never rested after a walk (6.5 ms of tracing a frame) and
+    /// walked at 2.49 % of the glossy pixels over a code of noise against the hybrid's 1.15 % - the lobe's own variance,
+    /// which the screen's converged answers carry less of (ledger 3953).
     int   ssr = 0;
     /// How far a reflection ray may travel, in world units. Beyond this the
     /// march gives up and the pixel falls back to the probe/sky reflection.

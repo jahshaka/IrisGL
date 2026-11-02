@@ -648,13 +648,25 @@ bool ChainDesc::anyEffect() const {
            distortion || hzb || !looks.empty() || hdrReadback;
 }
 
-bool ChainDesc::rasterMarch() const {
-    return ssr > 0 && !rayReflect && !stereo;
+bool ChainDesc::screenSources() const {
+    // THE HYBRID IS THE ONE SHAPE (PHOTON-7-9A's amendment, the owner's ruling): a mono chain's reflection reads the
+    // screen first, then the rays (a ray chain), or marches the screen alone (a chain without rays, until NO-RAY-CUT-1).
+    return ssr > 0 && !stereo;
+}
+
+const char *ChainDesc::screenTraceSource() const {
+    // the last LINEAR stage before the camera-side passes: the refractives' copy where refraction runs (a refractive
+    // surface is a real surface), else the opaque and blended composite - never the distortion's warp nor the AO apply
+    return refractions ? chain::kRefractOut : chain::kRt0;
 }
 
 const char *ChainDesc::composedTexture() const {
     // `build`'s sceneResult, in its order: refraction, then distortion, then the AO apply, each over the one before.
     return ssao ? chain::kAoApplied : distortion ? chain::kDistorted : refractions ? chain::kRefractOut : chain::kRt0;
+}
+
+bool ChainDesc::rasterMarch() const {
+    return screenSources() && !rayReflect;
 }
 
 bool ChainDesc::prepass() const {
@@ -1032,11 +1044,13 @@ void addAtomIdPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHandl
     }
     // THE ID PASS'S OWN DEPTH, copied before any scene pass adds a stock-PBR surface
     // to it (the prepass and the opaque pass LOAD this depth and draw into it). Two
-    // readers: the Atom view's quad (kAtomViewExecutionBit) and THE RAY REFLECTION
-    // (rq_reflect.comp, PHOTON-II-1 item 11; ID-DEPTH-1): a moving slot's previous pose is
-    // read only where the scene's final depth is still this one — a stock-drawn character
-    // standing in front of a moving Atom mover is not the id's surface. So on a chain
-    // whose ray reflection reads the ids it runs every frame.
+    // readers: the Atom view's quad (kAtomViewExecutionBit) and THE MARCH'S OBJECT
+    // MOTION (ID-DEPTH-1): rq_motion.comp writes a moving slot's velocity only where
+    // the scene's final depth is still this one — a stock-drawn character standing in
+    // front of a moving Atom mover is not the id's surface and keeps the camera path —
+    // and rq_motion_skin.comp identifies such a pixel by the same test; so does the ray
+    // reflection (rq_reflect.comp, PHOTON-II-1 item 11). So on a chain whose velocity job
+    // or ray reflection reads the ids it runs every frame.
     {
         Ogre::CompositorTargetDef *ct = n->addTargetPass(kAtomViewDepth);
         ct->setNumPasses(1);
@@ -1854,19 +1868,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // SSR (POST_CHAIN_SPEC §4.1 row "SSR", §8 phase 6). Named
     // once here because half the shape below reads it.
     //
-    // THREE NAMES (lane REFLECT-VR-1; PHOTON-7-9A: the reflection has no mode). `ssrMarch` is the RASTER MARCH — the
-    // prepass' G-buffers walked in texture space by a quad, then resolved by another — and it runs only on a chain that
-    // traces NO rays; `screen` is its SCREEN SOURCES — this view's previous picture, the depth it was drawn at, the
-    // helpers' mask and the (1 x 1, camera-path) object motion — which its resolve reads and nothing else does: a ray
-    // chain reflects by its rays alone and builds none of them. `ssr` is the whole reflection STAGE: the prepass, its two
-    // G-buffers and the texture HlmsPbs composites (`jahSsrReflection`), which the rays or the resolve write.
+    // THREE NAMES (lane REFLECT-VR-1; PHOTON-7 stage 6's one estimator). `screen` is the SCREEN SOURCES — this view's
+    // previous picture, the depth it was drawn at, the helpers' mask and the object motion — which the ray tier's trace
+    // reads for its screen trace (rq_reflect.comp) and the raster march's resolve reads. `ssrMarch` is the RASTER MARCH
+    // — the prepass' G-buffers walked in texture space by a quad, then resolved by another — and it runs only on a
+    // chain that traces NO rays: a ray chain answers its screen hits in the trace, one estimator, so it builds neither
+    // quad nor the march's ray buffer. `ssr` is the whole reflection STAGE: the prepass, its two G-buffers and the
+    // texture HlmsPbs composites (`jahSsrReflection`), which the rays or the resolve write.
     //
     // A STEREO CHAIN HAS NO SCREEN SOURCE, whatever a host asked for, and it is structural rather than a default: the
     // copies and the march's passes are not per layer, and every term of a screen-space trace (the neighbourhood it
     // walks, the colour history it reprojects) belongs to one picture. The rays are traced in the WORLD from the eye
     // that owns the pixel, so they are the stereo answer — see PostFxDesc::ssr.
+    const bool screen = desc.screenSources();
     const bool ssrMarch = marchesInScreenSpace(desc);
-    const bool screen = ssrMarch;   // (the march's screen sources: the march's alone since PHOTON-7-9A)
     // ...AND WITHOUT THE MARCH THE STAGE IS ONLY WORTH BUILDING FOR THE RAYS.
     // The prepass is a second full scene traversal; spending it to declare a
     // reflection texture that will be cleared and never written is a cost with
@@ -2116,14 +2131,27 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         // frame is an exact one. ITS READERS ARE THE SCREEN TRACE (a ray chain's
         // trace) AND THE RASTER MARCH'S RESOLVE — a rays-only chain reflects the
         // WORLD, not the last frame's picture of it, and builds none of these.
-        // THE OBJECT MOTION (REFLECT-MOVERS-1): its job (rq_motion.comp, the ray tier's) is deleted with the ray
-        // chain's screen sources (PHOTON-7-9A); the march's resolve still binds a 1x1 cleared to w = 0, "the camera
-        // path" everywhere.
+        // THE OBJECT MOTION (REFLECT-MOVERS-1): per pixel, where a MOVING
+        // slot's surface point would sit in this image at its previous pose — a
+        // delta in the target's uv and the depth value, w = 1 — written by the ray
+        // tier (rq_motion.comp) from the id image and the GPU scene's prevWorld;
+        // cleared to w = 0 ("the camera path") every frame in front of it, so a
+        // chain whose job does not run reads exactly the resolve it always did.
+        //
+        // FULL SIZE ONLY WHERE THE JOB RUNS (the ray tier and the id pass): 8 bytes a
+        // pixel — 16.6 MB at 1920x1080 — per screen-traced chain. Every other chain
+        // with screen sources (no rays, the split off) declares it 1x1: its reader
+        // binds a texture it reads as "the camera path" everywhere, clamping its fetch.
         if (screen) {
-            auto *td = addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT, 1u, 1u);
+            const bool velocityJob = desc.rayReflect && desc.atomDraw;
+            auto *td = velocityJob ? addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT)
+                                   : addTex(n, kSsrVelocity, Ogre::PFG_RGBA16_FLOAT, 1u, 1u);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
+            if (velocityJob) td->textureFlags |= Ogre::TextureFlags::Uav;
         }
-        if (screen) {
+        // (THE MARCH's COPY ONLY since PHOTON-7-9A: a ray chain's screen trace reads ChainDesc::screenTraceSource, kept
+        // across frames, with no copy - 16.6 MB at 1080p and the history quad freed)
+        if (ssrMarch) {
             auto *td = addTex(n, kSsrPrev,
                               floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
             td->textureFlags = Ogre::TextureFlags::RenderToTexture;
@@ -2371,9 +2399,9 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
     if (prepass) {
         // The colour history, seeded ONCE. Without this the first frame's
-        // resolve samples an Undefined texture; with it, the
+        // screen trace (or resolve) samples an Undefined texture; with it, the
         // first frame simply finds no screen answer and the second is correct.
-        if (screen) {
+        if (ssrMarch) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrev);
             t->setNumPasses(1);
             auto *c = static_cast<Ogre::CompositorPassClearDef *>(t->addPass(Ogre::PASS_CLEAR));
@@ -2383,7 +2411,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         }
         // ...and its depth, seeded once with -1, a value no depth buffer holds
         // (REFLECT-FIX-1): no first-frame texel matches a surface, so the first frame's
-        // march hands every pixel to the fallback.
+        // screen trace hands every pixel to the ray (the march's, to the fallback).
         if (screen) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrPrevDepth);
             t->setNumPasses(1);
@@ -2476,7 +2504,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         }
         // THE OBJECT MOTION'S CLEAR (w = 0: "the camera path"), every frame, in front of
-        // its reader (the resolve).
+        // its job (the ray tier's rq_motion.comp, recorded ahead of the trace in the
+        // photon trace pass) and of its readers (the trace's screen hits; the resolve).
         if (screen) {
             Ogre::CompositorTargetDef *t = n->addTargetPass(kSsrVelocity);
             t->setNumPasses(1);
@@ -2728,10 +2757,13 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // frame t-1's composite at the frame's start (photon_resolve, before the screen decode or the opaque pass clears
     // jahRt0), so it must not be DiscardableContent - Ogre's default, under which a texture nothing wrote yet this
     // frame is Undefined to the barrier solver (the colour history's rule, below).
+    // ...AND SO IS THE SCREEN TRACE's SOURCE (screenTraceSource: jahRt0 or the refractives' copy), read the same way by
+    // the trace (the hybrid's screen half) - one texture where neither AO nor distortion runs.
     if (desc.rayReflect) {
-        const Ogre::IdString composed(desc.composedTexture());
+        const Ogre::IdString composed(desc.composedTexture()), traced(desc.screenTraceSource());
         for (auto &td : n->getLocalTextureDefinitionsNonConst())
-            if (td.getName() == composed) td.textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
+            if (td.getName() == composed || td.getName() == traced)
+                td.textureFlags &= ~Ogre::uint32(Ogre::TextureFlags::DiscardableContent);
     }
 
     // The scene result the post passes read. (No MSAA resolve stands here any
@@ -2863,15 +2895,21 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // HDR luminance reduction averages one in). Bounding what is WRITTEN is the
     // half of that the resolve's own guard cannot do.
     //
-    // ONLY THE MARCH'S CHAIN HAS IT (lane REFLECT-VR-1; PHOTON-7-9A): the raster march
-    // reads it; a ray chain's temporal mean
+    // ONLY THE SCREEN SOURCES' CHAIN HAS IT (lane REFLECT-VR-1; PHOTON-7 stage 6): the
+    // screen trace and the raster march read it; a rays-only chain's temporal mean
     // lives in the trace's ping-ponged storage images, so it neither declares this
     // texture nor copies into it.
-    if (screen) {
+    // THE MARCH's COLOUR COPY ONLY (PHOTON-7-9A): a ray chain's screen trace reads its source in place (screenTraceSource,
+    // kept across frames: below) - the copy here sat AFTER the distortion's warp (a camera-side pass, read by a reflection
+    // at the wrong place: the Both-era trace's latent defect) and before the AO apply. The depth copy and the helpers'
+    // mask stay every screen-traced chain's.
+    if (ssrMarch) {
         auto *q = addQuad(n, kSsrPrev, "Jahshaka/SsrHistory", "Jahshaka SSR history");
         q->addQuadTextureSource(0, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;
         if (desc.letterbox) scissor(handlesOut, q);
+    }
+    if (screen) {
         // THE DEPTH THE PICTURE WAS DRAWN AT, copied at the same point (REFLECT-FIX-1).
         // The colour alone cannot say WHAT a texel shows: a floor point the teapot
         // uncovered this frame still holds the teapot in that copy, and a march

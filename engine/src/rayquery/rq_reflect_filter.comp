@@ -52,20 +52,20 @@ layout( rg32ui, set = 0, binding = 9 ) uniform readonly uimage2DArray stateCur;
 /// THE REST'S REFERENCE (PHOTON-2 round 2, R1 (f)'s arm, rest.y): composited UNFILTERED at rest under the arm.
 layout( rgba32f, set = 0, binding = 46 ) uniform readonly image2DArray restReference;
 /// THE EXPOSURE HISTORY (the chain's measured 1 x 1; a stand-in where p.denoiser.y = 0).
-layout( set = 0, binding = 47 ) uniform sampler2D jahExposure;
+layout( set = 0, binding = 50 ) uniform sampler2D jahExposure;
 
 /// THE REST'S STOP SHARE (jah_reflect_rest.glsl's stop): at rest every pixel lowers, to its own share, the share of
 /// each trace texel among its fixed rest taps that carries a variance - the denoiser-space standard error the texel
 /// may keep for THIS pixel's displayed SE to stay under one code - by an atomic MIN of the float's bits (positive
 /// floats order as their bits); the temporal pass read and reset it (all ones: no pixel measured the texel) before
 /// this pass. A statistic, never colour fed back.
-layout( r32ui, set = 0, binding = 48 ) uniform uimage2DArray restShare;
-/// THE REFINEMENT (binding 59, jah_reflect_rest.glsl jahRefineShown): a card-only reach's held answer and its walk.
-layout( rgba32ui, set = 0, binding = 59 ) uniform readonly uimage2DArray restRefine;
-/// THE COMPOSED SCENE (binding 60, PHOTON-7-9A stage 2; ChainDesc::composedTexture): frame t-1's linear composite, every
+layout( r32ui, set = 0, binding = 51 ) uniform uimage2DArray restShare;
+/// THE REFINEMENT (binding 62, jah_reflect_rest.glsl jahRefineShown): a card-only reach's held answer and its walk.
+layout( rgba32ui, set = 0, binding = 62 ) uniform readonly uimage2DArray restRefine;
+/// THE COMPOSED SCENE (binding 63, PHOTON-7-9A stage 2; ChainDesc::composedTexture): frame t-1's linear composite, every
 /// eye's layer - at rest the colour the user sees at this pixel, within a code by the stillness laws. The flat stand-in
 /// (0) where the chain has none of the view's shape: the reflection term alone, stricter, never looser.
-layout( set = 0, binding = 60 ) uniform sampler2DArray composedScene;
+layout( set = 0, binding = 63 ) uniform sampler2DArray composedScene;
 
 #include "jah_rq_finite.glsl"
 #include "jah_reflect_draw.glsl"
