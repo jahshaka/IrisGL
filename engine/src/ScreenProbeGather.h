@@ -97,7 +97,7 @@ inline bool isCameraCut(const float *prevPos, const float *prevRight, const floa
 constexpr unsigned kGatherMaxCascades = 4u;
 
 /// The volumes per cascade the trace binds (the reflection's kRayVoxelKinds' order): the half store (VOXEL-R13), X, Y, Z,
-/// coverage +/-, position +/-, the half store's direct terms, the halves' normals per axis (three).
+/// coverage +/-, position +/-, the half store's direct terms, the direct directional chains (three: BISTRO-REST-1).
 constexpr unsigned kGatherVoxelKinds = 12u;
 /// The octahedral probe map is at most 8x8, because one ray is one thread of
 /// the trace's 8x8 workgroup (the shaders' `kOctResMax`).
@@ -212,7 +212,8 @@ struct HitSetSources {
     /// The cascade chain's light volumes: [cascade][kind], the kinds in kGatherVoxelKinds' order - 0 the half store
     /// (level 0's six half lights, VOXEL-R13), 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7
     /// the surface position per half (RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 the half store's direct terms (MOVER-OCCLUSION-1's
-    /// share), 9..11 the halves' normals per axis (the share's ring). Innermost first; past `cascadeCount` the slots bind
+    /// share), 9..11 the DIRECT directional chains (BISTRO-REST-1: the bounce read's second read). Innermost first; past
+/// `cascadeCount` the slots bind
     /// the last cascade's (a shader indexes kGatherMaxCascades).
     Ogre::TextureGpu *voxel[kGatherMaxCascades][kGatherVoxelKinds] = {};
     /// THE WORLD's BOX (PHOTON-7 10-3 R4; L9: "ran out of distance" is not a miss): the union of the traced instances'

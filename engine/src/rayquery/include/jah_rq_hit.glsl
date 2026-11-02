@@ -110,77 +110,12 @@ bool jahHitTracedLobe = false;
 /// the gather-hits instrument's reading (FAR-SUN-1), nothing else reads it.
 int jahVoxelAnswerCascade = -1;
 
-/// THE STORE'S BOUNCE PART at the last jahVoxelRadiance's hit (FAR-SUN-2; jah_rq_hit_direct.glsl):
-/// the read times its share that is NOT the direct volume's - 1 - D / T per channel, the
-/// isotropic total T and the direct volume D (every lamp's direct light and the emissive,
-/// LightInjection_piece_cs.any) read at the same texel, level 0 - before the mover gate. With
-/// no bounce and no sky in the store it is exactly 0; where the store holds only bounce, the read.
-/// A hit whose direct light is computed at the hit adds this, and nothing else of the store.
+/// THE STORE'S BOUNCE PART at the last jahVoxelRadiance's hit (FAR-SUN-2; jah_rq_hit_direct.glsl): the read of the total
+/// less THE SAME READ of the direct chain (every lamp's direct light and the emissive, LightInjection_piece_cs.any) -
+/// jah_voxel_sample.glsl's JAH_VOX_SAMPLE_DX, BISTRO-REST-1: one reader, one footprint. With no bounce and no sky in
+/// the store it is exactly 0; where the store holds only bounce, the read. A hit whose direct light is computed at the
+/// hit adds this, and nothing else of the store.
 vec3 jahVoxelBounceOut = vec3( 0.0 );
-
-#ifdef JAH_VOX_SAMPLE_DIRECT
-/// THE BOUNCE SHARE AT THE READ'S OWN FOOTPRINT (BISTRO-REST-1, the lead's ruling - form 2). The share ( T - D ) / T of
-/// a read is a QUOTIENT of two store values, and the read `rad` is taken at the ray's footprint level: the share is
-/// summed over the SAME footprint - the pick texel's half and the rings of the same surface's cells (the same half,
-/// faces within 25 degrees of the pick's normal, where the caller binds the halves' normals) across the pick's axis at
-/// level 0, as many rings as the footprint's level spans (1-3; the T store has no levels of its own) - always whole:
-/// share = Sum ( T - D ) / Sum T, a coverage-weighted mean, no floor, no bias, one estimate for numerator and
-/// denominator. Its cancellation error is absolute (about two subnormal quanta over the footprint's summed coverage),
-/// constant in the bounce loop, which therefore stays LINEAR (the read's gain is the operator's).
-/// WHY NO TRUST (stage 0, spikes/bistro-rest-1): the shipped share weighed each footprint by a TRUST in its precision -
-/// clamp( 2 - 100 q / T ) with q the store's quantum at T's binade - a function of the very value the loop feeds. Its
-/// slope T dtrust/dT reached 2 on the ramp (and the stepped quantum jumped it at every binade edge), so the read
-/// amplified a half's bounce up to 3x and two shaded low-coverage halves that read each other orbited at period 2 (Bistro
-/// Exterior at Epic: 2-18 fp16 steps under the Jacobi door, the feedback never at rest; gi.hitDirect 0 ended it). Any
-/// trust that reads T has that slope on a ramp narrow enough to bound its error; summing the read's own footprint needs
-/// none. An EMPTY footprint (Sum T = 0) shares 0: the read's light came through the kernel's other cells, never its own.
-vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, float lod, vec4 tIso, vec4 dIso )
-{
-	const vec3 ir = JAH_VOX_INVRES( c );
-	const int ax = jahVoxelAxis( dir, ir );
-	const int a1 = ax == 0 ? 1 : 0;
-	const int a2 = ax == 2 ? 1 : 2;
-	const vec3 cell0 = floor( lsPick / ir );
-	// THE HALF THE SHARE READS (VOXEL-R13 stage 2): the one whose faces look back at the read's direction on its axis -
-	// at the pick and in every ring cell (the same surface's faces)
-	const int hh = dir[ax] > 0.0 ? 1 : 0;
-#ifdef JAH_VOX_SAMPLE_HALF_NRM
-	const vec3 n0 = jahHalfNormalDecode( JAH_VOX_SAMPLE_HALF_NRM( c, ax, hh, ( cell0 + 0.5 ) * ir, 0.0 ), ax, hh );
-#endif
-	// THE FOOTPRINT's RINGS: a function of the read's level alone (static at a still scene), always summed whole
-	const int rings = clamp( int( exp2( floor( max( lod, 0.0 ) ) ) ), 1, 3 );
-	for( int ring = 1; ring <= rings; ++ring )
-	{
-		for( int du = -ring; du <= ring; ++du )
-			for( int dv = -ring; dv <= ring; ++dv )
-			{
-				if( max( abs( du ), abs( dv ) ) != ring )
-					continue;   // the ring's own cells
-				vec3 cc = cell0;
-				cc[a1] += float( du );
-				cc[a2] += float( dv );
-				const vec3 u = ( cc + 0.5 ) * ir;
-				if( any( lessThan( u, vec3( 0.0 ) ) ) || any( greaterThan( u, vec3( 1.0 ) ) ) )
-					continue;
-#ifdef JAH_VOX_SAMPLE_HALF_NRM
-				{
-					const vec3 n = jahHalfNormalDecode( JAH_VOX_SAMPLE_HALF_NRM( c, ax, hh, u, 0.0 ), ax, hh );
-					if( !( dot( n, n0 ) > 0.906 ) )
-						continue;   // another surface
-				}
-#endif
-				const vec4 t = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( u, hh, ax, ir.x ), 0.0 );
-				if( !( t.w > 0.0 ) )
-					continue;   // no face of this half here
-				tIso += t;
-				dIso += JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( u, hh, ax, ir.x ), 0.0 );
-			}
-	}
-	// (an empty footprint shares 0, never a quotient of zeros)
-	return mix( vec3( 0.0 ), clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-30 ) ), vec3( 0.0 ), vec3( 1.0 ) ),
-				greaterThan( tIso.xyz, vec3( 0.0 ) ) );
-}
-#endif
 
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
 /// the cascade chain's light volumes - the side the ray hit, by `hitNormal`.
@@ -276,8 +211,8 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 		// Both texels are read whole (their centres along the axis, the lateral position
 		// kept) and the one holding the surface - the larger opacity along the ray - answers.
 		vec4 s;
-#ifdef JAH_VOX_SAMPLE_DIRECT
-		vec3 lsPick = ls;
+#ifdef JAH_VOX_SAMPLE_DX
+		vec3 sD = vec3( 0.0 );   // the direct chain's read, through the same reader (jah_voxel_sample.glsl jahVoxSampleD)
 #endif
 		{
 			const vec3 ir = JAH_VOX_INVRES( c );
@@ -289,10 +224,13 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			const float kOther = ( at / ir[ax] - k ) < 0.5 ? k - 1.0 : k + 1.0;
 			lsB[ax] = ( kOther + 0.5 ) * ir[ax];
 			const vec4 sA = jahVoxelSample( c, lsA, dir, lod );
+#ifdef JAH_VOX_SAMPLE_DX
+			const vec3 dA = jahVoxSampleD;
+#endif
 			const vec4 sB = jahVoxelSample( c, lsB, dir, lod );
 			s = sB.w > sA.w ? sB : sA;
-#ifdef JAH_VOX_SAMPLE_DIRECT
-			lsPick = sB.w > sA.w ? lsB : lsA;
+#ifdef JAH_VOX_SAMPLE_DX
+			sD = sB.w > sA.w ? jahVoxSampleD : dA;
 #endif
 		}
 		if( !jahVoxelSampleUsable( s ) )
@@ -313,27 +251,17 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 		if( w <= 0.0 )
 			continue;
 		vec3 rad = s.xyz / s.w;
-#ifdef JAH_VOX_SAMPLE_DIRECT
-		{
-			// LEVEL 0 of both: the two volumes are written by one injection with one value
-			// at level 0 (T = D where nothing bounced), while their mip chains are not built
-			// alike - a share read at a coarser level was 2 % of the lit floor's light on shaded
-			// faces with no bounce in the store (spikes/far-sun-2/NOTES.md section 10).
-			// THE SIDES' MEANS (PHOTON-7 stage 7: the store and the direct store hold the two sides).
-			// THE HALF THE READ TOOK (VOXEL-R13 stage 2): its store and its direct term at the pick
-			const vec3 irS = JAH_VOX_INVRES( c );
-			const int axS = jahVoxelAxis( dir, irS );
-			const int hS = dir[axS] > 0.0 ? 1 : 0;
-			vec4 tIso = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( lsPick, hS, axS, irS.x ), 0.0 );
-			vec4 dIso = JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( lsPick, hS, axS, irS.x ), 0.0 );
-			// (THE SHARE AT THE READ's OWN FOOTPRINT: the pick and its rings, summed whole - BISTRO-REST-1)
-			const vec3 share = jahVoxelShareFootprint( c, lsPick, dir, lod, tIso, dIso );
-			// ( T - D ) / T, NOT 1 - D / T: at an EMPTY texel (T = D = 0 - the texel picked along
-			// the ray holds nothing and the read's light came through the kernel's other axes) the
-			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on
-			// shaded faces at bounces 0; spikes/far-sun-2/NOTES.md section 16).
-			accBounce += rad * share * w;
-		}
+#ifdef JAH_VOX_SAMPLE_DX
+		// THE STORE'S BOUNCE PART, READ (BISTRO-REST-1, the lead's ruling - form 3): the same read of the DIRECT chain - its
+		// every tap at the read's own uvw, level, clamp and weights (jah_voxel_sample.glsl) - subtracted: B = T - D at the
+		// read's own footprint, no quotient, no precision gate, LINEAR in the store (a loop through it has the operator's
+		// gain). The direct chain's levels are built by the total's step-1 jobs from a level 0 whose opacities are the
+		// total's (the injection's and step 0's composites over one set of coverages), so every level holds T = B + D. An
+		// empty read (s.w 0) never comes here; a negative difference (the two half-float stores' rounding) is no bounce.
+		// (The share it replaces read ( T - D ) / T at the PICK texel against a footprint-level read, weighed by a
+		// precision trust in T: the read amplified a half's bounce up to 3-4x over the dim range and two halves of one
+		// coarse cell orbited at period 2 - Bistro Exterior at Epic never at rest; gi.share_law.)
+		accBounce += max( rad - sD / s.w, vec3( 0.0 ) ) * w;
 #endif
 		acc += rad * w;
 		accW += w;

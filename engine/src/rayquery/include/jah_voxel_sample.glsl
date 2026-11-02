@@ -226,8 +226,23 @@ vec3 jahVoxelAnisoUvw( vec3 posLS, float texelU )
 }
 
 /// One sample of cascade c's directional volume for axis b at the packed `u`, level `mip`.
+#ifdef JAH_VOX_SAMPLE_DX
+/// THE DIRECT CHAIN, READ BY THE SAME READER (BISTRO-REST-1, the bounce read's form 3): a ray reader that binds the direct
+/// directional volumes (their levels built by the total's own step-1 jobs, the same opacities: the total at every level
+/// is the bounce's composite plus the direct's) asks every tap of a read twice - the total's, then the direct's at the
+/// same uvw, level and clamp - and takes the store's bounce part as the difference of the two reads (jah_rq_hit.glsl's
+/// jahVoxelRadiance). `jahVoxReadD` turns jahVoxelAxisSample to the direct chain for the second tap; `jahVoxPlaneD` is
+/// the plane's direct colour under the total's weights; `jahVoxSampleD` jahVoxelSample's, under its normalisation.
+bool jahVoxReadD = false;
+vec3 jahVoxPlaneD = vec3( 0.0 );
+vec3 jahVoxSampleD = vec3( 0.0 );
+#endif
 vec4 jahVoxelAxisSample( int c, int b, vec3 u, float mip )
 {
+#ifdef JAH_VOX_SAMPLE_DX
+	if( jahVoxReadD )
+		return b == 0 ? JAH_VOX_SAMPLE_DX( c, u, mip ) : ( b == 1 ? JAH_VOX_SAMPLE_DY( c, u, mip ) : JAH_VOX_SAMPLE_DZ( c, u, mip ) );
+#endif
 	if( b == 0 )
 		return JAH_VOX_SAMPLE_X( c, u, mip );
 	if( b == 1 )
@@ -308,6 +323,10 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	// access chain even in a branch that never runs (VUID-VkShaderModuleCreateInfo-pCode-08737).
 	const int ni = max( n, 0 );
 	const bool ray = !( tanHalf > 0.0 );
+#ifdef JAH_VOX_SAMPLE_DX
+	vec3 cAD = vec3( 0.0 );   // the plane axis's direct colour, at the total's opacity
+	vec3 colourD = vec3( 0.0 );
+#endif
 	// THE PLANE'S OWN AXIS, at the plane, from the half looking back at the travel
 	const int ha = dir[axis] > 0.0 ? 1 : 0;
 	float aA;
@@ -318,6 +337,11 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		const vec4 v = jahVoxelReadAxis( c, axis, posLS, dir[axis] > 0.0, mip );
 		aA = v.w;
 		cA = v.xyz;
+#ifdef JAH_VOX_SAMPLE_DX
+		jahVoxReadD = true;
+		cAD = jahVoxelReadAxis( c, axis, posLS, dir[axis] > 0.0, mip ).xyz;   // (premultiplied like the total's)
+		jahVoxReadD = false;
+#endif
 		if( n == axis || w < 1.0 )
 		{
 			const float pO = jahVoxelPos( c, ha, posLS, mip + 1.0 )[axis];
@@ -339,6 +363,11 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 		const float o = ray ? min( 1.0, oBack + jahVoxelCov( c, 1 - ha, posLS, 0.0 )[axis] ) : oBack;
 		aA = o;
 		cA = ( s.w > 0.0 ) ? s.xyz * ( aA / s.w ) : vec3( 0.0 );   // (the half's radiance at the plane's opacity)
+#ifdef JAH_VOX_SAMPLE_DX
+		// (the half's direct term at the same uvw, at the total's opacity: the half store's own direct volume)
+		cAD = ( s.w > 0.0 ) ? JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( posLS, ha, axis, invRes.x ), 0.0 ).xyz * ( aA / s.w )
+							: vec3( 0.0 );
+#endif
 		if( n == axis || w < 1.0 )
 		{
 			// (level 0: the plane's own texel along the axis, its cell added - jahVoxelPos0Centred)
@@ -354,6 +383,9 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 	const float kA = w < 1.0 ? gA : gA * w;
 	float x = kA * aA;
 	vec3 colour = kA * cA;
+#ifdef JAH_VOX_SAMPLE_DX
+	colourD = kA * cAD;
+#endif
 
 	// THE OTHER TWO AXES, through the footprint kernel, each half at the cone's rate, the
 	// colour from the directional volume's half facing the rays that meet it
@@ -394,8 +426,17 @@ vec4 jahVoxelReadPlane( int c, vec3 posLS, vec3 kernelLS, vec3 dir, int axis, fl
 			const vec3 rad = ( v.w > 0.0 ) ? v.xyz * ( 1.0 / v.w ) : vec3( 0.0 );
 			x += xb;
 			colour += xb * rad;
+#ifdef JAH_VOX_SAMPLE_DX
+			jahVoxReadD = true;
+			const vec3 vD = jahVoxelReadAxis( c, b, kernelLS, hb, max( lk - 1.0, 0.0 ) ).xyz;
+			jahVoxReadD = false;
+			colourD += xb * ( ( v.w > 0.0 ) ? vD * ( 1.0 / v.w ) : vec3( 0.0 ) );   // (at the total's opacity)
+#endif
 		}
 	}
+#ifdef JAH_VOX_SAMPLE_DX
+	jahVoxPlaneD = colourD;
+#endif
 	return vec4( colour, x );
 }
 
@@ -423,6 +464,9 @@ vec4 jahVoxelSample( int c, vec3 posLS, vec3 dir, float lod )
 	const vec4 r = jahVoxelReadPlane( c, posLS, posLS, dir, axis, mip, directional, 1.0, 0.0,
 									  texelLS * invAbsDa, jahVoxelKernelLevel( lod, texelCells, mip ), 0.0,
 									  kJahVoxelNoOrigin );
+#ifdef JAH_VOX_SAMPLE_DX
+	jahVoxSampleD = r.w > 1.0 ? jahVoxPlaneD * ( 1.0 / r.w ) : jahVoxPlaneD;   // (the total's normalisation)
+#endif
 	return r.w > 1.0 ? vec4( r.xyz * ( 1.0 / r.w ), 1.0 ) : r;
 }
 
