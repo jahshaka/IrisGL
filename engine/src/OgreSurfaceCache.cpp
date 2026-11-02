@@ -46,7 +46,6 @@
 #include <chrono>
 #include <memory>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -2261,17 +2260,6 @@ void SurfaceCache::relightCards() {
         mPlanRound = std::max(mPlanRound, c.round);
     }
     mFrameRoots[mFrame % 512u] = FrameRoots{ mFrame, mPlanRoots, mPlanRound };
-    // MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted): the frame's relights, their mode and round
-    if (censusOn(mFrame) && !mRelight.empty()) {
-        std::string line = "JAH CC R frame " + std::to_string(mFrame) + " n " + std::to_string(mRelight.size());
-        for (size_t ri = 0; ri < mRelight.size(); ++ri) {
-            const CardRec &c = mCards[mRelight[ri]];
-            const unsigned slot = (c.atlasY >> 4u) * 128u + (c.atlasX >> 4u);
-            line += " " + std::to_string(slot) + ":m" + std::to_string(ri < mRelightMode.size() ? mRelightMode[ri] : 0u) +
-                    ":r" + std::to_string(c.round);
-        }
-        Ogre::LogManager::getSingleton().logMessage(line);
-    }
     if (mRelight.empty() || !mRadiance) { mVct = nullptr; return; }
     const auto t0 = std::chrono::steady_clock::now();
     Ogre::Root &root = Ogre::Root::getSingleton();
@@ -3001,7 +2989,6 @@ void SurfaceCache::cardToCardMoves(bool shaderReadyRelight) {
             detail::photonDispatch(hc, mAccumJob, rs);
             mAccumRan = true;
         }
-        if (cardsRead) censusIssueMoves();   // MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted)
         const Ogre::uint32 clearMoves[4] = { 4u, kCardSlots, kReportCapacity, 0u };   // (z: the report's frame words)
         setMode(clearMoves);
         mAccumJob->setNumThreadGroups((kCardSlots + 63u) / 64u, 1u, 1u);
@@ -3141,116 +3128,6 @@ void SurfaceCache::accumulateIndirect(Ogre::UavBufferPacked *brickState, const u
     for (Ogre::uint8 k = 0u; k < 5u; ++k) mAccumJob->_setUavBuffer(k, empty);
 }
 
-// ---------------------------------------------------------------------------
-// MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted)
-// ---------------------------------------------------------------------------
-bool SurfaceCache::censusOn(unsigned long long frame) const {
-    static const std::pair<unsigned long long, unsigned long long> win = []() {
-        const char *e = std::getenv("JAH_CARD_CENSUS");
-        unsigned long long a = 0ull, n = 0ull;
-        if (e) std::sscanf(e, "%llu:%llu", &a, &n);
-        return std::make_pair(a, n);
-    }();
-    return win.second && frame >= win.first && frame < win.first + win.second;
-}
-
-void SurfaceCache::censusIssueMoves() {
-    if (!censusOn(mFrame) || !mCardMoves) return;
-    CensusTicket &t = mCensus[mFrame % kCensusSlots];
-    t = CensusTicket();
-    t.cacheFrame = mFrame;
-    t.moves = mCardMoves->readRequest(0u, kCardSlots + 2u, false);
-    if (mCardReads) {
-        t.readsElements = mCardReads->getNumElements();
-        t.reads = mCardReads->readRequest(0u, t.readsElements, false);
-    }
-}
-
-void SurfaceCache::censusIssueState(unsigned long long cacheFrame) {
-    if (!censusOn(cacheFrame) || !mCardSlotState) return;
-    CensusTicket &t = mCensus[cacheFrame % kCensusSlots];
-    if (t.cacheFrame != cacheFrame) { t = CensusTicket(); t.cacheFrame = cacheFrame; }
-    t.state = mCardSlotState->readRequest(0u, kCardSlots * 4u, false);
-}
-
-void SurfaceCache::censusPrint(unsigned long long cacheFrame, const Ogre::uint32 *report, unsigned n) {
-    if (!censusOn(cacheFrame)) return;
-    Ogre::LogManager &log = Ogre::LogManager::getSingleton();
-    char buf[512];
-    if (!mCensusTableDone) {
-        mCensusTableDone = true;
-        for (size_t i = 0; i < mCards.size(); ++i) {
-            const CardRec &c = mCards[i];
-            if (!c.size) continue;
-            const unsigned slot = (c.atlasY >> 4u) * 128u + (c.atlasX >> 4u);
-            std::snprintf(buf, sizeof buf,
-                          "JAH CC T slot %u card %zu inst %u node %llu idx %u size %u centre %.3f %.3f %.3f d %.3f %.3f %.3f "
-                          "half %.3f %.3f %.3f",
-                          slot, i, c.instance, (unsigned long long)mInstances[c.instance].node, unsigned(c.index), c.size,
-                          c.centre.x, c.centre.y, c.centre.z, c.d.x, c.d.y, c.d.z, c.halfU, c.halfV, c.halfDepth);
-            log.logMessage(buf);
-        }
-    }
-    CensusTicket &t = mCensus[cacheFrame % kCensusSlots];
-    const bool mine = t.cacheFrame == cacheFrame;
-    const Ogre::uint32 *mv = mine && t.moves.get() ? static_cast<const Ogre::uint32 *>(t.moves->map()) : nullptr;
-    const Ogre::uint32 *rd = mine && t.reads.get() ? static_cast<const Ogre::uint32 *>(t.reads->map()) : nullptr;
-    const Ogre::uint32 *st = mine && t.state.get() ? static_cast<const Ogre::uint32 *>(t.state->map()) : nullptr;
-    const auto f32 = [](Ogre::uint32 b) { float f; std::memcpy(&f, &b, 4); return f; };
-    // the relit cards' moves (absolute radiance, the largest texel's reported change)
-    if (mv) {
-        std::string line = "JAH CC M frame " + std::to_string(cacheFrame) + " codesMax " +
-                           std::to_string(f32(mv[kCardSlots])) + " nonFinite " + std::to_string(mv[kCardSlots + 1u]);
-        for (unsigned s = 0; s < kCardSlots; ++s)
-            if (mv[s]) {
-                std::snprintf(buf, sizeof buf, " %u:%.6g", s, f32(mv[s]));
-                line += buf;
-            }
-        log.logMessage(line);
-    }
-    // every resident card's state: sensitivity (1 / its code), the accumulator in codes, reported
-    if (st) {
-        std::string line = "JAH CC S frame " + std::to_string(cacheFrame);
-        for (const CardRec &c : mCards) {
-            if (!c.size) continue;
-            const unsigned s = (c.atlasY >> 4u) * 128u + (c.atlasX >> 4u);
-            const Ogre::uint32 *w = st + 4u * s;
-            std::snprintf(buf, sizeof buf, " %u:%.6g:%.6g:%u", s, f32(w[0]), double(w[1]) / 65536.0 + double(f32(w[2])) / 65536.0, w[3]);
-            line += buf;
-        }
-        log.logMessage(line);
-    }
-    // the listings: the cause bits, and for a card-to-card listing its read list's moved terms (from, m, share, codes)
-    for (unsigned k = 0; k < n; ++k) {
-        const Ogre::uint32 word = report[1u + k], slot = word & 0x3FFFFFFFu;
-        std::string line = "JAH CC L frame " + std::to_string(cacheFrame) + " slot " + std::to_string(slot) + " cause " +
-                           ((word & 0x40000000u) ? "c" : "v") + ((word & 0x80000000u) ? "b" : "");
-        if (st && slot < kCardSlots) {
-            std::snprintf(buf, sizeof buf, " sens %.6g acc %.6g", f32(st[4u * slot]), double(st[4u * slot + 1u]) / 65536.0);
-            line += buf;
-        }
-        if (rd && mv && (word & 0x40000000u) && size_t(slot + 1u) * kCardReadsBlock <= t.readsElements) {
-            const Ogre::uint32 *b = rd + size_t(slot) * kCardReadsBlock;
-            line += (b[0] & 1u) ? " overflowed" : "";
-            const float sens = st ? f32(st[4u * slot]) : 0.0f;
-            for (unsigned e = 0; e < 32u; ++e) {
-                const Ogre::uint32 key = b[1u + 2u * e];
-                if (!key || key > kCardSlots) continue;
-                const float m = f32(mv[key - 1u]);
-                if (!(m > 0.0f)) continue;
-                const float share = float(b[2u + 2u * e]) / 65535.0f;
-                std::snprintf(buf, sizeof buf, " from %u m %.6g share %.5f codes %.6g", key - 1u, m, share, sens * m * share);
-                line += buf;
-            }
-        }
-        log.logMessage(line);
-    }
-    if (mv) t.moves->unmap();
-    if (rd) t.reads->unmap();
-    if (st) t.state->unmap();
-    t = CensusTicket();
-}
-
 void SurfaceCache::endIndirectFrame(unsigned long long frame) {
     if (!mAccumRan || !mCardReport) return;
     mAccumRan = false;
@@ -3279,7 +3156,6 @@ void SurfaceCache::flushReport() {
         return;
     }
     r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
-    censusIssueState(mReportPendingCache);   // MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted)
     r.frame = mReportPendingHost;
     r.cacheFrame = mReportPendingCache;
     r.carriesMoves = mMovesOwed;
@@ -3353,7 +3229,6 @@ void SurfaceCache::harvestIndirectReports(unsigned long long frame) {
             mMoveCodesLast = nonFinite ? -1.0f : codes;
             mMoveCodesFrame = r.cacheFrame;
         }
-        censusPrint(r.cacheFrame, w, n);   // MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted)
         r.ticket->unmap();
         r.ticket.reset();
         mReportNextTake = (mReportNextTake + 1u) % kReportSlots;

@@ -1002,21 +1002,6 @@ private:
     }
     static constexpr unsigned kReportSlots = 8u;
     ReportTicket mReportReadings[kReportSlots];
-    /// MEASURING ARM (BISTRO-REST-1, the cards' census; to be reverted): JAH_CARD_CENSUS="<from>:<count>" (the cache's
-    /// frames) logs per frame the relit cards' moves, every resident card's accumulator and the listings with their
-    /// read lists' terms (JAH CC lines in the Ogre log)
-    struct CensusTicket {
-        Ogre::AsyncTicketPtr moves, reads, state;
-        unsigned long long cacheFrame = 0ull;
-        size_t readsElements = 0u;
-    };
-    static constexpr unsigned kCensusSlots = 16u;
-    CensusTicket mCensus[kCensusSlots];
-    bool censusOn(unsigned long long frame) const;
-    void censusIssueMoves();
-    void censusIssueState(unsigned long long cacheFrame);
-    void censusPrint(unsigned long long cacheFrame, const Ogre::uint32 *report, unsigned n);
-    bool mCensusTableDone = false;
     unsigned mReportNextIssue = 0u, mReportNextTake = 0u;
     Ogre::HlmsComputeJob *mAccumJob = nullptr;
     Ogre::HlmsComputeJob *mSensJob = nullptr;
