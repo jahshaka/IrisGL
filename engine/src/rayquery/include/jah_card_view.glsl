@@ -136,15 +136,9 @@ void jahCardStoreTerms( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, 
 		cached = jahHalfStored( irradiance * mix( specLobe, diffuseLobe, hasDiffuse ) );
 	else if( ( mode & 2u ) == 0u )
 		cached = cachedIn;
-	vec3 indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
+	const vec3 indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
 	// the lobe's share, recovered from the layer (kD > 0) or the layer itself; a near-mirror's is 0 by the rule above
-	vec3 specIndirect = nearMirror ? vec3( 0.0, 0.0, 0.0 ) : jahCardLobeShare( cached, diffuseLobe, specLobe, hasDiffuse );
-	if( ( mode & 1u ) != 0u )   // MEASURING ARM 2 (BISTRO-REST-1): the march's terms from the unrounded irradiance, as on A
-	{
-		indirect = irradiance * diffuseLobe;
-		specIndirect = irradiance * specLobe;
-		cached = mix( specIndirect, indirect, hasDiffuse );
-	}
+	const vec3 specIndirect = nearMirror ? vec3( 0.0, 0.0, 0.0 ) : jahCardLobeShare( cached, diffuseLobe, specLobe, hasDiffuse );
 	// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
 	flatTerm = ( emissive + specIndirect ) * openF;
 	radiance = ( direct * kD + indirect ) * openF + flatTerm;
