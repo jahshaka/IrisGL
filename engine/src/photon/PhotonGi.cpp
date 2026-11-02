@@ -1070,6 +1070,7 @@ GiStatus PhotonComponent::giStatus() const {
             // giInputsOwed: the gather's rest reads that, and the decision waits for the readers' rest (a deadlock).
             st.giAtRest = !giInputsOwed() && !readersHoldOwed();
             st.chainOwed = chainWorkOwed();
+            st.lightSourcesOwed = lightSourcesOwed();
         }
         // THE PROBE CACHE (ENGINE_CACHE_POLICY_SPEC P1/P6/P7).
         st.probeCapturesLastFrame = mPcc ? mProbeCapturesLastFrame : 0;
@@ -8606,6 +8607,14 @@ bool PhotonComponent::giInputsOwed() const {
 // THE CHAIN'S OWN OWED WORK (GiStatus::chainOwed, PHOTON-7 stage 1's voxel door): a rebuild, a re-voxelisation or an
 // injection the cascades still owe - the field's integration aside.
 bool PhotonComponent::chainWorkOwed() const {
+    // ...AND THE FEEDBACK'S OWED WORK (PHOTON-7 stage 4): a relight owed (a lamp's delta, the sun's, the host's), or a
+    // cascade whose bricks are active by its last landed reading - or activated since: its bounces are still converging.
+    // THE CHAIN'S EPISODE ONLY (PHOTON-7 stage 8A, THE CONTRACT): an episode of mover activations alone is the movers'.
+    return chainRebuildOwed() || stillFeedbackOwed();
+}
+
+// A REBUILD OR A RE-SOLVE THE CHAIN STILL OWES (chainOwed's and lightSourcesOwed's common part).
+bool PhotonComponent::chainRebuildOwed() const {
     // (an edit's region rebuild not served yet is a rebuild owed; a MOVER's is not chain work - THE CONTRACT, stage 8A)
     bool cascadePending = mGiCascadeDirtyAll || !mGiCascadeDirtyBoxes.empty() || stillRegionOwed();
     for (const VctCascade &c : mVctCascades) cascadePending = cascadePending || c.pending > 0;
@@ -8615,10 +8624,18 @@ bool PhotonComponent::chainWorkOwed() const {
     // once the change has held still for its window, and a picture taken before it is not the scene's
     // answer. A paused budget follows nothing and keeps what it owes for the un-pause (plan()).
     const bool resolvePending = mGiPlan.pendingRefresh && mGi.updateBudget > 0;
-    // ...AND THE FEEDBACK'S OWED WORK (PHOTON-7 stage 4): a relight owed (a lamp's delta, the sun's, the host's), or a
-    // cascade whose bricks are active by its last landed reading - or activated since: its bounces are still converging.
-    // THE CHAIN'S EPISODE ONLY (PHOTON-7 stage 8A, THE CONTRACT): an episode of mover activations alone is the movers'.
-    return rebuildPending || resolvePending || stillFeedbackOwed();
+    return rebuildPending || resolvePending;
+}
+
+// THE CHAIN'S LIGHT SOURCES STILL ARRIVING (GiStatus::lightSourcesOwed, BISTRO-REST-1): a rebuild, a re-voxelisation, a
+// re-solve held pending, a scroll in flight or a relight owed (a lamp's delta, the sun's, the host's whole relight, an
+// outer whole rebuild's inner re-march) - what the store is still being written FROM, the bounce feedback's own
+// iteration aside. From the frame it is false only the feedback moves the store: the series a contraction makes
+// (gi.feedback_closed_box (ii)). chainOwed is unchanged by it.
+bool PhotonComponent::lightSourcesOwed() const {
+    bool relight = mGiRelightAllOwed;
+    for (const VctCascade &c : mVctCascades) relight = relight || c.relightOwed || c.scroll.active;
+    return chainRebuildOwed() || relight;
 }
 
 // THE CHAIN'S FEEDBACK WORK: a relight owed (a lamp's spheres, the sun, the host's whole relight, an outer whole

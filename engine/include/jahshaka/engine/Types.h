@@ -4820,6 +4820,11 @@ struct GiStatus {
     /// irradiance field's integration. A readback of the voxels (giVoxelVolume, giVoxelStats) taken while it is false
     /// reads the chain's answer for the placements it stands at. False with GI off.
     bool chainOwed = false;
+    /// THE CHAIN'S LIGHT SOURCES STILL ARRIVING (BISTRO-REST-1): chainOwed without the bounce feedback's own iteration - a
+    /// rebuild, a re-voxelisation, a scroll in flight, a re-solve held pending or a relight owed. CPU-exact for the frame
+    /// the status is published at (no readback). From the frame it is false only the feedback moves the store, so a
+    /// step's change from there is a contraction's series (gi.feedback_closed_box (ii)). False with GI off.
+    bool lightSourcesOwed = false;
     /// THE CHANGED-REGION LIST (PHOTON-7 stage 3) as it last CLOSED (GiChangedRegions; the regions themselves:
     /// Scene::giChangedRegions): the frame, its regions and their count per kind (by the kind's value), its overflow
     /// bits and restart flag, the merges its cap made; over the scene's life the closes and those that listed anything
