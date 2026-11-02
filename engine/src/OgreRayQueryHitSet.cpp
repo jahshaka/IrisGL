@@ -231,15 +231,14 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
     }
     out.worldMin[3] = src.worldOn ? 1.0f : 0.0f;
     // THE LEVEL RULE (HitReader): a view's by the GI camera (10-2e: the camera and each cascade's radius and band, past
-    // the chain's length the last's - never read, the outermost reads by its box); a cache's by its ray's footprint
-    // (each cascade's K), whatever the camera
+    // the chain's length the last's - never read, the outermost reads by its box); a cache's the box rule (the finest
+    // box holding the hit), whatever the camera
     for (int k = 0; k < 3; ++k) out.levelCam[k] = src.levelCam[k];
-    out.levelCam[3] = !n ? 0.0f : reader == HitReader::Cache ? 2.0f : src.levelOn ? 1.0f : 0.0f;
+    out.levelCam[3] = n && reader == HitReader::View && src.levelOn ? 1.0f : 0.0f;
     for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
         const unsigned from = c < n ? c : (n ? n - 1u : 0u);
         out.level[c][0] = n ? src.levelRadius[from] : 0.0f;
         out.level[c][1] = n ? src.levelBand[from] : 0.0f;
-        out.level[c][2] = n ? src.levelMaxLod[from] : 0.0f;
     }
     out.counts[1] = src.sky ? 1.0f : 0.0f;
     out.counts[2] = float(geomSlots);

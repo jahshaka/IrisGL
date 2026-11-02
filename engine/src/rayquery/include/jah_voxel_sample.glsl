@@ -470,14 +470,6 @@ vec4 jahVoxelSample( int c, vec3 posLS, vec3 dir, float lod )
 	return r.w > 1.0 ? vec4( r.xyz * ( 1.0 / r.w ), 1.0 ) : r;
 }
 
-/// THE FOOTPRINT'S LOD for a world footprint against a cascade's cell (both in world
-/// units): log2 of the footprint in cells - the march's own lod - never below 0 and
-/// never past the sixth. The reads map it to their levels (jahVoxelKernelMip).
-float jahVoxelFootprintLod( float footprint, float texel )
-{
-	return clamp( log2( max( footprint, texel ) / texel ), 0.0, 6.0 );
-}
-
 /// A read that holds nothing, or holds something that is not a number, is no
 /// answer (the finite test is on the BITS: a self-equality is folded to true on
 /// this stack — jah_rq_finite.glsl).

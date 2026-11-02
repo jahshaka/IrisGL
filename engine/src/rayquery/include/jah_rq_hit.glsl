@@ -36,10 +36,9 @@
 // every term of it lives at the call site in that file (the anisotropic slot
 // blend in the ray's own direction, the six-cell crossfade at a cascade's face,
 // the half-cell step into the surface's own cell, the opacity divide). What
-// moved here is the CODE, not a decision: the reflection path passes the
-// footprint its lobe implies and asks for no crossfade when it is a mirror; the
-// gather passes the footprint ONE RAY of its probe covers. Both get the same
-// answer for the same footprint, which is the point.
+// moved here is the CODE, not a decision: every reader gets the hit surface's
+// own level-0 half (BISTRO-REST-1: never a footprint level, which spans what
+// stands beyond the hit's walls), a mirror's with no crossfade.
 
 #ifndef JAH_RQ_HIT_GLSL
 #define JAH_RQ_HIT_GLSL
@@ -48,7 +47,7 @@
 #include "jah_voxel_halves.glsl"
 
 // THE READ ITSELF IS THE ONE VOXEL RADIANCE READER'S (PHOTON-READER-1): the
-// directional three-axis blend, the total's level 0, the footprint's mip
+// directional three-axis blend, the total's level 0
 // and the usable-sample guard live in jah_voxel_sample.glsl, which the pixel
 // shader's cone march, the bounce job and the irradiance field read too. This
 // file keeps what is the HIT's own: which cascade answers, the step into the
@@ -112,7 +111,7 @@ int jahVoxelAnswerCascade = -1;
 
 /// THE STORE'S BOUNCE PART at the last jahVoxelRadiance's hit (FAR-SUN-2; jah_rq_hit_direct.glsl): the read of the total
 /// less THE SAME READ of the direct chain (every lamp's direct light and the emissive, LightInjection_piece_cs.any) -
-/// jah_voxel_sample.glsl's JAH_VOX_SAMPLE_DX, BISTRO-REST-1: one reader, one footprint. With no bounce and no sky in
+/// jah_voxel_sample.glsl's JAH_VOX_SAMPLE_DX, BISTRO-REST-1: one reader, the hit's level-0 half. With no bounce and no sky in
 /// the store it is exactly 0; where the store holds only bounce, the read. A hit whose direct light is computed at the
 /// hit adds this, and nothing else of the store.
 vec3 jahVoxelBounceOut = vec3( 0.0 );
@@ -120,14 +119,12 @@ vec3 jahVoxelBounceOut = vec3( 0.0 );
 /// The radiance leaving `hitPos` towards where the ray came from, read out of
 /// the cascade chain's light volumes - the side the ray hit, by `hitNormal`.
 ///
-/// `footprint` is how wide, in world units, the thing that asked is: a mip
-/// exists for exactly that width and reading the finest one aliases. `mirror`
-/// takes the containing cascade WHOLE and mip 0 — a crossfade of two texel
-/// sizes is still a blur, and a mirror is the one surface that must not be
-/// blurred. `ok` is false when no bound cascade holds anything there: the hit
+/// The read is the hit surface's own level-0 half (below: never a footprint level). `mirror`
+/// takes the containing cascade WHOLE — a crossfade of two texel sizes is still a blur,
+/// and a mirror is the one surface that must not be blurred. `ok` is false when no bound cascade holds anything there: the hit
 /// is then a record for the visibility-buffer decode (jah_rq_hit_record.glsl,
 /// PHOTON-HIT-SHADE-1) in both callers.
-vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint, bool mirror, out bool ok )
+vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, bool mirror, out bool ok )
 {
 	// THE READ IS ANCHORED TO THE HIT'S NORMAL, NEVER TO THE RAY (PHOTON-7 stage 10, the lead's ruling on card_residency
 	// (3)): a surface's radiance toward a ray is the radiance of the side the ray HIT, so the texel pair, the side, the
@@ -169,13 +166,8 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 		// step and a cell (covered by its box at every placement it can reach) less the measured margin (the bounce's reach) -
 		// blending out over the band below it; the outermost by its box (nothing further out to hand to). So two
 		// placements the engine can reach - a walk and a teleport to one pose - read the same level from the same
-		// cells (the grid is world-anchored), where the box rule read the finest box holding the point.
-		// The footprint's lod in this cascade's cells (`invSize.w` is the cell in world
-		// units); the read maps it to its own level (jahVoxelKernelMip).
-		const float texel = max( invSize.w, 1e-6 );
-		float lod = 0.0;
-		if( !mirror )
-			lod = jahVoxelFootprintLod( footprint, texel );
+		// cells (the grid is world-anchored), where the box rule read the finest box holding the point. A cache's rays
+		// (levelCam.w 0) read the finest box holding the hit, its edge blend below: a cache's store is a world function.
 		float wLevel = -1.0;
 		if( JAH_VOX_LEVEL_ON && c < count - 1 )
 		{
@@ -185,22 +177,16 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			wLevel = mirror ? ( d <= lv.x ? 1.0 : 0.0 ) : clamp( ( lv.x - d ) / max( lv.y, 1e-6 ), 0.0, 1.0 );
 			if( !( wLevel > 0.0 ) )
 				continue;				// past this cascade's level: the next one out answers
-			// THE FOOTPRINT IS THE HIT SURFACE'S (VOXEL-R13 stage 2, the lead's ruling): its levels are capped at this
-			// cascade's world-anchored ones (under K = log2 of its placement quantum) - a footprint filters over the
-			// surface the ray met, and a wide one is never handed out to a coarser cascade, whose texel at that level
-			// averages the surface with what stands beyond its walls (gi.sealed_sky (8): a matte wall's secondary hit
-			// on the floor read by cascade 2 at lod 3.6, a 5.8 m texel, 1.1 % of the roof inside a sealed room)
-			if( !mirror )
-				lod = min( lod, max( lv.z - 1.0, 0.0 ) + 0.999 );
 		}
-		// THE CACHE'S LEVEL: ITS RAY'S OWN FOOTPRINT, WHATEVER THE CAMERA (PHOTON-7 stage 10-3, the lead's ruling - a
-		// cache's store is a world function): the finest box holding the hit answers (its edge blend below), its footprint
-		// capped under its K (VOXEL-R13 stage 2: the clipmap law's fade out to the next cascade is deleted - the next one
-		// out read the surface's footprint through its walls). The camera's level made the store a function of where the camera stood: a sealed room
-		// beyond c0's radius read c2 / c3, whose cells hold several faces under one normal, and a teleport into it read the
-		// sky-lit roof's share for a hundred frames (gi.sealed_sky (8): 5.8 % of the roof).
-		if( JAH_VOX_LEVEL_FOOTPRINT && c < count - 1 && !mirror )
-			lod = min( lod, max( JAH_VOX_LEVEL( c ).z - 1.0, 0.0 ) + 0.999 );
+		// THE HIT READS ITS OWN SURFACE'S LEVEL-0 HALF, NEVER A FOOTPRINT (BISTRO-REST-1, the lead's ruling (1)): the store's
+		// answer at a hit - its bounce part B = T - D and the total - is the hit surface's own level-0 half, both terms
+		// through the same reader at the same level (lod 0). A footprint level's texel spans what stands beyond the hit's
+		// walls: the directional chain's levels composite ALONG the read direction, so a coarse texel's +Y face holds the
+		// TOPMOST face it covers - a sealed room's floor hit read the sky-lit roof's bounce (gi.sealed_sky (3): 0.32 % of
+		// the roof in cascade 0's inside halves, the bar 0.053 %). The share the bounce read replaced hid it by weighing
+		// the footprint's read with the pick's own (dark) share. (Deleted with the footprint: its lod, the cache's cap at
+		// a cascade's world-anchored K and the view's cap - the hit read has no level but 0; a mirror's was 0 already.)
+		const float lod = 0.0;
 		// THE HIT READS THE TEXEL ITS SURFACE WAS VOXELISED INTO (PHOTON-VOXEL-5 item (iv)).
 		// Along the ray's dominant axis the surface lies in one of the two texels either side
 		// of the hit - the voxels are half-open, so a face ON a texel plane belongs to the
@@ -253,11 +239,13 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 		vec3 rad = s.xyz / s.w;
 #ifdef JAH_VOX_SAMPLE_DX
 		// THE STORE'S BOUNCE PART, READ (BISTRO-REST-1, the lead's ruling - form 3): the same read of the DIRECT chain - its
-		// every tap at the read's own uvw, level, clamp and weights (jah_voxel_sample.glsl) - subtracted: B = T - D at the
-		// read's own footprint, no quotient, no precision gate, LINEAR in the store (a loop through it has the operator's
-		// gain). The direct chain's levels are built by the total's step-1 jobs from a level 0 whose opacities are the
-		// total's (the injection's and step 0's composites over one set of coverages), so every level holds T = B + D. An
-		// empty read (s.w 0) never comes here; a negative difference (the two half-float stores' rounding) is no bounce.
+		// every tap at the read's own uvw, level 0, clamp and weights (jah_voxel_sample.glsl) - subtracted: B = T - D at the
+		// hit's own level-0 half, no quotient, no precision gate, LINEAR in the store (a loop through it has the operator's
+		// gain). Level 0 holds T = B + D texel by texel (the half store and its direct terms; the directional level 0 and
+		// the direct's, written by the injection and step 0 over one set of coverages), and both reads take the same taps
+		// with the same weights, so a room lit from inside neither goes negative nor counts its direct twice. An empty read
+		// (s.w 0) never comes here. THE CLAMP below takes ONLY the two half-float stores' rounding: T and D are each rounded
+		// once to the half float, so T - D >= -1/2 a step of each, never a term.
 		// (The share it replaces read ( T - D ) / T at the PICK texel against a footprint-level read, weighed by a
 		// precision trust in T: the read amplified a half's bounce up to 3-4x over the dim range and two halves of one
 		// coarse cell orbited at period 2 - Bistro Exterior at Epic never at rest; gi.share_law.)

@@ -68,7 +68,7 @@ vec3 jahHitStoreRead( uint slot, vec3 hitPos, vec3 hitNormal, vec3 dir, float fo
 			return card;
 		}
 	}
-	const vec3 voxel = jahVoxelRadiance( hitPos, dir, hitNormal, footprint, mirror, ok );
+	const vec3 voxel = jahVoxelRadiance( hitPos, dir, hitNormal, mirror, ok );
 	source = ok ? 2u : 0u;
 	// THE ONE RULE (FAR-SUN-2): the direct light at the hit, the store's bounce part beside it, both toward
 	// the ray's viewer (PHOTON-4 stage 2: the bounce's diffuse share by its directional albedo at N.V,
