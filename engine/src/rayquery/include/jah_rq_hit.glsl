@@ -119,57 +119,23 @@ int jahVoxelAnswerCascade = -1;
 vec3 jahVoxelBounceOut = vec3( 0.0 );
 
 #ifdef JAH_VOX_SAMPLE_DIRECT
-/// THE STORE'S QUANTUM at a value's level, per channel: the half's 2^-10 of the value, 2^-24 under its smallest normal.
-vec3 jahStoreQuantum( vec3 v )
+/// THE BOUNCE SHARE AT THE READ'S OWN FOOTPRINT (BISTRO-REST-1, the lead's ruling - form 2). The share ( T - D ) / T of
+/// a read is a QUOTIENT of two store values, and the read `rad` is taken at the ray's footprint level: the share is
+/// summed over the SAME footprint - the pick texel's half and the rings of the same surface's cells (the same half,
+/// faces within 25 degrees of the pick's normal, where the caller binds the halves' normals) across the pick's axis at
+/// level 0, as many rings as the footprint's level spans (1-3; the T store has no levels of its own) - always whole:
+/// share = Sum ( T - D ) / Sum T, a coverage-weighted mean, no floor, no bias, one estimate for numerator and
+/// denominator. Its cancellation error is absolute (about two subnormal quanta over the footprint's summed coverage),
+/// constant in the bounce loop, which therefore stays LINEAR (the read's gain is the operator's).
+/// WHY NO TRUST (stage 0, spikes/bistro-rest-1): the shipped share weighed each footprint by a TRUST in its precision -
+/// clamp( 2 - 100 q / T ) with q the store's quantum at T's binade - a function of the very value the loop feeds. Its
+/// slope T dtrust/dT reached 2 on the ramp (and the stepped quantum jumped it at every binade edge), so the read
+/// amplified a half's bounce up to 3x and two shaded low-coverage halves that read each other orbited at period 2 (Bistro
+/// Exterior at Epic: 2-18 fp16 steps under the Jacobi door, the feedback never at rest; gi.hitDirect 0 ended it). Any
+/// trust that reads T has that slope on a ramp narrow enough to bound its error; summing the read's own footprint needs
+/// none. An EMPTY footprint (Sum T = 0) shares 0: the read's light came through the kernel's other cells, never its own.
+vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, float lod, vec4 tIso, vec4 dIso )
 {
-	return exp2( floor( log2( max( abs( v ), vec3( 6.1035156e-5 ) ) ) ) - 10.0 );
-}
-
-/// THE BOUNCE SHARE BY PRECISION (PHOTON-7 stage 10, the lead's ruling (B)). The share ( T - D ) / T of a read is a
-/// QUOTIENT of two store values; carried onto the read `rad` its quantum is e = rad x ( q(T) + q(D) ) / T. It is TRUSTED
-/// where e is within a code at the read's own level (1 % of the read over the store's floor, kGiBrickFloor), not at all
-/// past two codes, linearly between: a CONTINUOUS weight, so a quantum more or less of T never jumps the answer (a
-/// level-0 texel holding a quantum or two is not trusted - measured on the TLAS route: one subnormal quantum of T made the
-/// share 1 and none made it 0, a coarse read of 4.3e-4 then toggled the hit's bounce whole and two voxels at a convex
-/// edge orbited at period 2, 230-1725 store steps; and a trust taken as a THRESHOLD, a yes or a no, flipped across two
-/// placements a quantum apart, gi.field_oracle_shells (6b): 0 against 3.4e-5). A read of 0 is trusted (it multiplies
-/// nothing); an empty texel under a read that holds light, never.
-vec3 jahShareTrust( vec3 t, vec3 q, vec3 rad )
-{
-	const vec3 code = 0.01 * max( rad, vec3( 5.9604645e-6 ) );
-	vec3 trust = vec3( 1.0 );
-	for( int k = 0; k < 3; ++k )
-	{
-		if( !( rad[k] > 0.0 ) )
-			continue;
-		trust[k] = t[k] > 0.0 ? clamp( 2.0 - rad[k] * q[k] / ( code[k] * t[k] ), 0.0, 1.0 ) : 0.0;
-	}
-	return trust;
-}
-
-/// THE SHARE'S FOOTPRINT GROWS, deterministically and WORLD-ANCHORED (the ruling): the pick texel's share, then the
-/// cells of the SAME SURFACE (VOXEL-R13: the same half - its faces looking back at the read - whose faces' normal is
-/// within 25 degrees of the pick's, where the caller binds the halves' normals) in rings of the plane across the pick's
-/// axis at level 0 - the cell grid, never a position's fraction: the same
-/// cells for every ray that reads this surface here - summed (Sum ( T - D ) / Sum T: a coverage-weighted mean, no floor,
-/// no bias), up to the read's own texel (1-3 rings; the T store has no levels of its own). Each footprint answers by its
-/// TRUST, the rest passed to the next (share = Sum_k ( Prod_{j<k} ( 1 - trust_j ) ) trust_k share_k): continuous in the
-/// store's values; what no footprint trusts is THE EMPTY TEXEL'S share, 0 - a footprint that holds too little of the
-/// read's light at level 0 cannot say what of it is bounce (taken anyway, T = 0 gave 0 and one quantum gave 1: two fixed
-/// points, the walk resting on one and the teleport and the exact Jacobi solve on the other, gi.card_residency (7)'s
-/// convex edge). Returns the share.
-vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, vec4 tIso, vec4 dIso )
-{
-	vec3 q = jahStoreQuantum( tIso.xyz ) + jahStoreQuantum( dIso.xyz );
-	vec3 left = vec3( 1.0 );   // what the footprints so far left untrusted
-	vec3 share = vec3( 0.0 );
-	{
-		const vec3 tr = jahShareTrust( tIso.xyz, q, rad );
-		share += left * tr * clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
-		left *= vec3( 1.0 ) - tr;
-	}
-	if( all( lessThanEqual( left, vec3( 0.0 ) ) ) )
-		return share;
 	const vec3 ir = JAH_VOX_INVRES( c );
 	const int ax = jahVoxelAxis( dir, ir );
 	const int a1 = ax == 0 ? 1 : 0;
@@ -181,6 +147,7 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 #ifdef JAH_VOX_SAMPLE_HALF_NRM
 	const vec3 n0 = jahHalfNormalDecode( JAH_VOX_SAMPLE_HALF_NRM( c, ax, hh, ( cell0 + 0.5 ) * ir, 0.0 ), ax, hh );
 #endif
+	// THE FOOTPRINT's RINGS: a function of the read's level alone (static at a still scene), always summed whole
 	const int rings = clamp( int( exp2( floor( max( lod, 0.0 ) ) ) ), 1, 3 );
 	for( int ring = 1; ring <= rings; ++ring )
 	{
@@ -205,18 +172,13 @@ vec3 jahVoxelShareFootprint( int c, vec3 lsPick, vec3 dir, vec3 rad, float lod, 
 				const vec4 t = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( u, hh, ax, ir.x ), 0.0 );
 				if( !( t.w > 0.0 ) )
 					continue;   // no face of this half here
-				const vec4 d = JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( u, hh, ax, ir.x ), 0.0 );
 				tIso += t;
-				dIso += d;
-				q += jahStoreQuantum( t.xyz ) + jahStoreQuantum( d.xyz );
+				dIso += JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( u, hh, ax, ir.x ), 0.0 );
 			}
-		const vec3 tr = jahShareTrust( tIso.xyz, q, rad );
-		share += left * tr * clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-8 ) ), vec3( 0.0 ), vec3( 1.0 ) );
-		left *= vec3( 1.0 ) - tr;
-		if( all( lessThanEqual( left, vec3( 0.0 ) ) ) )
-			break;
 	}
-	return share;
+	// (an empty footprint shares 0, never a quotient of zeros)
+	return mix( vec3( 0.0 ), clamp( ( tIso.xyz - dIso.xyz ) / max( tIso.xyz, vec3( 1e-30 ) ), vec3( 0.0 ), vec3( 1.0 ) ),
+				greaterThan( tIso.xyz, vec3( 0.0 ) ) );
 }
 #endif
 
@@ -364,9 +326,8 @@ vec3 jahVoxelRadiance( vec3 hitPos, vec3 rayDir, vec3 hitNormal, float footprint
 			const int hS = dir[axS] > 0.0 ? 1 : 0;
 			vec4 tIso = JAH_VOX_SAMPLE_ISO( c, jahHalfUvw( lsPick, hS, axS, irS.x ), 0.0 );
 			vec4 dIso = JAH_VOX_SAMPLE_DIRECT( c, jahHalfUvw( lsPick, hS, axS, irS.x ), 0.0 );
-			// (THE SHARE BY PRECISION, the ruling (B): its footprint grows where the pick texel cannot carry it; one that
-			// never can is the empty texel's case)
-			const vec3 share = jahVoxelShareFootprint( c, lsPick, dir, rad, lod, tIso, dIso );
+			// (THE SHARE AT THE READ's OWN FOOTPRINT: the pick and its rings, summed whole - BISTRO-REST-1)
+			const vec3 share = jahVoxelShareFootprint( c, lsPick, dir, lod, tIso, dIso );
 			// ( T - D ) / T, NOT 1 - D / T: at an EMPTY texel (T = D = 0 - the texel picked along
 			// the ray holds nothing and the read's light came through the kernel's other axes) the
 			// share is 0, not 1 (1 handed the whole read back as bounce: 0.02 of the lit floor on

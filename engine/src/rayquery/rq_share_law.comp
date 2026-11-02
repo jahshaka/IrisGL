@@ -95,7 +95,7 @@ vec3 jahFixShare( float T, float D, float k, out float rad )
 	jahFixPickT = vec4( vec3( T ), k );
 	jahFixPickD = vec4( vec3( D ), k );
 	rad = k > 0.0 ? T / k : 0.0;
-	return jahVoxelShareFootprint( 0, lsPick, dir, vec3( rad ), 0.0, jahFixPickT, jahFixPickD );
+	return jahVoxelShareFootprint( 0, lsPick, dir, 0.0, jahFixPickT, jahFixPickD );
 }
 
 void main()
