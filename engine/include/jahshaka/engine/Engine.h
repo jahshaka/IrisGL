@@ -3184,6 +3184,15 @@ public:
     virtual bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
                                 std::vector<CardReadPick> &out) = 0;
 
+    /// THE HIT READ's BOUNCE SHARE, ASKED DIRECTLY (BISTRO-REST-1, gi.share_law): the shipped share
+    /// (rayquery/include/jah_rq_hit.glsl jahVoxelShareFootprint) over a fixture store, in a test-only compute job
+    /// (rq_share_law.comp: the sweep and the two-half loop, GiShareQuestion). A MEASUREMENT (dispatch, stall) - a suite,
+    /// never a frame. False without a ray-query device (the reason in takeLastError()).
+    virtual bool giShareLaw(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out)
+    {
+        (void)questions; out.clear(); return false;
+    }
+
     /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
     /// environment's cone lookup (jah_environment.glsl's jahEnvCone) for every
     /// query on `scene`'s environment cube — the disc-free sky capture,

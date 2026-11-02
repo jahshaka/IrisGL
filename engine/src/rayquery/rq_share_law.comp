@@ -1,0 +1,141 @@
+#version 460
+// gi.share_law's GPU half (BISTRO-REST-1, the lead's ruling (B)): THE HIT READ's BOUNCE SHARE, the shipped function
+// (jah_rq_hit.glsl jahVoxelShareFootprint - the SAME include every ray job reads), asked over a fixture store set by the
+// host, and the loop it closes. A test-only job: nothing in a frame dispatches it (RayQueryTier::shareLawBlocking records
+// it on its own command buffer and stalls on the answer).
+// THE FIXTURE STORE: one cell's half - the pick - holds what the question names (T, D, coverage k); every other cell is
+// EMPTY (no coverage), so the share's footprint rings find nothing beyond the pick: the function's own arithmetic on T
+// and D, at the read's level 0.
+// THE QUESTIONS (one invocation each):
+//   mode 0, THE SWEEP: T = q.x, D = q.y, k = q.z - the share and the answer the read hands back, rad x share, with the
+//     read's radiance rad = T / k (the read's own footprint holding exactly the pick: the consistent read);
+//   mode 1, THE LOOP: two halves of ONE cell reading each other - each a fraction F = q.y of its rays to the other, albedo
+//     rho = q.z, source S = q.x (premultiplied), coverage k = q.w - under the Jacobi door (both from the last iterate),
+//     from OUT OF PHASE (X high, Y 0), each iterate rounded to the store's half float: X' = S + rho F k answer(Y),
+//     answer(Y) = (Y / k) share(Y, D = 0); the last four iterates of each written back.
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+struct Question
+{
+	vec4 q;		// see the head
+	uvec4 mode;	// x the mode, y the loop's iterations
+};
+layout( std430, set = 0, binding = 0 ) readonly buffer QuestionBuf { Question questions[]; };
+struct Answer
+{
+	vec4 a;		// mode 0: share, answer, rad, 0; mode 1: X at n-3 .. n
+	vec4 b;		// mode 1: Y at n-3 .. n
+};
+layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
+layout( std430, set = 0, binding = 2 ) readonly buffer CountBuf { uint questionCount; };
+
+// THE FIXTURE STORE, read through the include's macros: one cascade, a 16^3 box of unit cells at the origin; the pick
+// is the cell the question names (its half's T / D / k), every other cell empty
+const int kFixRes = 16;
+vec4 jahFixPickT = vec4( 0.0 ), jahFixPickD = vec4( 0.0 );
+vec3 jahFixPickUvw = vec3( -1.0 );
+vec4 jahFixHalf( vec3 u, bool direct )
+{
+	return all( lessThan( abs( u - jahFixPickUvw ), vec3( 1e-6 ) ) ) ? ( direct ? jahFixPickD : jahFixPickT ) : vec4( 0.0 );
+}
+#define JAH_VOX_COUNT 1
+#define JAH_VOX_ORIGIN( c ) vec4( 0.0 )
+#define JAH_VOX_INVSIZE( c ) vec4( vec3( 1.0 / float( kFixRes ) ), 1.0 )
+#define JAH_SKY_ON false
+#define JAH_SKY_COLOUR vec3( 0.0 )
+#define JAH_VOX_SAMPLE_ISO( c, u, l ) jahFixHalf( u, false )
+#define JAH_VOX_SAMPLE_DIRECT( c, u, l ) jahFixHalf( u, true )
+#define JAH_VOX_SAMPLE_HALF_NRM( c, a, h, u, l ) vec2( 0.5 )   // (the half's own axis: one surface)
+#define JAH_VOX_SAMPLE_X( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_Y( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_Z( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_COVP( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_COVN( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_POSP( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_SAMPLE_POSN( c, u, l ) vec4( 0.0 )
+#define JAH_VOX_LEVEL_ON false
+#define JAH_VOX_LEVEL( c ) vec4( 0.0 )
+#define JAH_VOX_LEVEL_CAM vec3( 0.0 )
+#define JAH_VOX_LEVEL_FOOTPRINT false
+// (no environment: the share never reads one)
+#define JAH_ENV_CUBE_ON false
+#define JAH_ENV_SAMPLE( d, l ) vec3( 0.0 )
+#define JAH_ENV_MIPS 1.0
+#define JAH_ENV_SH_C0 vec3( 0.0 )
+#define JAH_ENV_SH_C1 vec3( 0.0 )
+#define JAH_ENV_SH_C2 vec3( 0.0 )
+#define JAH_ENV_SH_C3 vec3( 0.0 )
+#define JAH_ENV_SH_C4 vec3( 0.0 )
+#define JAH_ENV_SH_C5 vec3( 0.0 )
+#define JAH_ENV_SH_C6 vec3( 0.0 )
+#define JAH_ENV_SH_C7 vec3( 0.0 )
+#define JAH_ENV_SH_C8 vec3( 0.0 )
+#include "jah_rq_hit.glsl"
+
+/// THE STORE's ROUNDING (the half float, to nearest): what a pass's write leaves of a value
+float jahFixRoundHalf( float v )
+{
+	const float a = abs( v );
+	const float step = a < 6.1035156e-5 ? 5.9604645e-8 : exp2( floor( log2( a ) ) - 10.0 );
+	return sign( v ) * round( a / step ) * step;
+}
+
+/// The share of the pick holding (T, D) at coverage k, read along -y (its +y half), and the read's radiance T / k
+vec3 jahFixShare( float T, float D, float k, out float rad )
+{
+	const ivec3 cell = ivec3( 8, 8, 8 );
+	const vec3 dir = vec3( 0.0, -1.0, 0.0 );   // the read's direction: down, into the pick's +y half
+	const vec3 ir = JAH_VOX_INVRES( 0 );
+	const int ax = jahVoxelAxis( dir, ir );
+	const int hS = dir[ax] > 0.0 ? 1 : 0;
+	const vec3 lsPick = ( vec3( cell ) + 0.5 ) * ir;
+	jahFixPickUvw = jahHalfUvw( lsPick, hS, ax, ir.x );
+	jahFixPickT = vec4( vec3( T ), k );
+	jahFixPickD = vec4( vec3( D ), k );
+	rad = k > 0.0 ? T / k : 0.0;
+	return jahVoxelShareFootprint( 0, lsPick, dir, vec3( rad ), 0.0, jahFixPickT, jahFixPickD );
+}
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= questionCount )
+		return;
+	const Question qu = questions[i];
+	Answer an;
+	an.a = vec4( 0.0 );
+	an.b = vec4( 0.0 );
+	if( qu.mode.x == 0u )
+	{
+		float rad;
+		const vec3 s = jahFixShare( qu.q.x, qu.q.y, qu.q.z, rad );
+		an.a = vec4( s.x, rad * s.x, rad, 0.0 );
+	}
+	else
+	{
+		const float S = qu.q.x, F = qu.q.y, rho = qu.q.z, k = qu.q.w;
+		float X = jahFixRoundHalf( 2.0 * S / max( 1.0 - rho * F, 1e-6 ) ), Y = 0.0;
+		const int n = int( max( qu.mode.y, 4u ) );
+		float hx[4], hy[4];
+		for( int it = 0; it < n; ++it )
+		{
+			float radX, radY;
+			const float shX = jahFixShare( X, 0.0, k, radX ).x;
+			const float shY = jahFixShare( Y, 0.0, k, radY ).x;
+			const float nX = jahFixRoundHalf( S + rho * F * k * radY * shY );
+			const float nY = jahFixRoundHalf( S + rho * F * k * radX * shX );
+			X = nX;
+			Y = nY;
+			if( it >= n - 4 )
+			{
+				hx[it - ( n - 4 )] = X;
+				hy[it - ( n - 4 )] = Y;
+			}
+		}
+		an.a = vec4( hx[0], hx[1], hx[2], hx[3] );
+		an.b = vec4( hy[0], hy[1], hy[2], hy[3] );
+	}
+	answers[i] = an;
+}

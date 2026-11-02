@@ -93,6 +93,7 @@
 #include "rayquery/rq_motion_spv.h"
 #include "rayquery/rq_motion_skin_spv.h"
 #include "rayquery/rq_card_parity_spv.h"
+#include "rayquery/rq_share_law_spv.h"
 #include "rayquery/rq_sun_contact_spv.h"
 #include "rayquery/rq_area_vis_spv.h"
 #include "rayquery/rq_area_vis_resolve_spv.h"
@@ -537,6 +538,8 @@ public:
     /// read (jah_rq_card.glsl) asked at `queries` through a test-only job
     /// (rq_card_parity.comp) over the scene's own surface cache. Flushes
     /// Ogre's commands, submits, stalls — a suite, never a frame.
+    /// gi.share_law's harness (rq_share_law.comp): the shipped bounce share over a fixture store, blocking
+    bool shareLawBlocking(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out, std::string &err);
     bool cardPickBlocking(OgreScene *scene, const std::vector<CardReadQuery> &queries,
                           std::vector<CardReadPick> &out, std::string &err);
 
@@ -1443,6 +1446,12 @@ private:
     VkPipeline            mComposePipeline = VK_NULL_HANDLE;
     VkShaderModule        mComposeModule = VK_NULL_HANDLE;
     VkDescriptorPool      mReflectPool = VK_NULL_HANDLE;
+    /// gi.share_law's harness (shareLawBlocking), made on first use.
+    VkDescriptorSetLayout mShareLawSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      mShareLawPipeLayout = VK_NULL_HANDLE;
+    VkShaderModule        mShareLawModule = VK_NULL_HANDLE;
+    VkPipeline            mShareLawPipeline = VK_NULL_HANDLE;
+    VkDescriptorPool      mShareLawPool = VK_NULL_HANDLE;
     /// gi.card_read_parity's harness (cardPickBlocking), made on first use.
     VkDescriptorSetLayout mCardParitySetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mCardParityPipeLayout = VK_NULL_HANDLE;
@@ -3081,6 +3090,13 @@ void RayQueryTier::close() {
     if (mCmSetLayout) vkDestroyDescriptorSetLayout(mVk, mCmSetLayout, nullptr);
     mCmPool = VK_NULL_HANDLE; mCmPipeline = VK_NULL_HANDLE; mCmModule = VK_NULL_HANDLE;
     mCmPipeLayout = VK_NULL_HANDLE; mCmSetLayout = VK_NULL_HANDLE;
+    if (mShareLawPool) vkDestroyDescriptorPool(mVk, mShareLawPool, nullptr);
+    if (mShareLawPipeline) vkDestroyPipeline(mVk, mShareLawPipeline, nullptr);
+    if (mShareLawModule) vkDestroyShaderModule(mVk, mShareLawModule, nullptr);
+    if (mShareLawPipeLayout) vkDestroyPipelineLayout(mVk, mShareLawPipeLayout, nullptr);
+    if (mShareLawSetLayout) vkDestroyDescriptorSetLayout(mVk, mShareLawSetLayout, nullptr);
+    mShareLawPool = VK_NULL_HANDLE; mShareLawPipeline = VK_NULL_HANDLE; mShareLawModule = VK_NULL_HANDLE;
+    mShareLawPipeLayout = VK_NULL_HANDLE; mShareLawSetLayout = VK_NULL_HANDLE;
     if (mCardParityPool) vkDestroyDescriptorPool(mVk, mCardParityPool, nullptr);
     if (mCardParitySampler) vkDestroySampler(mVk, mCardParitySampler, nullptr);
     mCardParitySampler = VK_NULL_HANDLE;
@@ -5786,6 +5802,172 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     dropBuffer(aBuf);
     dropBuffer(ubo);
     return ok;
+}
+
+// gi.share_law's harness (BISTRO-REST-1): rq_share_law.comp - the shipped bounce share (jah_rq_hit.glsl) over a fixture
+// store - recorded on its own command buffer, submitted and waited on. Three storage buffers: the questions, the answers,
+// the count.
+bool RayQueryTier::shareLawBlocking(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out,
+                                    std::string &err) {
+    out.clear();
+    if (!isOpen()) { err = "giShareLaw: the ray tier is not open"; return false; }
+    if (questions.empty()) { err = "giShareLaw: no questions"; return false; }
+    if (!mShareLawPipeline) {
+        constexpr unsigned kBindings = 3u;
+        VkDescriptorSetLayoutBinding b[kBindings] = {};
+        for (unsigned i = 0; i < kBindings; ++i) {
+            b[i].binding = i;
+            b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            b[i].descriptorCount = 1;
+            b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        DescriptorPoolPlan plan;
+        if (!plan.makeLayout(mVk, b, kBindings, 1u, mShareLawSetLayout, err, "rayquery/share-law")) return false;
+        VkPipelineLayoutCreateInfo pli{};
+        pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &mShareLawSetLayout;
+        VkShaderModuleCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        smi.codeSize = sizeof(krq_shareLawSpv);
+        smi.pCode = krq_shareLawSpv;
+        if (vkCreatePipelineLayout(mVk, &pli, nullptr, &mShareLawPipeLayout) != VK_SUCCESS ||
+            vkCreateShaderModule(mVk, &smi, nullptr, &mShareLawModule) != VK_SUCCESS) {
+            err = "giShareLaw: the harness pipeline could not be made";
+            return false;
+        }
+        if (!plan.create(mVk, "rayquery/share-law", VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, mShareLawPool, err))
+            return false;
+        VkComputePipelineCreateInfo cpi{};
+        cpi.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        cpi.stage.module = mShareLawModule;
+        cpi.stage.pName = "main";
+        cpi.layout = mShareLawPipeLayout;
+        if (createComputePipeline(cpi, &mShareLawPipeline, "share law") != VK_SUCCESS) {
+            err = "giShareLaw: vkCreateComputePipelines failed";
+            return false;
+        }
+    }
+    mRs->flushCommands();
+    const size_t n = questions.size();
+    RawBuffer qBuf, aBuf, cBuf;
+    if (!makeBuffer(n * 8u * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, qBuf, err)) return false;
+    if (!makeBuffer(n * 8u * sizeof(float), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, aBuf, err)) {
+        dropBuffer(qBuf);
+        return false;
+    }
+    if (!makeBuffer(64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false, cBuf, err)) {
+        dropBuffer(qBuf); dropBuffer(aBuf);
+        return false;
+    }
+    {
+        uint32_t *q = static_cast<uint32_t *>(qBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            std::memcpy(&q[i * 8u], questions[i].q, 4u * sizeof(float));
+            q[i * 8u + 4] = questions[i].mode;
+            q[i * 8u + 5] = questions[i].iterations;
+            q[i * 8u + 6] = q[i * 8u + 7] = 0u;
+        }
+        std::memset(aBuf.mapped, 0, n * 8u * sizeof(float));
+        const uint32_t count = uint32_t(n);
+        std::memcpy(cBuf.mapped, &count, sizeof(count));
+    }
+    VkDescriptorSetAllocateInfo dai{};
+    dai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dai.descriptorPool = mShareLawPool;
+    dai.descriptorSetCount = 1;
+    dai.pSetLayouts = &mShareLawSetLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(mVk, &dai, &set) != VK_SUCCESS) {
+        err = "giShareLaw: vkAllocateDescriptorSets failed";
+        dropBuffer(qBuf); dropBuffer(aBuf); dropBuffer(cBuf);
+        return false;
+    }
+    VkDescriptorBufferInfo bufs[3] = {};
+    bufs[0].buffer = qBuf.buffer; bufs[0].range = VK_WHOLE_SIZE;
+    bufs[1].buffer = aBuf.buffer; bufs[1].range = VK_WHOLE_SIZE;
+    bufs[2].buffer = cBuf.buffer; bufs[2].range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet writes[3] = {};
+    for (unsigned i = 0; i < 3u; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = set;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufs[i];
+    }
+    vkUpdateDescriptorSets(mVk, 3u, writes, 0, nullptr);
+    VkCommandPoolCreateInfo pci{};
+    pci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.queueFamilyIndex = mDev->mGraphicsQueue.getFamilyIdx();
+    VkCommandPool pool = VK_NULL_HANDLE;
+    vkCreateCommandPool(mVk, &pci, nullptr, &pool);
+    VkCommandBufferAllocateInfo cai{};
+    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cai.commandPool = pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    vkAllocateCommandBuffers(mVk, &cai, &cmd);
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mShareLawPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mShareLawPipeLayout, 0, 1, &set, 0, nullptr);
+    JAH_GPU_CHECKPOINT(cmd);   // THE GPU CHECKPOINTS (GpuCheckpoints.h)
+    vkCmdDispatch(cmd, uint32_t((n + 63u) / 64u), 1, 1);
+    VkMemoryBarrier toHost{};
+    toHost.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    toHost.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &toHost, 0, nullptr,
+                         0, nullptr);
+    vkEndCommandBuffer(cmd);
+    VkFenceCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(mVk, &fci, nullptr, &fence);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    bool ok = vkQueueSubmit(mDev->mGraphicsQueue.mQueue, 1, &si, fence) == VK_SUCCESS;
+    if (ok) ok = vkWaitForFences(mVk, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    if (ok) {
+        out.resize(n);
+        const float *a = static_cast<const float *>(aBuf.mapped);
+        for (size_t i = 0; i < n; ++i) {
+            std::memcpy(out[i].a, &a[i * 8u], 4u * sizeof(float));
+            std::memcpy(out[i].b, &a[i * 8u + 4u], 4u * sizeof(float));
+        }
+    } else {
+        err = "giShareLaw: the job did not complete (submit or device-lost wait failed)";
+    }
+    vkDestroyFence(mVk, fence, nullptr);
+    vkFreeCommandBuffers(mVk, pool, 1, &cmd);
+    vkDestroyCommandPool(mVk, pool, nullptr);
+    vkFreeDescriptorSets(mVk, mShareLawPool, 1, &set);
+    dropBuffer(qBuf);
+    dropBuffer(aBuf);
+    dropBuffer(cBuf);
+    return ok;
+}
+
+bool OgreEngine::giShareLaw(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out) {
+    out.clear();
+    if (!mRayTier || !mRayTier->isOpen()) {
+        mLastError = "giShareLaw: the ray tier is not open (no ray-query device, or rays off)";
+        return false;
+    }
+    std::string err;
+    if (!mRayTier->shareLawBlocking(questions, out, err)) {
+        mLastError = err;
+        return false;
+    }
+    return true;
 }
 
 bool OgreEngine::cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
@@ -13883,6 +14065,12 @@ void OgreView::retirePhotonOverlay() {
     mPhotonOverlay = nullptr;
     mPhotonOverlayWritten = false;
 }
+bool OgreEngine::giShareLaw(const std::vector<GiShareQuestion> &, std::vector<GiShareAnswer> &out) {
+    out.clear();
+    mLastError = "giShareLaw: no ray-query tier on this platform";
+    return false;
+}
+
 bool OgreEngine::cardReadParity(Scene *, const std::vector<CardReadQuery> &,
                                 std::vector<CardReadPick> &out) {
     out.clear();

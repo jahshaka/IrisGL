@@ -228,6 +228,20 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h.d"
         COMMENT "Compiling the card-read parity compute shader at SPIR-V 1.4"
         VERBATIM)
+    # gi.share_law's harness (BISTRO-REST-1): the hit read's bounce share (jah_rq_hit.glsl) over a fixture store - a
+    # test-only job, same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_shareLawSpv -o "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_share_law.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_share_law.comp"
+                "${JAH_RQ_FORK_BRDF}"
+                "${JAH_RQ_SPEC_ALBEDO}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h.d"
+        COMMENT "Compiling the bounce-share law compute shader at SPIR-V 1.4"
+        VERBATIM)
     # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
@@ -598,6 +612,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"

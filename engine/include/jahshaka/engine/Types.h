@@ -4160,6 +4160,20 @@ struct CardSample {
     long long gatherSky = -1;
 };
 
+/// ONE QUESTION FOR THE HIT READ's BOUNCE SHARE (Engine::giShareLaw, gi.share_law; rq_share_law.comp says the modes):
+/// mode 0 THE SWEEP - q = (T, D, k, -): the share and the answer the shipped jah_rq_hit.glsl hands back for a pick
+/// holding T and D at coverage k, its read rad = T / k; mode 1 THE LOOP - q = (S, F, rho, k): two halves of one cell
+/// reading each other under the Jacobi door from out of phase, `iterations` steps, each rounded to the store's half float.
+struct GiShareQuestion {
+    float q[4] = { 0.f, 0.f, 0.f, 0.f };
+    unsigned mode = 0u, iterations = 0u;
+};
+/// ...its answer: mode 0 a = (share, answer, rad, -); mode 1 a = X and b = Y at the last four iterates.
+struct GiShareAnswer {
+    float a[4] = { 0.f, 0.f, 0.f, 0.f };
+    float b[4] = { 0.f, 0.f, 0.f, 0.f };
+};
+
 /// ONE QUESTION FOR THE RAY JOB'S CARD READ (Engine::cardReadParity): a world
 /// point on `node`'s surface and the direction the read treats as "facing"
 /// (the ray job passes the reversed ray direction — jah_rq_card.glsl says why).
