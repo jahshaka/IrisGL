@@ -1110,7 +1110,17 @@ public:
     /// GiVoxelVolume::light), and the placement
     /// (`width`/`height`/`depth`, `origin`, `cell`, `available`); every other member left empty. For a law that reads the light of several cascades and arms (the
     /// whole door decodes a dozen volumes and every directional level).
-    virtual bool giVoxelLight(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    /// `worldLo` / `worldHi` (both or neither, world metres): THE CELLS THAT BOX REACHES alone, as giVoxelHalves' box (its
+    /// own `width` / `height` / `depth`, `origin` its first cell's corner) - and only those rows downloaded.
+    virtual bool giVoxelLight(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr, const float *worldHi = nullptr)
+    {
+        (void)cascade; (void)worldLo; (void)worldHi; out = GiVoxelVolume(); return false;
+    }
+    /// ...ITS HALF STORE AS STORED (BISTRO-REST-1; a TEST readback, flushes and BLOCKS): level 0 of the half light, the
+    /// texture's own RGBA16F words in its texel order (Types.h GiVoxelVolume::halfLight's layout, four words a texel), NO
+    /// decode - for a law that compares the store word for word (a rest that writes nothing: the same words). False
+    /// without that cascade.
+    virtual bool giHalfStoreWords(int cascade, std::vector<std::uint16_t> &out) { (void)cascade; out.clear(); return false; }
     /// ...ITS DIRECT TERM ALONE (BISTRO-REST-1; jahlab's `voxels <c> direct`, gi.light_is_world) - the same TEST AND TOOL
     /// readback (flushes and BLOCKS): the half store's direct terms (`halfDirect`), `direct` the cell's direct derived from
     /// its six halves as `light` is (Types.h GiVoxelVolume::direct), and the placement; every other member left empty.
@@ -1123,7 +1133,8 @@ public:
     /// coverage and the surface position per half, and the placement; every other member empty.
     /// `worldLo` / `worldHi` (both or neither, world metres): the volume returned is THE CELLS THAT BOX REACHES alone -
     /// `width` / `height` / `depth` its own, `origin` its first cell's corner - a law over one room reads that room (the
-    /// whole cascade decoded in Debug cost a fixture about a second and a half a cascade).
+    /// whole cascade decoded in Debug cost a fixture about a second and a half a cascade); only the box's rows and
+    /// slices are downloaded (BISTRO-REST-1: twelve whole volumes a read before).
     virtual bool giVoxelHalves(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr,
                                const float *worldHi = nullptr)
     {

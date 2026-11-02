@@ -1694,6 +1694,47 @@ bool PhotonComponent::giFeedbackBricks(int cascadeIdx, GiFeedbackBricks &out) {
     return false;
 }
 
+// Scene::giHalfStoreWords (BISTRO-REST-1): level 0 of the half light as stored - its RGBA16F words in texel order, x
+// fastest, no decode (a rest compared word for word: one download, a memcmp; the decode of fifty million halves was
+// most of a rest law's read in Debug)
+bool PhotonComponent::giHalfStoreWords(int cascadeIdx, std::vector<std::uint16_t> &out) {
+    out.clear();
+    JAH_TRY {
+        Ogre::PhotonVoxelLighting *lighting = nullptr;
+        if (!mVctCascades.empty()) {
+            if (cascadeIdx < 0 || size_t(cascadeIdx) >= mVctCascades.size()) return false;
+            lighting = mVctCascades[size_t(cascadeIdx)].lighting;
+        } else if (cascadeIdx == 0) {
+            lighting = mVctLighting;
+        }
+        Ogre::TextureGpu *hl = lighting ? lighting->getHalfLightTexture() : nullptr;
+        if (!hl || hl->getResidencyStatus() != Ogre::GpuResidency::Resident ||
+            hl->getPixelFormat() != Ogre::PFG_RGBA16_FLOAT)
+            return false;
+        Ogre::RenderSystem *rs = mRoot->getRenderSystem();
+        rs->flushCommands();
+        Ogre::TextureGpuManager *tm = rs->getTextureGpuManager();
+        const Ogre::uint32 W = hl->getWidth(), H = hl->getHeight(), D = hl->getDepth();
+        Ogre::AsyncTextureTicket *ticket =
+            tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, Ogre::PFG_RGBA16_FLOAT);
+        bool ok = false;
+        try {
+            ticket->download(hl, 0u, true);
+            const Ogre::TextureBox box = ticket->map(0);
+            out.resize(size_t(W) * H * D * 4u);
+            for (Ogre::uint32 z = 0; z < D; ++z)
+                for (Ogre::uint32 y = 0; y < H; ++y)
+                    std::memcpy(&out[((size_t(z) * H + y) * W) * 4u], box.at(0, y, z), size_t(W) * 4u * sizeof(std::uint16_t));
+            ticket->unmap();
+            ok = true;
+        } catch (Ogre::Exception &e) { mError = e.getFullDescription(); }
+          catch (std::exception &e)  { mError = std::string("engine: ") + e.what(); }
+        tm->destroyAsyncTextureTicket(ticket);
+        if (!ok) out.clear();
+        return ok;
+    } JAH_CATCH(mError, false);
+}
+
 bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part, const float *worldLo,
                                     const float *worldHi) {
     const bool lightOnly = part == 1;
@@ -1760,18 +1801,30 @@ bool PhotonComponent::giVoxelVolume(int cascadeIdx, GiVoxelVolume &out, int part
             const Ogre::uint32 oW = boxed ? blocks * bw : W, oH = boxed ? cellHi[1] - cellLo[1] : H,
                                oD = boxed ? cellHi[2] - cellLo[2] : D;
             dst.assign(size_t(oW) * oH * oD * 4u, 0.0f);
+            if (boxed && (oH == 0u || oD == 0u)) return true;   // (a box that reaches no cell: nothing to download)
+            // (BISTRO-REST-1: a box DOWNLOADS its rows and slices alone - Ogre's own sub-box ticket, every x of them, the
+            // packed blocks; the ticket's size the box's, its texel (x, y, z) the box's own. Before, each volume came whole
+            // and the box only limited the decode.)
+            const Ogre::uint32 tH = boxed ? oH : H, tD = boxed ? oD : D;
             Ogre::AsyncTextureTicket *ticket =
-                tm->createAsyncTextureTicket(W, H, D, Ogre::TextureTypes::Type3D, fmt);
+                tm->createAsyncTextureTicket(W, tH, tD, Ogre::TextureTypes::Type3D, fmt);
             bool ok = false;
             try {
-                ticket->download(tex, mip, true);
+                if (boxed) {
+                    Ogre::TextureBox src = tex->getEmptyBox(mip);
+                    src.y = cellLo[1];
+                    src.height = tH;
+                    src.z = cellLo[2];
+                    src.depth = tD;
+                    ticket->download(tex, mip, true, &src);
+                } else {
+                    ticket->download(tex, mip, true);
+                }
                 const Ogre::TextureBox box = ticket->map(0);
-                for (Ogre::uint32 z = 0; z < D; ++z)
-                    for (Ogre::uint32 y = 0; y < H; ++y) {
-                        if (boxed && (z < cellLo[2] || z >= cellHi[2] || y < cellLo[1] || y >= cellHi[1])) continue;
+                for (Ogre::uint32 z = 0; z < tD; ++z)
+                    for (Ogre::uint32 y = 0; y < tH; ++y) {
                         const void *row = box.at(0, y, z);
-                        float *o = boxed ? &dst[((size_t(z - cellLo[2]) * oH + (y - cellLo[1])) * oW) * 4u]
-                                         : &dst[((size_t(z) * H + y) * W) * 4u];
+                        float *o = &dst[((size_t(z) * tH + y) * (boxed ? oW : W)) * 4u];
                         for (Ogre::uint32 x = 0; x < W; ++x) {
                             // (a packed volume's texel x holds cell x mod the volume's width, block x / width)
                             if (boxed && ((x % volW) < cellLo[0] || (x % volW) >= cellHi[0])) continue;

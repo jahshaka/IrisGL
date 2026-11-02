@@ -4807,9 +4807,13 @@ public:
     bool giVoxelVolume(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelVolume(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelVolume"); return mPhoton.giVoxelVolume(cascade, out); }
-    bool giVoxelLight(int cascade, GiVoxelVolume &out) override {
-        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelLight(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
-        JAH_HOST_CALL("Scene::giVoxelLight"); return mPhoton.giVoxelVolume(cascade, out, 1); }
+    bool giVoxelLight(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr,
+                      const float *worldHi = nullptr) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelLight(cascade, out, worldLo, worldHi); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giVoxelLight"); return mPhoton.giVoxelVolume(cascade, out, 1, worldLo, worldHi); }
+    bool giHalfStoreWords(int cascade, std::vector<std::uint16_t> &out) override {
+        if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giHalfStoreWords(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
+        JAH_HOST_CALL("Scene::giHalfStoreWords"); return mPhoton.giHalfStoreWords(cascade, out); }
     bool giVoxelDirect(int cascade, GiVoxelVolume &out) override {
         if (hostPosts()) { bool r{}; requestOnEngine([&] { r = giVoxelDirect(cascade, out); }); return r; }   // a REQUEST on the host's side (U3 4b)
         JAH_HOST_CALL("Scene::giVoxelDirect"); return mPhoton.giVoxelVolume(cascade, out, 3); }
