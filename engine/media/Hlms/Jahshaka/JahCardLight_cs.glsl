@@ -557,18 +557,17 @@ void main()
 			jahSpecularAlbedoHemi( perceptualRoughness, sa, sb );
 			specLobe = specF0 * sa + specW * sb;
 		}
-		const bvec3 hasDiffuse = greaterThan( kD, vec3( 0.0, 0.0, 0.0 ) );
-		vec3 indirect = vec3( 0.0, 0.0, 0.0 );
-		vec3 specIndirect = vec3( 0.0, 0.0, 0.0 );
+		// THE INDIRECT: marched (mode bit 1), the cached layer (neither bit), or none yet (bit 2)
+		vec3 irradiance = vec3( 0.0, 0.0, 0.0 );
 		if( ( mode & 1u ) != 0u )
 		{
 @property( hlms_num_vct_cascades )
 			// BRDF_EnvMap's envColourD (the voxels' share plus the environment's share;
 			// the header says why) - the TLAS gather's at the ray tier (mode bit 4).
 	@property( jah_card_gather )
-			const vec3 irradiance = ( mode & 4u ) != 0u ? imageLoad( cardGather, at ).xyz : jahCardEnvColourD( P, Ncone );
+			irradiance = ( mode & 4u ) != 0u ? imageLoad( cardGather, at ).xyz : jahCardEnvColourD( P, Ncone );
 	@else
-			const vec3 irradiance = jahCardEnvColourD( P, Ncone );
+			irradiance = jahCardEnvColourD( P, Ncone );
 	@end
 @else
 			// GI OFF (PHOTON-CARDS-5): the pixel's envColourD is the SH irradiance
@@ -576,25 +575,13 @@ void main()
 			// coefficients. Cached like the march: the SH is in the indirect
 			// signature (OgreScene::updateSurfaceCache), so a change re-runs this
 			// branch.
-			const vec3 irradiance = jahEnvIrradiance( Ncone );
+			irradiance = jahEnvIrradiance( Ncone );
 @end
-			indirect = irradiance * diffuseLobe;
-			specIndirect = irradiance * specLobe;
-			// THE CACHE: the diffuse half where the channel has one, the lobe's share where not
-			cached = mix( specIndirect, indirect, hasDiffuse );
 		}
-		else if( ( mode & 2u ) == 0u )
-		{
-			cached = imageLoad( cardIndirect, at ).xyz;
-			indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
-			// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
-			specIndirect = mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
-			if( nearMirror )
-				specIndirect = vec3( 0.0, 0.0, 0.0 );   // (a near-mirror's cached lobe share is 0 by the rule above)
-		}
-		// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
-		flatTerm = ( texelFetch( cardEmissive, at, 0 ).xyz + specIndirect ) * openF;
-		radiance = ( direct * kD + indirect ) * openF + flatTerm;
+		const vec3 cachedIn = ( mode & 3u ) == 0u ? imageLoad( cardIndirect, at ).xyz : vec3( 0.0, 0.0, 0.0 );
+		// THE STORED TERMS (jah_card_view.glsl jahCardStoreTerms - gi.card_law drives the same text)
+		jahCardStoreTerms( mode, irradiance, cachedIn, direct, kD, diffuseLobe, specLobe, nearMirror,
+						   texelFetch( cardEmissive, at, 0 ).xyz, openF, cached, flatTerm, radiance );
 	}
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahRoundHalf( cached ), 1.0 ) );
@@ -615,23 +602,21 @@ void main()
 		const vec3 now = imageLoad( cardRadiance, at ).xyz;
 		const float S = max( max( now.x, now.y ), now.z );
 		const vec4 g = imageLoad( cardGather, at );
-		const bool refOk = ( floatBitsToUint( g.w ) & 0x7F800000u ) != 0x7F800000u && g.w >= 0.0;
-		const float d = refOk ? abs( S - g.w ) : 3.0e38;
-		const float code = 0.01 * max( max( S, refOk ? g.w : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
 		// A CARD CAPTURED THIS FRAME (mode bit 8) reports its radiance whole: its readers read the voxels there before it
 		// (the accumulation's arrivals, through the geometric bound)
 		const bool fresh = ( mode & 8u ) != 0u;
+		// THE MOVE (jah_card_view.glsl jahCardMoveReport - gi.card_law drives the same text)
+		float move, codes;
+		const bool report = jahCardMoveReport( S, g.w, fresh, move, codes );
 		// THE MOVE IN CODES for the frame's word, tested BY ITS BITS (a NaN compares false to everything, and its bits
 		// would win every max): a non-finite one raises the flag word instead of being stored
-		// (no reference yet: the whole value moved, as a capture's)
-		const float codes = ( fresh || !refOk ? S : d ) / code;
 		const bool finiteCodes = ( floatBitsToUint( codes ) & 0x7F800000u ) != 0x7F800000u;
 		if( !finiteCodes )
 			atomicOr( cardMoves[16385u], 1u );
-		if( fresh || d > code )
+		if( report )
 		{
 			imageStore( cardGather, at, vec4( jahRoundHalf( g.xyz ), S ) );
-			const uint mb = min( floatBitsToUint( fresh ? S : d ), 0x7F7FFFFFu );
+			const uint mb = min( floatBitsToUint( move ), 0x7F7FFFFFu );
 			const uint slot = ( uint( r.rect.y ) >> 4u ) * 128u + ( uint( r.rect.x ) >> 4u );
 			if( mb > cardMoves[slot] )
 				atomicMax( cardMoves[slot], mb );

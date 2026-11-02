@@ -295,28 +295,18 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	// diffuse half is the layer where kD > 0, else 0. The EMISSIVE binding is the relight's FLAT layer
 	// (the emissive and the specular lobe's re-emission), added outside the diffuse view restore.
 	const vec3 stored = JAH_CARD_INDIRECT( pick.texel );
-	const bvec3 hasDiffuse = greaterThan( albedo.xyz, vec3( 0.0 ) );
-	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );
+	const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
 	// THE LOBE'S INDIRECT SHARE, LEFT OUT WHERE THE READER TRACES THE LOBE ITSELF (C2: the traced lobe replaces the
 	// integral): where kD = 0 the cached texel IS that share; where kD > 0 it is the cached diffuse half times the lobes'
 	// ratio ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ), the relight's own recovery. Cut from the radiance and the flat term
 	// alike, so the direct half is untouched. (The movers' gate's half of this cut is deleted: PHOTON-7 8A A3.)
 	// (A NEAR-MIRROR's texel holds no lobe share - JahCardLight_cs.glsl, PHOTON-7 11-2 (7): nothing to cut. The lights'
 	// lobe below is not a cache: it is evaluated toward this ray, a near-mirror's glint included.)
-	vec3 cutLobe = vec3( 0.0 );
-	if( jahHitTracedLobe && alpha > kJahCardNearMirrorAlpha )
-	{
-		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
-		if( spec.w > 0.0 )
-		{
-			float sa, sb;
-			jahCardLobeHemi( r, sa, sb );
-			const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
-			const vec3 diffuseLobe = albedo.xyz * 3.141592654 * jahDiffuseAlbedoHemi( r );
-			const vec3 lobeShare = mix( stored, stored * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
-			cutLobe = lobeShare;
-		}
-	}
+	// (jah_card_view.glsl jahCardReadView - gi.card_law drives the same text)
+	float sa = 0.0, sb = 0.0;
+	const bool cut = jahHitTracedLobe && alpha > kJahCardNearMirrorAlpha && spec.w > 0.0;
+	if( cut )
+		jahCardLobeHemi( r, sa, sb );
 	// THE LIGHTS' SPECULAR LOBE TOWARD THIS RAY (PHOTON-3 stage 2): where the relight re-emitted the lobe's
 	// integral the same way to every direction, the read evaluates BRDF_Default's own lobe toward viewDir for
 	// every light it knows, E mu vis f_s( L, V ) with the texel's F0 and w (jahCardLightsLobe) - exact per light,
@@ -324,15 +314,15 @@ vec3 jahCardRadiance( uint slot, vec3 hitPos, vec3 facingDir, vec3 viewDir, out 
 	// energy is unchanged, the direction is the surface's.
 	const vec3 V = normalize( viewDir );
 	vec3 lobe = vec3( 0.0 );
-	{
-		const vec4 spec = JAH_CARD_SPECULAR( pick.texel );
-		if( spec.w > 0.0 )
-			lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w,
-									  JAH_CARD_SUN_VIS( pick.texel ), JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
-	}
+	if( spec.w > 0.0 )
+		lobe = jahCardLightsLobe( hitPos, N, V, r, spec.www * 0.04 + spec.xyz * 0.96, spec.w, JAH_CARD_SUN_VIS( pick.texel ),
+								  JAH_CARD_LAMP_BITS( pick.texel ), c.lamps );
+	vec3 cutLobe;
+	const vec3 viewed = jahCardReadView( JAH_CARD_RADIANCE( pick.texel ), stored, JAH_CARD_EMISSIVE( pick.texel ),
+										 albedo.xyz, spec, alpha, r, sa, sb, cut, kJahCardNearMirrorAlpha, N, L, V,
+										 cutLobe );
 	jahCardPickCut = cutLobe;
-	return jahCardViewRadiance( JAH_CARD_RADIANCE( pick.texel ) - cutLobe, indirect,
-								JAH_CARD_EMISSIVE( pick.texel ) - cutLobe, N, L, r, V ) + lobe;
+	return viewed + lobe;
 }
 
 /// ONE LAMP's LOBE AT A CARD HIT (PHOTON-7 11-2 (8)): the part of jahCardRadiance's lights' lobe that lamp `lamp` (its

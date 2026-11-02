@@ -1,0 +1,192 @@
+#version 460
+// gi.card_law's GPU half (BISTRO-REST-1, the lead's ruling (3)): A CARD TEXEL's STORED TERMS, ITS READ AND ITS MOVE - the
+// shipped functions (jah_card_view.glsl: jahCardStoreTerms, the relight's; jahCardReadView, every ray job's card read;
+// jahCardMoveReport, the relight's move) over a fixture texel set by the host. A test-only job: nothing in a frame
+// dispatches it (RayQueryTier::lawBlocking records it on its own command buffer and stalls on the answer).
+// THE QUESTIONS (one invocation each):
+//   mode 0, THE TEXEL: irradiance q.x (grey), open fraction q.y, roughness q.z, emissive q.w; the material mode.y (0 a
+//     metal F0 0.9, 1 a dielectric albedo 0.5, 2 a dark dielectric albedo 0.02, 3 a tinted metal), the direct half
+//     mode.z (0 none: the texel in shade; 1 a tenth of the irradiance). The texel is MARCHED (the capture), its layers
+//     stored as the relight stores them (rounded to nearest, then the half-float store's truncation), READ toward
+//     three directions by a reader that traces the lobe (the cut taken: C2), RE-MARCHED unchanged, and its read
+//     answer gathered by a RECEIVER texel (a dielectric of albedo 0.5) captured then re-marched unchanged:
+//       a = ( the least channel of the read over the directions, the cut's residual F - cut in half-float steps of the
+//             flat term - its least channel, BEFORE any clamp -, the re-march reported (1) or not (0), the receiver's
+//             re-march reported ), b = ( the receiver's re-march move, the receiver's S, the flat term's largest
+//             channel, the cut's largest channel );
+//   mode 1, THE REFERENCE: a stored radiance's largest channel S = q.x against a last reported value q.y (any finite
+//     value): a = ( the move, reported (1) or not, the codes, 0 ).
+#extension GL_GOOGLE_include_directive : require
+
+layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
+
+struct Question
+{
+	vec4 q;		// see the head
+	uvec4 mode;	// x the mode, y the material, z the direct half
+};
+layout( std430, set = 0, binding = 0 ) readonly buffer QuestionBuf { Question questions[]; };
+struct Answer
+{
+	vec4 a;
+	vec4 b;
+};
+layout( std430, set = 0, binding = 1 ) writeonly buffer AnswerBuf { Answer answers[]; };
+layout( std430, set = 0, binding = 2 ) readonly buffer CountBuf { uint questionCount; };
+
+#include "jah_fork_brdf.glsl"
+#include "jah_card_view.glsl"
+#include "jah_half_round.glsl"
+
+const float kNearMirrorAlpha = 0.0011;   // (jah_rq_card.glsl kJahCardNearMirrorAlpha, JahCardLight_cs.glsl's)
+
+/// The half float's step at |v| (its 10-bit mantissa's unit; the denormals' absolute 2^-24 below 2^-14)
+float jahFixStep( float v )
+{
+	const float a = abs( v );
+	return a < 6.1035156e-5 ? 5.9604645e-8 : exp2( floor( log2( a ) ) - 10.0 );
+}
+/// THE RELIGHT's STORE OF A VALUE INTO AN RGBA16F LAYER: jahRoundHalf (the shipped rounding), then the store's own
+/// conversion - by TRUNCATION on NVIDIA 595.x (jah_half_round.glsl, measured) - emulated
+float jahFixStore( float v )
+{
+	const float r = jahRoundHalf( v );
+	const float s = jahFixStep( r );
+	return sign( r ) * floor( abs( r ) / s ) * s;
+}
+vec3 jahFixStore( vec3 v )
+{
+	return vec3( jahFixStore( v.x ), jahFixStore( v.y ), jahFixStore( v.z ) );
+}
+/// The 8-bit unorm layers (albedo, specular): what the capture stores
+vec3 jahFixUnorm( vec3 v )
+{
+	return round( clamp( v, 0.0, 1.0 ) * 255.0 ) / 255.0;
+}
+
+/// THE LOBE's INTEGRALS ( A-bar, B-bar ): the fixture's stand-in for the store's table (JahSpecularAlbedo): both sides of
+/// the card - its relight and its read - read the SAME table in the engine, so the law needs only one value for both
+void jahFixLobeHemi( float r, out float a, out float b )
+{
+	a = 1.0 - 0.4 * r;
+	b = 0.1 + 0.2 * r;
+}
+
+/// One card texel's relight (JahCardLight_cs.glsl's caller of jahCardStoreTerms, its lobe set-up the same): its three
+/// layers as stored
+struct FixTexel
+{
+	vec3 cached, flatTerm, radiance;
+};
+FixTexel jahFixRelight( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, vec3 kD, vec4 spec, float alpha,
+						vec3 emissive, float openF )
+{
+	const float pr = sqrt( max( alpha, 0.0 ) );
+	const vec3 specF0 = spec.www * 0.04 + spec.xyz * 0.96;
+	const float specW = spec.w;
+	const vec3 diffuseLobe = kD * 3.141592654 * jahDiffuseAlbedoHemi( pr );
+	vec3 specLobe = vec3( 0.0 );
+	const bool nearMirror = alpha <= 0.0011;
+	if( specW > 0.0 && !nearMirror )
+	{
+		float sa, sb;
+		jahFixLobeHemi( pr, sa, sb );
+		specLobe = specF0 * sa + specW * sb;
+	}
+	FixTexel t;
+	jahCardStoreTerms( mode, irradiance, cachedIn, direct, kD, diffuseLobe, specLobe, nearMirror, emissive, openF,
+					   t.cached, t.flatTerm, t.radiance );
+	t.cached = jahFixStore( t.cached );
+	t.flatTerm = jahFixStore( t.flatTerm );
+	t.radiance = jahFixStore( t.radiance );
+	return t;
+}
+
+/// ...and its read toward V by a reader tracing the lobe (C2), the stored normal N = +z and no light (L = N)
+vec3 jahFixRead( FixTexel t, vec3 kD, vec4 spec, float alpha, vec3 V, out vec3 cut )
+{
+	const float r = sqrt( max( alpha, 0.0 ) );
+	float sa = 0.0, sb = 0.0;
+	const bool traced = alpha > kNearMirrorAlpha && spec.w > 0.0;
+	if( traced )
+		jahFixLobeHemi( r, sa, sb );
+	const vec3 N = vec3( 0.0, 0.0, 1.0 );
+	return jahCardReadView( t.radiance, t.cached, t.flatTerm, kD, spec, alpha, r, sa, sb, traced, kNearMirrorAlpha, N, N,
+							V, cut );
+}
+
+/// A capture then an unchanged re-march: the re-march's move against the capture's reference (the Gather layer's a,
+/// an RGBA16F store of S)
+bool jahFixRemarch( FixTexel first, FixTexel again, out float move, out float S )
+{
+	S = max( max( first.radiance.x, first.radiance.y ), first.radiance.z );
+	float codes;
+	jahCardMoveReport( S, 0.0, true, move, codes );   // (the capture: reported whole, the reference set)
+	const float ref = jahFixStore( S );
+	const float S2 = max( max( again.radiance.x, again.radiance.y ), again.radiance.z );
+	return jahCardMoveReport( S2, ref, false, move, codes );
+}
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if( i >= questionCount )
+		return;
+	const Question qu = questions[i];
+	Answer an;
+	an.a = vec4( 0.0 );
+	an.b = vec4( 0.0 );
+	if( qu.mode.x == 1u )
+	{
+		float move, codes;
+		const bool rep = jahCardMoveReport( qu.q.x, qu.q.y, false, move, codes );
+		an.a = vec4( move, rep ? 1.0 : 0.0, codes, 0.0 );
+		answers[i] = an;
+		return;
+	}
+	const float irr = qu.q.x, openF = qu.q.y, rough = qu.q.z, E = qu.q.w;
+	vec3 kD = vec3( 0.0 );
+	vec4 spec = vec4( 0.0, 0.0, 0.0, 1.0 );
+	if( qu.mode.y == 0u )
+		spec.xyz = vec3( 0.9 );
+	else if( qu.mode.y == 1u )
+		kD = vec3( 0.5 );
+	else if( qu.mode.y == 2u )
+		kD = vec3( 0.02 );
+	else
+		spec.xyz = vec3( 0.95, 0.64, 0.54 );
+	kD = jahFixUnorm( kD );
+	spec = vec4( jahFixUnorm( spec.xyz ), spec.w );
+	const float alpha = max( rough * rough, 0.0011 ) ;
+	const vec3 direct = qu.mode.z == 1u ? vec3( 0.1 * irr ) : vec3( 0.0 );
+	const vec3 emissive = vec3( E );
+	// THE CAPTURE'S MARCH, the read toward three directions, and the unchanged re-march (the cached layer)
+	const FixTexel t = jahFixRelight( 1u, vec3( irr ), vec3( 0.0 ), direct, kD, spec, alpha, emissive, openF );
+	float least = 3.0e38, residual = 3.0e38, cutMax = 0.0;
+	const vec3 Vs[3] = { vec3( 0.0, 0.0, 1.0 ), vec3( 0.866, 0.0, 0.5 ), vec3( 0.0, 0.995, 0.0998 ) };
+	vec3 answer = vec3( 3.0e38 );
+	for( int k = 0; k < 3; ++k )
+	{
+		vec3 cut;
+		const vec3 v = jahFixRead( t, kD, spec, alpha, Vs[k], cut );
+		least = min( least, min( min( v.x, v.y ), v.z ) );
+		answer = min( answer, v );
+		const vec3 res = t.flatTerm - cut;
+		for( int c = 0; c < 3; ++c )
+			residual = min( residual, res[c] / jahFixStep( t.flatTerm[c] ) );
+		cutMax = max( cutMax, max( max( cut.x, cut.y ), cut.z ) );
+	}
+	const FixTexel t2 = jahFixRelight( 0u, vec3( 0.0 ), t.cached, direct, kD, spec, alpha, emissive, openF );
+	float move, S;
+	const bool rep = jahFixRemarch( t, t2, move, S );
+	// THE RECEIVER: a dielectric texel (albedo 0.5) whose gather reads the answer (its least direction), in shade
+	const vec3 kR = jahFixUnorm( vec3( 0.5 ) );
+	const vec4 specR = vec4( 0.0, 0.0, 0.0, 1.0 );
+	const FixTexel r1 = jahFixRelight( 1u, answer, vec3( 0.0 ), vec3( 0.0 ), kR, specR, 0.36, vec3( 0.0 ), 1.0 );
+	const FixTexel r2 = jahFixRelight( 1u, answer, vec3( 0.0 ), vec3( 0.0 ), kR, specR, 0.36, vec3( 0.0 ), 1.0 );
+	float moveR, SR;
+	const bool repR = jahFixRemarch( r1, r2, moveR, SR );
+	an.a = vec4( least, residual, rep ? 1.0 : 0.0, repR ? 1.0 : 0.0 );
+	an.b = vec4( moveR, SR, max( max( t.flatTerm.x, t.flatTerm.y ), t.flatTerm.z ), cutMax );
+	answers[i] = an;
+}

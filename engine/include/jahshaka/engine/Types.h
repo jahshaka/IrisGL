@@ -4160,16 +4160,19 @@ struct CardSample {
     long long gatherSky = -1;
 };
 
-/// ONE QUESTION FOR THE HIT READ's BOUNCE SHARE (Engine::giShareLaw, gi.share_law; rq_share_law.comp says the modes):
-/// mode 0 THE SWEEP - q = (T, D, k, -): the share and the answer the shipped jah_rq_hit.glsl hands back for a pick
-/// holding T and D at coverage k, its read rad = T / k; mode 1 THE LOOP - q = (S, F, rho, k): two halves of one cell
-/// reading each other under the Jacobi door from out of phase, `iterations` steps, each rounded to the store's half float.
-struct GiShareQuestion {
+/// THE LAWS ASKED OF A SHIPPED SHADER FUNCTION DIRECTLY (Engine::giLaw; BISTRO-REST-1), each its own test-only job:
+/// Share - THE HIT READ's BOUNCE SHARE (gi.share_law, rq_share_law.comp says the modes): mode 0 THE SWEEP - q = (T, D,
+/// k, lod): the share and the answer the shipped jah_rq_hit.glsl hands back for a pick holding T and D at coverage k,
+/// its read rad = T / k; mode 1 THE LOOP - q = (S, F, rho, k): two halves of one cell reading each other under the
+/// Jacobi door from out of phase, u[1] steps, each rounded to the store's half float.
+/// Card - A CARD TEXEL's STORED TERMS, ITS READ AND ITS MOVE (gi.card_law, rq_card_law.comp says the modes).
+enum class GiLaw : unsigned { Share = 0u, Card = 1u };
+struct GiLawQuestion {
     float q[4] = { 0.f, 0.f, 0.f, 0.f };
-    unsigned mode = 0u, iterations = 0u;
+    unsigned u[4] = { 0u, 0u, 0u, 0u };   ///< u[0] the mode; the rest the law's (its job's head)
 };
-/// ...its answer: mode 0 a = (share, answer, rad, -); mode 1 a = X and b = Y at the last four iterates.
-struct GiShareAnswer {
+/// ...its answer: Share mode 0 a = (share, answer, rad, -), mode 1 a = X and b = Y at the last four iterates; Card: its job's head.
+struct GiLawAnswer {
     float a[4] = { 0.f, 0.f, 0.f, 0.f };
     float b[4] = { 0.f, 0.f, 0.f, 0.f };
 };

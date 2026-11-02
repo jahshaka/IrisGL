@@ -9246,7 +9246,7 @@ public:
     // ---- The ray job's card read, asked directly (OgreRayQuery.cpp) ----
     bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
                         std::vector<CardReadPick> &out) override;
-    bool giShareLaw(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out) override;
+    bool giLaw(GiLaw law, const std::vector<GiLawQuestion> &questions, std::vector<GiLawAnswer> &out) override;
     // ---- The one voxel reader's parity harness (OgreVoxelReaderParity.cpp) ----
     bool voxelReaderParity(Scene *scene, const std::vector<VoxelReaderCone> &cones,
                            std::vector<VoxelReaderAnswer> &fragment,

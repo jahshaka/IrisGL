@@ -242,6 +242,19 @@ if(JAH_RAY_QUERY_OK)
         DEPFILE "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h.d"
         COMMENT "Compiling the bounce-share law compute shader at SPIR-V 1.4"
         VERBATIM)
+    # gi.card_law's harness (BISTRO-REST-1): a card texel's stored terms, read and move (jah_card_view.glsl) over a
+    # fixture texel - a test-only job, same rule.
+    add_custom_command(
+        OUTPUT "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h"
+        COMMAND "${JAH_GLSLANG_VALIDATOR}" -V --depfile "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h.d" --target-env spirv1.4 -S comp -x
+                "-I${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/include" "-I${JAH_RQ_GEN_DIR}"
+                --vn krq_cardLawSpv -o "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_law.comp"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/rayquery/rq_card_law.comp"
+                "${JAH_RQ_FORK_BRDF}"
+        DEPFILE "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h.d"
+        COMMENT "Compiling the card texel law compute shader at SPIR-V 1.4"
+        VERBATIM)
     # REFLECT-MOVERS-1's object motion for the screen march's resolve, same rule.
     add_custom_command(
         OUTPUT "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
@@ -613,6 +626,7 @@ if(JAH_RAY_QUERY_OK)
                               "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
+                              "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
                               "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"

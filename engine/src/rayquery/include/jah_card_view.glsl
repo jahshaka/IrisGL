@@ -105,4 +105,83 @@ vec3 jahCardViewRadiance( vec3 radiance, vec3 indirect, vec3 emissive, vec3 N, v
 	return direct * viewFactor + indirect * envFactor + emissive;
 }
 
+/// THE LOBE SHARE OF A CACHED INDIRECT TEXEL (BISTRO-REST-1): the specular lobe's re-emission of the gathered light,
+/// recovered from the Indirect layer's texel `cached` - where the channel has a diffuse albedo the layer holds the diffuse
+/// half and the share is it times the lobes' ratio specLobe / diffuseLobe ( F0 A-bar + w B-bar ) / ( kD pi Dd-bar ),
+/// where it has none the layer IS the share. ONE TEXT for the relight (its flat term) and the read (its cut).
+vec3 jahCardLobeShare( vec3 cached, vec3 diffuseLobe, vec3 specLobe, bvec3 hasDiffuse )
+{
+	return mix( cached, cached * specLobe / max( diffuseLobe, vec3( 1e-12 ) ), hasDiffuse );
+}
+
+/// THE RELIGHT'S STORED TERMS (JahCardLight_cs.glsl; gi.card_law drives the same text): from the texel's direct half
+/// `direct` (the lights' E x diffuse, before kD) and its indirect - MARCHED (mode bit 1: `irradiance`, the gather's
+/// envColourD), CACHED (neither bit: `cachedIn`, the Indirect layer's texel) or none yet (mode bit 2) - the Indirect
+/// layer's value `cached`, the FLAT term (the emissive and the lobe's re-emission) and the RADIANCE, each times the
+/// texel's open fraction `openF` (the area mean, PHOTON-7 11-2 (5)). `nearMirror`: the lobe stores nothing.
+void jahCardStoreTerms( uint mode, vec3 irradiance, vec3 cachedIn, vec3 direct, vec3 kD, vec3 diffuseLobe,
+						vec3 specLobe, bool nearMirror, vec3 emissive, float openF, out vec3 cached, out vec3 flatTerm,
+						out vec3 radiance )
+{
+	const bvec3 hasDiffuse = greaterThan( kD, vec3( 0.0, 0.0, 0.0 ) );
+	vec3 indirect = vec3( 0.0, 0.0, 0.0 );
+	vec3 specIndirect = vec3( 0.0, 0.0, 0.0 );
+	cached = vec3( 0.0, 0.0, 0.0 );
+	if( ( mode & 1u ) != 0u )
+	{
+		indirect = irradiance * diffuseLobe;
+		specIndirect = irradiance * specLobe;
+		// THE CACHE: the diffuse half where the channel has one, the lobe's share where not
+		cached = mix( specIndirect, indirect, hasDiffuse );
+	}
+	else if( ( mode & 2u ) == 0u )
+	{
+		cached = cachedIn;
+		indirect = mix( vec3( 0.0, 0.0, 0.0 ), cached, hasDiffuse );
+		// the irradiance, recovered from the diffuse half (kD > 0) or the lobe's share itself
+		specIndirect = jahCardLobeShare( cached, diffuseLobe, specLobe, hasDiffuse );
+		if( nearMirror )
+			specIndirect = vec3( 0.0, 0.0, 0.0 );   // (a near-mirror's cached lobe share is 0 by the rule above)
+	}
+	// THE AREA MEAN (11-2 (5)): the texel sends f x its open part's light - the covered part sends nothing
+	flatTerm = ( emissive + specIndirect ) * openF;
+	radiance = ( direct * kD + indirect ) * openF + flatTerm;
+}
+
+/// THE READ OF A CARD TEXEL TOWARD V (jah_rq_card.glsl jahCardRadiance; gi.card_law drives the same text): the stored
+/// RADIANCE `R`, INDIRECT `stored` and FLAT `F` layers, the albedo, the specular texel `spec` (F0's encoding, w), the
+/// roughness (alpha and r), the lobe's integrals ( A-bar `sa`, B-bar `sb` ) and the stored normal and light direction.
+/// `traced`: the reader traces the hit's lobe itself (jahHitTracedLobe, C2) - the lobe's INDIRECT share is left out
+/// (`cutLobe`, handed back) from the radiance and the flat term alike, so the direct half is untouched. The lights' lobe
+/// toward V is the caller's (not a cache).
+vec3 jahCardReadView( vec3 R, vec3 stored, vec3 F, vec3 albedo, vec4 spec, float alpha, float r, float sa, float sb,
+					  bool traced, float nearMirrorAlpha, vec3 N, vec3 L, vec3 V, out vec3 cutLobe )
+{
+	const bvec3 hasDiffuse = greaterThan( albedo, vec3( 0.0 ) );
+	const vec3 indirect = mix( vec3( 0.0 ), stored, hasDiffuse );
+	cutLobe = vec3( 0.0 );
+	if( traced && alpha > nearMirrorAlpha && spec.w > 0.0 )
+	{
+		const vec3 specLobe = ( spec.www * 0.04 + spec.xyz * 0.96 ) * sa + spec.w * sb;
+		const vec3 diffuseLobe = albedo * 3.141592654 * jahDiffuseAlbedoHemi( r );
+		cutLobe = jahCardLobeShare( stored, diffuseLobe, specLobe, hasDiffuse );
+	}
+	return jahCardViewRadiance( R - cutLobe, indirect, F - cutLobe, N, L, r, V );
+}
+
+/// THE RELIGHT'S MOVE (JahCardLight_cs.glsl, 10-2c; gi.card_law drives the same text): the texel's stored radiance's
+/// largest channel `S` against the value it last REPORTED `ref` (the Gather layer's a) - reported when they differ by
+/// more than ONE CODE (1 % of the larger of the two, over the store's floor), or whole when the card was captured this
+/// frame (`fresh`). `move` the reported move (the slot word's), `codes` the move in codes (the frame's word). True: report.
+bool jahCardMoveReport( float S, float ref, bool fresh, out float move, out float codes )
+{
+	const bool refOk = ( floatBitsToUint( ref ) & 0x7F800000u ) != 0x7F800000u && ref >= 0.0;
+	const float d = refOk ? abs( S - ref ) : 3.0e38;
+	const float code = 0.01 * max( max( S, refOk ? ref : 0.0 ), 5.9604645e-6 );   // one code, the floor's as the laws
+	// (no reference yet: the whole value moved, as a capture's)
+	codes = ( fresh || !refOk ? S : d ) / code;
+	move = fresh ? S : d;
+	return fresh || d > code;
+}
+
 #endif   // JAH_CARD_VIEW_GLSL

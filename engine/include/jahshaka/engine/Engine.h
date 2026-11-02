@@ -3184,13 +3184,14 @@ public:
     virtual bool cardReadParity(Scene *scene, const std::vector<CardReadQuery> &queries,
                                 std::vector<CardReadPick> &out) = 0;
 
-    /// THE HIT READ's BOUNCE SHARE, ASKED DIRECTLY (BISTRO-REST-1, gi.share_law): the shipped share
-    /// (rayquery/include/jah_rq_hit.glsl jahVoxelShareFootprint) over a fixture store, in a test-only compute job
-    /// (rq_share_law.comp: the sweep and the two-half loop, GiShareQuestion). A MEASUREMENT (dispatch, stall) - a suite,
-    /// never a frame. False without a ray-query device (the reason in takeLastError()).
-    virtual bool giShareLaw(const std::vector<GiShareQuestion> &questions, std::vector<GiShareAnswer> &out)
+    /// A SHIPPED SHADER FUNCTION'S LAW, ASKED DIRECTLY (BISTRO-REST-1): GiLaw::Share the hit read's bounce share
+    /// (rayquery/include/jah_rq_hit.glsl jahVoxelRadiance) over a fixture store (rq_share_law.comp, gi.share_law);
+    /// GiLaw::Card a card texel's stored terms, read and move (jah_card_view.glsl, rq_card_law.comp, gi.card_law) - each a
+    /// test-only compute job. A MEASUREMENT (dispatch, stall) - a suite, never a frame. False without a ray-query device
+    /// (the reason in takeLastError()).
+    virtual bool giLaw(GiLaw law, const std::vector<GiLawQuestion> &questions, std::vector<GiLawAnswer> &out)
     {
-        (void)questions; out.clear(); return false;
+        (void)law; (void)questions; out.clear(); return false;
     }
 
     /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
