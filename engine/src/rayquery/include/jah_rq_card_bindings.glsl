@@ -81,7 +81,7 @@ layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 2 ) uniform sampler2D ja
 layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 3 ) uniform sampler2D jahCardAlbedoLayer;
 layout( set = 0, binding = JAH_CARD_VIEW_BINDING_BASE + 4 ) uniform sampler2D jahCardNormalLayer;
 #define JAH_CARD_INDIRECT( t ) texelFetch( jahCardIndirectLayer, t, 0 ).xyz
-#define JAH_CARD_EMISSIVE( t ) texelFetch( jahCardEmissiveLayer, t, 0 ).xyz
+#define JAH_CARD_FLAT( t ) texelFetch( jahCardEmissiveLayer, t, 0 )   // (the Flat layer: rgb the term, a its open fraction)
 #define JAH_CARD_SHADOW_ROUGH( t ) texelFetch( jahCardShadowRoughLayer, t, 0 ).xy
 #define JAH_CARD_ALBEDO( t ) texelFetch( jahCardAlbedoLayer, t, 0 )
 #define JAH_CARD_NORMAL( t ) texelFetch( jahCardNormalLayer, t, 0 )

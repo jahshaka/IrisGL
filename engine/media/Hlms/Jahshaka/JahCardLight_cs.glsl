@@ -357,8 +357,8 @@ layout( local_size_x = @value( threads_per_group_x ),
 @insertpiece( DeclAreaLtcLightFuncs )
 @insertpiece( JahDiffuseAlbedo )
 @insertpiece( JahSpecularAlbedo )
-@insertpiece( JahCardView )
 @insertpiece( JahHalfRound )
+@insertpiece( JahCardView )
 @property( jah_cloud_shadow )
 	#define JAH_CLOUD_TAU( uv ) textureLod( sampler2D( cloudField, cloudSmp ), uv, 0.0 ).x
 	@insertpiece( JahCloudShadow )
@@ -429,7 +429,7 @@ void main()
 			const vec4 o = imageLoad( cardOpen, at );
 			if( o.a > 0.5 && ( mode & 16u ) != 0u )   // (mode bit 16: the open layer holds this capture's)
 			{
-				openF = 1.0 - o.r;
+				openF = jahHalfStored( 1.0 - o.r );   // (the value the Flat layer's a holds: the read's factor - jahCardReadView)
 				openOff = o.gb - 0.5;
 			}
 		}
@@ -585,7 +585,8 @@ void main()
 	}
 	if( ( mode & 3u ) != 0u )
 		imageStore( cardIndirect, at, vec4( jahRoundHalf( cached ), 1.0 ) );
-	imageStore( cardFlat, at, vec4( jahRoundHalf( flatTerm ), 1.0 ) );
+	// (its a: the open fraction its terms carry - exact in the half float, jahHalfStored above - the read's factor)
+	imageStore( cardFlat, at, vec4( jahRoundHalf( flatTerm ), openF ) );
 	imageStore( cardSunVis, at, jahSunVisPack( sunVis, lampRest, lampThrough, lampMask, lampThroughMask ) );
 	// (RGBA16F, 10-2d: the store TRUNCATES on NVIDIA 595.x - REDS-1, measured - so the value is rounded first: jahRoundHalf)
 	imageStore( cardRadiance, at, vec4( jahRoundHalf( radiance ), 1.0 ) );
