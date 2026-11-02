@@ -209,6 +209,8 @@ struct HitListBinding {
 /// (hitSetLayout), writes it (HitSetWrite) and orders it (hitSetTransitions) at ITS OWN binding numbers (HitSetSlots).
 struct HitSetSources {
     VkAccelerationStructureKHR tlas = VK_NULL_HANDLE;
+    /// MEASURING ARM (BISTRO-REST-1, the price A/B; reverted): the bounce share reads its pick alone, no rings (gi.sharePickOnly)
+    bool sharePickOnly = false;
     /// The cascade chain's light volumes: [cascade][kind], the kinds in kGatherVoxelKinds' order - 0 the half store
     /// (level 0's six half lights, VOXEL-R13), 1..3 the directional chains, 4/5 the coverage per half-axis (+a, -a), 6/7
     /// the surface position per half (RQ-COV-SLOT-1 / PHOTON-VOXEL-4), 8 the half store's direct terms (MOVER-OCCLUSION-1's
