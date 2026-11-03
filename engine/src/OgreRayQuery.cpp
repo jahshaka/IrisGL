@@ -1341,7 +1341,7 @@ private:
         /// frame, from its read-back (0 until it arrives: the first frames run k a texel).
         unsigned long long restRayCount = 0ull;
         bool restAllStopped = false;
-        /// The view CAN rest (not stereo, not the photon overlay's: its still predicate's standing half), at its last
+        /// The view CAN rest (not stereo: its still predicate's standing half; the Hits overlay rests too), at its last
         /// record - the cards' rest decision waits only on a view that can (cardReadersRestComplete).
         bool restableLast = false;
         /// ...and the frame it last recorded (frameNow), and its scene's draw count then (OgreScene::drawSerial): a view
@@ -7376,7 +7376,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the
     // reflection's rest key (reflectRestKey: never a move), and every parameter of the pass but the ones a still frame
     // changes by construction (the frame index, the previous basis, the view's age, the rest frame itself, the moved
-    // instances' boxes). A Hits photon view keeps tracing (it is the trace's picture).
+    // instances' boxes). A Hits photon view RESTS like the shipped view (PHOTON-7-9A, the lead's ruling: a viewing aid
+    // never changes the estimator's state): a texel that stopped paints kPhotonRest - no ray shaded it this frame.
     HitView *restHits = nullptr;
     {
         auto hit = mHits.find(key);
@@ -7407,7 +7408,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         foldF(pp.knobs[0]); foldF(pp.knobs[1]); foldF(pp.knobs[3]);
         foldF(pp.knobs2[1]); foldF(pp.knobs2[3]);
         fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
-        foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
+        foldF(pp.stereo[0]); foldF(pp.stereo[3]);   // (NOT stereo.z: the Hits overlay's write, an instrument - it changes
+                                                     // no picture, and switching the view broke the rest: PHOTON-7-9A)
         {
             // THE HIT SET'S UNIFORMS, all but the list's capacity (as before: the list grows under a rest) - and NOT the
             // DEVICE ADDRESSES (DETERMINISM-1, C4: the alpha and hit tables' in `tables`, the tier counters' in
@@ -7435,9 +7437,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const unsigned long long restKey = reflectRestKey(scene, sa);
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
-        const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
+        const bool still = !stereo && sameEye && rv.restKnown && restKey == rv.restKey &&
                            paramsKey == rv.restParams && rv.historyFrames >= 1u;
-        rv.restableLast = !stereo && !photon;
+        rv.restableLast = !stereo;
         rv.recordedFrame = frameNow();
         rv.recordedDraw = rv.scene ? rv.scene->drawSerial() : 0u;
         const bool wasResting = rv.restFrames > 0u;
