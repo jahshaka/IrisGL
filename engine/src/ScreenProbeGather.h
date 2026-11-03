@@ -41,6 +41,7 @@
 
 #include "jahshaka/engine/Types.h"
 #include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
+#include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
 
 #include <algorithm>
 #include <cmath>
@@ -776,7 +777,9 @@ private:
         unsigned atlasW = 0u, atlasH = 0u;
         bool targetsReady = false;
         bool atlasNeedsClear = false;
-        unsigned frame = 0u;             ///< the sample sequence's input
+        unsigned frame = 0u;             ///< the sample sequence's input (its MOVING index: `moving`, below)
+        /// the moving sample index: `frame` since the view's last scene bind or size change (MovingSample.h, URGENT #157)
+        ::jahshaka::engine::detail::MovingSequence moving;
         unsigned adaptiveLast = 0u;      ///< read back from the counter, a frame late
         unsigned adaptiveAsked = 0u;     ///< ...before the cap clamped it
         unsigned long long vramBytes = 0ull;

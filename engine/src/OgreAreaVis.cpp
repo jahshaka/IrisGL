@@ -62,8 +62,8 @@ std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm) 
 
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, const PhotonComponent &photon, bool freshImages, float liftA, float liftB,
-                  float mask, CameraImageF &eye) {
+                  unsigned strata, const PhotonComponent &photon, unsigned long long sceneId, bool freshImages,
+                  float liftA, float liftB, float mask, CameraImageF &eye) {
     // ---- THE LIGHTS, in HlmsPbs's order, and the rest's test ----------------
     std::vector<float> lightKey;
     for (size_t i = 0; i < lights.size() && i < 4u; ++i) {
@@ -156,7 +156,8 @@ bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const O
     pp.knobs[3] = float(kAreaVisDivisor);
     pp.strata[0] = float(n);
     // the stratum sequence: the view's frame, and at rest the rest frame's own index (every stratum once by n^2)
-    pp.strata[1] = float(st.restFrames ? st.restFrames - 1u : (st.frame & 0xFFFFu));
+    // (moving: the frames since the scene's bind or the grid's size change - MovingSample.h, the one rule, URGENT #157)
+    pp.strata[1] = float(st.restFrames ? st.restFrames - 1u : st.moving.index(st.frame, sceneId, w, h));
     pp.strata[2] = 1.0f / float(n * n);
     pp.strata[3] = float(std::min(st.age, 65535u));
     pp.rest[0] = float(st.restFrames);
@@ -332,7 +333,7 @@ void ScreenGiListener::bindAreaVis(Ogre::CompositorPassCompute *pass) {
     // (no hold before a resolve has written the product: the trace's history can be complete while the resolve's
     // permutation still builds, F2)
     const bool held = areaVisFrame(mAreaState, pp, lights, cam, mView->chainDesc(), w, h, fullW, fullH, n,
-                                   scene->photon(), mAreaFresh || !mAreaVisWritten, 0.0f,
+                                   scene->photon(), scene->historyId(), mAreaFresh || !mAreaVisWritten, 0.0f,
                                    std::max(cell0, 0.001f), 0.0f, mAreaEye);
     mAreaRan = true;
     mAreaRead = true;

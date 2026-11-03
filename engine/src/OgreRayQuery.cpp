@@ -1267,7 +1267,9 @@ private:
         bool compactListFresh = false;   ///< made this frame: both counts zeroed before its first pass
         bool referenceFull = false;
         unsigned w = 0, h = 0, layers = 1;
-        unsigned frame = 0;              ///< the sample sequence's input
+        unsigned frame = 0;              ///< the sample sequence's input (its MOVING index: `moving`, below)
+        /// the moving sample index: `frame` since the view's last scene bind or size change (MovingSample.h, URGENT #157)
+        ::jahshaka::engine::detail::MovingSequence moving;
         bool     imagesReady = false;
         /// The pair has been made but not yet zeroed (the clear needs a command
         /// buffer, which is taken later than the creation).
@@ -7082,7 +7084,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  hs.voxelSize[voxCount - 1u][2]).length()
                  : 0.0f,
         cam->getFarClipDistance());
-    pp.knobs[2] = float(rv.frame & 0xFFFFu);
+    // (the moving sample index: frames since the scene's bind or the trace's size change - MovingSample.h, URGENT #157)
+    pp.knobs[2] = float(rv.moving.index(rv.frame, rv.scene ? rv.scene->historyId() : 0ull, rv.w, rv.h));
     // THE NEE (PHOTON-7 11-1b): 1 = next-event estimation toward the emitter table with the BRDF draw by the balance
     // heuristic; the arm "reflect.nee" 0 = the BRDF-only estimator (the acceptance's reference)
     pp.knobs[3] = arm(ArmId::ReflectNee, true) ? 1.0f : 0.0f;
@@ -10269,7 +10272,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     const unsigned n = std::max(giQualityFacts(scene->giParams().quality).cardAreaStrata, 1u);
     // THE CLEARANCE: the ray origin's one law, as the sun contact takes it (rq_area_vis.comp's jahAreaLiftRays): the
     // drawn surface's footprints (knobs.x) and the depth-rebuilt point's sub-pixel snap (knobs.y)
-    areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, scene->photon(),
+    areaVisFrame(av.st, pp, lights, cam, view->chainDesc(), w, h, fullW, fullH, n, scene->photon(), scene->historyId(),
                  av.imagesNeedClear, drawnFootprintsOf(scene, view->chainDesc().lodHysteresis), pointSnapKnob(),
                  float(kAreaVisMask), eye);
     const bool readback = arm(ArmId::AreaVisReadback, false);

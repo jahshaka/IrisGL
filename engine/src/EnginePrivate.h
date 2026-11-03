@@ -23,6 +23,7 @@
 // nothing of OgreScene's Node, which is what keeps it bindable from an
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "AlphaMasks.h"   // the cut-outs' masks (ENGINE-POLISH-ATOM-1 stage 3)
+#include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
 #include "photon/PhotonComponent.h"
@@ -2058,6 +2059,8 @@ std::vector<const Ogre::Light *> forwardLtcLights(const Ogre::SceneManager *sm);
 /// (the five numbers) and the light set it traced.
 struct AreaVisState {
     unsigned frame = 0u, flip = 0u, age = 0u, restFrames = 0u, lights = 0u, strata = 0u;
+    /// the moving stratum index: `frame` since the last scene bind or size change (MovingSample.h, the one rule)
+    ::jahshaka::engine::detail::MovingSequence moving;
     /// THE REST FRAME OF THE LAST FRAME THAT LISTED CHANGED GEOMETRY (PHOTON-7 8B, B2): the texels it reached rest again
     /// from the next, so the view holds n^2 frames after it (the scene's view-wide rest key is DELETED: a change breaks
     /// the rest per texel, the light set restarts it whole)
@@ -2080,8 +2083,8 @@ struct AreaVisState {
 /// the sequence and the rest. Returns whether the view holds.
 bool areaVisFrame(AreaVisState &st, AreaVisParams &pp, const std::vector<const Ogre::Light *> &lights,
                   const Ogre::Camera *cam, const ChainDesc &cd, unsigned w, unsigned h, unsigned fullW, unsigned fullH,
-                  unsigned strata, const PhotonComponent &photon, bool freshImages, float liftA, float liftB,
-                  float mask, CameraImageF &eye);
+                  unsigned strata, const PhotonComponent &photon, unsigned long long sceneId, bool freshImages,
+                  float liftA, float liftB, float mask, CameraImageF &eye);
 /// ...and after its dispatches: the camera kept, the pair flipped, the age and the frame advanced.
 void areaVisAdvance(AreaVisState &st, const CameraImageF &eye);
 /// The ray tier's views' part of a scene's area visibility status (OgreRayQuery.cpp; nothing where the tier is compiled
@@ -4239,6 +4242,10 @@ class OgreScene final : public Scene, public inspect::SceneEcho {
 public:
     /// The engine that made this scene: its own pointer and the boundary's identity (Scene::engine), set once.
     void bindEngine(OgreEngine *e);
+    /// THIS SCENE's HISTORY ID (TEST-STREAMLINE-1 3c, MovingSample.h): process-unique and never reused - a destroyed
+    /// scene's address can come back for the next one, its id never does - so a view's moving sample index restarts
+    /// exactly when the view draws another scene.
+    NodeId historyId() const { return mHistoryId; }
     OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
               std::string &errorSink);
     /// The manager of a scene the host made through a create message (U3 stage 4a): bound at the message's drain.
@@ -5382,6 +5389,7 @@ public:
     void destroy();
 
 private:
+    const NodeId mHistoryId = reserveNodeId();   ///< historyId()
     /// What a node owns. mNodes used to track only the SceneNode, leaking the
     /// Item, Light, mesh and datablock on removal (audit).
     struct Node {

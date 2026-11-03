@@ -2008,7 +2008,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // ...and the view's ADVANCING frame counter (PHOTON-GA-VR): the packed
     // history's stochastic rounding is keyed on it, never on the sample
     // sequence's frame above, which a frozen A/B holds still.
-    pp.knobs6[2] = float(v.frame & 0xFFFFu);
+    pp.knobs6[2] = float(v.moving.index(v.frame, v.scene ? v.scene->historyId() : 0ull, v.w, v.h));   // (MovingSample.h)
     pp.knobs6[3] = in.tuning.rayJitterOff ? 1.0f : 0.0f;   // the rays at their texels' centres
     pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     pp.knobs5[3] = in.tuning.historyValidationOff ? 1.0f : 0.0f;
@@ -2468,7 +2468,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     rp.mode[1] = float(restN);
     rp.mode[2] = float(ringReach);
     rp.mode[3] = v.restableLast ? 1.0f : 0.0f;
-    rp.seq[0] = float(v.frame & 0xFFFFu);
+    rp.seq[0] = float(v.moving.index(v.frame, v.scene ? v.scene->historyId() : 0ull, v.w, v.h));   // (MovingSample.h, #157)
     rp.seq[1] = float(kRestSequenceBase + std::min(in.tuning.restSeed, 255u) * 4096u);   // + K < 2^21: exact
     rp.seq[2] = in.tuning.freezeFrameIndex ? 1.0f : 0.0f;
     rp.seq[3] = in.farClip > 0.0f ? in.farClip : 1.0e4f;
