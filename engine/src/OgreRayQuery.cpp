@@ -7186,14 +7186,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // view that has just BECOME stereo (or stopped being) is the same case: its
     // history's two halves were one picture, or its one picture is now two.
     // ...AND A CAMERA CUT (PHOTON-2 round 2, N3: isCameraCut, the gather's rule - Lumen's): the histories restart - the
-    // images cleared this frame (a distance of zero is "no history here") and the view's age back to 0 (the young
-    // view's fade-in) - instead of ghosting through what the reprojection's tests happened to accept.
+    // images cleared this frame (a distance of zero is "no history here") - instead of ghosting through what the
+    // reprojection's tests happened to accept. THE VIEW'S AGE IS KEPT (PHOTON-7-9A, the lead's ruling): a cut is a WARM
+    // view whose pixels are all new (PAN-SMEAR-1's rule: full confidence, this frame's sample), never a young one - the
+    // young fade (rq_reflect_filter.comp, kYoungViewFrames) lerps the reflection toward the FALLBACK environment cube,
+    // which in a sealed room is the sky's capture: measured, ~180,000 px of a glass room's panes blue-grey for 6-7
+    // frames after every cut (spikes/photon-7-9a/cut/). The fade stays for a view's own first frames.
+    bool cameraCut = false;
     if (rv.havePrev && rv.prevStereo == stereo &&
         isCameraCut(rv.prev[0].camPos, rv.prev[0].rayRight, rv.prev[0].rayDown, rv.prev[0].fwd, eyeB[0].camPos,
                     eyeB[0].rayRight, eyeB[0].rayDown, eyeB[0].fwd)) {
-        rv.havePrev = false;   // the branch below withholds the previous basis and zeroes the age
+        rv.havePrev = false;   // the branch below withholds the previous basis (the age stays: cameraCut)
         rv.needsClear = true;
         ++rv.cameraCuts;
+        cameraCut = true;
     }
     if (rv.havePrev && rv.prevStereo == stereo) {
         memcpy(pp.prevCamPos, rv.prev[0].camPos, sizeof(pp.prevCamPos));
@@ -7209,11 +7215,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     } else {
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
         memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
-        rv.historyFrames = 0;
+        if (!cameraCut) rv.historyFrames = 0;
     }
     // THE VIEW'S AGE, in frames of unbroken history (rq_reflect.comp's
     // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
-    // stereo shape, exactly where the previous basis is withheld above).
+    // stereo shape, exactly where the previous basis is withheld above - never at a camera cut, a warm view's).
     pp.stereo[1] = float(rv.historyFrames);
     // knobs2.x: THE REST (PHOTON-2 1e), set below once every parameter is known; a lamp's step, a cloud or a
     // re-injection is the temporal pass' clamp's (the radiance-key cap is deleted with its key, PHOTON-2 1b).
