@@ -1280,7 +1280,8 @@ constexpr const char *kScreenAreaVisResolveJob = "Jahshaka/ScreenAreaVisResolve"
 /// so a new view's first frames hold their records - and it only GROWS: a retired frame whose traces appended more
 /// records than that frame's list held (the buffer's counter word 0 counts past the capacity) doubles the rows until the
 /// list holds that frame's demand. It is never shrunk and its size is in no key (a ray finds the same thing in a list of
-/// any size). A record a full list cannot hold is NO SAMPLE for its ray (the reflection's rule; the gather's
+/// any size; the reflection rest's per-texel allowance reads the TARGET's creation capacity, never the grown list's -
+/// URGENT #157). A record a full list cannot hold is NO SAMPLE for its ray (the reflection's rule; the gather's
 /// kAtlasNoSample), never black. The growth re-makes the three list textures in place (Ogre's own window-resize path:
 /// re-create, then CompositorNode::notifyRecreated), never the graph: no other history moves.
 constexpr unsigned kHitListWidth = 1024u;
@@ -8479,7 +8480,9 @@ private:
     bool                       mChainProbeGather = false;
     bool                       mChainScreenIntegrate = false;
     /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): the rows the list holds (0 until the first sizeHitList reads the
-    /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases.
+    /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases WITHIN A SCENE; 0 again at
+    /// detachScene (URGENT #157: the list dies with the workspace there, and a second scene is built at its own creation
+    /// size, as if it were the first - never at the high-water an earlier scene or target left).
     unsigned                   mHitListRows = 0u;
     /// Frames drawn+presented since the current scene was bound (see
     /// View::framesPresented). Reset by setScene/detachScene, NOT by a

@@ -55,6 +55,7 @@
 #include <thread>
 #include "ReadbackDecode.h"
 #include "EnginePrivate.h"
+#include "HitListLaw.h"   // the reflection rest's record allowance (URGENT #157)
 #include "GpuCheckpoints.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
@@ -7446,10 +7447,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                 rv.restRayCount = (unsigned long long)kBase * restHits->restBatching;
             pp.rest[2] = float(share);
             // THE RECORD ALLOWANCE (the record runs, rq_reflect.comp): the list's capacity shared by the texels batching
-            // - min( k_active, capacity / batching ) a texel - none until the first read-back counted them.
+            // - min( k_active, capacity / batching ) a texel - none until the first read-back counted them. The capacity
+            // is the TARGET's creation size, never the list as it grew (detail::restRecordAllowance, HitListLaw.h:
+            // URGENT #157 - the growth is the history of what overflowed it).
             unsigned allowance = 0u;
-            if (rv.restRayCount != 0ull && restHits && restHits->restBatching > 0u)
-                allowance = std::min(share, unsigned(restHits->capacity / restHits->restBatching));
+            if (rv.restRayCount != 0ull && restHits && restHits->restBatching > 0u && view)
+                allowance = restRecordAllowance(share, restHits->capacity,
+                                                (unsigned long long)view->hitListCreateRows() * kHitListWidth,
+                                                restHits->restBatching);
             pp.rest[3] = float(allowance);
         }
         // THE HOLD: every texel has stopped (its standard error under a code - a capped texel stops too, counted as the
@@ -12266,7 +12271,7 @@ void OgreView::syncReflectListener() {
 // touched the list yet. The list is created at its share of the target (OgreView::hitListCreateRows, OgreView.cpp: the
 // graph builds it at max(the rows it has, that)); it GROWS when the target outgrew its creation size or a retired frame
 // overflowed it - the rows double until the list holds that frame's demand (the counter word 0, which counts past the
-// capacity) - and is never shrunk. A growth re-makes the three list textures IN PLACE the way Ogre re-makes a window's
+// capacity) - and is never shrunk in a scene. A growth re-makes the three list textures IN PLACE the way Ogre re-makes a window's
 // resizable textures (OnStorage, the new resolution, Resident, then CompositorNode::notifyRecreated for the passes that
 // render into them) - never the graph, so no other texture and no history moves. The ray tier re-reads the textures (and
 // re-makes its buffer to the new size) at its next prepare.

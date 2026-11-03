@@ -1350,6 +1350,9 @@ void OgreView::detachScene(bool takeBlank) {
         mScene  = nullptr;
         if (callIsTheHosts()) mBoundScene = nullptr;   // the host's record, the host's (decision 66)
         mFramesPresented = 0;
+        // THE HIT LIST'S GROWTH IS THE SCENE's (URGENT #157): the list died with the workspace above; the next scene's
+        // graph is built at ITS creation size, never at the rows an earlier scene's overflow or a larger target grew to.
+        mHitListRows = 0u;
         // AND THE CLEAR-ONLY CHAIN TAKES OVER, in the same call (lane
         // STALE-VIEW-1). Without it this view would present nothing until a
         // scene was bound again, and a window that presents nothing keeps the

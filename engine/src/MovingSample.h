@@ -4,9 +4,10 @@
 // Each stochastic producer draws two sample sequences per view: AT REST a sequence keyed on the rest's own frame K
 // (path-independent by design - "the rest mean is a function of the scene and the eye, never of the path",
 // OgreRayQuery.cpp), and MOVING a sequence keyed on the view's own frame counter. That counter counted every frame the
-// view had EVER traced, so a moving picture depended on what the view drew before: the self-test's mover pose hashed
-// 2d88c4ee after the fixture half alone and 122cb3a8 after the default poses (URGENT #157). An estimator's samples are a
-// function of the pose, never of the process.
+// view had EVER traced, so a moving picture depended on what the view drew before. An estimator's samples are a
+// function of the pose, never of the process. (URGENT #157 suspected this rule for the self-test's two mover hashes,
+// 2d88c4ee / 122cb3a8; measured, the restart moved no byte of them - their carrier was fixture B's editor view SIZE,
+// fixed in the self-test - and the rule stands on its own law.)
 //
 // THE RULE: a view's moving index is the frames it has traced SINCE ITS LAST RESTART, and it restarts at
 //   * a SCENE BIND - a different scene is a new history (the same rule as the rest's), told by the scene's history id
