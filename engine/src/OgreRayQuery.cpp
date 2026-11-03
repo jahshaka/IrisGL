@@ -1295,6 +1295,7 @@ private:
         bool  prevStereo = false;
         /// What the last recorded dispatch covered, for the status readings.
         OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         unsigned   rays = 0;
         /// THE REFLECTION'S GPU TIME is two monitor rows, the trace's
         /// ("rq.reflect.trace") and the filter's ("rq.reflect.filter"), owner =
@@ -1663,6 +1664,7 @@ private:
         const Ogre::SceneManager *sceneMgr = nullptr;
         /// What the last record did, for the status.
         OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         bool      ran = false;
         unsigned long long rays = 0;
         float     range = 0.0f;
@@ -1712,6 +1714,7 @@ private:
         AreaVisState st;
         const Ogre::SceneManager *sceneMgr = nullptr;
         OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         bool ran = false, finishPending = false, bound = false;
         uint32_t boundFrame = 0xFFFFFFFFu;
         /// The scene draw it last ran at (OgreScene::drawSerial; a view the tier no longer records - rays switched off,
@@ -1843,6 +1846,7 @@ private:
         Pending pending[kFramesInFlight];
         unsigned frame = 0;
         OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         /// The newest retired frame's counters (RayQueryStatus) and the scene draw they landed at (a view whose readings
         /// stopped is STALE: the status counts live views only).
         unsigned long long appended = 0ull, dropped = 0ull;
@@ -2026,6 +2030,7 @@ private:
     };
     struct EscapeView {
         const OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         unsigned width = 0u, height = 0u, eyes = 1u;
         RawBuffer accum;                   ///< three fixed-point words a pixel, eye-major rows
         EscapeList lists[2];
@@ -6711,7 +6716,7 @@ void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
 
 void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
     for (const auto &kv : mReflects) {
-        if (kv.second.scene != scene) continue;
+        if (kv.second.sceneId != scene->historyId()) continue;   // (the one identity, never an address)
         st.reflect = true;
         st.reflectRays += int(kv.second.rays);
         // The views' GPU times are the monitor's rows (lane TEST-1): the worst view.
@@ -6923,6 +6928,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // ---- PER-VIEW STATE -----------------------------------------------------
     ReflectView &rv = mReflects[key];
     rv.scene = scene;
+    rv.sceneId = scene->historyId();
     // A FRAME THAT DECLINES REPORTS ZERO (second reader, L4). Every early
     // return below leaves the picture correct, but leaving `rays` at the last
     // frame's value makes `giStatus().rayQuery.reflectRays` say a trace is
@@ -7085,7 +7091,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                  : 0.0f,
         cam->getFarClipDistance());
     // (the moving sample index: frames since the scene's bind or the trace's size change - MovingSample.h, URGENT #157)
-    pp.knobs[2] = float(rv.moving.index(rv.frame, rv.scene ? rv.scene->historyId() : 0ull, rv.w, rv.h));
+    pp.knobs[2] = float(rv.moving.index(rv.frame, rv.sceneId, rv.w, rv.h));
     // THE NEE (PHOTON-7 11-1b): 1 = next-event estimation toward the emitter table with the BRDF draw by the balance
     // heuristic; the arm "reflect.nee" 0 = the BRDF-only estimator (the acceptance's reference)
     pp.knobs[3] = arm(ArmId::ReflectNee, true) ? 1.0f : 0.0f;
@@ -9388,7 +9394,7 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     mDemandSpan = n + due;
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
-        if (rv.scene != scene) continue;
+        if (rv.sceneId != scene->historyId()) continue;   // (a stale view of a dead scene at this address is not its reader)
         // (a view that stopped recording - the editor's under a screenshot's offscreen settle - makes no demand)
         if (uint32_t(scene->drawSerial() - rv.recordedDraw) > ScreenProbeGather::kReaderStaleFrames) continue;
         active[0] = true;
@@ -9409,7 +9415,7 @@ bool RayQueryTier::gatherRestPastHandOver(const OgreScene *scene) const {
 bool RayQueryTier::reflectRestPastHandOver(const OgreScene *scene) const {
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
-        if (rv.scene != scene) continue;
+        if (rv.sceneId != scene->historyId()) continue;   // (a stale view of a dead scene at this address is not its reader)
         if (uint32_t(scene->drawSerial() - rv.recordedDraw) > ScreenProbeGather::kReaderStaleFrames) continue;
         if (!rv.restableLast) continue;
         // THE HAND-OVER IS 2N REST SAMPLES (jah_reflect_rest.glsl, jahRestHandOverLength) and a converging texel takes at
@@ -9918,7 +9924,7 @@ void RayQueryTier::releaseCapturePass(const ReflectPassListener *key) {
 void RayQueryTier::sunContactStatsInto(const OgreScene *scene, SunContactStatus &st) const {
     for (const auto &kv : mSunContacts) {
         const SunContactView &sv = kv.second;
-        if (sv.scene != scene) continue;
+        if (sv.sceneId != scene->historyId()) continue;
         if (!sv.ran) {
             if (st.reason.empty()) st.reason = sv.reason;
             continue;
@@ -10126,7 +10132,7 @@ void RayQueryTier::releaseAreaVisBinding(const ReflectPassListener *key) {
 void RayQueryTier::areaVisStatsInto(const OgreScene *scene, AreaVisStatus &st) const {
     for (const auto &kv : mAreaVis) {
         const AreaVisView &av = kv.second;
-        if (av.scene != scene) continue;
+        if (av.sceneId != scene->historyId()) continue;
         if (!av.ran || av.ranDraw + 1u < scene->drawSerial()) {
             if (av.ran) continue;   // a view the tier stopped recording: not this scene's producer now
             if (st.reason.empty()) st.reason = av.reason;
@@ -10185,6 +10191,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     const auto cpuStart = Clock::now();
     AreaVisView &av = mAreaVis[key];
     av.scene = scene;
+    av.sceneId = scene->historyId();
     av.sceneMgr = scene->sceneManager();
     av.ran = false;
     av.rays = 0;
@@ -10553,6 +10560,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     const auto cpuStart = Clock::now();
     SunContactView &sv = mSunContacts[key];
     sv.scene = scene;
+    sv.sceneId = scene->historyId();
     sv.sceneMgr = scene->sceneManager();
     sv.ran = false;
     sv.rays = 0;
@@ -12420,6 +12428,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     Ogre::Camera *cam = view ? view->camera() : nullptr;
     if (!scene || !cam || !pass || !out.ids) return false;
     hv.scene = scene;
+    hv.sceneId = scene->historyId();
     // (a stereo view's width() is its eye PAIR's: both eyes append to this one list)
     hv.eyes = view->stereo() ? 2u : 1u;
     hv.eyeWidth = view->width() / hv.eyes;
@@ -12744,7 +12753,7 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
     const uint32_t now = scene ? scene->drawSerial() : 0u, stale = 2u * kFramesInFlight + 2u;
     for (const auto &kv : mHits) {
         const HitView &hv = kv.second;
-        if (hv.scene != scene || !hv.everRead || uint32_t(now - hv.readDraw) > stale) continue;
+        if (hv.sceneId != scene->historyId() || !hv.everRead || uint32_t(now - hv.readDraw) > stale) continue;
         st.hitRecords += hv.appended;
         st.hitDropped += hv.dropped;
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
@@ -13227,6 +13236,7 @@ void RayQueryTier::prepareGlassEscape(const ReflectPassListener *key, OgreView *
     }
     EscapeView &ev = mEscape[key];
     ev.scene = scene;
+    ev.sceneId = scene->historyId();
     readGlassEscape(ev);
     const unsigned w = target->getWidth(), h = target->getHeight(),
                    eyes = std::max<unsigned>(1u, target->getNumSlices());
@@ -13604,7 +13614,7 @@ void RayQueryTier::glassEscapeStatsInto(const OgreScene *scene, RayQueryStatus &
     const uint32_t now = scene ? const_cast<OgreScene *>(scene)->drawSerial() : 0u, stale = 2u * kFramesInFlight + 2u;
     for (const auto &kv : mEscape) {
         const EscapeView &ev = kv.second;
-        if (ev.scene != scene || !ev.everRead || uint32_t(now - ev.readDraw) > stale) continue;
+        if (ev.sceneId != scene->historyId() || !ev.everRead || uint32_t(now - ev.readDraw) > stale) continue;
         st.escapeRecords += ev.records;
         st.escapeDropped += ev.dropped;
         st.escapeCapacity = std::max<unsigned long long>(st.escapeCapacity, ev.capacity);

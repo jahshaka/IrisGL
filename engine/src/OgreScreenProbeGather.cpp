@@ -1349,7 +1349,7 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
     const View *latest = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
-        if (v.scene != scene || !v.targetsReady) continue;
+        if (v.sceneId != scene->historyId() || !v.targetsReady) continue;
         if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) latest = &v;
     }
     // A READER THAT NO LONGER RECORDS MAKES NO DEMAND (PHOTON-7 stage 10, the giAtRest contract): a view that has not
@@ -1363,7 +1363,7 @@ bool ScreenProbeGather::restDemandComplete(const detail::OgreScene *scene, unsig
     active = true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
-        if (o.scene != scene || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
+        if (o.sceneId != scene->historyId() || !o.targetsReady || o.recordedFrame != latest->recordedFrame || !o.restableLast) continue;
         const unsigned rest = o.heldLast ? std::max(restKnownOf(o), restLengthOf(o.tuningLast, o.historyFramesLast) + due)
                                          : restKnownOf(o);
         const unsigned n = restLengthOf(o.tuningLast, o.historyFramesLast);
@@ -1391,7 +1391,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     const void *latestKey = nullptr;
     for (const auto &kv : mViews) {
         const View &v = kv.second;
-        if (v.scene != scene || !v.targetsReady) continue;
+        if (v.sceneId != scene->historyId() || !v.targetsReady) continue;
         if (!latest || int32_t(v.recordedFrame - latest->recordedFrame) > 0) { latest = &v; latestKey = kv.first; }
     }
     if (!latest) {
@@ -1450,7 +1450,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
     out.held = true;
     for (const auto &kv : mViews) {
         const View &o = kv.second;
-        if (o.scene != scene || !o.targetsReady || o.recordedFrame != v.recordedFrame) continue;
+        if (o.sceneId != scene->historyId() || !o.targetsReady || o.recordedFrame != v.recordedFrame) continue;
         // EVERY CELL HOLDS (PHOTON-7 stage 8B, B1): the view held whole, or its rest clock is past N - every active cell
         // held at that frame's finalize (a resume would have put the clock back)
         const unsigned rest = restKnownOf(o);
@@ -1705,7 +1705,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
     // A SCENE BIND IS A NEW VIEW for the histories: nothing in them is this
     // scene's.
-    if (v.scene != in.scene) v.age = 0u;
+    // THE ONE IDENTITY (TEST-STREAMLINE-1 3c audit): the scene's history id, never its address - a new scene allocated
+    // where the last one was freed is a new scene, and its history starts empty.
+    if (detail::rebindScene(v.sceneId, in.scene->historyId())) v.age = 0u;
     v.scene = in.scene;
     v.sceneMgr = in.sceneMgr;
     readPending(v);
@@ -2008,7 +2010,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // ...and the view's ADVANCING frame counter (PHOTON-GA-VR): the packed
     // history's stochastic rounding is keyed on it, never on the sample
     // sequence's frame above, which a frozen A/B holds still.
-    pp.knobs6[2] = float(v.moving.index(v.frame, v.scene ? v.scene->historyId() : 0ull, v.w, v.h));   // (MovingSample.h)
+    pp.knobs6[2] = float(v.moving.index(v.frame, v.sceneId, v.w, v.h));   // (MovingSample.h)
     pp.knobs6[3] = in.tuning.rayJitterOff ? 1.0f : 0.0f;   // the rays at their texels' centres
     pp.knobs5[2] = temporal ? 1.0f : 0.0f;
     pp.knobs5[3] = in.tuning.historyValidationOff ? 1.0f : 0.0f;
@@ -2468,7 +2470,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     rp.mode[1] = float(restN);
     rp.mode[2] = float(ringReach);
     rp.mode[3] = v.restableLast ? 1.0f : 0.0f;
-    rp.seq[0] = float(v.moving.index(v.frame, v.scene ? v.scene->historyId() : 0ull, v.w, v.h));   // (MovingSample.h, #157)
+    rp.seq[0] = float(v.moving.index(v.frame, v.sceneId, v.w, v.h));   // (MovingSample.h, #157)
     rp.seq[1] = float(kRestSequenceBase + std::min(in.tuning.restSeed, 255u) * 4096u);   // + K < 2^21: exact
     rp.seq[2] = in.tuning.freezeFrameIndex ? 1.0f : 0.0f;
     rp.seq[3] = in.farClip > 0.0f ? in.farClip : 1.0e4f;

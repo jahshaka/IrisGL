@@ -762,6 +762,7 @@ private:
         unsigned prefilteredLayers = 0u;
 
         const detail::OgreScene *scene = nullptr;
+        NodeId sceneId = 0u;   ///< the scene's ONE identity (OgreScene::historyId): what a stored view compares
         Ogre::SceneManager *sceneMgr = nullptr;
         unsigned w = 0u, h = 0u, stride = 0u, octRes = 0u;
         /// The placement counter's per-row words (one per eye and grid row).

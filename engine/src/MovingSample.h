@@ -46,4 +46,16 @@ private:
     unsigned mBase = 0u;
 };
 
+/// THE ONE SCENE IDENTITY A STORED VIEW COMPARES (TEST-STREAMLINE-1 3c audit): a view's state outlives the scenes it
+/// drew, and a destroyed scene's ADDRESS can come back for the next one - so a stored view keeps the scene's history id
+/// (OgreScene::historyId, never reused) and compares that. True when `live` is ANOTHER scene than the stored one (a new
+/// scene at a freed address included): the view's histories start empty. The stored id becomes `live`.
+template <class Id>
+inline bool rebindScene(Id &stored, Id live)
+{
+    const bool changed = stored != live;
+    stored = live;
+    return changed;
+}
+
 }   // namespace jahshaka::engine::detail
