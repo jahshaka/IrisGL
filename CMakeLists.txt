@@ -196,6 +196,11 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_bullet_patch_f
 set(BULLET2_MULTITHREADING ON)
 add_subdirectory_with_folder("Dependencies/Bullet" thirdparty/bullet3)
 add_subdirectory_with_folder("Dependencies/Zip" thirdparty/zip)
+# THE ZIP LIBRARY IS OPTIMISED IN DEBUG TOO (TEST-STREAMLINE-1 5c), Bullet's and meshoptimizer's reason below: Debug is the
+# daily driver and a share file's deflate is the zip library's own loop - at -O0 one ~70 MB payload took 4.3 s to write,
+# at -O2 ~2.2 s (bundle.writer: 12.59 -> 7.33 s). The same bytes at any level (integer code). Set from OUR CMake, never
+# the vendored tree's; source.debug_hot_loops holds every such target at -O2 in a Debug build.
+target_compile_options(zip PRIVATE $<$<CONFIG:Debug>:-O2>)
 # meshoptimizer (ATOM stage 1, SPECS/NANITE_SPEC.md §7): the simplifier that
 # builds a mesh's LOD chain at IMPORT time, inside MeshBake. Same policy as
 # bullet3 and zip — STATIC and position-independent, because it links into the
