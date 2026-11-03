@@ -98,6 +98,7 @@ void OgreView::buildChain() {
     mChainSsao = chainDesc().ssao;
     mChainProbeGather = chainDesc().probeGather;
     mChainScreenIntegrate = chainDesc().screenIntegrate;
+    mChainPhotonTerm = chainDesc().photonTerm;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -354,6 +355,11 @@ ChainDesc OgreView::chainDesc() const {
     // anti-aliasing the window's samples. The post shapes render at 1x into their own
     // targets and always carry it. AtomDrawStatus::passthroughViews counts these.
     d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
+    // THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm): the scene's view isolates a term, on a mono post chain.
+    if (mScene && !mStereo && d.anyEffect()) {
+        const PhotonView pv = mScene->photonView();
+        d.photonTerm = pv == PhotonView::Diffuse || pv == PhotonView::Reflections;
+    }
     finishAtomOcclusion(d);
     return d;
 }
@@ -368,7 +374,9 @@ bool OgreView::sceneShapeMoved() const {
            mChainSsao != d.ssao ||
            // ...and WHO PRODUCES THE OPAQUE PASSES' GI (PHOTON-7 7-5 / 7-6: graph shape): the gather (the scene's ray
            // answer and the view's contract) or the no-ray screen integrate (the scene's GI mode)
-           mChainProbeGather != d.probeGather || mChainScreenIntegrate != d.screenIntegrate;
+           mChainProbeGather != d.probeGather || mChainScreenIntegrate != d.screenIntegrate ||
+           // ...and THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm: the scene's view, graph shape)
+           mChainPhotonTerm != d.photonTerm;
 }
 
 /// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
@@ -1639,6 +1647,7 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainSsao = chainDesc().ssao;
     mChainProbeGather = chainDesc().probeGather;
     mChainScreenIntegrate = chainDesc().screenIntegrate;
+    mChainPhotonTerm = chainDesc().photonTerm;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {

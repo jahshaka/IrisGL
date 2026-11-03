@@ -8614,10 +8614,18 @@ static_assert(int(AtomView::Density) + 1 == kAtomViewCount, "kAtomViewCount is t
 ///                 yellow where it waits for its first
 ///   ScreenProbes  the screen-probe gather's probes as discs at their positions,
 ///                 coloured by the irradiance each probe traced
-///   Diffuse       the indirect diffuse term alone (direct light, emission and
-///                 reflections off) — a pass property on the one lighting text
-///   Reflections   the specular environment term alone (probes, voxels, SSR and
-///                 the ray-traced reflection) — the same mechanism
+///   Diffuse       THE OPAQUE SURFACES' indirect diffuse term alone (direct light,
+///                 emission and reflections off) — a pass property on the one
+///                 lighting text
+///   Reflections   THE OPAQUE SURFACES' specular environment term alone (probes,
+///                 voxels, SSR and the ray-traced reflection) — the same mechanism.
+///                 Both are written BESIDE the radiance on a mono post chain
+///                 (ChainDesc::photonTerm, PHOTON-7-9A): the picture underneath keeps
+///                 the scene's light (the reflection's screen trace reads it), the
+///                 term is composited over it before the tonemap, and glass and
+///                 every other blended or refractive surface is not in the picture
+///                 (the opaque surface behind it shows its term). A graph shape: a
+///                 switch to or from either rebuilds the view's chain.
 ///   Hits          every traced reflection pixel coloured by what shaded its ray:
 ///                 green = a card, blue = the voxels, cyan = the sky, magenta = the
 ///                 hit list (the decode), red = a dropped record; no ray = dimmed

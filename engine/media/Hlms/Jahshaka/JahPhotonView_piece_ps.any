@@ -28,7 +28,20 @@
 // card capture's definitions are prepass-only; HlmsAtom's is the hit decode's,
 // whose pass never carries this property (atom_hit_mode is in the guard anyway).
 //
+// BESIDE THE RADIANCE, NEVER IN ITS PLACE (PHOTON-7-9A; the pass property jah_photon_term, ChainDesc::photonTerm):
+// on a mono post chain the pass's target holds a SECOND colour attachment for the term, the last of its attachments,
+// so this file declares that output after the template's own (the same counter the template numbers its outputs
+// with) and writes the term there with an alpha of one; the picture's own colour stays the scene's light, which
+// the reflection's screen trace and its rest's stop read from the next frame on. The chain composites the term over
+// the scene result in front of the tonemap (Jahshaka/PhotonTerm). Without the property (a stereo chain) the term
+// replaces the picture's colour as before.
+//
 // SPELLED OUT, NO DIRECTIVE MARK IN ANY COMMENT: the Hlms parser reads them there.
+@property( jah_photon_view && jah_photon_term && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !atom_hit_mode )
+@piece( custom_ps_output_types )
+		layout(location = @counter(rtv_target)) out midf4 outPhotonTerm;
+@end
+@end
 @property( jah_photon_view && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !atom_hit_mode )
 @piece( custom_ps_posExecution )
 	{
@@ -48,10 +61,18 @@
 			@insertpiece( BRDF_EnvMap )
 		@end
 		// The template's own output rule (Ogre-Next 4.0 always writes linear).
-		@property( !hw_gamma_write )
-			outPs_colour0.xyz = sqrt( finalColour );
+		@property( jah_photon_term )
+			@property( !hw_gamma_write )
+				outPhotonTerm = midf4( sqrt( finalColour ), 1.0 );
+			@else
+				outPhotonTerm = midf4( finalColour, 1.0 );
+			@end
 		@else
-			outPs_colour0.xyz = finalColour;
+			@property( !hw_gamma_write )
+				outPs_colour0.xyz = sqrt( finalColour );
+			@else
+				outPs_colour0.xyz = finalColour;
+			@end
 		@end
 	}
 @end

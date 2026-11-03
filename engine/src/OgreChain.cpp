@@ -240,6 +240,13 @@ constexpr const char *kDepth    = kSceneDepthTexture;
 /// carries `mipmapLevel` on both its texture and its UAV sources.
 constexpr const char *kHzb      = "jahHzb";
 constexpr const char *kSceneRtv = "jahSceneRtv";
+/// THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm): the isolated term the opaque passes write beside the radiance
+/// (a second colour attachment of kSceneRtv), the picture the chain shows in its place (the scene result with the term
+/// composited over it, in front of the tonemap), and the scene RTV WITHOUT the term for the passes that are not the
+/// term's (the blended pass: its fragments write jahRt0 only, so they never leave an undefined value in the term).
+constexpr const char *kPhotonTerm       = "jahPhotonTerm";
+constexpr const char *kPhotonShown      = "jahPhotonShown";
+constexpr const char *kSceneRtvNoTerm   = "jahSceneRtv/noTerm";
 /// THE VISIBILITY BUFFER (ATOM S3-DRAW, ChainDesc::atomDraw): the id image the id
 /// pass writes (R32G32_UINT, AtomId's two words), the RTV it renders through (the
 /// id image + the scene's named depth, which the prepass and the opaque pass then
@@ -716,7 +723,7 @@ bool ChainDesc::sameShape(const ChainDesc &a, const ChainDesc &b) {
            // producer's opaque passes bind no world cache and draw the blended queues in a pass of their own, and the
            // no-ray producer adds its compute pass and targets.
            a.probeGather == b.probeGather && a.screenIntegrate == b.screenIntegrate &&
-           a.refractions == b.refractions && a.hdrReadback == b.hdrReadback &&
+           a.refractions == b.refractions && a.hdrReadback == b.hdrReadback && a.photonTerm == b.photonTerm &&
            a.displayEncode == b.displayEncode &&
            a.overlays == b.overlays && a.helpers == b.helpers &&
            a.vrHelpers == b.vrHelpers && a.hiddenAreaMask == b.hiddenAreaMask &&
@@ -1931,6 +1938,12 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         td->preferDepthTexture = desc.ssao || prepass;   // sampled by the AO/SSR/gather passes
         syncRtvDepth(n, kRt0, td);
     }
+    // THE PHOTON VIEW'S TERM (ChainDesc::photonTerm): the term the opaque passes write beside the radiance, and the
+    // picture shown in its place - the scene's format, the target's size; only while a term view is on.
+    if (desc.photonTerm) {
+        addTex(n, kPhotonTerm, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+        addTex(n, kPhotonShown, floatScene ? Ogre::PFG_RGBA16_FLOAT : Ogre::PFG_RGBA8_UNORM);
+    }
 
     if (desc.hdr) {
         // THE FIXED-EXPOSURE VARIANT (PostFxDesc::tonemapFixed) drops the whole
@@ -2031,7 +2044,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     // ...and THE ID PASS (ChainDesc::atomDraw), which writes the depth every scene
     // pass after it loads.
     const bool namedDepth = desc.ssao || prepass || desc.refractions || desc.distortion ||
-                            desc.hzb || desc.atomDraw;
+                            desc.hzb || desc.atomDraw || desc.photonTerm;
     if (namedDepth) {
         auto *td = addTex(n, kDepth, Ogre::PFG_D32_FLOAT);
         td->preferDepthTexture = true;
@@ -2340,6 +2353,18 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         rtv->depthAttachment.textureName = kDepth;
         rtv->stencilAttachment.textureName = kDepth;
         rtv->preferDepthTexture = true;
+        // THE PHOTON VIEW'S TERM (ChainDesc::photonTerm): the LAST colour attachment - the shaders' output after their
+        // own (the term piece's `rtv_target` counter, JahPhotonView_piece_ps.any) - and the same view without it.
+        if (desc.photonTerm) {
+            Ogre::RenderTargetViewDef *plain = n->addRenderTextureView(kSceneRtvNoTerm);
+            plain->colourAttachments = rtv->colourAttachments;
+            plain->depthAttachment = rtv->depthAttachment;
+            plain->stencilAttachment = rtv->stencilAttachment;
+            plain->preferDepthTexture = true;
+            Ogre::RenderTargetViewEntry term;
+            term.textureName = kPhotonTerm;
+            rtv->colourAttachments.push_back(term);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2651,7 +2676,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             desc.atomDraw ? addAtomDecodePass(n, sceneTarget, !prepass, false, "Jahshaka atom decode") : nullptr;
         if (decode && screenGi) decode->mJahReadsGi = false;   // L4 (above; PhotonPassBinding::passReadsGi)
         Ogre::CompositorTargetDef *t = n->addTargetPass(sceneTarget);
-        t->setNumPasses(screenGi ? 2 : 1);
+        // (the blended pass shares the target unless the term view parts them: ChainDesc::photonTerm, below)
+        t->setNumPasses(screenGi && !desc.photonTerm ? 2 : 1);
         auto *p = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
         if (screenGi) p->mJahReadsGi = false;   // L4 (above; PhotonPassBinding::passReadsGi)
         p->mShadowNode = desc.shadows ? Ogre::IdString(OgreView::kShadowNodeName) : Ogre::IdString();
@@ -2660,6 +2686,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
         if (desc.letterbox) {
             p->mLoadActionColour[0] = Ogre::LoadAction::Load;   // keep the bars
             inset(handlesOut, p);
+        }
+        // THE PHOTON VIEW'S TERM (ChainDesc::photonTerm): cleared TRANSPARENT every frame, so a pixel no term shader
+        // wrote (the sky, a material outside the PBS family) shows the scene's picture in the composite (alpha 0), as
+        // the in-place view did; stored for that composite. (The screen decode in front takes this clear: below.)
+        if (desc.photonTerm) {
+            const size_t ti = (desc.ssao && !prepass) ? 2u : 1u;
+            p->mClearColour[ti] = Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f);
+            p->mStoreActionColour[ti] = Ogre::StoreAction::Store;
         }
         // WITH SSR THE DEPTH IS THE PREPASS'. setUseDepthPrePass sets
         // mReadOnlyDepth (OgreCompositorPassSceneDef.h:232-241), so this pass
@@ -2729,7 +2763,15 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // none), the shadow node reused. It is not a PrePassUse pass, so the ray tier's pass-scoped screen
             // products are already withdrawn (ReflectPassListener::passPosExecute after the opaque pass) and none
             // of the prepass's properties reach its shaders.
-            auto *b = static_cast<Ogre::CompositorPassSceneDef *>(t->addPass(Ogre::PASS_SCENE));
+            // (ON THE SCENE RTV WITHOUT THE PHOTON VIEW'S TERM while a term view is on, ChainDesc::photonTerm: the
+            // term is the OPAQUE surfaces', and a blended fragment's shader writes no term output - on the term
+            // attachment its value would be undefined)
+            Ogre::CompositorTargetDef *bt = t;
+            if (desc.photonTerm) {
+                bt = n->addTargetPass(kSceneRtvNoTerm);
+                bt->setNumPasses(1);
+            }
+            auto *b = static_cast<Ogre::CompositorPassSceneDef *>(bt->addPass(Ogre::PASS_SCENE));
             b->mShadowNode = p->mShadowNode;
             b->mShadowNodeRecalculation = Ogre::SHADOW_NODE_REUSE;
             b->setAllLoadActions(Ogre::LoadAction::Load);
@@ -3002,6 +3044,24 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             if (desc.letterbox) scissor(handlesOut, q);
         }
         sceneResult = kAoApplied;
+    }
+
+    // THE PHOTON VIEW'S TERM SHOWN (ChainDesc::photonTerm): the scene result copied, the opaque surfaces' term
+    // composited over it where a term shader wrote it (straight alpha: 1 written, 0 the transparent clear), into a
+    // picture of its own - jahRt0 and every texture the screen trace and the composed stop read keep the scene's light.
+    // Everything after (the exposure, bloom, the tonemap, the radiance readback) takes the shown picture, as it took the
+    // in-place isolated one. In front of the exposure, after the AO apply: the term is not darkened by the camera's AO.
+    if (desc.photonTerm) {
+        auto *c = addQuad(n, kPhotonShown, "Ogre/Copy/4xFP32", "Jahshaka photon term base");
+        c->addQuadTextureSource(0, sceneResult);
+        c->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        if (desc.letterbox) scissor(handlesOut, c);
+        auto *q = addQuad(n, kPhotonShown, kPhotonTermMaterial, "Jahshaka photon term");
+        q->addQuadTextureSource(0, kPhotonTerm);
+        q->mLoadActionColour[0] = Ogre::LoadAction::Load;
+        q->mStoreActionColour[0] = Ogre::StoreAction::Store;
+        if (desc.letterbox) scissor(handlesOut, q, /*clear=*/false);
+        sceneResult = kPhotonShown;
     }
 
     // HDR: exposure (measured or fixed), bloom, tonemap.

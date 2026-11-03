@@ -971,6 +971,8 @@ constexpr Ogre::uint8 kPhotonExecutionBits = kPhotonSceneExecutionBit | kPhotonO
 constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";         ///< display-encoded (SRGB-ENCODE-1)
 constexpr const char *kPhotonLayerLinearMaterial = "Jahshaka/PhotonLayerLinear"; ///< the Plain instrument's
 constexpr const char *kPhotonOverlayMaterial = "Jahshaka/PhotonOverlay";
+/// THE PHOTON VIEW'S TERM over the scene result (ChainDesc::photonTerm; JahPhotonView.material).
+constexpr const char *kPhotonTermMaterial = "Jahshaka/PhotonTerm";
 /// The cards' quads' material (the same file).
 constexpr const char *kPhotonCardsMaterial = "Jahshaka/PhotonCards";
 
@@ -1436,6 +1438,15 @@ struct ChainDesc {
     bool  screenIntegrate = false;
     /// The opaque passes read the screen products (a gathering chain or the no-ray producer's).
     bool screenGi() const { return probeGather || screenIntegrate; }
+    /// THE PHOTON VIEW'S TERM TARGET (PHOTON-7-9A, the lead's ruling on the crease's cause (1)): while the scene's Photon
+    /// view ISOLATES a term (Diffuse / Reflections) on a mono post chain, the two passes that shade the picture (the
+    /// opaque pass and the opaque screen decode) write the FULL radiance to jahRt0 as every frame does - the screen
+    /// trace's source and the composed stop read the scene's light, never the viewing aid - and the isolated term to a
+    /// SECOND colour attachment (jahPhotonTerm, the target's format, cleared transparent), which the chain composites
+    /// over the scene result in front of the tonemap (Jahshaka/PhotonTerm). The term view is therefore THE OPAQUE
+    /// SURFACES' TERM: the blended and refractive passes draw into jahRt0 only. GRAPH SHAPE (the attachment, its
+    /// target and the composite); a stereo chain keeps the in-place isolation (it has no screen source).
+    bool  photonTerm = false;
     /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3), here for the gather's
     /// reason exactly: the contact job starts each ray from the PREPASS' depth
     /// and normals and the pixel reads its answer back in the `PrePassUse`
@@ -3745,7 +3756,9 @@ public:
     /// `jah_photon_view` (its VALUE is the mode) selects the lighting text's own
     /// isolation (JahPhotonView_piece_ps.any): one lighting text, never a second
     /// shader. 0 takes it away.
-    static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode);
+    /// `term`: the pass's target holds the term attachment (ChainDesc::photonTerm) - the shaders write the radiance as
+    /// always and the term beside it, never in its place.
+    static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode, bool term = false);
 
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
@@ -3826,6 +3839,7 @@ public:
         SunContactBind   sunContact;               ///< PHOTON-RAYS-1 (the pass's copy: PassBinds::sunVis)
         Ogre::TextureGpu *areaVis = nullptr;       ///< PHOTON-7 7-A (the pass's copy: PassBinds::areaVis)
         int              photonIsolation = 0;      ///< PHOTON-VIEW-1: 1 diffuse, 2 specular, 0 none
+        bool             photonTerm = false;       ///< ...written to the term attachment (ChainDesc::photonTerm)
         CloudShadowState cloudShadow;              ///< CLOUDS-2D-1 (the pass's copy: PassBinds::cloudField)
         AtmoBind         atmo;                     ///< SKY-ATMOSPHERE-1 (PassBinds::atmoAerial)
         FogState         fog;
@@ -7955,6 +7969,8 @@ public:
     inspect::ViewRoutes routes() const override { return inspect::ViewRoutes{ mChainProbeGather, mChainScreenIntegrate, mChainRayReflect }; }
     /// The BUILT chain carries the ray reflection (its recordReflect runs each frame it draws: the build's need).
     bool chainRayReflect() const { return mChainRayReflect; }
+    /// ChainDesc::photonTerm as the definition was built: the opaque passes' term attachment exists (OgrePhotonView.cpp).
+    bool chainPhotonTerm() const { return mChainPhotonTerm; }
     void setOffscreenContract(OffscreenContract c) override;
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).
@@ -8488,6 +8504,7 @@ private:
     /// re-checked once a frame with the scene's other shape terms (sceneShapeMoved).
     bool                       mChainProbeGather = false;
     bool                       mChainScreenIntegrate = false;
+    bool                       mChainPhotonTerm = false;   ///< ChainDesc::photonTerm as the definition was built
     /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): the rows the list holds (0 until the first sizeHitList reads the
     /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases WITHIN A SCENE; 0 again at
     /// detachScene (URGENT #157: the list dies with the workspace there, and a second scene is built at its own creation

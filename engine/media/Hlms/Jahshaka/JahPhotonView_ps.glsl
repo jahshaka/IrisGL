@@ -17,7 +17,7 @@ in block
 	vec2 uv0;
 } inPs;
 
-#ifndef PHOTON_COVERAGE
+#if !defined( PHOTON_COVERAGE ) && !defined( PHOTON_TERM )
 // x = 1 once the ray tier has written the overlay (OgreView::photonOverlayWritten),
 // pushed per view by the photon listener in front of this pass; 0 draws nothing
 // (a view whose tier has not traced yet — the overlay's contents are undefined).
@@ -38,7 +38,11 @@ void main()
 	ivec2 size = jahScreenSize( photonOverlay, 0 );
 	ivec2 pix = clamp( ivec2( inPs.uv0 * vec2( size ) ), ivec2( 0 ), size - ivec2( 1 ) );
 	vec4 o = texelFetch( photonOverlay, jahScreenTexel( pix ), 0 );
-#ifdef PHOTON_COVERAGE
+#if defined( PHOTON_TERM )
+	// THE OPAQUE SURFACES' TERM (ChainDesc::photonTerm): linear radiance at the scene's scale, straight alpha - 1 where a
+	// term shader wrote it, 0 the transparent clear - over the copied scene result, before the tonemap: no clamp.
+	fragColour = vec4( o.rgb, o.a > 0.5 ? 1.0 : 0.0 );
+#elif defined( PHOTON_COVERAGE )
 	// The photon scene pass' layer: covered wherever anything was drawn.
 	const bool covered = any( greaterThan( o, vec4( 0.0 ) ) );
 #ifdef PHOTON_ENCODE
