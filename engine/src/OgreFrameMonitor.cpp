@@ -2025,7 +2025,7 @@ bool OgreEngine::captureSnapshot(EngineSnapshot &out, const std::string &label,
         OgreScene *s = static_cast<OgreScene *>(scene);
         if (!s) {
             for (const auto &v : mViews)
-                if (v->isEnabled() && !v->isOffscreen() && v->ogreScene()) { s = v->ogreScene(); break; }
+                if (v->isEnabled() && v->presentsAsWindow() && v->ogreScene()) { s = v->ogreScene(); break; }
             if (!s)
                 for (const auto &v : mViews)
                     if (v->isEnabled() && v->ogreScene()) { s = v->ogreScene(); break; }

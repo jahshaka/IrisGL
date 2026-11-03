@@ -7470,7 +7470,9 @@ void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record,
     // Pushing the scene's count to them was a latent inconsistency: harmless
     // while scenes defaulted to 1x, and a whole-suite re-baseline the moment a
     // World Mode set 4x.
-    if (!view->isOffscreen())
+    // (View::presentsAsWindow: a PRESENTED STAND-IN - the headless host's editor view - takes the window's count, the
+    // picture it stands in for; TEST-STREAMLINE-1 3a item 2b)
+    if (view->presentsAsWindow())
         part.sampleCount = unsigned(qBound(1, mSource->antiAliasing, 16));
     // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
     // per frame: the engine ignores a repeat of the value already set, and only

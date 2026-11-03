@@ -1489,6 +1489,13 @@ public:
     /// set, never a read of the engine's state.
     const std::string &name() const { return mIdentityName; }
     bool isOffscreen() const { return mIdentityOffscreen; }
+    /// THE ONE PREDICATE OF "PRESENTED" (TEST-STREAMLINE-1 3a, item 2b): an on-screen view, or an offscreen one declared
+    /// OffscreenContract::PresentedStandIn (the headless host's editor view) - every engine branch that treats a
+    /// presented view differently from an offscreen picture reads THIS, never isOffscreen() (the post chain, the overlay,
+    /// the PiP, the LOD band, the photon view's present, the GI driver's on-screen pass, the reflection's fold, the
+    /// frame monitor's on-screen frame, the mirror's sample count). isOffscreen() stays the TARGET's fact (a texture:
+    /// its readback, its RTT). Fixed at creation, like isOffscreen().
+    bool presentsAsWindow() const { return !mIdentityOffscreen || mIdentityStandIn; }
     Scene *scene() const { return mBoundScene; }
     /// The view's id (ENGINE-UPGRADE-U3 stage 3): reserved when the engine made it, never reused — its snapshot row's key.
     NodeId id() const { return mIdentityId; }
@@ -1956,6 +1963,7 @@ protected:
     NodeId mIdentityId = 0;
     std::string mIdentityName;
     bool        mIdentityOffscreen = false;
+    bool        mIdentityStandIn = false;   ///< OffscreenContract::PresentedStandIn at creation (presentsAsWindow)
     Scene      *mBoundScene = nullptr;
     PostFxDesc  mPushedPostFx;
     Colour      mPushedBackground;

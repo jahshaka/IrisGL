@@ -833,6 +833,7 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
         syncHostViews();
         mViews.back()->mEngine = this;
         // (the engine's own thread: no frame runs between these lines; the contract's graph shape, applied at once)
+        mViews.back()->declareStandIn(contract);   // the identity first: the setter refuses a stand-in it was not born
         mViews.back()->setOffscreenContract(contract);
         return mViews.back().get();
     } JAH_CATCH(mLastError, nullptr);
@@ -1054,7 +1055,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         if (monitor::live()) {
             bool onscreen = false;
             for (auto &v : mViews)
-                if (v->isEnabled() && !v->isOffscreen()) { onscreen = true; break; }
+                if (v->isEnabled() && v->presentsAsWindow()) { onscreen = true; break; }   // (a presented stand-in too)
             // THE RECORD'S FRAME IS THE FRAME THIS CALL PUBLISHES (PublishedFrame::frame: the publish after the close
             // counts it), the stamp every reader joins the record to - never the shadow cache's counter, which a
             // headless engine (no Hlms) never ticks (PHOTON-7 stage 0, AB G3).
@@ -1251,7 +1252,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 if (!v->ogreScene()) continue;
                 if (pass == -1 && !v->giPriority()) continue;
                 if (pass != -1 && !v->isEnabled()) continue;
-                if (pass == 0 && v->isOffscreen()) continue;
+                if (pass == 0 && !v->presentsAsWindow()) continue;   // the on-screen pass: a presented stand-in is one
                 OgreView **slot = driverSlot(v->ogreScene());
                 if (!*slot) *slot = v.get();
             }

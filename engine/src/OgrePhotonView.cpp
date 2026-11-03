@@ -225,7 +225,7 @@ void OgreView::syncPhotonView() {
     shape.rayReflect = cd.rayReflect;
     shape.probeGather = cd.probeGather;
     shape.stereo = cd.stereo;
-    mScene->notePhotonView(this, !isOffscreen() || stereo(), shape);
+    mScene->notePhotonView(this, presentsAsWindow() || stereo(), shape);   // a presented stand-in presents
 
     // THE OVERLAY follows the scene's view and the target's size. Created here,
     // between frames; the tier writes it inside the frame and says so.

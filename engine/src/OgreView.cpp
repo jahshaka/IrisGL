@@ -131,7 +131,8 @@ ChainDesc OgreView::chainDesc() const {
     // ...and an offscreen view may ASK for it, per view
     // (View::setLodHysteresisOffscreen — the suite that reads what the band
     // does is the only caller; see the note on the public method).
-    d.lodHysteresis  = (!isOffscreen() || d.stereo || mLodHysteresisOffscreen)
+    // ...AND A PRESENTED STAND-IN takes the band like the window it stands in for (presentsAsWindow: a presented stand-in - the headless host's editor view - is a watched picture; TEST-STREAMLINE-1 3a item 2b)
+    d.lodHysteresis  = (presentsAsWindow() || d.stereo || mLodHysteresisOffscreen)
                            ? detail::jahLodHysteresis() : 0.0f;
     // Set BEFORE the offscreen early-out below: the overlay's entitlement is
     // its own opt-in (ViewOverlayDesc::allowOffscreen), not the post chain's,
@@ -211,7 +212,7 @@ ChainDesc OgreView::chainDesc() const {
     // gathers by its row: the contract is a property of the pictures an editor
     // makes offscreen, and the wearer's picture is not one of them.
     const bool wantsGather = mScene && mScene->probeGatherWanted();
-    const bool presents = !isOffscreen() || mStereo;
+    const bool presents = presentsAsWindow() || mStereo;   // a presented stand-in gathers by its row, as a window does
     bool contractAllows = presents || mOffscreenContract == OffscreenContract::StillPicture;
     d.probeGather    = wantsGather && contractAllows;
     // ...AND WHERE IT DOES NOT, THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6): the same screen products
@@ -225,7 +226,8 @@ ChainDesc OgreView::chainDesc() const {
     // Thumbnails, material previews, the asset viewer, the avatar preview and
     // every pixel suite render through createOffscreenView, and their exact
     // colours are what makes them assertable.
-    if (isOffscreen() && !mPostFx.allowOffscreen) {
+    // (a PRESENTED STAND-IN is not an offscreen picture: it takes the window's chain (presentsAsWindow: a presented stand-in - the headless host's editor view - is a watched picture; TEST-STREAMLINE-1 3a item 2b))
+    if (!presentsAsWindow() && !mPostFx.allowOffscreen) {
         // ...except REFRACTION, which is not a post-process at all: it is how a
         // refractive material renders. A scene that has one needs the pass in
         // EVERY view that draws it (thumbnails, previews, screenshots), or the
@@ -389,7 +391,7 @@ bool OgreView::overlaysAllowed() const {
     // the VIEW, not of what the desc currently asks to draw — that is what
     // makes toggling the stats readout or the loading cover free (element
     // state, never a workspace rebuild). See kIncludeOverlaysNote.
-    return !isOffscreen() || mOverlay.allowOffscreen;
+    return presentsAsWindow() || mOverlay.allowOffscreen;   // a presented stand-in draws the window's overlay
 }
 
 void OgreView::setOverlay(const ViewOverlayDesc &d) {
@@ -475,7 +477,7 @@ bool OgreView::pipAllowed() const {
     // view NEVER gets an inset unless it opted in. Thumbnails, material
     // previews and every pixel suite must stay byte-identical whatever a host
     // pushes at them (tests/engine's pip_is_ignored_offscreen_unless_asked).
-    return !isOffscreen() || mPip.allowOffscreen;
+    return presentsAsWindow() || mPip.allowOffscreen;   // a presented stand-in shows the window's inset
 }
 
 void OgreView::postRecord(FrameInput &&in) { mEngine->submitFrame(std::move(in)); }
@@ -1590,6 +1592,14 @@ void OgreView::setLodHysteresisOffscreen(bool on) {
 }
 
 void OgreView::setOffscreenContract(OffscreenContract c) {
+    // A STAND-IN IS BORN ONE (TEST-STREAMLINE-1 3a item 2b): every presented-vs-offscreen branch reads the identity it was
+    // created with (View::presentsAsWindow), so no later call makes a view one or unmakes it - refused, named.
+    if ((c == OffscreenContract::PresentedStandIn) != mIdentityStandIn) {
+        mError = "View '" + name() + "': setOffscreenContract cannot " +
+                 (mIdentityStandIn ? "end a presented stand-in" : "make a view a presented stand-in") +
+                 " (it is declared at creation, Engine::createOffscreenView)";
+        return;
+    }
     if (postedAsField([&](FrameInputView &p) { p.offscreenContract = c; })) return;   // the host's: a field (U3 4a)
     if (c == mOffscreenContract) return;
     mOffscreenContract = c;

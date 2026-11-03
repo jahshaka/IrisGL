@@ -7940,7 +7940,10 @@ public:
     void setOffscreenContract(OffscreenContract c) override;
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).
-    void initOffscreenContract(OffscreenContract c) { mOffscreenContract = c; }
+    void initOffscreenContract(OffscreenContract c) { declareStandIn(c); mOffscreenContract = c; }
+    /// THE STAND-IN's IDENTITY AT BIRTH (TEST-STREAMLINE-1 3a item 2b; View::presentsAsWindow): set once, before the
+    /// view is anyone's but its creator's - never after (setOffscreenContract refuses a change either way).
+    void declareStandIn(OffscreenContract c) { mIdentityStandIn = c == OffscreenContract::PresentedStandIn; }
     float measuredExposureScale() const override;
 
     void setOverlay(const ViewOverlayDesc &d) override;

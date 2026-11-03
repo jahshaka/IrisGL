@@ -3727,7 +3727,12 @@ struct GiVoxelDigests {
 
 /// An offscreen view's declared contract, a REQUIRED parameter of Engine::createOffscreenView (PHOTON-7 stage 10-3: no
 /// frame ever sees an offscreen view without one; View::setOffscreenContract changes it later). See the setter.
-enum class OffscreenContract { StillPicture, Live };
+/// PresentedStandIn (TEST-STREAMLINE-1 stage 3a, item 2b): THE SCRIPTABLE HEADLESS HOST's editor view - an offscreen
+/// target that STANDS IN FOR A PRESENTED VIEW: every branch that tells a presented view from an offscreen one reads it
+/// as presented (View::presentsAsWindow, the one predicate), so a host's verbs see the picture the editor's window
+/// shows - only the target is a texture. Declared at creation and fixed for the view's life (setOffscreenContract
+/// refuses it, both ways); no product view declares it (the host's createOffscreenEditorViewport is its one caller).
+enum class OffscreenContract { StillPicture, Live, PresentedStandIn };
 
 /// Where a view's one-shot readback of its own presented frame stands
 /// (View::requestFrameCapture, CLOSE-SHOT-2). Idle = nothing asked; Armed = the

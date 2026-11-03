@@ -12239,7 +12239,7 @@ void OgreView::syncReflectListener() {
     }
     mReflectListener->mView = this;
     mReflectListener->mRoot = mRoot;
-    mReflectListener->mFoldsOnForget = isOffscreen();
+    mReflectListener->mFoldsOnForget = !presentsAsWindow();   // a presented stand-in keeps the window's (3a item 2b)
 }
 
 // THE HIT LIST'S GROWTH (kHitListWidth's law in EnginePrivate.h). Before the workspace runs, so no pass of this frame has
