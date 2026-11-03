@@ -556,6 +556,9 @@ foreach(_s ${_mesh_bake_hashed_sources})
     string(APPEND _mesh_bake_blob "${_h};")
 endforeach()
 string(SHA256 _mesh_bake_producer_id "${_mesh_bake_blob}")
+# ...AND READABLE BY THE HOST's BUILD (TEST-STREAMLINE-1 3a item 5): the test harness keys the seeded library template on it
+# (Studio's tests/CMakeLists.txt writes it to <build>/tests/bake-key.txt; tests/support/seed_home.sh)
+set_property(GLOBAL PROPERTY JAH_MESH_BAKE_PRODUCER_ID "${_mesh_bake_producer_id}")
 # '|' separated, not ';': a semicolon inside a compile definition is a CMake
 # list separator and would become three defines.
 string(REPLACE ";" "|" _mesh_bake_hashed_list "${_mesh_bake_hashed_sources}")
