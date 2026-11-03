@@ -272,6 +272,9 @@ unsigned reflectRestLength(unsigned window) { return gatherSettleFramesOf(window
 /// every stop at one pose - the rest mean is a function of the scene and the eye, never of the path (the gather's rest
 /// mean's law, rq_probe_integrate.comp). The reference arm's value 2 offsets it by 0x8000 (+ a 16-bit v: < 2^18, exact).
 constexpr unsigned kReflectRestSequence = 0x10000u;
+/// THE GLASS ESCAPE's REST SEQUENCE (TEST-STREAMLINE-1 3c audit): its area draws at rest index this base plus the rest
+/// frame K (< 2^20: < 2^21 in all, exact in the float lane), past every moving index (16 bits, MovingSample.h).
+constexpr unsigned kGlassRestSequence = 0x10000u;
 /// THE REST'S TAIL BUDGET, A COUNT PER VIEW (L7; the lead's rulings after the hold's tail): the rest's first batching
 /// frame traces k = GiQualityFacts::reflectRestRays rays a batching texel - its COUNT, k x the texels batching then -
 /// and each frame after k_active = max(k, min(kReflectRestRaysCap, count / (kReflectRestTailDivisor x batching))), the
@@ -2039,6 +2042,8 @@ private:
         struct Pending { uint32_t frame = 0u; bool live = false; unsigned capacity = 0u; };
         Pending pending[kFramesInFlight][2];
         unsigned frame = 0u;
+        /// the area draws' moving index: `frame` since the scene's bind or the target's size change (MovingSample.h)
+        ::jahshaka::engine::detail::MovingSequence moving;
         /// THE NEWEST READ (summed over the two lists): the records appended, those a full list dropped, the lists'
         /// capacity, the job's counts; the largest demand a retired frame showed (the growth's target)
         unsigned long long records = 0ull, dropped = 0ull, capacity = 0ull;
@@ -13431,7 +13436,18 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
     pp.knobs2[1] = float(ev.height);
     pp.knobs2[2] = float(ev.eyes);
     pp.knobs2[3] = kEscapeFixedScale;
-    pp.knobs3[0] = float(frameNow() & 0xFFFFu);
+    // THE AREA DRAWS' SEQUENCE - the two every stochastic producer has (TEST-STREAMLINE-1 3c audit; MovingSample.h):
+    // AT REST the rest sequence, keyed on the view's rest frame K (its reflection's: the escape runs only with the ray
+    // reflection on, chainGlassEscape) past every moving index - path-independent, so a settled picture behind glass is a
+    // function of the scene and the eye; MOVING the view's frames since its scene's bind or its size change. It was the
+    // PROCESS frame count (frameNow()), at rest too: a picture behind glass carried the process's history.
+    {
+        const auto rvIt = mReflects.find(key);
+        const unsigned restFrames = rvIt != mReflects.end() && rvIt->second.sceneId == scene->historyId()
+                                        ? rvIt->second.restFrames : 0u;
+        pp.knobs3[0] = float(restFrames > 0u ? kGlassRestSequence + std::min(restFrames - 1u, (1u << 20) - 1u)
+                                             : ev.moving.index(ev.frame, scene->historyId(), ev.width, ev.height));
+    }
     pp.knobs3[1] = 2.0f * std::tan(0.5f * cam->getFOVy().valueRadians()) / float(std::max(ev.height, 1u));
     pp.knobs3[2] = float(kRayMaskNearField | kRayMaskFar);
     Ogre::TextureGpu *fogAerial = nullptr;

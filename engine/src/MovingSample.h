@@ -15,9 +15,10 @@
 // and NOT at a camera cut (the view keeps its age: the cut's ruling stands). Its 16 bits are the shaders' (`& 0xFFFF`).
 //
 // The producers' own counters are untouched - they also index ring slots and readbacks in flight - the index is their
-// difference from the counter's value at the restart. Used by all three: the reflection (OgreRayQuery.cpp, pp.knobs[2]),
+// difference from the counter's value at the restart. Used by all four: the reflection (OgreRayQuery.cpp, pp.knobs[2]),
 // the gather (OgreScreenProbeGather.cpp, rp.seq[0] and pp.knobs6[2]) and the area visibility (OgreAreaVis.cpp,
-// pp.strata[1]); source.moving_sample holds every moving site to it. No Ogre here: a pure function, unit-tested
+// pp.strata[1]) and the glass escape's area draws (OgreRayQuery.cpp, pp.knobs3[0]: it sampled by the PROCESS frame
+// count, at rest too); source.moving_sample holds every moving site to it. No Ogre here: a pure function, unit-tested
 // (tests/engine test_moving_sample.cpp).
 
 namespace jahshaka::engine::detail {
