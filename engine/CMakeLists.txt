@@ -729,10 +729,13 @@ endfunction()
 #    "upstream's commit + a directory of patches". Ogre's own hashes cannot see
 #    either: a media-only change produces identical Ogre-side hashes, so without
 #    this term a stale cache looks perfectly valid and loads.
-#  * JAHSHAKA_ENGINE_BUILD_ID — a hash of the engine's OWN sources. This TU set
-#    decides which Hlms properties are set, which datablocks exist and which
-#    listener extends the pass buffer. Editing OgreEngine.cpp changes what
-#    shaders mean without changing one byte of any template.
+#  * JAHSHAKA_ENGINE_BUILD_ID — a hash of the engine's OWN sources: the TEXTURE
+#    cache's term (the code that picks a texture's flags) and the warm-up's top-up
+#    signal. NOT the hlms layer's any more (TEST-STREAMLINE-1 1a): an Hlms disk-cache
+#    entry is found by its merged properties + pieces after every C++ hook, so an
+#    engine edit that changes a property makes a new entry, never a wrong one; the
+#    hlms layer keys on JAHSHAKA_SHADER_CACHE_CODE_ID, the container's own code
+#    (irisgl/cmake/EngineBuildId.cmake says why, with the anchors).
 #
 # Configure-time, not build-time: an input to a cache whose only failure mode is
 # "used a stale entry"; the submodule's HEAD files are configure dependencies (below),
@@ -789,6 +792,11 @@ set(JAHSHAKA_ENGINE_BUILD_ID_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/PhotonStatus.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Types.h)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
+# THE C++ THAT WRITES THE HLMS LAYER's BYTES (JAHSHAKA_SHADER_CACHE_CODE_ID): the container alone. A source of ours that
+# puts shader SOURCE text into an Hlms entry other than through properties and pieces is listed here too
+# (source.shader_cache_key reds an unlisted one).
+set(JAHSHAKA_SHADER_CACHE_CODE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp)
+string(REPLACE ";" "|" _cache_id_inputs_arg "${JAHSHAKA_SHADER_CACHE_CODE_SOURCES}")
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(_build_id_header "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/jahshaka_engine_build_id.h")
 file(MAKE_DIRECTORY "${JAHSHAKA_ENGINE_BUILD_ID_DIR}")
@@ -797,6 +805,7 @@ add_custom_command(
     OUTPUT "${_build_id_header}"
     COMMAND ${CMAKE_COMMAND}
             "-DJAH_BUILD_ID_SOURCES=${_build_id_inputs_arg}"
+            "-DJAH_BUILD_ID_CACHE_SOURCES=${_cache_id_inputs_arg}"
             "-DJAH_BUILD_ID_OUT=${_build_id_header}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
     DEPENDS ${_build_id_inputs} "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"

@@ -18,10 +18,10 @@
 
 #include <OgreHlmsAsyncCompiler.h>
 #include <mutex>
-// JAHSHAKA_ENGINE_BUILD_ID: a hash of this library's own sources, regenerated
-// on every BUILD (irisgl/cmake/EngineBuildId.cmake) rather than at configure
-// time — an incremental edit to OgreEngine.cpp changes what the generated
-// shaders mean and must therefore invalidate the cache (LIGHTING_FIX fix 10).
+// JAHSHAKA_SHADER_CACHE_CODE_ID: a hash of THIS file (the container that writes the
+// layers' bytes), regenerated on every BUILD (irisgl/cmake/EngineBuildId.cmake, which
+// says why the engine's other sources are not a term: an Hlms entry is keyed by its
+// merged properties and pieces after every C++ hook - TEST-STREAMLINE-1 1a).
 #include "jahshaka_engine_build_id.h"
 
 #include <OgreGpuProgramManager.h>
@@ -436,12 +436,15 @@ void ShaderCache::configure(const std::string &dir, const std::string &mediaDir,
     //     is a different entry, never a stale one. What can make an entry wrong
     //     is the PRODUCER: the fork's compile path (ogre=), the SPIR-V compiler it
     //     links (glslang=), the build type, and the render system (load());
-    //   * hlms.N.bin is the template parse and the property sets: the engine's
-    //     own C++ (engine= decides which Hlms properties are set and which
-    //     datablocks exist), the fork, the staged templates and Photon's media,
+    //   * hlms.N.bin is the template parse and the property sets: the fork, the
+    //     staged templates and Photon's media, this container's own code (code=),
     //     and the IdString/hash layout terms — plus the GPU (load()), whose caps
-    //     are properties. Studio reaches Hlms only through property VALUES, which
-    //     are hash inputs: a new set is a new entry.
+    //     are properties. The engine's C++ and Studio reach Hlms only through
+    //     property and piece VALUES, which are the entry's key (taken after every
+    //     C++ hook, OgreHlms.cpp createShaderCacheEntry; the root layout and the
+    //     PSOs are made fresh at every compile): a new set is a new entry, never a
+    //     wrong one (TEST-STREAMLINE-1 1a; the engine's full build id was a term
+    //     here and re-keyed every cache at every engine edit).
     const std::string format = "format=" + std::to_string(kCacheFormat);
     const std::string build =
 #if OGRE_DEBUG_MODE
@@ -454,12 +457,12 @@ void ShaderCache::configure(const std::string &dir, const std::string &mediaDir,
                    "|glslang=" + JAH_GLSLANG_VERSION_TERM + build;
     std::ostringstream h;
     h << format
-      // The engine library's own build identity, and the commit of our Ogre fork
-      // that produced the .so and staged the media. An engine-side change to a
-      // shader piece changes SHADER BEHAVIOUR while leaving every Ogre-side hash
-      // untouched — without this term, re-running build-ogre.sh on a new fork
-      // commit leaves a cache Ogre considers perfect.
-      << "|engine=" << JAHSHAKA_ENGINE_BUILD_ID
+      // The container's own code (what writes these bytes), and the commit of our
+      // Ogre fork that produced the .so and staged the media: a fork-side change to
+      // a shader piece changes SHADER BEHAVIOUR while leaving every Ogre-side hash
+      // untouched — without ogre=, re-running build-ogre.sh on a new fork commit
+      // leaves a cache Ogre considers perfect.
+      << "|code=" << JAHSHAKA_SHADER_CACHE_CODE_ID
       << "|ogre=" << JAHSHAKA_OGRE_FORK_COMMIT
       // Belt and braces over the staged templates (see hashTree).
       << "|media=" << hashTree(mMediaDir + "Hlms")
