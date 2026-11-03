@@ -1284,6 +1284,10 @@ constexpr ArmDef kArms[] = {
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
       "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
+    { ArmId::ReflectScreenOff, 0.0, 0.0, 1.0,
+      "THE SCREEN SILENT (PHOTON-7-9A, the lead's ruling for rtreflect.mirror_blend; a test arm no product frame sets): 1 = "
+      "the hybrid's screen half gives no answer - every sample is the ray's, its hits shaded as shipped (the stereo "
+      "chain's route on a mono view) - the reference the screen's share is read against at the same pose; 0 = shipped." },
     { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
       "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
       "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "

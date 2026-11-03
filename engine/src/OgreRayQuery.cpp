@@ -7163,6 +7163,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE LOBE DRAW'S SEED OFFSET (the measuring arm reflect.seedOffset: 0 shipped).
     pp.denoiser[2] = float(std::lround(armValue(ArmId::ReflectSeedOffset)));
     pp.denoiser[3] = 0.0f;
+    // THE TEST ARM reflect.screenOff (rtreflect.mirror_blend's reference): the screen gives no answer, the hits as shipped.
+    if (arm(ArmId::ReflectScreenOff, false)) pp.screen[0] = 0.0f;
     if (arm(ArmId::ReflectFlatHits, false)) {   // the measuring arm reflect.flatHits
         pp.denoiser[3] = 1.0f;
         // ...AND THE SCREEN GIVES NO ANSWER (PHOTON-7-9A, the lead's ruling (A)): the screen half answers from the
