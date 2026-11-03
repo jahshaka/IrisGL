@@ -3249,8 +3249,15 @@ void RayQueryTier::close() {
 /// wait: a scene can be destroyed on any frame, and draining the GPU to free a
 /// thumbnail's structures would be a stall the user feels.
 void RayQueryTier::forgetScene(OgreScene *scene) {
+    // EVERY MAP KEYED BY THE SCENE's ADDRESS DIES WITH THE SCENE, before anything can return (TEST-STREAMLINE-1 3c audit):
+    // the cards' and the voxel sides' views were forgotten only past the `!saP` return below, so a scene that held no
+    // structures of its own kept them, and a new scene allocated at its address inherited its cards and voxel sides -
+    // another scene's lighting. source.scene_maps holds every such map to an erase here, ahead of the first return.
     mForgottenReflects.erase(scene);   // (the shot-view fold's entries die with their scene)
     if (mGather) mGather->forgetScene(scene);
+    forgetCardMovers(scene);
+    forgetCardGather(scene);
+    forgetVoxelSides(scene);
     SceneAs *saP = asOf(scene);
     if (!saP) return;
     SceneAs &sa = *saP;
@@ -3298,9 +3305,6 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     sa.compactWaiting.clear();
     detail::monitor::forgetGpuOwner(&sa);
     scene->rayStructuresSlot().reset();
-    forgetCardMovers(scene);
-    forgetCardGather(scene);
-    forgetVoxelSides(scene);
 }
 
 // ---------------------------------------------------------------------------
