@@ -7162,7 +7162,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
     // THE LOBE DRAW'S SEED OFFSET (the measuring arm reflect.seedOffset: 0 shipped).
     pp.denoiser[2] = float(std::lround(armValue(ArmId::ReflectSeedOffset)));
-    pp.denoiser[3] = arm(ArmId::ReflectFlatHits, false) ? 1.0f : 0.0f;   // the measuring arm reflect.flatHits
+    pp.denoiser[3] = 0.0f;
+    if (arm(ArmId::ReflectFlatHits, false)) {   // the measuring arm reflect.flatHits
+        pp.denoiser[3] = 1.0f;
+        // ...AND THE SCREEN GIVES NO ANSWER (PHOTON-7-9A, the lead's ruling (A)): the screen half answers from the
+        // previous picture - a cache - so under the arm the ray and the denoiser run alone, the caches out: the stereo
+        // chain's route (no screen sources in stereo). The product's frames never set the arm.
+        pp.screen[0] = 0.0f;
+    }
     // THE GI FREEZE (M1's measuring arm): the reflection keeps its histories under 1; under 2 (THE WORLD HELD) the caches
     // and the gather are held and the reflection runs live - its own estimator measured alone.
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;

@@ -1287,8 +1287,11 @@ constexpr ArmDef kArms[] = {
     { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
       "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
       "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "
-      "no footprint or mip, no fog, no record - the reflection's estimator and denoiser measured alone (the hit caches "
-      "owned ~half the glossy noise map and a third of the lag law). 0 = shipped." },
+      "no footprint or mip, no fog, no record - and the SCREEN gives no answer (its read of the previous picture is a "
+      "cache; PHOTON-7-9A, the lead's ruling (A)) - the reflection's ray estimator and denoiser measured alone, the "
+      "caches out: the STEREO chain's route (no screen sources in stereo); the desktop hybrid's motion and lag are "
+      "rtreflect.walk_world_hybrid's and rtreflect.history_detectors' (the hit caches owned ~half the glossy noise map "
+      "and a third of the lag law). 0 = shipped." },
     { ArmId::ReflectWindow, 0.0, 0.0, 64.0,
       "THE MOVING WINDOW (PHOTON-7 stage 6, the lead's window measurement, a measuring arm): the reflection's "
       "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "
