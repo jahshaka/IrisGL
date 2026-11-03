@@ -439,20 +439,28 @@ StepMeasure measureStep(const LocalSpace &space,
         });
     }
 
-    // 4. THE EXTERNAL POSITIONS the output lost.
+    // 4. THE EXTERNAL POSITIONS the output lost. A weld id is the MESH's (LocalSpace::weld), never an index into the
+    // group's local positions: the lost position is read at the first local vertex holding it (every vertex of one
+    // weld id stands at one position, +-0 folded). (TEST-STREAMLINE-1 5c: `vertexOf(P, pc, w)` read a wrong vertex
+    // under the local count and past the array above it - meshbake.archive_bakes.rebuild's SIGSEGV under load.)
     if (!externalWelds.empty()) {
         std::vector<unsigned> outW;
         for (unsigned v : keptV) outW.push_back(weld[v]);
         std::sort(outW.begin(), outW.end());
-        std::vector<unsigned> inW;
-        for (unsigned v : inV) inW.push_back(weld[v]);
+        std::vector<std::pair<unsigned, unsigned>> inW;   // (weld id, the first local vertex at it)
+        for (unsigned v : inV) inW.push_back({ weld[v], v });
         std::sort(inW.begin(), inW.end());
-        inW.erase(std::unique(inW.begin(), inW.end()), inW.end());
+        inW.erase(std::unique(inW.begin(), inW.end(),
+                              [](const std::pair<unsigned, unsigned> &a, const std::pair<unsigned, unsigned> &b) {
+                                  return a.first == b.first;
+                              }),
+                  inW.end());
         for (unsigned w : externalWelds) {
-            if (!std::binary_search(inW.begin(), inW.end(), w) || std::binary_search(outW.begin(), outW.end(), w)) continue;
+            const auto at = std::lower_bound(inW.begin(), inW.end(), std::make_pair(w, 0u));
+            if (at == inW.end() || at->first != w || std::binary_search(outW.begin(), outW.end(), w)) continue;
             ++m.lockedLost;
             const float d = outTris.empty() ? std::numeric_limits<float>::infinity()
-                                            : gridO.closest(q, vertexOf(P, pc, w));
+                                            : gridO.closest(q, vertexOf(P, pc, at->second));
             m.lostLocked = std::max(m.lostLocked, std::isfinite(d) ? d : 0.0f);
             fan.push_back(w);
         }
