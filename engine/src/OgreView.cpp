@@ -2,6 +2,7 @@
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+#include "ReflectChainRules.h"
 
 // The inset's letterbox rectangle is written straight onto its scene pass'
 // DEFINITION (chain::PipHandles::scenePass) between frames — Ogre re-reads it
@@ -1129,10 +1130,10 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
         const bool hadWorkspace = detachWorkspace();
         // Only when the shape is wrong: the session's pair is BORN layered
         // (OgreEngine::createStereoPairView), and ending a session makes it 2D.
-        if (mTexture && mTexture->getNumSlices() != (mStereo ? 2u : 1u)) {
+        if (mTexture && mTexture->getNumSlices() != stereoTargetLayers(mStereo)) {
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture);
             mTexture = createRtt(mRoot, processUniqueName("rtt"), mWidth, mHeight,
-                                 mRequestedSamples, mStereo ? 2u : 1u);
+                                 mRequestedSamples, stereoTargetLayers(mStereo));
         }
         rebuildDetachedWorkspaceDef();
         if (hadWorkspace) attachWorkspace();

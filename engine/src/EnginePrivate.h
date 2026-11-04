@@ -7778,6 +7778,9 @@ public:
     /// the target and rebuilds the workspace definition.
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
+    /// A FAULT A PASS OF THIS VIEW's FRAME FOUND (the reflection's shape refusal, PHOTON-7-9A): written to the engine's
+    /// error sink, which the frame publishes as its error (RenderThread::finishPublish) - never a silent frame.
+    void noteFrameFault(const std::string &text) { mError = text; }
     bool stereo() const { return mStereo; }
     /// The no-ray route's screen-GI listener (PHOTON-7 stage 7, 7-6; null where the chain gathers or draws nothing).
     const ScreenGiListener *screenGiListener() const { return mScreenGiListener.get(); }

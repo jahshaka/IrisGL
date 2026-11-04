@@ -54,6 +54,7 @@
 #include "AtomPass.h"
 #include <thread>
 #include "ReadbackDecode.h"
+#include "ReflectChainRules.h"
 #include "EnginePrivate.h"
 #include "HitListLaw.h"   // the reflection rest's record allowance (URGENT #157)
 #include "GpuCheckpoints.h"
@@ -1510,6 +1511,8 @@ private:
     /// The pipeline could not be made on this device; say so ONCE and take the
     /// fallback picture for the rest of the process.
     bool                  mReflectFailed = false;
+    /// Recordings refused for a chain not at the view's stereo shape (ReflectChainRules.h; a defect: 0 is the law).
+    unsigned long long mReflectShapeRefusals = 0ull;
 
     // ---- THE SCREEN-PROBE GATHER (GATHER-1a) ---------------------------
     // Three more compute dispatches on the SAME frame command buffer and the
@@ -6721,6 +6724,7 @@ void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
+    st.reflectShapeRefusals = mReflectShapeRefusals;   // (the tier's, every view)
     for (const auto &kv : mReflects) {
         if (kv.second.sceneId != scene->historyId()) continue;   // (the one identity, never an address)
         st.reflect = true;
@@ -6930,7 +6934,19 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
     // fullW is one eye's, the trace is per layer, and the dispatch's z is the eye.
     const unsigned eyeLayers = ssrTex->getNumSlices();
-    if (stereo != (eyeLayers == 2u)) return;   // a chain that is not the view's shape yet
+    // THE SHAPE (ReflectChainRules.h): OgreView::setStereo rebuilds the chain at the view's shape inside the call, so a
+    // recording that finds another shape is a DEFECT - refused, counted (RayQueryStatus::reflectShapeRefusals) and the
+    // frame's error naming the view, never a silent frame with no reflection (w = 0 everywhere: the bound cube's open
+    // share; PHOTON-7-9A, the lead's ruling (A) on cube site (6b)).
+    if (!reflectChainMatchesStereo(stereo, eyeLayers)) {
+        ++mReflectShapeRefusals;
+        const std::string why = "reflection refused: view '" + view->name() + "' is " + (stereo ? "stereo" : "mono") +
+                                " but its chain's images hold " + std::to_string(eyeLayers) +
+                                " layer(s) - a chain not rebuilt at the view's shape (a defect)";
+        if (mReflectShapeRefusals == 1u) Ogre::LogManager::getSingleton().logMessage("R5 " + why + " (logged once; counted)");
+        view->noteFrameFault(why);
+        return;
+    }
 
     // ---- THE HIT SET (the tier's one collection, hitSetOf): the cascades the hits are shaded from (route A,
     // innermost first), the one environment, the surface cache the hits read first, the geometric normal's rows, the

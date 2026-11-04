@@ -5733,6 +5733,10 @@ struct RayQueryStatus {
     unsigned reflectRestMoverFrames = 0u;
     /// THE CAMERA CUTS a reflection view detected (N3, the gather's rule) - each one its histories cleared.
     unsigned reflectCameraCuts = 0u;
+    /// THE RECORDINGS REFUSED for a chain not at its view's stereo shape (PHOTON-7-9A; the tier's, every view): a view's
+    /// chain is rebuilt at its shape inside View::setStereo, so this is a DEFECT counter - 0 is the law; each refusal is
+    /// also its frame's error, naming the view.
+    unsigned long long reflectShapeRefusals = 0ull;
 };
 
 /// THE VISIBILITY BUFFER'S SPLIT AND ITS BUCKETS (ATOM S3-DRAW,

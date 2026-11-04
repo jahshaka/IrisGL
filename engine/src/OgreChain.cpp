@@ -81,6 +81,7 @@
 #include "AtomPass.h"
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"   // kHitDecodeRenderQueue (PHOTON-HIT-SHADE-1)
+#include "ReflectChainRules.h"   // the reflection chain's rules, pure (PHOTON-7-9A)
 
 
 #include <Compositor/OgreCompositorWorkspaceDef.h>
@@ -655,26 +656,29 @@ bool ChainDesc::anyEffect() const {
            distortion || hzb || !looks.empty() || hdrReadback;
 }
 
-bool ChainDesc::screenSources() const {
-    // THE HYBRID IS THE ONE SHAPE (PHOTON-7-9A's amendment, the owner's ruling): a mono chain's reflection reads the
-    // screen first, then the rays (a ray chain), or marches the screen alone (a chain without rays, until NO-RAY-CUT-1).
-    return ssr > 0 && !stereo;
+bool ChainDesc::screenSources() const { return reflectScreenSources(ssr, stereo); }   // (ReflectChainRules.h says the law)
+
+namespace {
+const char *reflectChainImageName(ReflectChainImage i) {
+    switch (i) {
+    case ReflectChainImage::RefractOut: return chain::kRefractOut;
+    case ReflectChainImage::Distorted:  return chain::kDistorted;
+    case ReflectChainImage::AoApplied:  return chain::kAoApplied;
+    case ReflectChainImage::Rt0:        break;
+    }
+    return chain::kRt0;
 }
+}   // namespace
 
 const char *ChainDesc::screenTraceSource() const {
-    // the last LINEAR stage before the camera-side passes: the refractives' copy where refraction runs (a refractive
-    // surface is a real surface), else the opaque and blended composite - never the distortion's warp nor the AO apply
-    return refractions ? chain::kRefractOut : chain::kRt0;
+    return reflectChainImageName(reflectScreenTraceSource(refractions));
 }
 
 const char *ChainDesc::composedTexture() const {
-    // `build`'s sceneResult, in its order: refraction, then distortion, then the AO apply, each over the one before.
-    return ssao ? chain::kAoApplied : distortion ? chain::kDistorted : refractions ? chain::kRefractOut : chain::kRt0;
+    return reflectChainImageName(reflectComposedImage(ssao, distortion, refractions));
 }
 
-bool ChainDesc::rasterMarch() const {
-    return screenSources() && !rayReflect;
-}
+bool ChainDesc::rasterMarch() const { return reflectRasterMarch(ssr, stereo, rayReflect); }
 
 bool ChainDesc::prepass() const {
     // The SSR stage runs for the march or for the rays; the TRAVERSAL runs for it,
