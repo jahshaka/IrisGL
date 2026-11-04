@@ -2218,6 +2218,7 @@ private:
     X(RaysOriginPoint, "rays.originPoint") /* every view ray job's lift carries the depth-rebuilt point's own error - its depth quantum and the rasteriser's sub-pixel snap (0: the float bound alone - the float-only control) */ \
     X(ReflectSeedOffset, "reflect.seedOffset") /* the lobe draw's frame index offset (a second, independent noise) */ \
     X(ReflectScreenOff, "reflect.screenOff") /* the hybrid's screen half gives no answer: the ray's own picture (rtreflect.mirror_blend's reference) */ \
+    X(ReflectShapeMismatch, "reflect.shapeMismatch") /* a STEREO view's recording reads its chain as the other shape: the shape refusal's negative control (vr.hit_list_stereo) */ \
     X(ReflectFlatHits, "reflect.flatHits") /* every reflection ray's hit answered by a constant of its instance (the estimator and denoiser measured alone) */ \
     X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \

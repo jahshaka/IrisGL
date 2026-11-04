@@ -1288,6 +1288,11 @@ constexpr ArmDef kArms[] = {
       "THE SCREEN SILENT (PHOTON-7-9A, the lead's ruling for rtreflect.mirror_blend; a test arm no product frame sets): 1 = "
       "the hybrid's screen half gives no answer - every sample is the ray's, its hits shaded as shipped (the stereo "
       "chain's route on a mono view) - the reference the screen's share is read against at the same pose; 0 = shipped." },
+    { ArmId::ReflectShapeMismatch, 0.0, 0.0, 1.0,
+      "THE SHAPE REFUSAL's NEGATIVE CONTROL (PHOTON-7-9A, the lead's ruling; a test arm no product frame sets): 1 = every "
+      "STEREO view's reflection recording reads its chain as the other stereo shape, so it is refused and counted "
+      "(RayQueryStatus::reflectShapeRefusals) and is its frame's error - vr.hit_list_stereo sets it for one eye frame and "
+      "reads the count 1, proving the counter counts; 0 = shipped (the shape as built)." },
     { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
       "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
       "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "

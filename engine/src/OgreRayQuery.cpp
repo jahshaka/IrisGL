@@ -6938,7 +6938,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // recording that finds another shape is a DEFECT - refused, counted (RayQueryStatus::reflectShapeRefusals) and the
     // frame's error naming the view, never a silent frame with no reflection (w = 0 everywhere: the bound cube's open
     // share; PHOTON-7-9A, the lead's ruling (A) on cube site (6b)).
-    if (!reflectChainMatchesStereo(stereo, eyeLayers)) {
+    // (the arm reflect.shapeMismatch: a STEREO view's recording reads the other shape - the counter's negative control)
+    if (!reflectChainMatchesStereo(stereo, eyeLayers) || (stereo && arm(ArmId::ReflectShapeMismatch, false))) {
         ++mReflectShapeRefusals;
         const std::string why = "reflection refused: view '" + view->name() + "' is " + (stereo ? "stereo" : "mono") +
                                 " but its chain's images hold " + std::to_string(eyeLayers) +
