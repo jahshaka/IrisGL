@@ -7358,8 +7358,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the
     // reflection's rest key (reflectRestKey: never a move), and every parameter of the pass but the ones a still frame
-    // changes by construction (the frame index, the previous basis, the view's age, the rest frame itself, the moved
-    // instances' boxes). A Hits photon view RESTS like the shipped view (PHOTON-7-9A, the lead's ruling: a viewing aid
+    // changes by construction (the frame index, the previous basis, the rest frame itself, the moved instances'
+    // boxes). A Hits photon view RESTS like the shipped view (PHOTON-7-9A, the lead's ruling: a viewing aid
     // never changes the estimator's state): a texel that stopped paints kPhotonRest - no ray shaded it this frame.
     HitView *restHits = nullptr;
     {
