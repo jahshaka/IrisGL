@@ -1513,6 +1513,7 @@ private:
     bool                  mReflectFailed = false;
     /// Recordings refused for a chain not at the view's stereo shape (ReflectChainRules.h; a defect: 0 is the law).
     unsigned long long mReflectShapeRefusals = 0ull;
+    bool mReflectShapeLogged = false;   ///< the genuine refusal's one log line spent (a forced one never spends it)
 
     // ---- THE SCREEN-PROBE GATHER (GATHER-1a) ---------------------------
     // Three more compute dispatches on the SAME frame command buffer and the
@@ -6939,12 +6940,20 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // frame's error naming the view, never a silent frame with no reflection (w = 0 everywhere: the bound cube's open
     // share; PHOTON-7-9A, the lead's ruling (A) on cube site (6b)).
     // (the arm reflect.shapeMismatch: a STEREO view's recording reads the other shape - the counter's negative control)
-    if (!reflectChainMatchesStereo(stereo, eyeLayers) || (stereo && arm(ArmId::ReflectShapeMismatch, false))) {
+    const bool shapeWrong = !reflectChainMatchesStereo(stereo, eyeLayers);
+    const bool shapeForced = !shapeWrong && stereo && arm(ArmId::ReflectShapeMismatch, false);
+    if (shapeWrong || shapeForced) {
         ++mReflectShapeRefusals;
-        const std::string why = "reflection refused: view '" + view->name() + "' is " + (stereo ? "stereo" : "mono") +
-                                " but its chain's images hold " + std::to_string(eyeLayers) +
-                                " layer(s) - a chain not rebuilt at the view's shape (a defect)";
-        if (mReflectShapeRefusals == 1u) Ogre::LogManager::getSingleton().logMessage("R5 " + why + " (logged once; counted)");
+        // the forced refusal names its arm and leaves the genuine refusal's one log line unspent (the reader's audit)
+        const std::string why = shapeForced
+            ? "reflection refused: view '" + view->name() + "' - reflect.shapeMismatch forced (the counter's negative control)"
+            : "reflection refused: view '" + view->name() + "' is " + (stereo ? "stereo" : "mono") +
+                  " but its chain's images hold " + std::to_string(eyeLayers) +
+                  " layer(s) - a chain not rebuilt at the view's shape (a defect)";
+        if (shapeWrong && !mReflectShapeLogged) {
+            mReflectShapeLogged = true;
+            Ogre::LogManager::getSingleton().logMessage("R5 " + why + " (logged once; counted)");
+        }
         view->noteFrameFault(why);
         return;
     }
