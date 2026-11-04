@@ -26,8 +26,9 @@
 //   where the support is over a pixel: Lumen's relative-noise gate (50 %) and its 4-8 jittered taps belong to a
 //   pipeline whose TSR re-jitters and accumulates them; this one has none (measured: the literal arm doubled the glass
 //   walk's glossy flicker, p99 3.63 -> 6.25). Never fed back into the history.
-//   THE WRITE: the result in linear radiance, w = the roughness gate's feather times the young VIEW's fade (a graded
-//   screenshot's two frames).
+//   THE WRITE: the result in linear radiance, w = the roughness gate's feather - from a view's FIRST frame (no young
+//   view's fade: PHOTON-7-9A deleted it - its other weight went to the bound environment cube, the sky's capture inside
+//   a sealed room, ~7 frames of light through walls on every view's first frames, presented or not).
 //
 // SAME DESCRIPTOR SET as rq_reflect.comp — the same layout, the same bound set, the same Params (through `denoiser`).
 #extension GL_EXT_ray_query : require
@@ -77,9 +78,6 @@ float gExposure = 1.0;
 #include "jah_reflect_rest.glsl"
 #include "jah_reflect_state.glsl"
 
-/// THE YOUNG VIEW'S FADE (a graded screenshot's view lives about two frames): a traced reflection is shown whole once
-/// the VIEW has this many frames of history - a fact about the view, not about a texel.
-const float kYoungViewFrames = 8.0;
 /// Lumen's spatial constants (r.Lumen.Reflections.BilateralFilter.*): the kernel radius in pixels, the samples, the depth
 /// weight's scale, the disocclusion frames.
 const float kKernelRadius = 8.0;
@@ -429,9 +427,7 @@ void main()
 				}
 		}
 	}
-	// ---- THE WRITE: the feather (owner, ledger section 426) and the young VIEW's fade ----
-	float gate = 1.0 - smoothstep( roughGate - feather, roughGate + feather, r );
-	const float young = min( ( p.stereo.y + 1.0 ) / kYoungViewFrames, 1.0 );
-	gate *= mix( young, 1.0, centreChance );
+	// ---- THE WRITE: the feather (owner, ledger section 426) - the ray reflection's own answer from the view's first frame ----
+	const float gate = 1.0 - smoothstep( roughGate - feather, roughGate + feather, r );
 	imageStore( ssrReflection, ivec3( px, gEye ), jahRoundHalf( finite3( outRgb ) && gate > 0.0 ? vec4( outRgb, gate ) : vec4( 0.0 ) ) );
 }

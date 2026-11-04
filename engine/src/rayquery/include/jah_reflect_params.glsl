@@ -71,8 +71,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// above is the one camera's, exactly as before. One dispatch, one
 	/// descriptor set, one history ring: the eye is the layer (gEye).
 	///
-	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
-	/// written (0 on a first frame, a resize, a scene bind): the filter's young-VIEW fade (a two-frame screenshot).
+	/// y = unused (was THE VIEW'S AGE for the filter's young-view fade, deleted by PHOTON-7-9A: its fallback was the
+	/// bound environment cube - the sky inside a sealed room).
 	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
 	/// w = THE REST'S LENGTH N (PHOTON-2 fix F1): the frames the rest mean is handed over in, the gather's own
 	/// settleFramesOf(the reflection's 32-frame history) — after which the view holds.

@@ -1289,14 +1289,6 @@ private:
         /// frame, a resize and a scene change all are.
         EyeBasisF prev[2];
         bool  havePrev = false;
-        /// HOW MANY CONSECUTIVE FRAMES THIS HISTORY HAS BEEN WRITTEN — the
-        /// VIEW's age, which is a different fact from a texel's sample count
-        /// (PAN-SMEAR-1). A pixel the camera has just turned onto has no
-        /// previous position on screen, and the shader must tell that apart
-        /// from a view that is two frames old: the second is what the filter's
-        /// warm-up exists for, the first is an ordinary frame of an ordinary
-        /// pan. Restarts with `havePrev`.
-        unsigned historyFrames = 0;
         /// Was the LAST recorded frame a stereo one? A view that changes shape
         /// (a session beginning or ending on it) has a history whose halves mean
         /// something else, so the mean starts again — the same rule as a resize.
@@ -6615,7 +6607,6 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     retireImage(rv.refine);
     rv.imagesReady = false;
     rv.havePrev = false;
-    rv.historyFrames = 0;
     rv.w = w; rv.h = h;
     rv.layers = layers;
     // The second image, THE STATE TEXEL (PHOTON-7 stage 6, L8; jah_reflect_state.glsl): the surface's distance (the
@@ -7127,7 +7118,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
     // continuation, OgreScreenProbeGather.cpp).
     pp.screen[0] = screenTrace ? 1.0f : 0.0f;
-    pp.screen[1] = 0.0f;
     pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
                                        : (chainD.ssr >= 2 ? 96.0f : 48.0f);
     pp.screen[3] = float(chainD.ssrMarchPhase);
@@ -7187,19 +7177,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // history's two halves were one picture, or its one picture is now two.
     // ...AND A CAMERA CUT (PHOTON-2 round 2, N3: isCameraCut, the gather's rule - Lumen's): the histories restart - the
     // images cleared this frame (a distance of zero is "no history here") - instead of ghosting through what the
-    // reprojection's tests happened to accept. THE VIEW'S AGE IS KEPT (PHOTON-7-9A, the lead's ruling): a cut is a WARM
-    // view whose pixels are all new (PAN-SMEAR-1's rule: full confidence, this frame's sample), never a young one - the
-    // young fade (rq_reflect_filter.comp, kYoungViewFrames) lerps the reflection toward the FALLBACK environment cube,
-    // which in a sealed room is the sky's capture: measured, ~180,000 px of a glass room's panes blue-grey for 6-7
-    // frames after every cut (spikes/photon-7-9a/cut/). The fade stays for a view's own first frames.
-    bool cameraCut = false;
+    // reprojection's tests happened to accept. Every pixel is then a NEW pixel answered by this frame's sample at full
+    // weight (PAN-SMEAR-1's rule) - no young-view fade toward the bound environment cube (PHOTON-7-9A: deleted; it was
+    // the sky's capture inside a sealed room, ~180,000 px of a glass room's panes blue-grey for 6-7 frames after every
+    // cut, spikes/photon-7-9a/cut/).
     if (rv.havePrev && rv.prevStereo == stereo &&
         isCameraCut(rv.prev[0].camPos, rv.prev[0].rayRight, rv.prev[0].rayDown, rv.prev[0].fwd, eyeB[0].camPos,
                     eyeB[0].rayRight, eyeB[0].rayDown, eyeB[0].fwd)) {
-        rv.havePrev = false;   // the branch below withholds the previous basis (the age stays: cameraCut)
+        rv.havePrev = false;   // the branch below withholds the previous basis
         rv.needsClear = true;
         ++rv.cameraCuts;
-        cameraCut = true;
     }
     if (rv.havePrev && rv.prevStereo == stereo) {
         memcpy(pp.prevCamPos, rv.prev[0].camPos, sizeof(pp.prevCamPos));
@@ -7215,12 +7202,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     } else {
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
         memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
-        if (!cameraCut) rv.historyFrames = 0;
     }
-    // THE VIEW'S AGE, in frames of unbroken history (rq_reflect.comp's
-    // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
-    // stereo shape, exactly where the previous basis is withheld above - never at a camera cut, a warm view's).
-    pp.stereo[1] = float(rv.historyFrames);
+    // (stereo.y and screen.y stay zero - pp{} - and unread: the view's age fed the filter's young-view fade, deleted by
+    // PHOTON-7-9A with the age itself; a rest's "one frame of history" is `sameEye` below, which needs havePrev.)
     // knobs2.x: THE REST (PHOTON-2 1e), set below once every parameter is known; a lamp's step, a cloud or a
     // re-injection is the temporal pass' clamp's (the radiance-key cap is deleted with its key, PHOTON-2 1b).
     pp.knobs2[0] = 0.0f;
@@ -7390,7 +7374,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // tables, the sun legs, the id pass's image, the alpha table, the origin's terms, the fog, the metal route, the
         // clouds, the rest's own arms, the screen trace's and the denoiser's. NOT the eye (`sameEye` compares its basis
         // bit for bit), nor what a still frame changes by construction: the frame index (knobs.z), the rest frame
-        // (knobs2.x), the view's age (stereo.y), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
+        // (knobs2.x), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
         // (motion.w: a move, which breaks per texel) and the list's capacity (hitList.x: it grows in place).
         unsigned long long paramsKey = 1469598103934665603ull;
         const auto foldBytes = [&paramsKey](const void *d, size_t n) {
@@ -7437,7 +7421,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
         const bool still = !stereo && sameEye && rv.restKnown && restKey == rv.restKey &&
-                           paramsKey == rv.restParams && rv.historyFrames >= 1u;
+                           paramsKey == rv.restParams;
         rv.restableLast = !stereo;
         rv.recordedFrame = frameNow();
         rv.recordedDraw = rv.scene ? rv.scene->drawSerial() : 0u;
@@ -7507,7 +7491,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                     ? ((rv.restSession & 0xFFFu) << 20u) | (rv.restFrames & 0xFFFFFu)
                                     : 0u;
     }
-    if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     // THE REST'S COMPACT PATH (kReflectCompactTexels): at rest in place, a mono view, a traced frame, no reference arm -
     // the tile pass lists this frame's converging texels in the half it flips to, and the compact pass takes them when
     // last frame's list (the other half) fit.
