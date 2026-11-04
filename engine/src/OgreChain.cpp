@@ -2862,8 +2862,10 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             p->mProfilingId = "Jahshaka refractives";
             p->mIdentifier = kRefractivesPassIdentifier;   // (its escape list: PHOTON-7 10-4 R4)
         }
-        sceneResult = kRefractOut;
     }
+    // THE SCENE RESULT AFTER EACH LINEAR STAGE IS THE ONE RULE's (ReflectChainRules.h reflectComposedImage - the stop's
+    // composed picture, ChainDesc::composedTexture, reads the same function): never a parallel decision here
+    sceneResult = reflectChainImageName(reflectComposedImage(false, false, desc.refractions));
 
     // ---- DISTORTION (POST_LOOKS_SPEC.md §5.3) -------------------------------
     //
@@ -2920,8 +2922,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
             if (desc.letterbox) scissor(handlesOut, q);
         }
-        sceneResult = kDistorted;
     }
+    sceneResult = reflectChainImageName(reflectComposedImage(false, desc.distortion, desc.refractions));
 
     // SSR's colour history for the NEXT frame — copied here, deliberately, and
     // not at the end of the chain: what a reflection needs is the scene's
@@ -3047,8 +3049,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             // and a relative scissor on a reduced target truncates by a row.)
             if (desc.letterbox) scissor(handlesOut, q);
         }
-        sceneResult = kAoApplied;
     }
+    sceneResult = desc.composedTexture();   // (the last linear stage: the picture the composed stop reads, by the one rule)
 
     // THE PHOTON VIEW'S TERM SHOWN (ChainDesc::photonTerm): the scene result copied, the opaque surfaces' term
     // composited over it where a term shader wrote it (straight alpha: 1 written, 0 the transparent clear), into a
