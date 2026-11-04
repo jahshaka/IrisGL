@@ -9802,6 +9802,10 @@ struct PublishedEngineFrame {
         unsigned           workspaceGeneration = 0;
         unsigned long long globalsPushes = 0;
         PostFxDesc         postFx;              ///< the EFFECTIVE chain the view drew with (a VR policy applied)
+        /// THE CHAIN's ROUTES AS BUILT (PHOTON-7-9A; the engine's decision, published for a host - the lab's `routes`
+        /// verb): the screen-probe gather, the no-ray route's screen integrate, the ray reflection. The fixtures' door
+        /// (inspect::ViewEcho::routes) answers the same three on the same frame (engine.published_routes holds them equal).
+        bool               routeGather = false, routeIntegrate = false, routeReflect = false;
     };
     /// ONE FRAME'S ERROR (U3 F3): the record it applied, the frame, the text.
     struct FrameError {
