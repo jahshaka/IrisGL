@@ -1,0 +1,259 @@
+OBJ: the word buffer must not be a fixed 4096-byte member (and must stop at EOF)
+
+Backport of upstream assimp commit 0404c875 ("Migrate OBJ parser from
+fixed-size stack buffer to std::string", PR #6714) -- merged after our pinned
+release tag v6.0.5. No CVE, but it is the same defect family as the four FBX
+ones and .obj is a first-class Jahshaka import format, so it rides along.
+
+The bug
+-------
+`ObjFileParser::copyNextWord(char *pBuffer, size_t length)` copied a
+whitespace-delimited token into the class's fixed `char mBuffer[4096]`,
+bounded only by a length check that was one `ai_assert` away from being the
+whole guard -- and `ai_assert` compiles to nothing without ASSIMP_BUILD_DEBUG.
+Worse, the line-continuation branch (`\`) advanced the iterator twice with no
+end check, so a file ending in a backslash walked past the end of the buffer.
+
+The fix
+-------
+`mBuffer` becomes a std::string that grows to the token; copyNextWord takes no
+arguments; every caller reads it through `c_str()`; and each iterator advance
+in the continuation branch is followed by an end-of-buffer test.
+
+Documented deviations from upstream, all cosmetic:
+  * upstream's new early-return guards are indented with a mix of tabs and
+    "space before tab"; normalised to the file's four-space style,
+  * upstream's CMakeLists.txt hunk (a global `-Wunsafe-buffer-usage` for every
+    Clang build of assimp) is dropped -- it is not part of the fix and would
+    add thousands of warnings to the macOS build,
+  * upstream's test/unit/utObjTools.cpp hunk is dropped (ASSIMP_BUILD_TESTS is
+    OFF in irisgl/CMakeLists.txt, so that file is never compiled),
+  * upstream also deletes the trailing newline of ObjFileParser.h and leaves a
+    dangling empty `private:` label; neither is reproduced here.
+
+diff --git a/code/AssetLib/Obj/ObjFileParser.cpp b/code/AssetLib/Obj/ObjFileParser.cpp
+--- a/code/AssetLib/Obj/ObjFileParser.cpp
++++ b/code/AssetLib/Obj/ObjFileParser.cpp
+@@ -80,8 +80,8 @@ static bool isNanOrInf(const char *in) {
+ }
+ 
+ // -------------------------------------------------------------------
+-ObjFileParser::ObjFileParser() : mEnd(&mBuffer[Buffersize-1]+1) {
+-    std::fill_n(mBuffer, Buffersize, '\0');
++ObjFileParser::ObjFileParser() {
++    mBuffer.clear();
+ }
+ 
+ // -------------------------------------------------------------------
+@@ -90,7 +90,7 @@ ObjFileParser::ObjFileParser(IOStreamBuffer<char> &streamBuffer, const std::stri
+             mIO(io),
+             mProgress(progress),
+             mOriginalObjFileName(originalObjFileName) { 
+-    std::fill_n(mBuffer, Buffersize, '\0');
++    mBuffer.clear();
+ 
+     // Create the model instance to store all the data
+     mModel.reset(new ObjFile::Model());
+@@ -279,25 +279,27 @@ void ObjFileParser::parseFile(IOStreamBuffer<char> &streamBuffer) {
+ }
+ 
+ // -------------------------------------------------------------------
+-void ObjFileParser::copyNextWord(char *pBuffer, size_t length) {
+-    size_t index = 0;
++void ObjFileParser::copyNextWord() {
++    mBuffer.clear();
+     mDataIt = getNextWord<DataArrayIt>(mDataIt, mDataItEnd);
++    if (mDataIt == mDataItEnd) {
++        return;
++    }
+     if (*mDataIt == '\\') {
+         ++mDataIt;
++        if (mDataIt == mDataItEnd) {
++            return;
++        }
+         ++mDataIt;
+         mDataIt = getNextWord<DataArrayIt>(mDataIt, mDataItEnd);
++        if (mDataIt == mDataItEnd) {
++            return;
++        }
+     }
+     while (mDataIt != mDataItEnd && !IsSpaceOrNewLine(*mDataIt)) {
+-        pBuffer[index] = *mDataIt;
+-        index++;
+-        if (index == length - 1) {
+-            break;
+-        }
++        mBuffer.push_back(*mDataIt);
+         ++mDataIt;
+     }
+-
+-    ai_assert(index < length);
+-    pBuffer[index] = '\0';
+ }
+ 
+ // -------------------------------------------------------------------
+@@ -332,21 +334,21 @@ size_t ObjFileParser::getTexCoordVector(std::vector<aiVector3D> &point3d_array)
+     size_t numComponents = getNumComponentsInDataDefinition();
+     ai_real x, y, z;
+     if (2 == numComponents) {
+-        copyNextWord(mBuffer, Buffersize);
+-        x = fast_atof(mBuffer);
++        copyNextWord();
++        x = fast_atof(mBuffer.c_str());
+ 
+-        copyNextWord(mBuffer, Buffersize);
+-        y = fast_atof(mBuffer);
++        copyNextWord();
++        y = fast_atof(mBuffer.c_str());
+         z = 0.0;
+     } else if (3 == numComponents) {
+-        copyNextWord(mBuffer, Buffersize);
+-        x = fast_atof(mBuffer);
++        copyNextWord();
++        x = fast_atof(mBuffer.c_str());
+ 
+-        copyNextWord(mBuffer, Buffersize);
+-        y = fast_atof(mBuffer);
++        copyNextWord();
++        y = fast_atof(mBuffer.c_str());
+ 
+-        copyNextWord(mBuffer, Buffersize);
+-        z = fast_atof(mBuffer);
++        copyNextWord();
++        z = fast_atof(mBuffer.c_str());
+     } else {
+         throw DeadlyImportError("OBJ: Invalid number of components");
+     }
+@@ -369,14 +371,14 @@ size_t ObjFileParser::getTexCoordVector(std::vector<aiVector3D> &point3d_array)
+ // -------------------------------------------------------------------
+ void ObjFileParser::getVector3(std::vector<aiVector3D> &point3d_array) {
+     ai_real x, y, z;
+-    copyNextWord(mBuffer, Buffersize);
+-    x = fast_atof(mBuffer);
++    copyNextWord();
++    x = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    y = fast_atof(mBuffer);
++    copyNextWord();
++    y = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    z = fast_atof(mBuffer);
++    copyNextWord();
++    z = fast_atof(mBuffer.c_str());
+ 
+     point3d_array.emplace_back(x, y, z);
+     mDataIt = skipLine<DataArrayIt>(mDataIt, mDataItEnd, mLine);
+@@ -385,17 +387,17 @@ void ObjFileParser::getVector3(std::vector<aiVector3D> &point3d_array) {
+ // -------------------------------------------------------------------
+ void ObjFileParser::getHomogeneousVector3(std::vector<aiVector3D> &point3d_array) {
+     ai_real x, y, z, w;
+-    copyNextWord(mBuffer, Buffersize);
+-    x = fast_atof(mBuffer);
++    copyNextWord();
++    x = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    y = fast_atof(mBuffer);
++    copyNextWord();
++    y = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    z = fast_atof(mBuffer);
++    copyNextWord();
++    z = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    w = fast_atof(mBuffer);
++    copyNextWord();
++    w = fast_atof(mBuffer.c_str());
+ 
+     if (w == 0)
+         throw DeadlyImportError("OBJ: Invalid component in homogeneous vector (Division by zero)");
+@@ -407,25 +409,25 @@ void ObjFileParser::getHomogeneousVector3(std::vector<aiVector3D> &point3d_array
+ // -------------------------------------------------------------------
+ void ObjFileParser::getTwoVectors3(std::vector<aiVector3D> &point3d_array_a, std::vector<aiVector3D> &point3d_array_b) {
+     ai_real x, y, z;
+-    copyNextWord(mBuffer, Buffersize);
+-    x = fast_atof(mBuffer);
++    copyNextWord();
++    x = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    y = fast_atof(mBuffer);
++    copyNextWord();
++    y = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    z = fast_atof(mBuffer);
++    copyNextWord();
++    z = fast_atof(mBuffer.c_str());
+ 
+     point3d_array_a.emplace_back(x, y, z);
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    x = fast_atof(mBuffer);
++    copyNextWord();
++    x = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    y = fast_atof(mBuffer);
++    copyNextWord();
++    y = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    z = fast_atof(mBuffer);
++    copyNextWord();
++    z = fast_atof(mBuffer.c_str());
+ 
+     point3d_array_b.emplace_back(x, y, z);
+ 
+@@ -435,11 +437,11 @@ void ObjFileParser::getTwoVectors3(std::vector<aiVector3D> &point3d_array_a, std
+ // -------------------------------------------------------------------
+ void ObjFileParser::getVector2(std::vector<aiVector2D> &point2d_array) {
+     ai_real x, y;
+-    copyNextWord(mBuffer, Buffersize);
+-    x = fast_atof(mBuffer);
++    copyNextWord();
++    x = fast_atof(mBuffer.c_str());
+ 
+-    copyNextWord(mBuffer, Buffersize);
+-    y = fast_atof(mBuffer);
++    copyNextWord();
++    y = fast_atof(mBuffer.c_str());
+ 
+     point2d_array.emplace_back(x, y);
+ 
+diff --git a/code/AssetLib/Obj/ObjFileParser.h b/code/AssetLib/Obj/ObjFileParser.h
+--- a/code/AssetLib/Obj/ObjFileParser.h
++++ b/code/AssetLib/Obj/ObjFileParser.h
+@@ -89,7 +89,7 @@ protected:
+     /// Parse the loaded file
+     void parseFile(IOStreamBuffer<char> &streamBuffer);
+     /// Method to copy the new delimited word in the current line.
+-    void copyNextWord(char *pBuffer, size_t length);
++    void copyNextWord();
+     /// Get the number of components in a line.
+     size_t getNumComponentsInDataDefinition();
+     /// Stores the vector
+@@ -131,7 +131,7 @@ protected:
+     /// Error report in token
+     void reportErrorTokenInFace();
+ 
+-private:
++protected:
+     /// Default material name
+     static constexpr const char DEFAULT_MATERIAL[] = AI_DEFAULT_MATERIAL_NAME;
+     //! Iterator to current position in buffer
+@@ -142,8 +142,8 @@ private:
+     std::unique_ptr<ObjFile::Model> mModel{};
+     //! Current line (for debugging)
+     unsigned int mLine{ 0 };
+-    //! Helper buffer
+-    char mBuffer[Buffersize];
++    //! Helper buffer (safe)
++    std::string mBuffer;
+ 	/// End of buffer
+     const char *mEnd{ nullptr };
+     /// Pointer to IO system instance.

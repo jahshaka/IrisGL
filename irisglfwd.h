@@ -1,0 +1,117 @@
+/**************************************************************************
+This file is part of IrisGL
+http://www.irisgl.org
+Copyright (c) 2016-2026 EXEDOS LLC (www.exedos.com)
+
+This is free software: you may copy, redistribute
+and/or modify it under the terms of the MIT License
+
+For more information see the LICENSE file
+*************************************************************************/
+
+#ifndef IRISGLFWD_H
+#define IRISGLFWD_H
+
+/* Forward declarations of the document-model classes in irisgl.
+ * The legacy GL renderer's classes were deleted at step 14.
+ */
+
+#include <QSharedPointer>
+#include "core/logger.h"
+
+namespace iris
+{
+
+class CameraNode;
+class LightNode;
+class DecalNode;
+class ParticleSystemNode;
+/// Forward-declared with its underlying type so headers can take one by value
+/// without dragging in particlesystemnode.h (an enumerator still needs the
+/// definition — see SceneEditService::addParticleSystem, which has no default
+/// argument for exactly that reason).
+enum class ParticlePreset : int;
+class Mesh;
+class Model;
+class Frustum;
+class Material;
+class MeshNode;
+class SceneNode;
+class Texture2D;
+class Texture;
+class Scene;
+class VertexLayout;
+class TriMesh;
+class Viewport;
+class DefaultMaterial;
+class KeyFrameSet;
+class Animation;
+class FloatKeyFrame;
+class PbrMaterial;
+class PickingResult;
+struct Property;
+class PostProcess;
+class PostProcessManager;
+class PropertyAnim;
+class PropertyAnimInfo;
+class FloatPropertyAnim;
+class Vector3DPropertyAnim;
+class ColorPropertyAnim;
+class AnimableProperty;
+class Bone;
+class Skeleton;
+class SkeletalAnimation;
+template<typename T> class Key;
+typedef Key<float> FloatKey;
+class BoundingSphere;
+class VertexBuffer;
+class IndexBuffer;
+class AABB;
+/// The avatar movement component (AVATAR_LOCOMOTION_SPEC §6), carried by the
+/// avatar WRAPPER node and by nothing else.
+class AvatarMovement;
+/// The locomotion state machine (AVATAR_LOCOMOTION_SPEC §7), carried by the
+/// same avatar WRAPPER node. Separate from the movement component on purpose:
+/// movement is physics and locomotion is animation, and the state machine
+/// CONSUMES the movement's five-parameter contract rather than living inside it.
+class AvatarLocomotion;
+
+typedef QSharedPointer<iris::Animation> AnimationPtr;
+typedef QSharedPointer<Scene> ScenePtr;
+typedef QSharedPointer<SceneNode> SceneNodePtr;
+typedef QSharedPointer<AvatarMovement> AvatarMovementPtr;
+typedef QSharedPointer<AvatarLocomotion> AvatarLocomotionPtr;
+
+/// The scene graph's NON-owning links. The tree has exactly one ownership
+/// direction — a parent owns its children — so the back-references (child to
+/// parent, node to scene) are weak. They were QSharedPointer until the deep
+/// audit of 2026-09 (area 3) measured what that costs: every parent/child pair
+/// was a reference cycle, so no scene, no subtree and no node ever died and
+/// every world the app had opened stayed resident for the life of the process.
+typedef QWeakPointer<Scene> SceneWPtr;
+typedef QWeakPointer<SceneNode> SceneNodeWPtr;
+typedef QSharedPointer<Mesh> MeshPtr;
+typedef QSharedPointer<Model> ModelPtr;
+typedef QSharedPointer<Material> MaterialPtr;
+typedef QSharedPointer<DefaultMaterial> DefaultMaterialPtr;
+typedef QSharedPointer<LightNode> LightNodePtr;
+typedef QSharedPointer<DecalNode> DecalNodePtr;
+typedef QSharedPointer<CameraNode> CameraNodePtr;
+typedef QSharedPointer<MeshNode> MeshNodePtr;
+typedef QSharedPointer<Texture2D> Texture2DPtr;
+typedef QSharedPointer<Texture> TexturePtr;
+typedef QSharedPointer<KeyFrameSet> KeyFrameSetPtr;
+typedef QSharedPointer<FloatKeyFrame> FloatKeyFramePtr;
+typedef QSharedPointer<PbrMaterial> PbrMaterialPtr;
+typedef QSharedPointer<ParticleSystemNode> ParticleSystemNodePtr;
+typedef QSharedPointer<PostProcess> PostProcessPtr;
+typedef QSharedPointer<PostProcessManager> PostProcessManagerPtr;
+typedef QSharedPointer<Bone> BonePtr;
+typedef QSharedPointer<Skeleton> SkeletonPtr;
+typedef QSharedPointer<SkeletalAnimation> SkeletalAnimationPtr;
+typedef QSharedPointer<VertexBuffer> VertexBufferPtr;
+typedef QSharedPointer<IndexBuffer> IndexBufferPtr;
+
+}
+
+#endif // IRISGLFWD_H

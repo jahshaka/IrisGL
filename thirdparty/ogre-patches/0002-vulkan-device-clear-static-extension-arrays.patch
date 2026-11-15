@@ -1,0 +1,19 @@
+diff --git a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+index b4d27ba..c226857 100644
+--- a/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
++++ b/RenderSystems/Vulkan/src/OgreVulkanDevice.cpp
+@@ -91,6 +91,14 @@ namespace Ogre
+                                                    ? "Vulkan: Initializing"
+                                                    : "Vulkan: Initializing with external VkInstance" );
+ 
++        // Jahshaka local patch (upstream-reportable): these are static and were never
++        // cleared, so a second RenderSystem in the same process (Root destroyed and
++        // re-created) accumulated the previous run's entries. Their pointers referenced
++        // the host string that sortAndRelocate() resets, so the names were garbage and
++        // vkCreateInstance failed with VK_ERROR_EXTENSION_NOT_PRESENT.
++        enabledExtensions.clear();
++        enabledLayers.clear();
++
+         // Enumerate supported extensions
+         FastArray<VkExtensionProperties> availableExtensions;
+         uint32 numExtensions = 0u;

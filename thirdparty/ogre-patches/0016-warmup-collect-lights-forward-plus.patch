@@ -1,0 +1,24 @@
+diff --git a/OgreMain/src/OgreSceneManager.cpp b/OgreMain/src/OgreSceneManager.cpp
+index d34b825de..d79eb1ccf 100644
+--- a/OgreMain/src/OgreSceneManager.cpp
++++ b/OgreMain/src/OgreSceneManager.cpp
+@@ -1620,6 +1620,19 @@ namespace Ogre
+         const bool casterPass = mIlluminationStage == IRS_RENDER_TO_TEXTURE;
+ 
+         mRenderQueue->clear();
++
++        // Forward+ must collect the lights before renderPassPrepare, exactly as
++        // _cullPhase01 does a few hundred lines above: HlmsPbs::preparePassHash
++        // calls ForwardPlusBase::getGridBuffer(), which looks the camera's light
++        // grid up in a cache that collectLights() is the only thing that fills.
++        // Without this the lookup misses, outCachedGrid stays null and
++        // getGridBuffer dereferences it -- a null deref in every build where the
++        // "You must call ForwardPlusBase::collectLights first!" assert is
++        // compiled out. CompositorPassWarmUp is therefore unusable on any scene
++        // manager with Forward+ enabled, which is every one that lights anything.
++        if( mIlluminationStage != IRS_RENDER_TO_TEXTURE && mForwardPlusImpl )
++            mForwardPlusImpl->collectLights( camera );
++
+         mRenderQueue->renderPassPrepare( casterPass, false );
+ 
+         // Quick way of reducing overhead/stress on  calculations (lastRq can be up to 255)

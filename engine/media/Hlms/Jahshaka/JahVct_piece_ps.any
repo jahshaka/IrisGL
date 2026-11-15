@@ -1,0 +1,68 @@
+// ONE UPSTREAM HOLE, PATCHED FROM OUR SIDE: voxel cone tracing inside an SSR
+// prepass, on a NORMAL-MAPPED material.
+//
+// CAUTION, AND THIS FILE PROVED IT TWICE: the Hlms parser does NOT respect //
+// comments. An at-directive written inside a comment is still EXECUTED —
+// quoting upstream's own source in this header produced a "piece already
+// defined" error and an unmatched-block syntax error, from text that was
+// nothing but explanation. Every directive named below is therefore spelled
+// out in WORDS, never written with its at-sign. The same warning is at the top
+// of JahFog_piece_vs_piece_ps.any, for the same reason.
+//
+// THE BUG, at the pin (ogre-next v3.0.0-783-g52d1a7aaf), reproduced the first
+// time the SSR row was defaulted on at Epic — which is also the tier that turns
+// VCT on, so this is not an exotic combination, it is THE combination:
+//
+//     ERROR: 0:2145: 'TBN' : undeclared identifier
+//     Fragment Program …PixelShader_ps failed to compile
+//
+// and every normal-mapped object in the world renders as nothing.
+//
+// WHY IT HAPPENS. The piece "applyVoxelConeTracing"
+// (Hlms/Pbs/Any/Vct_piece_ps.any:520-531) needs a tangent basis to rotate its
+// diffuse cone directions with, and it declares a local TBN ITSELF — but only
+// under a property test of "not normal_map". With a normal map it expects the
+// TBN that the piece "LoadNormalData" builds
+// (Hlms/Pbs/Any/Main/800.PixelShader_piece_ps.any:379-391) — and that insert
+// sits inside a "not hlms_use_prepass" property block (:823-824), because in
+// prepass mode the normal arrives from the G-buffer instead. So in a prepass
+// pass, VCT references a variable that was never declared. Upstream never sees
+// it: its SSR sample has no GI and its VCT samples have no prepass.
+//
+// (The no-normal-map half is fine under a prepass, and not by luck: PixelData
+// #defines geomNormal to normal when there is no normal map (:48-52), so
+// upstream's own declaration reads the G-buffer normal.)
+//
+// THE FIX, and why it is here rather than in a patch or a fork. Ogre-Next is
+// patches-only, and this one does not need a patch: "custom_ps_posMaterialLoad"
+// is a documented Hlms hook sitting immediately after the PixelData
+// declaration (:798), in the same scope as the VCT block 1500 lines below, and
+// it is unused everywhere else in this tree (the materials piece emitter uses
+// custom_VStoPS, custom_ps_preLights, custom_ps_posExecution and
+// custom_ps_uv_modifier_macros — src/modules/materials/core/pieceemitter.h).
+// So we declare exactly what LoadNormalData would have declared, from the same
+// interpolants, and upstream's code finds it.
+//
+// SCOPE, deliberately as narrow as the bug: the piece is only DEFINED when all
+// three properties hold, so every other permutation's generated source is
+// byte-for-byte what it was before this file existed (inserting an undefined
+// piece emits nothing — which is how every custom_ hook works).
+@property( vct_num_probes && hlms_use_prepass && normal_map )
+@piece( custom_ps_posMaterialLoad )
+	// Verbatim from LoadNormalData's tangent-basis block, minus the normal-map
+	// sample itself (the prepass already did that; pixelData.normal comes from
+	// the G-buffer). Upstream's "tbnApplyReflection" piece is NOT reused: it is
+	// defined INSIDE the LoadNormalData body, which never expands here, so the
+	// reflection term is written out under the same property test instead.
+	pixelData.geomNormal = normalize( inPs.normal ) @insertpiece( two_sided_flip_normal );
+	midf3 jahTangent = normalize( inPs.tangent );
+	@property( hlms_qtangent || hlms_tangent4 )
+		midf3 jahBinormal =
+			normalize( cross( pixelData.geomNormal, jahTangent ) * inPs.biNormalReflection );
+	@end
+	@property( !hlms_qtangent && !hlms_tangent4 )
+		midf3 jahBinormal = normalize( cross( pixelData.geomNormal, jahTangent ) );
+	@end
+	midf3x3 TBN = buildMidf3x3( jahTangent, jahBinormal, pixelData.geomNormal );
+@end
+@end

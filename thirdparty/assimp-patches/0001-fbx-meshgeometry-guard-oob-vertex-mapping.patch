@@ -1,0 +1,85 @@
+FBX: never form a reference to the one-past-the-end mapping entry
+
+Upstream status (checked 2026-09-03 against assimp master 19f7386d7 and the
+pinned tag v6.0.5): UNFIXED.  Reported upstream as assimp issue #4312,
+"Out of range access of std::vector FBX::MeshGeometry::m_mappings" (opened
+2021-12-29, still open).  This patch is the fix that issue proposes, hardened
+for the empty-vector case; it is not a backport of any upstream commit,
+because none exists.  Drop this patch the day upstream lands its own.
+
+The bug
+-------
+MeshGeometry builds an adjacency table from FBX input vertices to output
+vertices: m_mapping_counts[i] entries starting at m_mapping_offsets[i] inside
+m_mappings.  A vertex that no polygon references gets count 0, and because the
+offsets are a running sum, a trailing run of such vertices gets an offset equal
+to m_mappings.size().  ToOutputVertexIndex then evaluated
+
+    &m_mappings[ m_mapping_offsets[ in_index ] ]
+
+which binds a reference to the one-past-the-end element.  That is undefined
+behaviour even though the caller never dereferences it (it loops [0, count)),
+and it is a hard abort with hardened libstdc++ -- _GLIBCXX_ASSERTIONS, which
+Ubuntu's g++ enables by default:
+
+    stl_vector.h:1282: ... Assertion '__n < this->size()' failed.
+
+Reached from FBXConverter::ConvertWeights while converting skin clusters.  Four
+of the owner's eight Mixamo FBX exports abort on load in a Debug build
+(in_index 14041, offset 54915 == m_mappings.size(), count 0); in an optimised
+build the same line is a silent out-of-range vector access.
+
+The fix
+-------
+Return an empty result -- count 0 and a valid, non-null address -- instead of
+indexing the vector.  All three call sites (ConvertWeights and the two
+blend-shape loops in FBXConverter.cpp) iterate [0, count) and so do nothing for
+an empty span, but ConvertWeights ai_asserts the pointer is non-null, hence the
+static sentinel rather than nullptr.  The same path also absorbs a corrupt
+adjacency table (offset + count past the end) that the old code only ai_asserted
+on, so release builds stop reading out of range there too.
+
+No behavioural change for well-formed vertices: those still get
+m_mappings.data() + offset, the same address the old expression produced.
+
+diff --git a/code/AssetLib/FBX/FBXMeshGeometry.cpp b/code/AssetLib/FBX/FBXMeshGeometry.cpp
+--- a/code/AssetLib/FBX/FBXMeshGeometry.cpp
++++ b/code/AssetLib/FBX/FBXMeshGeometry.cpp
+@@ -230,6 +230,13 @@ const MatIndexArray& MeshGeometry::GetMaterialIndices() const {
+ }
+ // ------------------------------------------------------------------------------------------------
+ const unsigned int* MeshGeometry::ToOutputVertexIndex( unsigned int in_index, unsigned int& count ) const {
++    // Non-null return + count == 0 means "this input vertex has no output
++    // mapping".  Every caller (ConvertWeights, and both blend-shape loops in
++    // FBXConverter) iterates [0, count) and never dereferences the pointer in
++    // that case, but ConvertWeights does ai_assert the pointer is non-null, so
++    // the empty result must still be a valid address.
++    static const unsigned int no_mapping = 0;
++
+     if ( in_index >= m_mapping_counts.size() ) {
+         return nullptr;
+     }
+@@ -237,9 +244,21 @@ const unsigned int* MeshGeometry::ToOutputVertexIndex( unsigned int in_index, un
+     ai_assert( m_mapping_counts.size() == m_mapping_offsets.size() );
+     count = m_mapping_counts[ in_index ];
+ 
+-    ai_assert( m_mapping_offsets[ in_index ] + count <= m_mappings.size() );
++    const size_t offset = static_cast< size_t >( m_mapping_offsets[ in_index ] );
++    if ( count == 0 || offset + count > m_mappings.size() ) {
++        // A vertex that no polygon references has count == 0 and, when it is at
++        // the tail of the vertex list, an offset equal to m_mappings.size().
++        // &m_mappings[ offset ] then forms a reference to the one-past-the-end
++        // element: undefined behaviour, and a hard abort in hardened libstdc++
++        // builds (_GLIBCXX_ASSERTIONS, on by default on Ubuntu) -- see assimp
++        // issue #4312.  Mixamo character exports contain such vertices.
++        // A genuinely corrupt adjacency table (offset + count past the end) is
++        // reported the same way instead of handing out an out-of-range span.
++        count = 0;
++        return &no_mapping;
++    }
+ 
+-    return &m_mappings[ m_mapping_offsets[ in_index ] ];
++    return m_mappings.data() + offset;
+ }
+ 
+ // ------------------------------------------------------------------------------------------------

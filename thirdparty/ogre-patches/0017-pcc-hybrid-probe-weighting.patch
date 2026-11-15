@@ -1,0 +1,87 @@
+diff --git a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+index 92e7977d4..24f23f5d0 100644
+--- a/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
++++ b/Samples/Media/Hlms/Pbs/Any/ForwardPlus_DecalsCubemaps_piece_ps.any
+@@ -150,8 +150,12 @@
+ 	@property( vct_num_probes )
+ 	if( pixelData.roughness < 1.0f || vctSpecular.w == 0 )
+ 	{
+-		float accumVctLerp = 0;
+-		float numProbesVctLerp = 0;
++		// Jahshaka patch 0017: accumVctLerp is now the probeFade-WEIGHTED sum of
++		// each probe's PCC trust (1 - vctLerp), so that it shares pccEnvS's own
++		// normalisation by cubemapAccumWeight. The unweighted probe COUNT that
++		// upstream divided the whole blend by is gone -- derivation at the blend
++		// itself, at the bottom of this piece.
++		midf accumVctLerp = _h( 0 );
+ 	@end
+ 	for( uint i=0u; i<numLightsInGrid; ++i )
+ 	{
+@@ -261,8 +265,7 @@
+ 					clearCoatPccSingleEnvS *= 1.0f - vctLerp;
+ 				@end
+ 
+-				accumVctLerp += 1.0f - vctLerp;
+-				numProbesVctLerp += 1.0f;
++				accumVctLerp += probeFade * midf_c( 1.0f - vctLerp );	// Jahshaka patch 0017
+ 			@end
+ 
+ 			pccEnvS	+= pccSingleEnvS.xyz;
+@@ -285,18 +288,50 @@
+ 	@end
+ 
+ 	@property( vct_num_probes )
+-		numProbesVctLerp = numProbesVctLerp == 0.0f ? 1.0f : numProbesVctLerp;
+-		pixelData.envColourS.xyz = ( pccEnvS +
+-									 pixelData.envColourS * (numProbesVctLerp - accumVctLerp) ) /
+-								   numProbesVctLerp;
++		// Jahshaka patch 0017 -- the overlapping-probe division fix.
++		//
++		// Upstream divided the finished blend by numProbesVctLerp, the COUNT of
++		// probes covering this pixel:
++		//     envColourS = ( pccEnvS + vct * (N - accumVctLerp) ) / N
++		// but pccEnvS is ALREADY a weighted average by then (the line above
++		// divides it by cubemapAccumWeight, the sum of probeFade), so dividing it
++		// again by N darkens every probe reflection by however many probes happen
++		// to overlap the pixel. Measured on one mirror pixel of gi.pcc_bounds
++		// with geometry and placement held identical: 1 probe -> r 1.000,
++		// 4 probes -> r 0.251. A 3x2x3 grid at overlap 1.5 puts a point inside up
++		// to 8 probe volumes, i.e. up to 8x too dark. The non-VCT branch of this
++		// very piece has no such division (envColourS.xyz = pccEnvS), and neither
++		// does the single-probe path in Main/800.PixelShader_piece_ps.any, which
++		// is a plain lerp( envS, vct, vctLerp ) == envS*(1-vctLerp) + vct*vctLerp.
++		//
++		// Derivation of the multi-probe generalisation of that lerp. Write
++		// w_p = probeFade of probe p, S_p = its sampled reflection, t_p = its PCC
++		// trust (1 - vctLerp_p), W = sum(w_p) = cubemapAccumWeight. The loop above
++		// accumulates sum(w_p * t_p * S_p) and the line above normalises it, so
++		//     pccEnvS = sum(w_p * t_p * S_p) / W
++		// which IS the probe contribution at its own accumulated weight; nothing
++		// further is owed to it. What is left for VCT is exactly the weight the
++		// probes did not claim, with T = sum(w_p * t_p) / W the weighted mean
++		// trust:
++		//     envColourS = pccEnvS + vct * (1 - T)
++		// One fully trusted probe collapses to S -- upstream's own single-probe
++		// result -- and so do N identical fully trusted probes, with no N left
++		// anywhere. T must be weighted the same way pccEnvS is or the two terms
++		// do not sum to one unit of weight: upstream's unweighted count on two
++		// probes with fades 1.0/0.1 and trusts 1/0 yields 0.909*S + 0.5*vct,
++		// 1.41 units of light. Hence the probeFade weighting above.
++		midf pccVctTrust = cubemapAccumWeight == _h( 0.0f )
++						   ? _h( 0.0f )
++						   : saturate( accumVctLerp / cubemapAccumWeight );
++		pixelData.envColourS.xyz = pccEnvS +
++								   pixelData.envColourS * ( _h( 1.0f ) - pccVctTrust );
+ 		@property( cubemaps_as_diffuse_gi )
+ 			pixelData.envColourD += vctSpecular.w > 0 ? midf3_c( 0, 0, 0 ) : pccEnvD;
+ 		@end
+ 
+ 		@property( clear_coat )
+-			pixelData.clearCoatEnvColourS = ( clearCoatPccEnvS +
+-											  pixelData.clearCoatEnvColourS * ( numProbesVctLerp - accumVctLerp ) )
+-											/ numProbesVctLerp;
++			pixelData.clearCoatEnvColourS = clearCoatPccEnvS +	// Jahshaka patch 0017
++											pixelData.clearCoatEnvColourS * ( _h( 1.0f ) - pccVctTrust );
+ 		@end
+ 	@else
+ 		pixelData.envColourS.xyz = pccEnvS;

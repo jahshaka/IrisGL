@@ -1,0 +1,1208 @@
+#pragma once
+// Jahshaka's engine abstraction.
+//
+// This is THE boundary between the application and the 3D engine. Studio talks
+// only to these types. No Ogre type, header or symbol appears here — swapping the
+// backend must not touch a single file under src/.
+//
+// Interface derived from what Studio DOES, not from what any engine offers.
+//
+// THREAD AFFINITY — no exceptions: every call on Engine, Scene and View, including
+// destruction, must happen on the thread that called Engine::create(). The backend
+// owns a single device and is not internally synchronised. Background work
+// (thumbnails, imports) posts to that thread; it never calls in directly.
+//
+// ERRORS: no backend exception ever escapes this boundary. A failing call returns
+// null/false and the reason is available from Engine::lastError() until the next
+// failing call overwrites it.
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+#include "Types.h"
+
+namespace jahshaka { namespace engine {
+
+class Scene;
+class View;
+
+/// A renderable scene. Views draw it; several Views may share one, or each may own one.
+/// Owned by the Engine: destroy with Engine::destroyScene().
+class Scene {
+public:
+    virtual ~Scene() = default;
+    virtual const std::string &name() const = 0;
+    /// Ambient light as a hemisphere pair: `upper` is what a surface facing +Y
+    /// receives, `lower` what a surface facing -Y receives. Kept as the simple
+    /// entry point (previews, thumbnails, tests); it is expressed EXACTLY in the
+    /// spherical harmonics setAmbientSh() takes — see the note there about the
+    /// scale of a flat (upper == lower) ambient.
+    virtual void        setAmbient(const Colour &upper, const Colour &lower) = 0;
+    /// Ambient light as 9 spherical-harmonic coefficients per channel, the form
+    /// a real sky integrates to (a hemisphere pair can only ever say "up" and
+    /// "down"). Layout: 9 groups of 3 floats (r, g, b), in the basis order
+    ///     1, y, z, x, x*y, y*z, 3z^2 - 1, z*x, x^2 - y^2
+    /// over WORLD axes, evaluated for the shading normal. The value the sum
+    /// produces is a MEAN INCIDENT RADIANCE (irradiance / pi), the same unit the
+    /// two hemisphere colours above are in, so a uniform white environment of
+    /// radiance L is sh[0..2] = L and the rest zero.
+    /// This is the only ambient path the backend has: setAmbient() converts.
+    virtual void        setAmbientSh(const float sh[27]) = 0;
+    /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
+    /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
+    /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled
+    /// FogDesc leaves the scene rendering the very same pixels it did before fog
+    /// was ever mentioned. Cheap to call every frame while enabled; the enabled
+    /// EDGE costs a shader rebuild (fog is a shader variant, not a uniform).
+    virtual void        setFog(const FogDesc &) = 0;
+    /// Textured sky behind everything: an equirectangular (lat-long) image.
+    /// SkyMode::NoSky removes it (the View's background shows). Cubemap skies go
+    /// through setSkyCubemap() — this call rejects SkyMode::Cubemap.
+    virtual bool        setSky(SkyMode, TextureId) = 0;
+    /// Cubemap sky from six face textures, in the order +X, -X, +Y, -Y, +Z, -Z,
+    /// each face seen from INSIDE the cube looking down that WORLD axis (the
+    /// backend converts to whatever handedness its cubemaps use). Also feeds
+    /// environment reflections (IBL) from the same faces.
+    virtual bool        setSkyCubemap(const TextureId faces[6]) = 0;
+    /// Environment reflections (IBL) WITHOUT touching the sky: six square face
+    /// textures (+X, -X, +Y, -Y, +Z, -Z, world axes, all the same size) become
+    /// the reflection cubemap every PBR material samples. This is how
+    /// equirectangular and CPU-baked skies (gradient, realistic) get the
+    /// reflections cubemap skies already have — the host resamples its equirect
+    /// image into six faces and pushes them here. The mip chain is a GGX
+    /// (roughness) PREFILTER, not a box mip chain, so a rough metal reads the
+    /// hemisphere around its reflection vector instead of one blurred face.
+    /// Passing six zero ids clears the reflections. The face textures are
+    /// copied; the caller may destroy them afterwards.
+    virtual bool        setSkyReflection(const TextureId faces[6]) = 0;
+    /// Removes a node and everything it uniquely owns (mesh, material). Unknown or
+    /// already-removed ids are ignored and return false. Children are NOT removed;
+    /// they are re-parented to the scene root.
+    virtual bool        removeNode(NodeId) = 0;
+
+    // ---- Hierarchy and transforms (VIEWPORT_MIGRATION_PLAN.md step 2) ----
+    /// An empty transform node under `parent` (0 = the scene root).
+    virtual NodeId      createNode(NodeId parent = 0) = 0;
+    /// ADOPTS a scene node the HOST already owns and gives it a NodeId, so that
+    /// everything else on this interface (attachMesh, setLight, decals, clips,
+    /// particles) works on it exactly as if the engine had made it.
+    ///
+    /// SPECS/SCENEGRAPH_SPEC.md D2: the document's scene graph IS this backend's
+    /// scene graph, and this is the one call that says so. An adopted node's
+    /// transform, parent and children belong to the host — setNodeTransform and
+    /// setNodeParent on it are refused — which is what makes the old per-frame
+    /// transform push unnecessary.
+    ///
+    /// The pointer is opaque here on purpose (`Ogre::SceneNode*` in the Ogre
+    /// backend); the host obtains it from iris::graph, which is the only other
+    /// place in the program that names an engine node type. The node must belong
+    /// to THIS scene's native scene manager — nativeSceneManager() is how the
+    /// host arranges that. Returns 0 on a null pointer or a foreign manager.
+    ///
+    /// removeNode() releases the engine's attachments and forgets the id; it
+    /// never destroys an adopted node.
+    virtual NodeId      adoptNode(void *nativeSceneNode) = 0;
+    /// This scene's native scene manager, opaque (`Ogre::SceneManager*`). The
+    /// document migrates its tree into it when a SceneMirror binds; nothing else
+    /// may use it.
+    virtual void       *nativeSceneManager() const = 0;
+    virtual bool        setNodeParent(NodeId, NodeId parent) = 0;
+    /// Absolute LOCAL transform (relative to the parent). The document owns the
+    /// numbers; the engine composes the hierarchy.
+    virtual void        setNodeTransform(NodeId, const Vec3 &position, const Quat &rotation,
+                                         const Vec3 &scale) = 0;
+    /// Hides the node and its subtree.
+    virtual void        setNodeVisible(NodeId, bool) = 0;
+
+    // ---- Meshes and materials (step 3/4) ----
+    /// Uploads geometry. Returns 0 on invalid data (lastError()).
+    virtual MeshId      createMesh(const MeshData &) = 0;
+    virtual bool        destroyMesh(MeshId) = 0;
+    /// Rewrites the vertex positions (and, when non-empty, normals) of a mesh
+    /// created with MeshData::dynamic — the CPU-skinning path: the host computes
+    /// skinned vertices per frame and pushes them here. positions is xyz per
+    /// vertex and must match the mesh's vertex count; normals likewise or empty
+    /// to keep the current ones. Tangents and uvs keep their created values.
+    /// Bounds are recomputed so culling stays correct. False (lastError()) for
+    /// unknown or non-dynamic meshes or size mismatches.
+    virtual bool        updateMeshVertices(MeshId, const std::vector<float> &positions,
+                                           const std::vector<float> &normals) = 0;
+    virtual MaterialId  createPbrMaterial(const PbrParams &) = 0;
+    /// Re-applies every parameter EXCEPT the shading model — see
+    /// setShadingModel for why that one is a separate, atomic call.
+    virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
+    /// Moves a material between the LIT and UNLIT shading families
+    /// (HLMS_ADOPTION P4a). See ShadingModel in Types.h for what Unlit costs.
+    ///
+    /// ATOMIC, and it has to be: the two families are different backend
+    /// material types, so this destroys the backend material, builds a new one
+    /// in the other family from the parameters and textures already pushed, and
+    /// RE-ATTACHES every renderable that referenced it. The MaterialId is
+    /// preserved on purpose — the host's own material identity is referenced by
+    /// every node, and a switch that minted a new id would be a rewrite of the
+    /// host's scene rather than a property change.
+    ///
+    /// REFUSES (lastError(), nothing changed) when the material is used by any
+    /// node carrying a rig: the Unlit family cannot skin, and an unlit rigged
+    /// mesh renders welded to its bind pose while the character animates away
+    /// from it — silently. Idempotent: setting the model it already has
+    /// succeeds and touches nothing.
+    virtual bool        setShadingModel(MaterialId, ShadingModel) = 0;
+    virtual bool        destroyMaterial(MaterialId) = 0;
+    /// Binds a GENERATED shader piece to one material (HLMS_ADOPTION P5).
+    /// `path` is an absolute path to a piece file; its directory is registered
+    /// with the backend's resource system on first use. An EMPTY path clears
+    /// the binding for that stage. Returns false (lastError()) for an unknown
+    /// material, an unreadable file, or a material in the Unlit family.
+    ///
+    /// FILE FORM ONLY, and that is a decision rather than an omission: the
+    /// backend's from-memory form cannot be disk-cached (it cannot prove the
+    /// cached shader still matches the source), so a from-memory piece would
+    /// recompile every material on every launch. Callers must therefore write
+    /// the piece to disk first — and should name it by a hash OF ITS CONTENT,
+    /// because the backend treats "same filename, different content" as a hard
+    /// error, and content-addressed names make that impossible by construction.
+    ///
+    /// The material keeps the binding across a shading-model switch or a
+    /// parameter push; only an empty path (or destroying the material) removes
+    /// it. A material with no piece bound generates BYTE-IDENTICAL shader
+    /// source to one from a build where this verb did not exist — the backend
+    /// only sets the piece property when a piece id is non-zero.
+    virtual bool        setMaterialCustomPiece(MaterialId, const std::string &path,
+                                               CustomPieceStage) = 0;
+    /// THE SHADER CLOCK this scene's generated pieces read (HLMS_ADOPTION P5).
+    /// Seconds, and the HOST owns it: a paused editor, a scrubbed timeline and
+    /// a deterministic test each render exactly the frame they ask for, because
+    /// nothing in the engine advances this by itself.
+    ///
+    /// Scene-wide rather than per-material for two reasons, one of them
+    /// structural: the vertex shader has NO material buffer in this backend's
+    /// PBR template, so a per-material clock could never reach a vertex piece;
+    /// and "time" is the same number for every material in a frame anyway. It
+    /// costs one float in the pass constant buffer and one write per pass — no
+    /// shader is ever rebuilt by it.
+    ///
+    /// Materials with no generated piece do not read it and are unaffected.
+    virtual void        setShaderTime(float seconds) = 0;
+    virtual float       shaderTime() const = 0;
+    /// DIAGNOSTIC: what the backend datablock actually ends up holding, as
+    /// text. Empty (lastError()) for an unknown material.
+    ///
+    /// "What did the datablock actually end up holding?" has been the hardest
+    /// question in every material bug so far — the document says one thing, the
+    /// mirror pushes another, the backend clamps or ignores a third, and
+    /// nothing between them was inspectable without a debugger. This answers it
+    /// from a script, in a running app. It pairs with the shader dump
+    /// (JAHSHAKA_HLMS_DEBUG_DIR), which answers "and what shader did that
+    /// produce".
+    ///
+    /// The format is the BACKEND'S, and it is a DIAGNOSTIC ONLY. It is not a
+    /// material format and must never become one: the document is the truth,
+    /// and it holds asset guids, a node graph, baked maps, our alpha-mode
+    /// vocabulary and roughness remap bounds — none of which a datablock has a
+    /// home for. Do not parse this.
+    virtual std::string dumpMaterial(MaterialId) const = 0;
+    /// Makes the node render `mesh` with `material`. A node renders at most one mesh;
+    /// attaching again replaces it. Mesh and material may be shared across nodes and
+    /// survive the node.
+    virtual bool        attachMesh(NodeId, MeshId, MaterialId) = 0;
+    virtual bool        detachMesh(NodeId) = 0;
+    /// How many renderables this node actually carries right now.
+    ///
+    /// The invariant is ONE (a node renders at most one mesh) and this is how a
+    /// suite can say so: an attach path that created an Item and then lost its
+    /// bookkeeping would leave the old one attached to the same scene node,
+    /// drawing a second copy of the object with nothing in the host's model
+    /// saying so. Counts the engine node's own attachments only — an outline
+    /// shell lives on a node of its own and never shows up here.
+    virtual size_t      itemCount(NodeId) const = 0;
+
+    // ---- Rigs: GPU skinning (GPU_SKINNING_SPEC) ----
+    /// Like attachMesh, but the mesh deforms on the GPU: the host pushes bone
+    /// poses (setBonePoses) instead of vertices, and the vertex shader skins
+    /// position, normal AND tangent.
+    ///
+    /// SEPARATE entry point on purpose — the backend must know the mesh is
+    /// skinned BEFORE the renderable exists, so attaching first and skinning
+    /// later would silently produce an unskinned object.
+    ///
+    /// The mesh must have been created with MeshData::hasSkinData(); its blend
+    /// indices name bones of `rig`. Several nodes may attach the same mesh and
+    /// the same rig and still pose independently — one rig instance per node.
+    /// Refuses (lastError()) a mesh with no skin data, a rig whose bones do not
+    /// cover the mesh's blend indices, an empty rig, a rig whose parent indices
+    /// are out of range or cyclic, or a rig with more than 256 bones (which is
+    /// attached UNSKINNED at bind pose, with a warning, rather than crashing).
+    /// Bone ORDER is free — the index is what the vertex data names.
+    virtual bool        attachSkinnedMesh(NodeId, MeshId, MaterialId, const SkeletonDesc &) = 0;
+    /// True when the node carries a GPU-skinned mesh with a live rig.
+    virtual bool        hasSkeleton(NodeId) const = 0;
+    /// The node's bone names, in rig index order. Empty when it has no rig.
+    virtual std::vector<std::string> boneNames(NodeId) const = 0;
+    /// The node's pose: `count` entries, index-parallel to the rig's bones, each
+    /// LOCAL to its parent bone. This is the per-frame call — everything else on
+    /// the rig surface is event-driven. False (lastError()) when the node has no
+    /// rig or `count` does not match the rig's bone count.
+    virtual bool        setBonePoses(NodeId, const BonePose *poses, size_t count) = 0;
+    /// Reads back the bone matrices the vertex shader is actually handed for this
+    /// node: `count` bones in rig order, each a ROW-MAJOR 3x4 (12 floats, so
+    /// `out` holds count*12), WORLD-relative — the node's own transform is folded
+    /// in, because a skinned vertex is never multiplied by a world matrix
+    /// separately. Resolved as of the last rendered frame. False (lastError())
+    /// when the node has no rig or `count` misses the rig's bone count.
+    /// The read-back surface for the pose: what proves GPU and CPU skinning agree.
+    virtual bool        boneMatrices(NodeId, float *out, size_t count) const = 0;
+
+    // ---- Clips (ANIMATION_ENGINE_MIGRATION_SPEC) ----
+    /// Attaches clips to a node that already carries a rig. IDEMPOTENT per clip
+    /// id: attaching a clip whose id is already on the node is a no-op.
+    ///
+    /// EVERY clip a node will use must be attached BEFORE any of them is
+    /// enabled. This is not a style preference: the engine's own
+    /// addAnimationsFromSkeleton push_backs into the vector its list of ACTIVE
+    /// animations holds raw pointers into, and it does not fix that list up —
+    /// so attaching while something plays dangles every active clip. The call
+    /// therefore REFUSES (lastError()) while any clip on the node is enabled.
+    ///
+    /// Attaching the first clip also takes the node OUT of manual-bone mode:
+    /// a manual bone is not reset to the bind pose before a clip accumulates,
+    /// so an enabled clip would ADD to whatever setBonePoses last wrote. Bones
+    /// explicitly marked by setBoneManual keep their override.
+    ///
+    /// Refuses: a node with no rig; a track naming a bone the rig does not
+    /// have; unsorted, duplicated or empty key times; a clip with no tracks.
+    /// A clip whose length is <= 0 is PADDED to a minimum length and reported
+    /// in the log, never refused.
+    virtual bool attachClips(NodeId, const ClipDesc *clips, size_t count) = 0;
+    /// The node's clip names, in attach order — including any uniquifying
+    /// suffix the backend added for a collision. Empty when it has no rig.
+    virtual std::vector<std::string> clipNames(NodeId) const = 0;
+
+    /// THE per-frame clip call. Absolute times only. Clips the array does not
+    /// name are disabled. Weights are raw intent; the backend normalizes them
+    /// PER BONE and honours manual-bone overrides (a manual bone gets zero
+    /// weight from every clip, so the override really overrides).
+    ///
+    /// NOTE, and it must be designed for rather than discovered: with NO clip
+    /// enabled the engine does not reset to the bind pose at all — the pose
+    /// FREEZES wherever it was. "Stop" means one clip enabled at t = 0, or a
+    /// setBonePoses write, never an empty state array.
+    virtual bool setClipStates(NodeId, const ClipState *states, size_t count) = 0;
+
+    /// Per-bone override channel. A manual bone keeps whatever setBonePoses
+    /// wrote and is excluded from every clip's weighting.
+    virtual bool setBoneManual(NodeId, const std::string &bone, bool manual) = 0;
+
+    /// Reads back the EVALUATED pose: `count` bones in rig order, each LOCAL to
+    /// its parent bone (a root bone: local to the mesh node) — the same frame
+    /// setBonePoses writes in. Resolved as of the last rendered frame.
+    virtual bool bonePoses(NodeId, BonePose *out, size_t count) const = 0;
+
+    /// The effective per-bone weight the backend applied for `clip`, in rig
+    /// bone order (0 for a bone the clip does not animate). The test and
+    /// diagnostic surface for the normalization rule; empty on any error.
+    virtual std::vector<float> clipBoneWeights(NodeId, const std::string &clip) const = 0;
+
+    // ---- Textures (step 4b): image files on disk, shared across materials ----
+    /// Loads an image file (png/jpg/tga/dds...). `srgb` for colour maps (albedo,
+    /// emissive); false for data maps (normal, roughness, metalness). The same path
+    /// loaded twice returns the same id. 0 on failure (lastError()).
+    virtual TextureId   loadTexture(const std::string &path, bool srgb) = 0;
+    /// A texture from RGBA8 pixels in memory (top-left origin, width*height*4 bytes).
+    virtual TextureId   createTexture(unsigned width, unsigned height, const unsigned char *rgba, bool srgb) = 0;
+    virtual bool        destroyTexture(TextureId) = 0;
+    /// Binds (or, with 0, clears) a texture slot on a PBR material.
+    virtual bool        setPbrTexture(MaterialId, PbrTextureSlot, TextureId) = 0;
+
+    // ---- Overlay primitives (step 8): gizmos, light wires, animation paths ----
+    /// Flat colour, unlit. With depthTest=false it draws on top of everything —
+    /// what gizmo handles need. Alpha < 1 blends.
+    /// `wireframe` draws only the triangle edges — the selection outline uses it.
+    virtual MaterialId  createUnlitMaterial(const Colour &, bool depthTest, bool wireframe = false) = 0;
+    virtual bool        setUnlitMaterial(MaterialId, const Colour &) = 0;
+    /// Selection silhouette: unlit colour drawn on BACK faces only, so a copy of the
+    /// mesh scaled up slightly (~4%) renders as a clean outline band around the
+    /// original (inverted hull). Depth-tested, so occluders still hide it.
+    ///
+    /// `skinnable` picks the variant a SKINNED character needs. HlmsUnlit has no
+    /// skeletal path at all in this engine (`hlms_skeleton` lives only in the Pbs
+    /// templates), so an unlit hull over a rigged mesh draws the BIND POSE
+    /// forever: the moment the character animates, its "outline" peels off and
+    /// stands there as a solid selection-coloured twin (found 2026-09-06 on a
+    /// Mixamo character — it read as "the character renders twice"). The
+    /// skinnable variant is the same silhouette built on HlmsPbs with black
+    /// diffuse/specular and the colour as EMISSIVE, which is unlit in effect and
+    /// skins; pair it with shareSkeleton so the shell rides the character's own
+    /// pose instead of a second, un-posed skeleton.
+    virtual MaterialId  createOutlineMaterial(const Colour &, bool skinnable = false) = 0;
+    /// Makes `follower`'s renderable copy `source`'s POSE every frame — the
+    /// selection silhouette over an animating character, and anything else that
+    /// needs a second renderable of the same rig to move with the first.
+    ///
+    /// A COPY, not Ogre's Item::useSkeletonInstanceFrom: a shared instance
+    /// carries the source's WORLD transforms in its bone matrices, so the
+    /// follower renders exactly where the source is and its own scene node stops
+    /// meaning anything — which is fatal for a silhouette, whose whole existence
+    /// is a few percent of scale on that node. Copying the LOCAL bone transforms
+    /// keeps each renderable's own node in charge of where it lands.
+    ///
+    /// The copy happens after each rendered frame, so the follower rides ONE
+    /// FRAME behind. That is deliberate: the alternative is forcing a second
+    /// skeleton update per frame before rendering, and a selection band 16 ms
+    /// behind the character is not visible while a second full animation pass is
+    /// measurable. Both rigs must have the same bone count.
+    ///
+    /// The pairing is REMEMBERED across re-attaches on either end, and drops
+    /// itself when either node goes away. Passing source = 0 stops following.
+    virtual bool        followSkeleton(NodeId follower, NodeId source) = 0;
+    /// A line list (pairs of points) or, with `strip`, a connected polyline.
+    /// Attach with attachMesh like any mesh. One pixel wide.
+    virtual MeshId      createLineMesh(const std::vector<Vec3> &points, bool strip) = 0;
+
+    // ---- Particles: externally-simulated particles drawn as camera-facing quads.
+    // The set rides on a node for ownership (removeNode frees it) but instance
+    // positions are WORLD-space — the document simulates in world space.
+    /// Creates (or replaces) the node's billboard set: up to `capacity` quads,
+    /// textured by `texture` (0 = untextured white), additive (src-alpha, one) or
+    /// alpha-blended. Depth test on, depth write off, drawn after opaques.
+    virtual bool createBillboardSet(NodeId, TextureId texture, bool additiveBlend,
+                                    unsigned capacity) = 0;
+    /// Replaces the set's instances each frame; count above capacity is clamped.
+    virtual bool setBillboards(NodeId, const BillboardInstance *, size_t count) = 0;
+    /// Removes the node's billboard set (removeNode does this too). KEPT as the
+    /// explicit counterpart of createBillboardSet: the document turns a particle
+    /// system off without destroying its node, and tests/particles pins that.
+    virtual bool destroyBillboardSet(NodeId) = 0;
+
+    // ---- Particles (PARTICLES_FX2_SPEC.md): the engine SIMULATES these ----
+    // Unlike billboard sets, the host pushes PARAMETERS, not particles: emission,
+    // forces, colour-over-life and spin run inside the engine (SIMD, on worker
+    // threads) and advance on every renderOneFrame. The document owns the
+    // authoring values and its own clock scalar; it never integrates anything.
+    //
+    // One node = one particle-system DEFINITION. The definition carries the quota,
+    // the material and the visibility flag, so two emitters in a scene are fully
+    // independent. Definitions cannot be individually destroyed by the backend
+    // (there is no such API), so the engine keeps each node's topology FROZEN —
+    // one emitter of the chosen shape plus a fixed, defaults-neutral affector set —
+    // and recycles abandoned definitions through a per-scene pool.
+
+    /// Creates or updates the node's particle system. Scalar changes (rate,
+    /// velocity, colour keys, forces...) are applied in place. A TOPOLOGY change —
+    /// emitter shape or count, affector kinds, quota bucket, orientation, blend
+    /// mode or texture — rebuilds the definition and recycles the old one.
+    /// The system rides on the node: it moves with it, hides with it, and
+    /// removeNode frees it. False with lastError() set; never throws.
+    virtual bool setParticleSystem(NodeId, const ParticleSystemDesc &) = 0;
+    /// KEPT as the explicit counterpart of setParticleSystem: a node may stop
+    /// being an emitter without being removed. Live particles vanish with it.
+    virtual bool removeParticleSystem(NodeId) = 0;
+    /// How many particles are currently alive in the node's system, for tests and
+    /// the properties panel. 0 when the node has no system. SIMD-rounded up.
+    virtual unsigned particleCount(NodeId) const = 0;
+    /// DIAGNOSTIC: how many particle definitions this Scene has ever created.
+    /// Definitions cannot be destroyed before the Scene is, so this number never
+    /// falls — it is the leak the recycling pool exists to bound, and the
+    /// particle suites assert on it. Never call it from UI code.
+    virtual unsigned particleDefinitionsCreated() const = 0;
+
+    // ---- Lights (step 5): a node may carry one light. Directional and spot lights
+    // shine down the node's -Y (the document's convention: identity = straight down).
+    virtual bool        setLight(NodeId, const LightDesc &) = 0;   // creates or updates
+    /// KEPT as the explicit counterpart of setLight: a node may stop being a light
+    /// without being removed (the document changes a node's type in place).
+    virtual bool        removeLight(NodeId) = 0;
+
+    // ---- Decals (DECALS_SPEC.md): a node may carry one projected-texture decal.
+    // A decal is an oriented box that overwrites base colour / roughness /
+    // metalness on the surfaces inside it, projecting down the node's -Y (the
+    // same convention as lights). It draws nothing itself: the PBR shader
+    // consumes it through the Forward+ clustered list.
+    /// Creates or updates the node's decal. False (lastError()) when the desc
+    /// carries no diffuse texture, or one that did not come from
+    /// loadDecalTexture().
+    virtual bool        setDecal(NodeId, const DecalDesc &) = 0;
+    /// KEPT as the explicit counterpart of setDecal: a node may stop being a
+    /// decal without being removed (the document changes a node's type, or the
+    /// user clears the image).
+    virtual bool        removeDecal(NodeId) = 0;
+    /// Loads an image into the DEDICATED, fixed-geometry decal atlas for `kind`
+    /// and returns a texture id usable in DecalDesc. Images are resampled into
+    /// the atlas geometry (aspect preserved, padded with transparent pixels —
+    /// alpha is the decal mask, so padding is invisible).
+    ///
+    /// NOT interchangeable with loadTexture(): decals sample one Type2DArray
+    /// per channel and carry a slice index into it, so every decal image must
+    /// share one resolution/format/mip-count pool. loadTexture() puts images in
+    /// pool 0 alongside ordinary PBR maps (wrong slices) and its grayscale
+    /// branch produces a non-batched texture the backend refuses outright.
+    ///
+    /// Returns 0 with a clear lastError() when the atlas is FULL — never a
+    /// silent fallback: an overflowing decal would sample another decal's image
+    /// with no warning at all.
+    virtual TextureId   loadDecalTexture(const std::string &path, DecalMap kind) = 0;
+    /// How many slices the `kind` atlas has, and how many are already taken.
+    /// The UI surfaces "decal image budget full" from this rather than guessing.
+    virtual unsigned    decalAtlasCapacity(DecalMap kind) const = 0;
+    virtual unsigned    decalAtlasUsed(DecalMap kind) const = 0;
+
+    // ---- Global illumination (GI_SPEC.md). Scene-level, like fog and sky. ----
+    /// Applies the GI state idempotently, rebuilding whatever changed. Passing the
+    /// same params twice is cheap; GiMode::Off tears everything down. Modes the
+    /// backend has not implemented yet degrade to Off (true is still returned so a
+    /// document saved with a future mode keeps loading). Instant Radiosity is
+    /// per-scene: its virtual point lights live in this scene only.
+    virtual bool        setGlobalIllumination(const GiParams &) = 0;
+    /// Re-runs the active GI solution against the scene's current state (the
+    /// driving light moved, geometry changed). No-op when GI is off. IR re-traces
+    /// in milliseconds at editor quality; callers may invoke this per edit.
+    virtual void        refreshGlobalIllumination() = 0;
+    /// The LIGHT-ONLY refresh (REFLECTIONS_ADOPTION_SPEC.md P2): re-injects the
+    /// scene's lights into the EXISTING voxel volume and leaves the geometry
+    /// alone. Orders of magnitude cheaper than the full call — no
+    /// re-voxelization, no probe re-render — and it is what a light being
+    /// DRAGGED needs: the bounce follows the light live while the expensive
+    /// rebuild waits for the drag to stop.
+    ///
+    /// It is a partial answer on purpose and the caller must know which parts it
+    /// does not update: reflection PROBES capture lighting, so probe reflections
+    /// stay as they were until the next full refresh. Under Instant Radiosity
+    /// there is no cheaper path than the re-trace, so there this IS the
+    /// re-trace. Returns false when nothing could be done (GI off, or nothing
+    /// built yet), so a caller can tell "cheap refresh done" from "no-op".
+    virtual bool        refreshGiLighting() = 0;
+    /// What GI actually ACHIEVED, as opposed to what was requested — probe
+    /// count and whether the probe/VCT bindings are live on this scene. The
+    /// hybrid can degrade to plain VCT (a missing probe workspace definition);
+    /// without this nothing, not even a pixel test, could tell the difference.
+    /// Cheap: reads live pointers, renders nothing.
+    virtual GiStatus    giStatus() const = 0;
+    /// "Has any object LEFT the volume that is currently lit?" — 0 when every
+    /// GI item is inside it, otherwise a hash of the escapees' quantized world
+    /// AABBs (LIGHTING_FIX fix 2).
+    ///
+    /// A HASH, NOT A BOOL, and that is the whole design. The host debounces
+    /// expensive re-solves by watching a signature: it restarts a stability
+    /// window whenever the value changes and re-solves once it has held still.
+    /// A bool would stay true for the entire duration of a drag, so the window
+    /// would either fire on every frame of it or never fire at all. A hash of
+    /// WHERE the escapee is changes on each frame the object moves and freezes
+    /// the moment the user lets go — one re-solve per gesture, which is exactly
+    /// the contract a light's transform signature already has. Zero when GI is
+    /// off, when nothing has been built yet, and whenever the document typed
+    /// its own bounds box (then the volume is the user's statement, not a fit).
+    ///
+    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
+    virtual unsigned long long giEscapeSignature() const = 0;
+    /// "Has any GI geometry MOVED?" — a quantized hash of every GI item's world
+    /// AABB (FIX WAVE B3). Same contract and the same debounce as
+    /// giEscapeSignature and the host's light-transform signature: it changes on
+    /// every frame of a drag and freezes when the drag stops, so a host that
+    /// watches it spends the CHEAP paths during the gesture and exactly one full
+    /// re-solve at the end of it. Stateless — reading it twice in a frame is
+    /// free of side effects. Zero only when GI is off.
+    ///
+    /// Cheap: one world-AABB read per GI item, no allocation, renders nothing.
+    virtual unsigned long long giGeometrySignature() const = 0;
+    /// "This object must not define WHERE global illumination happens"
+    /// (REFLECTIONS_ADOPTION_SPEC.md P1a). The object still voxelizes and still
+    /// bounces light — it is only kept out of the two AABB reductions, the lit
+    /// volume and the reflection-probe region. The case it exists for is the
+    /// ground plane: 200 units of it under a 2-unit scene drags the voxel
+    /// volume and the probe grid over empty air. Takes effect on the next GI
+    /// (re)build, exactly like moving the geometry would.
+    virtual void        setNodeGiBoundsExcluded(NodeId, bool) = 0;
+    virtual bool        nodeGiBoundsExcluded(NodeId) const = 0;
+    /// "This node is an EDITOR HELPER" (REFLECTIONS_ADOPTION_SPEC.md P1b): the
+    /// ground grid, light icons, range wires, camera helpers — geometry the
+    /// user must see in the viewport and a reflection probe must never capture.
+    /// It renders in the main view exactly as before; it is excluded from
+    /// reflection-probe captures, and from any future pass that opts into the
+    /// same channel. Applies to the node's mesh, billboards and particles, and
+    /// takes effect immediately whether it is set before or after they attach.
+    /// Not inherited: set it on each node that carries helper geometry.
+    virtual void        setNodeHelper(NodeId, bool) = 0;
+    virtual bool        nodeHelper(NodeId) const = 0;
+
+    /// LIGHTING CHANNELS, object side (LightDesc::lightMask is the light side).
+    ///
+    /// A light lights an object when `light.lightMask & object.lightMask` is
+    /// non-zero. Both are born 0xFFFFFFFF, so by default every light lights
+    /// every object and nothing here costs anything. There are NO reserved bits
+    /// — all 32 are the host's to spend (unlike the visibility/query flags,
+    /// where the engine owns specific bits).
+    ///
+    /// WHAT IT DOES AND DOES NOT COVER, at this engine pin:
+    ///   * it filters DIRECT lighting from every light path — directional,
+    ///     shadow-casting, Forward+ clustered point/spot, and both area kinds;
+    ///   * it does NOT filter SHADOW CASTING. A masked-off object still renders
+    ///     into that light's shadow map and therefore still casts a shadow onto
+    ///     objects the light does light. The caster pass has no access to the
+    ///     receiver's mask (the shadow map is one texture shared by every
+    ///     receiver), so this is a property of shadow mapping, not an omission;
+    ///   * it does NOT filter INDIRECT light. GI (Instant Radiosity VPLs, VCT)
+    ///     bakes/propagates before the mask is consulted, so a masked-off object
+    ///     still receives that light's bounce.
+    ///   * it applies to the node's ITEM (mesh geometry). Billboards and
+    ///     particle systems are not masked: PFX2 definitions are POOLED and
+    ///     shared between nodes, so a per-node mask on a def would leak.
+    ///
+    /// Applies immediately, survives an Item rebuild (the engine re-applies it
+    /// on attach), and is remembered for a node whose geometry has not arrived
+    /// yet. Not inherited: set it on every node that carries geometry.
+    virtual void        setNodeLightMask(NodeId, unsigned mask) = 0;
+    virtual unsigned    nodeLightMask(NodeId) const = 0;
+
+    // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md). Scene-level, like GI. ----
+    /// Applies the reflection state idempotently. Pushing the same params twice is
+    /// free; a CHANGE rebuilds the whole arm (render targets, cameras, private
+    /// workspaces) and a budget change additionally recompiles PBS shaders, so
+    /// hosts may call this every frame but must not animate the values.
+    /// `budget == 0` tears everything down and costs nothing.
+    ///
+    /// Only ONE scene per process can have reflections at a time: the receiving
+    /// half lives on the process-wide HlmsPbs, exactly like VCT/PCC. The last
+    /// scene to enable owns the binding; enabling on a second scene disables the
+    /// first (which is why the host arms this on the editor scene only).
+    virtual bool        setPlanarReflections(const PlanarReflectionParams &) = 0;
+    /// Makes (or un-makes) a node a reflection plane. The node must already have
+    /// a mesh attached, and that mesh must be PLATE-LIKE — its thinnest local
+    /// extent no more than a tenth of the next — because the plane, its size and
+    /// its normal are all derived from the mesh's own bounds. A sphere or a cube
+    /// is refused (false, lastError()); the 20-degree matching rule would make it
+    /// look broken rather than merely wrong.
+    ///
+    /// The plane's normal is the node's thin axis in the POSITIVE direction: the
+    /// top of a floor reflects, the underside does not. The reflector is excluded
+    /// from its own reflection render, so a mirror never contains itself.
+    /// Reflectors survive `setPlanarReflections` changes; the flag is remembered
+    /// even while the budget is 0.
+    virtual bool        setNodePlanarReflector(NodeId, bool) = 0;
+    virtual bool        nodePlanarReflector(NodeId) const = 0;
+    /// How many reflection planes actually rendered last frame — the "achieved"
+    /// number against the requested budget (planes off screen do not render).
+    /// 0 when reflections are off or nothing has rendered yet.
+    virtual int         activePlanarReflectors() const = 0;
+};
+
+/// A view onto a Scene, rendering into a native window supplied by the host or
+/// into an offscreen texture. Owned by the Engine: destroy with Engine::destroyView().
+class View {
+public:
+    virtual ~View() = default;
+    virtual const std::string &name() const = 0;
+    /// Binds a Scene to this View. Call after createScene(); a View renders nothing
+    /// until a Scene is attached. A View holds at most one Scene: binding a second
+    /// while one is attached fails (false, lastError()). Pass null to detach.
+    virtual bool setScene(Scene *) = 0;
+    virtual Scene *scene() const = 0;
+    /// Full camera state in one call (step 5). The document camera is pushed
+    /// through this every frame. This is the ONLY way to move a View's camera.
+    virtual void setCamera(const CameraDesc &) = 0;
+    /// Clear colour behind the scene (the document's flat sky colour). Cheap to
+    /// call with the same value; a change rebuilds the view's compositor workspace.
+    virtual void setBackground(const Colour &) = 0;
+    /// KEPT: cheap introspection the host needs to avoid redundant (workspace-
+    /// rebuilding) setBackground calls, and pinned by the engine suites.
+    virtual Colour background() const = 0;
+    /// Shadow maps for this view (PSSM for directional, focused for point/spot;
+    /// lights opt in with LightDesc::castShadows). Off by default; toggling rebuilds
+    /// the view's workspace.
+    virtual void setShadows(bool) = 0;
+    virtual bool shadows() const = 0;
+    /// A disabled View is skipped by renderOneFrame(). Hidden viewports MUST be
+    /// disabled — the backend otherwise keeps drawing them at full cost.
+    virtual void setEnabled(bool) = 0;
+    /// KEPT: cheap introspection — hosts query it before pushing per-frame state
+    /// into a View they may have disabled; pinned by the engine suites.
+    virtual bool isEnabled() const = 0;
+    /// Asks for a new size in LOGICAL POINTS (see Engine::createView on units).
+    /// Cheap and idempotent: for an on-screen View this only records the request
+    /// — it is applied once, at frame time, by the next renderOneFrame(), so a
+    /// layout burst costs one swapchain rebuild rather than one per event. An
+    /// offscreen View's texture is replaced immediately (an RTT cannot resize in
+    /// place), which also drops whatever was rendered into it.
+    virtual void resize(unsigned width, unsigned height) = 0;
+    /// The render target's ACTUAL size, in PIXELS — not what resize() was last
+    /// asked for. Exactly like sampleCount() reports the ACHIEVED sample count:
+    /// a swapchain follows the native window (on X11 the surface's currentExtent
+    /// wins outright), a request made this frame lands at the next frame, and a
+    /// window manager may never grant it at all. Hosts that need to know what is
+    /// really being drawn — and every test that asserts a resize took — must read
+    /// these, not their own request.
+    virtual unsigned width() const = 0;
+    virtual unsigned height() const = 0;
+    /// Hardware anti-aliasing (MSAA) for this view's render target: 1 = off,
+    /// 2/4/8 typical (values are rounded down to a power of two and clamped).
+    /// NOT cheap on change: the render target is recreated — on-screen at the
+    /// next frame (the resize path), offscreen immediately. Calling again with
+    /// the value already requested is free, so hosts may push it per frame.
+    /// The driver may clamp the request (Vulkan only guarantees 1 and 4);
+    /// sampleCount() reports the ACHIEVED count once the target exists.
+    virtual void setSampleCount(unsigned samples) = 0;
+    virtual unsigned sampleCount() const = 0;
+    /// KEPT: cheap introspection — readPixels() only works offscreen, so callers
+    /// (thumbnails, tests) branch on this; pinned by the engine suites.
+    virtual bool isOffscreen() const = 0;
+
+    /// The post-processing chain for this View (POST_CHAIN_SPEC.md): HDR +
+    /// filmic tonemap, bloom, SSAO, SMAA, SSR, refractive glass.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS, always and by construction — postFx() then
+    /// reports what was asked for, and the chain stays the simple one. That is
+    /// what keeps thumbnails, material previews and every pixel suite exact.
+    ///
+    /// Cheap to call with an unchanged value (hosts may push per frame). A
+    /// change to an ENABLE flag rebuilds the workspace; a change to a tuning
+    /// value is a uniform and rebuilds nothing.
+    virtual void setPostFx(const PostFxDesc &) = 0;
+    virtual const PostFxDesc &postFx() const = 0;
+
+    /// CUT THE EXPOSURE INSTEAD OF FADING IT (CAMERA_LENS_SPEC §4).
+    ///
+    /// The HDR chain's automatic exposure is a TEMPORAL filter: a 1x1 history
+    /// texture that converges on the measured luminance at ~75% per second, so
+    /// a cut from one camera to another with a different exposure re-adapts
+    /// over a visible one to two seconds. That is right for a light coming on
+    /// and wrong for a CUT — a camera change is a new shot, not a new lighting
+    /// condition, and even a MANUAL exposure fades across one (the clamp pins
+    /// what the chain measures, not what the history holds).
+    ///
+    /// This re-seeds that history from the view's CURRENT exposure setting, so
+    /// the next frame starts at the new grade instead of arriving at it. Call
+    /// it AFTER pushing the new camera's post description, and only on a cut:
+    /// calling it while a slider moves would turn a ramp into a series of
+    /// steps.
+    ///
+    /// A NO-OP unless this view's chain has the automatic HDR exposure — no
+    /// HDR, a fixed tonemap, an offscreen view with no chain, or no workspace
+    /// yet: nothing to re-seed, no error.
+    virtual void resetExposureHistory() = 0;
+
+    /// The engine-drawn overlay for this View (STATS_OVERLAY_SPEC.md §5.1):
+    /// a corner stats readout and/or a full-view loading cover.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS unless ViewOverlayDesc::allowOffscreen — the
+    /// same guarantee, in the same one place, as setPostFx. overlay() still
+    /// reports what the host asked for.
+    ///
+    /// Cheap to call with an unchanged value, and cheap to TOGGLE: showing or
+    /// hiding the overlay is element state, never a workspace rebuild
+    /// (workspaceGeneration does not move). Only a change to `allowOffscreen`
+    /// on an offscreen view changes the graph.
+    ///
+    /// The captions are recomposed once per frame from the ENABLED view's desc:
+    /// Ogre's overlay set is process-wide, so two on-screen Views cannot show
+    /// different text simultaneously (see ViewOverlayDesc's constraint note).
+    virtual void setOverlay(const ViewOverlayDesc &) = 0;
+    virtual const ViewOverlayDesc &overlay() const = 0;
+
+    /// The picture-in-picture inset for this View (CAMERAS_SPEC §7.7): a second
+    /// camera's view of the SAME scene, composited into a rectangle of this
+    /// View's target. See ViewPipDesc for the mechanism and every rule it obeys.
+    ///
+    /// This is the spec's `setPipCamera(CameraDesc|null, rect)` in this
+    /// boundary's own idiom: the camera, the rect, the inset's background and
+    /// the offscreen opt-in travel together in one value, exactly like
+    /// setPostFx and setOverlay — "null" is `ViewPipDesc::enabled = false`.
+    ///
+    /// IGNORED ON OFFSCREEN VIEWS unless ViewPipDesc::allowOffscreen — the same
+    /// guarantee, in the same one place, as setPostFx and setOverlay. pip()
+    /// still reports what the host asked for.
+    ///
+    /// Cheap to call with an unchanged value (hosts may push per frame), and
+    /// cheap to MOVE: changing only the rect or the camera is a live viewport
+    /// modifier / camera write, never a workspace rebuild (workspaceGeneration
+    /// does not move). Turning the inset on or off does build/tear its
+    /// workspace — that is the one structural change here.
+    virtual void setPip(const ViewPipDesc &) = 0;
+    virtual const ViewPipDesc &pip() const = 0;
+    /// How many times this View has (re)built its compositor workspace — the
+    /// structurally expensive operation behind setShadows(), setBackground(),
+    /// resize(), setSampleCount() and the engine's shadow-atlas rebuild. Starts
+    /// at 0 and reaches 1 when a Scene is first bound. Hosts use it to verify
+    /// that a per-frame push really was free; tests use it to pin the fact that
+    /// there is exactly ONE place a workspace is created (POST_CHAIN_SPEC.md).
+    virtual unsigned workspaceGeneration() const = 0;
+    /// How many frames this View has actually drawn AND presented since its
+    /// current Scene was bound — the honest "are there real pixels in that
+    /// window yet?" signal. A frame counts only when the View was enabled, had
+    /// a live workspace and a bound Scene while Engine::renderOneFrame ran, so
+    /// a hidden, scene-less or workspace-less View never inflates it. Binding a
+    /// Scene (or detaching one) resets it to 0; a workspace REBUILD does not —
+    /// the pixels of the previous frame are still on screen.
+    ///
+    /// Hosts use it to know when the window stopped showing stale pixels: the
+    /// editor's loading cover (src/viewport/viewportcover.h) is on screen until
+    /// this passes its threshold.
+    virtual unsigned long long framesPresented() const = 0;
+    /// Reads this View's rendered pixels back to the CPU. Offscreen Views only —
+    /// returns false for on-screen windows. This is the thumbnail path, and what
+    /// makes the engine testable without a window.
+    virtual bool readPixels(Image &out) = 0;
+
+    /// Compiles every shader this View's SCENE needs, now, without drawing it
+    /// (SHADER_CACHE_SPEC.md §5 — the PSO-precache half).
+    ///
+    /// The engine builds a shader per renderable, on first draw. Left alone,
+    /// that means the first frames of a freshly-opened world stutter through
+    /// dozens of compiles while the user is looking at them. This does the same
+    /// work early: it renders a WARM-UP pass over this view's scene — Ogre
+    /// walks the live render queues itself, so there is no material list to
+    /// build or maintain — into a 4x4 target, which forces every variant the
+    /// scene actually needs (including shadow casters) to be generated and
+    /// compiled. Nothing is presented and no pixel of the real view changes.
+    ///
+    /// SYNCHRONOUS, and that is the point: the caller holds its loading cover
+    /// up until this returns. It therefore LENGTHENS a cold open by however
+    /// long the compiles take, and shortens every frame after it.
+    ///
+    /// Requires a scene (setScene first). Returns false with lastError() set if
+    /// there is nothing to warm up or the warm-up pass could not be built; a
+    /// failure is never fatal — the shaders simply compile later, as before.
+    virtual bool warmUpShaders() = 0;
+};
+
+/// Owns the device and every Scene and View.
+///
+/// ONE PER PROCESS. The backend is a process-wide singleton; create() refuses to
+/// make a second Engine while one is alive (returns null + error). Destroying it
+/// and creating another later is supported (tests/engine/test_engine_recreate) —
+/// this needs the Ogre-Next patch recorded in OGRE_PLATFORM_DEPS.md.
+///
+/// LIFETIME CONTRACT: every View and Scene pointer handed out is owned by the
+/// Engine and dies with it. Hosts that cache a View* (e.g. a widget) must call
+/// destroyView() before the Engine is destroyed, or must check the Engine is still
+/// alive before touching the pointer — see EngineViewWidget for the pattern.
+class Engine {
+public:
+    virtual ~Engine() = default;
+
+    /// Creates the engine. Returns null on failure and fills `error`.
+    static std::unique_ptr<Engine> create(const EngineConfig &, std::string &error);
+    /// True while an Engine exists in this process.
+    static bool isAlive();
+
+    /// ORDER MATTERS. A View must be created before any Scene: the underlying engine
+    /// only starts its material and buffer systems when the first render target
+    /// exists, and creating a Scene before that dereferences null.
+    ///   createView(...)  ->  createScene(...)  ->  view->setScene(scene)
+    /// Names must be unique among live Views; a duplicate returns null (lastError()).
+    ///
+    /// UNITS (the contract for every size that crosses this boundary, in or out):
+    /// `width`/`height` here — and every later View::resize() — are LOGICAL
+    /// POINTS, the units the host's toolkit lays out in (Qt's QWidget::width()).
+    /// The window backend converts: on X11 at the current pin the conversion is
+    /// the identity, on macOS the Metal window multiplies by the layer's
+    /// contentsScale. What comes BACK — View::width()/height() — is the render
+    /// target's real size in PIXELS, which is why it can differ from what was
+    /// pushed (see View::width). Points == pixels on every unscaled display, so
+    /// the two only diverge on HiDPI, which is its own program and not handled
+    /// anywhere in this tree yet (deep audit area 7 F4).
+    virtual View  *createView(const std::string &name,
+                              NativeWindowHandle, unsigned width, unsigned height,
+                              const Colour &background) = 0;
+    /// An offscreen View: renders to a texture instead of a window. Needs no native
+    /// handle, so it works headless. Used for thumbnails, asset previews and tests.
+    virtual View  *createOffscreenView(const std::string &name,
+                                       unsigned width, unsigned height,
+                                       const Colour &background) = 0;
+    /// Releases the View's window/texture and camera. Any Scene it showed survives.
+    /// Null or unknown pointers are ignored.
+    virtual void   destroyView(View *) = 0;
+
+    /// Returns null if called before the first createView()/createOffscreenView(),
+    /// or if the name is already in use (lastError()).
+    ///
+    /// `workerThreads` sizes THIS SCENE'S OWN worker pool — the threads the
+    /// backend forks culling, render-queue building and object updates across.
+    /// Every scene gets its own pool (they are not shared), so the number is a
+    /// per-scene decision and not a global one: the on-screen editor scene
+    /// wants the machine, a 128x128 thumbnail scene wants one thread and no
+    /// barriers. 0 means "the backend's default" (2), which is what every
+    /// caller that does not care should pass. Clamped to [1, 32].
+    ///
+    /// MORE IS NOT FREE. The pool synchronises through a barrier per parallel
+    /// pass, so at small scene sizes the barrier cost outweighs the split work
+    /// — measure before raising it (tests/benchmarks/bench_scenegraph has a
+    /// `--threads` flag for exactly this).
+    ///
+    /// AND LESS THAN ONE IS A REAL ANSWER: pass `kSceneMainThreadOnly`
+    /// (Types.h) for a scene that should have NO worker threads at all
+    /// (SPECS/THREADING_ADOPTION_SPEC.md P5). That is a different mode, not a
+    /// smaller pool — the backend spawns nothing and every parallel pass runs
+    /// inline with no barrier, instead of waking one thread and paying two
+    /// barrier syncs to do the same serial work. It is what a staging scene
+    /// manager (which is never drawn) and a 128x128 thumbnail scene actually
+    /// want. It cannot be spelled `0`, because 0 has always meant "I do not
+    /// care, give me the default".
+    ///
+    /// NOT FOR A SCENE THAT COMPILES SHADERS: parallel Hlms and warm-up compile
+    /// need more than one worker (OgreRenderQueue.cpp:588), and 0 and 1 are
+    /// equally serial there. The startup warm-up scene is the worked example —
+    /// see the note on Tier::Utility in src/bridge/sceneworkerthreads.h.
+    virtual Scene *createScene(const std::string &name, unsigned workerThreads = 0) = 0;
+
+    /// The scene manager DETACHED document nodes live in, opaque
+    /// (`Ogre::SceneManager*`). SPECS/SCENEGRAPH_SPEC.md D2: a document node IS
+    /// an engine node, so one has to exist for nodes that are not (yet) in any
+    /// rendered scene — every node an importer builds, everything the undo stack
+    /// holds, every document that has not met a SceneMirror. It renders nothing
+    /// and is never bound to a View.
+    ///
+    /// Creating it forces the backend's one-time preparation — the
+    /// Hlms/resource registration a scene manager cannot exist without, and, on
+    /// a RENDERING boot only, a surfaceless window to hang that registration
+    /// on. A HEADLESS engine (EngineConfig::headless) already has both when
+    /// create() returns, so asking for this costs nothing there.
+    ///
+    /// Hosts ask for it once, before their first document node, and hand it to
+    /// iris::graph. On a rendering boot, asking BEFORE the first real View is
+    /// what makes the backend create that surfaceless window ahead of the
+    /// on-screen one; hosts that can wait should wait (Studio's EngineHost
+    /// registers it lazily for exactly this reason).
+    virtual void *documentGraphScene() = 0;
+    /// True when this engine was created with EngineConfig::headless — the NULL
+    /// render system, no display, no device, and no View of any kind. Hosts
+    /// that decide what to show read it instead of guessing from a failed
+    /// createView().
+    virtual bool  isHeadless() const = 0;
+    /// Destroys the Scene and every node, mesh and material it owns. Views bound to
+    /// it are detached first (they stay alive, showing nothing).
+    virtual void   destroyScene(Scene *) = 0;
+
+    /// Draws every enabled View once. The host owns the loop and calls this.
+    virtual void renderOneFrame() = 0;
+
+    /// RESOLVES ONE SCENE'S GRAPH WITHOUT DRAWING ANYTHING — transforms,
+    /// skeletal animations, tag points, bounds and the light list, exactly the
+    /// pass `renderOneFrame` runs for the scenes it draws.
+    ///
+    /// WHY THIS EXISTS (SPECS/THREADING_ADOPTION_SPEC.md P3). Bone transforms,
+    /// world AABBs and derived transforms are resolved by the scene-graph
+    /// update, which is part of a FRAME. Until P3 the frame updated every scene
+    /// manager in the process, so a host that wanted a pose resolved could get
+    /// one by calling `renderOneFrame()` with every view disabled — a frame
+    /// that drew nothing and updated everything. That is no longer true: the
+    /// frame now updates only the scenes an enabled View draws. Hosts that need
+    /// a resolved graph WITHOUT pixels — reading a bone after setting a clip
+    /// time is the real case — say so here instead.
+    ///
+    /// Strictly cheaper than the old trick (one scene, no render system work at
+    /// all) and correct whether or not the scene's page is on screen.
+    /// `clearFrameData` runs with it, so repeated calls do not accumulate the
+    /// global light list.
+    ///
+    /// False = no such scene, or the backend refused; `lastError()` says which.
+    virtual bool updateScene(Scene *scene) = 0;
+
+    /// True while at least one View is enabled (View::setEnabled) — i.e. while
+    /// renderOneFrame() has anything at all to draw.
+    ///
+    /// The host's render loop asks this BEFORE calling renderOneFrame, and skips
+    /// the frame entirely when the answer is false (deep audit area 7 F8). A
+    /// frame with nothing enabled is not free: it still walks every scene, runs
+    /// the per-frame interlocks, submits a command buffer and takes a slot in
+    /// the present queue — ~62 of them a second while the user sits on a page
+    /// that shows no viewport at all. Asking is O(views) and allocates nothing.
+    ///
+    /// Only View::setEnabled moves this, so nothing else has to change to stay
+    /// correct: the tick after a viewport is shown sees `true` and renders.
+    virtual bool hasEnabledViews() const = 0;
+
+    /// Every live View, in creation order (the vector is cleared first).
+    ///
+    /// Hosts need this for the ONE thing hasEnabledViews() cannot express:
+    /// temporarily quieting the on-screen views around an offscreen render.
+    /// A thumbnail or screenshot readback calls renderOneFrame() twice, and
+    /// renderOneFrame draws EVERY enabled View — so each readback also redraws
+    /// the whole editor twice and burns two vsync presents on frames nobody
+    /// asked for (fps audit F5; a thumbnail queue paced this way holds the
+    /// editor at ~20 fps). Disabling the on-screen views for the duration is
+    /// the whole fix, and it needs the list.
+    ///
+    /// The pointers are the Engine's and die with it — hold them for the
+    /// duration of a call, never across one that could destroy a View.
+    virtual void listViews(std::vector<View *> &out) const = 0;
+
+    // ---- Texture streaming (SPECS/THREADING_ADOPTION_SPEC.md P2) -----------
+    //
+    // WHAT CHANGED, in one sentence: `loadTexture` used to block the calling
+    // thread until that ONE texture was read, decoded and uploaded; now it only
+    // SCHEDULES the load, and the wait happens ONCE, at the frame edge, inside
+    // renderOneFrame(). N textures therefore decode concurrently instead of one
+    // at a time, and the frame that draws them still sees every one of them
+    // resident — which is what keeps the pixel suites byte-exact (decision
+    // D-C(1); option (2), "do not wait for the on-screen view either", is a
+    // visible-quality decision that was deliberately NOT taken here).
+    //
+    // A HOST NEEDS THESE THREE ONLY FOR ONE-SHOT RENDERS. Anything that draws
+    // through the ordinary loop is already covered by renderOneFrame's own
+    // wait. What is NOT covered is a caller that renders a fixed number of
+    // frames and then reads the pixels back — a thumbnail, an asset snapshot, a
+    // screenshot — because a texture whose load request arrives DURING that
+    // frame is resident only for the next one. Upstream's own recipe for that
+    // (OgreTextureGpuManager.h:849-868) is: wait, snapshot the request counter,
+    // render, and if the counter moved, wait and render again.
+
+    /// True when nothing is queued or in flight in the streaming worker(s).
+    /// Cheap — one flag and a queue size behind a mutex.
+    virtual bool texturesDoneStreaming() const = 0;
+
+    /// Blocks until texturesDoneStreaming() is true, pumping the streaming
+    /// worker's completion queue while it waits. Returns the milliseconds spent
+    /// waiting (0.0 when there was nothing to wait for), which is the number the
+    /// A/B harness reports and the only honest way to say what a "batched" open
+    /// actually cost.
+    ///
+    /// NOT NEEDED before a normal frame — renderOneFrame does it. It is here for
+    /// one-shot renders and for scripts that want a provably complete image.
+    virtual double waitForTextureLoads() = 0;
+
+    /// A monotonic count of texture LOAD REQUESTS this process has made. Only
+    /// differences mean anything: snapshot it, render, compare. It moving across
+    /// a render is exactly the condition upstream's double-render guard tests.
+    virtual unsigned long long textureLoadRequests() const = 0;
+
+    /// How many threads the multiload pool has (0 = the feature is off and
+    /// loading is the single background streaming thread). Set once at engine
+    /// init from the machine's core count, overridable with JAH_TEXTURE_MULTILOAD
+    /// for measurement — see the A/B protocol in THREADING_ADOPTION_SPEC G2-c.
+    virtual unsigned textureMultiLoadThreads() const = 0;
+
+    /// Rows in the backend's texture METADATA cache (P2 item 6): resolution,
+    /// format, mipmaps and pool per texture path, remembered across launches so
+    /// the main thread can reserve the right pool slice before the worker has
+    /// decoded anything. Derived data with the same delete-and-rebuild contract
+    /// as the shader cache, in the same directory. Not free to ask — the backend
+    /// exposes no size() and this exports the map to count it.
+    virtual unsigned textureMetadataCacheEntries() const = 0;
+
+    /// Rows in OUR channel sidecar (P2 item 7, decision D-D(b)): path ->
+    /// {numComponents, compressed}, remembered so that asking "is this file
+    /// single-channel?" — which used to mean fully decoding every image on the
+    /// calling thread and throwing the result away — costs a map lookup. Free to
+    /// ask: it is a container size.
+    virtual unsigned textureChannelCacheEntries() const = 0;
+
+    /// Writes the texture cache (metadata + the channel sidecar) now. Called on
+    /// clean shutdown beside saveShaderCache(); a no-op when the cache is off.
+    virtual bool saveTextureCache() = 0;
+
+    // ---- Presentation pacing (fps audit F1) --------------------------------
+    /// Vertical sync for every ON-SCREEN View, now and for every window created
+    /// afterwards (a window rebuilt by an MSAA change or a resize keeps it).
+    /// Offscreen Views never present and are unaffected.
+    ///
+    /// ON (the default, EngineConfig::vsync) the backend presents in a
+    /// vsync-respecting mode and the swapchain acquire BLOCKS until the display
+    /// releases an image — which, combined with a host loop that ticks on a
+    /// timer, is why the frame rate steps to refresh/n rather than sliding.
+    /// OFF asks for an immediate (tearing) present mode: frames go out as fast
+    /// as the loop produces them, which is what "unlimited" means and the only
+    /// honest way to see what the renderer can actually do.
+    ///
+    /// NOT FREE TO TOGGLE: each on-screen View's swapchain is destroyed and
+    /// rebuilt, exactly as a resize does. Call it on a user's change of mind,
+    /// never per frame. A no-op when the value is unchanged.
+    virtual void setVsync(bool) = 0;
+    virtual bool vsync() const = 0;
+
+    // ---- Simulation clock (PARTICLES_FX2_SPEC.md) ----
+    // The engine advances its own particle simulation inside renderOneFrame,
+    // from the backend's frame-time source. These two verbs are the ONLY control
+    // the host has over it, and both are PROCESS-WIDE, not per scene and not per
+    // view — the backend has exactly one frame-time source. "Freeze the editor's
+    // particles while the player window runs" is therefore not expressible; the
+    // document owns one clock scalar and pushes it here, the way the animation
+    // migration does.
+    /// Multiplies the frame delta every simulation reads. 1 = wall clock,
+    /// 0 = frozen, 2 = double speed. Also cancels any fixed frame delta.
+    virtual void setParticleTimeScale(float scale) = 0;
+    virtual float particleTimeScale() const = 0;
+    /// Replaces the wall clock with a FIXED step, in seconds — the same delta
+    /// every frame regardless of how long the frame took. Deterministic enough
+    /// for pixel gates and thumbnail warm-ups (emission is still randomised, so
+    /// those stay statistical); 0 restores the wall clock at scale 1.
+    virtual void setFixedFrameDelta(float seconds) = 0;
+    virtual float fixedFrameDelta() const = 0;
+
+    /// Shadow filter quality for EVERY shadowed light in EVERY scene — the
+    /// backend's PBR pipeline has one global filter, not a per-light one
+    /// (Hard = PCF 2x2, Soft = PCF 4x4, VerySoft = PCF 6x6). Callers with
+    /// per-light document settings push the strongest requested quality.
+    /// Cheap: takes effect next frame, no material rebuild. Default: Soft.
+    virtual void setShadowFilter(ShadowFilter) = 0;
+    virtual ShadowFilter shadowFilter() const = 0;
+
+    /// Shadow-map resolution for EVERY shadowed light in EVERY scene — global,
+    /// like the filter: the backend renders all shadow maps into one fixed atlas
+    /// (PSSM splits + two focused maps) whose sizes derive from this base value
+    /// (split 0 and the focused maps at `pixels`, further splits at half).
+    /// Callers with per-light document settings push the LARGEST requested size.
+    /// NOT cheap: changing it tears down and rebuilds the shadow node and every
+    /// workspace that references it — call on change only, never per frame.
+    /// Clamped to [256, 8192]. Default: 2048.
+    virtual void setShadowResolution(unsigned pixels) = 0;
+    virtual unsigned shadowResolution() const = 0;
+
+    /// Shadow-caster geometry optimization — see EngineConfig::optimizeShadowMeshes.
+    /// PROCESS-WIDE and consumed when a mesh is BUILT: changing it re-decides the
+    /// question for meshes created afterwards and leaves existing ones alone.
+    /// That is why it is an application preference, not a per-scene setting.
+    virtual void setShadowMeshOptimization(bool on) = 0;
+    virtual bool shadowMeshOptimization() const = 0;
+
+    // ---- Persistent shader cache (SHADER_CACHE_SPEC.md) ----
+    // Three layers behind one fingerprinted container: the Vulkan pipeline
+    // cache (driver ISA), the microcode cache (SPIR-V), and the Hlms disk cache
+    // (preprocessed shader source). All of it is DERIVED DATA: on any doubt the
+    // backend deletes the directory and starts cold rather than feed a
+    // half-written blob to a driver.
+    //
+    // The cache is loaded once, inside the first createView() — nothing here
+    // needs calling to make it work. These verbs exist so the application can
+    // SHOW what it did and let a user throw it away.
+
+    /// What is on disk and what happened this run. Cheap enough to call from a
+    /// settings page; it stats a handful of files.
+    virtual ShaderCacheStats shaderCacheStats() const = 0;
+
+    // ---- The engine's own log, forwarded (SESSION_LOG_SPEC fork F3-B) ----
+    //
+    // Ogre writes thousands of LML_NORMAL lines per boot into its OWN
+    // per-session file, and folding all of that into the application's session
+    // log would destroy exactly the signal-to-noise the log exists for. What
+    // the application DOES want is the criticals — the ~55 in OgreMain and the
+    // 15 in the Vulkan render system, which include every Vulkan validation
+    // error — where a human will actually see them.
+    //
+    // THREE RULES the sink must obey, all of them properties of Ogre's Log:
+    //   1. It is called UNDER Ogre's log mutex, from whatever thread logged
+    //      (including the background streaming and texture threads). It must be
+    //      thread-safe.
+    //   2. It must NEVER call back into Ogre. That is a deadlock, not a risk.
+    //   3. It must not block: a slow sink slows every log line in the process.
+    //
+    // `level` is 0 for ordinary messages and 1 for LML_CRITICAL. Ogre's own
+    // file and console output are untouched — the listener never sets
+    // skipThisMessage.
+    using LogSink = EngineLogSink;
+    virtual void setLogSink(LogSink sink) = 0;
+
+    /// Which GPU, which driver, which API version — filled once the render
+    /// system has a device. Empty strings before that, and under the NULL
+    /// render system everything but `renderSystem` is legitimately empty.
+    virtual DeviceInfo deviceInfo() const = 0;
+
+    /// What the renderer measured (STATS_OVERLAY_SPEC.md §4). Cheap: it reads
+    /// counters the backend already keeps, and copies no buffers.
+    ///
+    /// LAZY BY DESIGN. Geometry counting (draws/batches/triangles) is OFF in
+    /// the backend by default and costs integer adds per draw call, so the
+    /// FIRST call to this switches it on and reports metricsRecording=false
+    /// with zeroed counters. Every call after a rendered frame reports real
+    /// numbers. Nothing that never asks for stats ever pays for them.
+    ///
+    /// Returns false only when there is no backend to ask; `out` is then left
+    /// default-constructed.
+    virtual bool renderStats(RenderStats &out) const = 0;
+
+    /// What the renderer is HOLDING (see ObjectCounts). The companion to
+    /// renderStats: that one answers "what did the frame cost", this one
+    /// answers "what is alive", which is the question a slow leak makes
+    /// people ask an hour too late.
+    ///
+    /// Not lazy and not measured — every field is a container size() plus one
+    /// walk of the (tiny) view and scene vectors, so it is safe to call every
+    /// frame and costs nothing when nobody does.
+    ///
+    /// Returns false only when there is no backend to ask; `out` is then left
+    /// default-constructed.
+    virtual bool objectCounts(ObjectCounts &out) const = 0;
+
+    /// WHAT THE ENGINE IS THREADING (see EngineThreading;
+    /// SPECS/THREADING_ADOPTION_SPEC.md P1). Reads the backend's own capability
+    /// answer and the live per-scene worker counts — no measurement, no state.
+    ///
+    /// The reason this is a verb rather than a build-time constant: the
+    /// multithreaded-shader-compilation flag lives in the ENGINE INSTALL, not
+    /// in Studio, so the only honest way to know whether this binary is talking
+    /// to a mode-2 engine is to ask the render system at run time. A tree that
+    /// forgot to re-run `irisgl/scripts/build-ogre.sh` reports false here and
+    /// nowhere else.
+    ///
+    /// Returns false only when there is no backend to ask.
+    virtual bool threading(EngineThreading &out) const = 0;
+
+    /// Writes the cache now, if anything new has been compiled since the last
+    /// write. Called on clean shutdown and once a compile burst has settled;
+    /// safe (and a no-op) when the cache is disabled or nothing is dirty.
+    /// False means the write failed — the previous cache, if any, is untouched.
+    virtual bool saveShaderCache() = 0;
+    /// Deletes every cached file. The next launch is cold. Always safe: the
+    /// running process keeps its in-memory shaders.
+    virtual bool clearShaderCache() = 0;
+    // ---- Recorded warm-up sets (SHADER_CACHE_SPEC.md §2.7b / phase 3) ----
+    // Unreal's ".rec" recordings, our shape. A warm-up SET is not shaders and
+    // not SPIR-V — it is the list of {vertex format, render queue, one
+    // representative material per distinct shader} a scene actually used. That
+    // makes it small, and unlike the microcode and pipeline blobs it is
+    // platform- and driver-independent, so it is the only one of these
+    // artifacts that could ever be shipped.
+    //
+    // The point of the indirection: applying a set compiles every permutation
+    // in it against DEGENERATE 4-vertex buffers, so nothing is loaded from disk
+    // and nothing reaches VRAM. A recorded session's shaders can be rebuilt
+    // without its meshes, its skeletons or its textures.
+
+    /// Adds everything `scene` currently draws to this process's warm-up set,
+    /// or EVERY LIVE SCENE when `scene` is null. ACCUMULATES — call it for
+    /// every scene a session touches and the set is their union, which is what
+    /// makes "merging recordings" a no-op rather than a tool. Duplicate
+    /// permutations are folded by the engine.
+    virtual bool recordWarmUpSet(Scene * = nullptr) = 0;
+    /// Writes the accumulated set. False if nothing has been recorded or the
+    /// file cannot be written.
+    virtual bool saveWarmUpSet(const std::string &file) = 0;
+    /// Loads a set and compiles every permutation in it, using `scene` as the
+    /// host for the degenerate renderables it creates (null = the first live
+    /// scene; they exist for one frame and are destroyed again, so any will
+    /// do). Returns how many shaders were built — 0 is a legitimate answer on a
+    /// warm cache. The scene is left exactly as it was found.
+    virtual unsigned applyWarmUpSet(const std::string &file, Scene * = nullptr) = 0;
+
+    /// The startup progress counter's source: shaders compiled so far, shaders
+    /// served from the cache so far, and how many the last saved run needed in
+    /// total (0 = never saved, so no denominator exists yet). Two atomic reads;
+    /// no disk, safe to poll on a timer.
+    virtual void shaderBuildProgress(unsigned &compiled, unsigned &fromCache,
+                                     unsigned &expected) const = 0;
+
+    /// Reason for the most recent failure; empty if none.
+    ///
+    /// NOTE this is a PEEK: the sink is never cleared on success, so a stale
+    /// reason outlives the call that set it. Callers that check a specific
+    /// verb's return value read this immediately and are fine; anything that
+    /// POLLS must use takeLastError() instead, or it cannot tell a fresh
+    /// failure from one that happened at startup.
+    virtual const std::string &lastError() const = 0;
+
+    /// Reason for the most recent failure, AND clears the sink — so the next
+    /// call reports only what has failed since. Empty when nothing has.
+    ///
+    /// This exists because the backend swallows failures by design: every
+    /// backend virtual is wrapped in a try/catch that records the reason here
+    /// and returns a refusal value, and most callers (SceneMirror above all)
+    /// ignore that value. Nothing ever read the sink, so ~86 catch sites had no
+    /// reader at all — a mesh with no tangents, a texture that will not decode,
+    /// a full decal atlas all produced a wrong picture and ZERO log lines.
+    /// Draining this once a frame is what turns them back into diagnostics
+    /// (src/services/engineerrorpump.h).
+    ///
+    /// There is ONE sink per process: every Scene and View holds a reference to
+    /// the Engine's string, so this drains all of them.
+    virtual std::string takeLastError() = 0;
+};
+
+}}  // namespace jahshaka::engine
