@@ -85,7 +85,7 @@ layout( std430, ogre_U7 ) writeonly restrict buffer recordLayout { Record record
 layout( std430, ogre_U8 ) restrict buffer readoutLayout { uint readout[]; };
 layout( std430, ogre_U9 ) readonly restrict buffer maskLayout { uint budgetMask[]; };
 
-// Levels per mesh in the range table: GpuScene::kLevelsPerMesh, set from C++.
+// The table strides (GpuScene::kLevelsPerMesh, kSubmeshesPerMesh), set from C++.
 @insertpiece( JahLevelTable )
 #define JAH_NONE 0xFFFFFFFFu
 #define JAH_GI_VISIBLE 8u
@@ -163,12 +163,12 @@ void main()
 	if( L.geomRow == JAH_NONE || L.partCount == 0u )
 		return;                             // no readable geometry at this level
 	// A RIGGED ITEM AT ITS POSE (PHOTON-7 stage 8A): the row override (GpuInstance raster z, PHOTON-SKIN-1) names the
-	// item's skin cache - its POSED vertices over the mesh's own index ranges, level l submesh 0 at row + 8 l - the
+	// item's skin cache - its POSED vertices over the mesh's own index ranges, level l submesh 0 at row + l x stride - the
 	// rows the ray tier traces and the decode shades; none (no rig, or no cache yet) reads the mesh's rows. The
 	// partitions' boxes are the BIND pose's, so a posed item's every partition takes the instance's own world box.
 	uint skinRow = instances[slot].raster.z;
 	bool posed = skinRow != JAH_NONE;
-	uint geomRow = posed ? skinRow + level * 8u : L.geomRow;
+	uint geomRow = posed ? skinRow + level * JAH_SUBMESHES_PER_MESH : L.geomRow;
 
 @property( gather_write )
 	atomicAdd( readout[JAH_READ_CANDIDATES], 1u );

@@ -519,20 +519,25 @@
 			// A HIT NAMES A COPY: the near copy is the mesh's level 0 (ONE RAY LEVEL PER MESH, PHOTON-7 stage 6).
 			uint atomLevel = 0u;
 			uint atomTri = atomIds.y;
+			// THE TABLE STRIDES (GpuScene::kLevelsPerMesh, kSubmeshesPerMesh) are HlmsAtom's
+			// properties, from their one home; a decode without them does not compile.
+			@property( !jah_levels_per_mesh || !jah_submeshes_per_mesh )
+				#error "a table stride is not set (HlmsAtom::notifyPropertiesMergedPreGenerationStep)"
+			@end
 			// THE FAR COPY (bit 27): the mesh's coarsest level, the last one with an
 			// index range - the level the far BLAS was built from.
 			if( ( atomIds.x & 0x08000000u ) != 0u )
 			{
 				uint atomCoarsest = 0u;
-				for( uint atomL = 1u; atomL < 8u; ++atomL )
+				for( uint atomL = 1u; atomL < @value( jah_levels_per_mesh )u; ++atomL )
 				{
-					uint atomLAt = atomMesh * 8u + atomL;
+					uint atomLAt = atomMesh * @value( jah_levels_per_mesh )u + atomL;
 					if( atomLAt < atomLevelCount && atomLevels[min( atomLAt, max( atomLevelCount, 1u ) - 1u ) * 2u].y > 0u )
 						atomCoarsest = atomL;
 				}
 				atomLevel = atomCoarsest;
 			}
-			uint atomLevelAtRaw = atomMesh * 8u + atomLevel;
+			uint atomLevelAtRaw = atomMesh * @value( jah_levels_per_mesh )u + atomLevel;
 			atomOk = atomOk && atomLevelAtRaw < atomLevelCount;
 			uint4 atomLevelRow = atomLevels[min( atomLevelAtRaw, max( atomLevelCount, 1u ) - 1u ) * 2u];
 			// The triangle is compared as a COUNT, never as atomTri * 3: a wrapped product
@@ -541,7 +546,7 @@
 			// item's geometry is its skin cache's POSED vertices over the mesh's own
 			// index ranges - the rows jah_rq_geom.glsl traces - so a posed character is
 			// shaded on its posed triangles.
-			atomRowSrc = atomRaster.z != 0xFFFFFFFFu ? atomRaster.z + atomLevel * 8u : atomLevelRow.w;
+			atomRowSrc = atomRaster.z != 0xFFFFFFFFu ? atomRaster.z + atomLevel * @value( jah_submeshes_per_mesh )u : atomLevelRow.w;
 			atomOk = atomOk && atomTri < atomLevelRow.y / 3u;
 			atomFirstIdx = atomLevelRow.x + min( atomTri, atomLevelRow.y / 3u ) * 3u;
 		@else

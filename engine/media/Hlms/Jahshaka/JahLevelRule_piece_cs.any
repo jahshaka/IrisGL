@@ -42,15 +42,17 @@
 	}
 @end
 
-// THE LEVEL TABLE'S STRIDE: levels per mesh entry, GpuScene::kLevelsPerMesh in
-// GpuScene.h, its one home. The C++ sets it on every job that indexes the level
-// table (GpuScene::setLevelTableProperty, the property jah_levels_per_mesh); a job
-// dispatched without it fails to compile rather than read another mesh's rows.
+// THE TABLE STRIDES: levels per mesh entry (GpuScene::kLevelsPerMesh, the level
+// table) and submeshes per level (GpuScene::kSubmeshesPerMesh, a row block), in
+// GpuScene.h, their one home. The C++ sets both on every job that indexes either
+// table (GpuScene::setTableStrideProperties); a job dispatched without them fails
+// to compile rather than read another mesh's rows.
 @piece( JahLevelTable )
-@property( !jah_levels_per_mesh )
-	#error "jah_levels_per_mesh is not set (GpuScene::setLevelTableProperty)"
+@property( !jah_levels_per_mesh || !jah_submeshes_per_mesh )
+	#error "a table stride is not set (GpuScene::setTableStrideProperties)"
 @end
 	#define JAH_LEVELS_PER_MESH @value( jah_levels_per_mesh )u
+	#define JAH_SUBMESHES_PER_MESH @value( jah_submeshes_per_mesh )u
 @end
 
 // THE LEVEL WALK, ONE DEFINITION for both jobs that pick a mesh level on the

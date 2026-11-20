@@ -125,7 +125,7 @@ layout( std430, ogre_U7 ) writeonly restrict buffer hzbProbeLayout { uvec4 hzbPr
 	vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 @end
 
-// Levels per mesh in the range table: GpuScene::kLevelsPerMesh, set from C++.
+// The table strides (GpuScene::kLevelsPerMesh, kSubmeshesPerMesh), set from C++.
 @insertpiece( JahLevelTable )
 
 @insertpiece( JahLevelRuleScale )
