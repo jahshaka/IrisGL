@@ -1641,6 +1641,8 @@ private:
     /// animated materials start at the same phase in every run), never reset by a play edge (SimulationClock::time()
     /// is). No wall clock (trap 7).
     quint64 mShaderSteps = 0;
+    /// THE DOCUMENT's EPOCH on the engine scene (FrameInputScene::clockEpoch): moved at every setSource.
+    quint64 mClockEpoch = 0;
     /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): this sync's steps (capped at the clock's catch-up
     /// bound) x 1/60, 0 on a sync that took none. One value for the whole walk, so every tracking camera eases by the
     /// same dt. The smoothing arithmetic is a pure function of it (iris::lens::smoothTowards).

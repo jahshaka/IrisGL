@@ -116,6 +116,7 @@ void mergeRecord(FrameInput &p, FrameInput &&in) {
         if (sc.stepSerial) it->stepSerial = sc.stepSerial;   // monotone per document: the newest is the right one
         if (sc.stepPeriod) it->stepPeriod = sc.stepPeriod;
         if (sc.particleTimeScale) it->particleTimeScale = sc.particleTimeScale;
+        if (sc.clockEpoch) it->clockEpoch = sc.clockEpoch;
         if (sc.pixelTolerance) it->pixelTolerance = sc.pixelTolerance;
         it->reassert = it->reassert || sc.reassert;
         if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;

@@ -19,8 +19,9 @@ namespace jahshaka { namespace engine { namespace detail {
 struct SceneClock {
     static constexpr unsigned long long kMaxStepsPerFrame = FrameInputScene::kMaxStepsPerFrame;
 
-    bool               primed = false;   ///< a part's serial has been seen (since the last `reassert`)
+    bool               primed = false;   ///< a part's serial has been seen (since the last document change)
     unsigned long long seen = 0;         ///< the last serial a part carried
+    unsigned long long epoch = 0;        ///< the document the serials count (FrameInputScene::clockEpoch)
     unsigned long long owed = 0;         ///< steps counted by drains, not yet consumed by a frame that drew the scene
     bool               hostStamped = false;   ///< a host ever stamped it: the harness door never steps it again
     double             period = 1.0 / 60.0;   ///< FrameInputScene::stepPeriod
@@ -37,7 +38,12 @@ struct SceneClock {
     {
         if (part.stepPeriod && *part.stepPeriod > 0.0f) period = double(*part.stepPeriod);
         if (part.particleTimeScale) particleScale = std::max(0.0f, *part.particleTimeScale);
-        if (part.reassert) primed = false;   // a new document on this scene (the mirror's setSource): another clock
+        // ONLY A NEW DOCUMENT RE-PRIMES (the stage-1 audit's bug 2): its mirror's setSource moves the epoch. A `reassert`
+        // (re-apply every field: a page switch, a re-take, a Player shot) is no new clock and keeps the steps.
+        if (part.clockEpoch && *part.clockEpoch != epoch) {
+            epoch = *part.clockEpoch;
+            primed = false;
+        }
         if (!part.stepSerial) return;
         const unsigned long long serial = *part.stepSerial;
         hostStamped = true;   // the harness door never steps it again: one source of this scene's time
@@ -45,7 +51,7 @@ struct SceneClock {
             owed += serial - seen;   // the steps since the last part, ONCE (an equal serial: 0)
             if (serial > newest) newest = serial;
         } else {
-            // PRIMED HERE: the scene's first serial, or the first after a reassert (a lower serial without one is a
+            // PRIMED HERE: the scene's first serial, or the first of a new document (a lower serial in the same epoch is a
             // host stamping another clock on this scene: re-primed the same way, 0 steps, never a wrap). The presentation
             // starts at the incoming grid state.
             newest = serial;

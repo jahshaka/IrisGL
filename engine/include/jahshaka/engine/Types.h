@@ -9218,6 +9218,10 @@ struct FrameInputScene {
     /// The document's particle time scale: the scene's particles advance by its steps x stepPeriod x this, and
     /// nothing else of the scene reads it (a slow-motion flame never slows the exposure). Persists; 1 until a part says.
     std::optional<float>                  particleTimeScale;
+    /// THE DOCUMENT the serial counts (ONE-FRAME-1, the stage-1 audit's bug 2): the scene's mirror moves it at every
+    /// setSource, and only a moved epoch re-primes the scene's cursor (a new document's serial is another clock's). A
+    /// `reassert` (re-apply every field: a page switch, a re-take) keeps the steps. Newest wins in a merge.
+    std::optional<unsigned long long>     clockEpoch;
     /// THE VIEW'S PIXEL-ERROR THRESHOLD (ATOM-3 stage 1): the World Mode's `atomPixelError` row, in pixels
     /// (Scene::setPixelTolerance).
     std::optional<float>                  pixelTolerance;

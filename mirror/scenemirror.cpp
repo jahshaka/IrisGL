@@ -525,6 +525,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
         // THE STEP CURSOR reads the INCOMING document's clock from its present: the steps it took before this bind
         // were never this mirror's (ONE-FRAME-1 stage 0).
         mStepCursor.prime(mSource->simulationClock());
+        ++mClockEpoch;   // ...and the engine's cursor on this scene re-primes on the new document (never on a reassert)
         mSource->bindMirror(this);
         mSource->_setMirrorEvacuationHook([this] { evacuateEngineObjects(); });
     }
@@ -1064,6 +1065,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
         scenePart.stepSerial = mSource->simulationClock().lifetimeSteps();
         scenePart.stepPeriod = float(iris::SimulationClock::kStepSeconds);
         scenePart.particleTimeScale = mSource->particleTimeScale;
+        scenePart.clockEpoch = mClockEpoch;   // the document the serial counts (setSource moves it)
     }
     if (mSource) scenePart.pixelTolerance = float(mSource->atomPixelError);   // the World Mode's pixel-error row (ATOM-3)
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
