@@ -33,6 +33,7 @@
 #include "irisgl/mirror/scenecommands.h"
 #include "irisgl/document/animation/clipextractor.h"
 #include "irisgl/document/scenegraph/nodegraph.h"
+#include "irisgl/document/scenegraph/simulationclock.h"
 #include "irisgl/document/scenegraph/socket.h"
 #include "jahshaka/engine/Engine.h"
 
@@ -567,8 +568,8 @@ public:
     /// drive the surface from its own playhead. The verb is world.shaderTime.
     void setShaderTimeOverride(float seconds) { mShaderTimeOverride = seconds; }
     float shaderTimeOverride() const { return mShaderTimeOverride; }
-    /// The free clock's current value (seconds), whether or not it is pinned.
-    double shaderSeconds() const { return mShaderSeconds; }
+    /// The free clock's current value (seconds), whether or not it is pinned: its steps x 1/60.
+    double shaderSeconds() const { return double(mShaderSteps) * iris::SimulationClock::kStepSeconds; }
     /// True once a mirrored material reads the shader clock (a generated piece
     /// or a scrolling map): only then is the clock pushed at all.
     bool shaderClockLive() const { return mAnyCustomPiece; }
@@ -1630,16 +1631,18 @@ private:
     /// clock below; a test or a timeline sets an exact value through
     /// setShaderTimeOverride so a frame is reproducible.
     float mShaderTimeOverride = -1.0f;
-    /// The shader clock: the document's SimulationClock::frameSeconds()
-    /// ACCUMULATED since the first sync that needed it — whole 1/60 s steps,
-    /// as many as the host's frame bought, and never reset by a play edge
-    /// (SimulationClock::time() is). No wall clock (trap 7).
-    double mShaderSeconds = 0.0;
-    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): the
-    /// document's SimulationClock::frameSeconds() — the steps the host's frame
-    /// bought, 0 on a frame that bought none. One value for the whole walk, so
-    /// every tracking camera eases by the same dt. The smoothing arithmetic is
-    /// a pure function of it (iris::lens::smoothTowards).
+    /// THE STEP CURSOR on the document's SimulationClock (ONE-FRAME-1 stage 0): primed at setSource, taken ONCE per
+    /// sync into mSyncSteps — the one number every time consumer of the sync reads.
+    iris::StepCursor mStepCursor;
+    /// The steps the clock took since the last sync (0 on a second sync of the same frame).
+    quint64 mSyncSteps = 0;
+    /// The shader clock: the document's steps COUNTED while the clock is live and unpinned — whole 1/60 s steps, an
+    /// integer count (seconds = steps x 1/60), never reset by a play edge (SimulationClock::time() is). No wall clock
+    /// (trap 7).
+    quint64 mShaderSteps = 0;
+    /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): this sync's steps (capped at the clock's catch-up
+    /// bound) x 1/60, 0 on a sync that took none. One value for the whole walk, so every tracking camera eases by the
+    /// same dt. The smoothing arithmetic is a pure function of it (iris::lens::smoothTowards).
     float mFocusDt = 0.0f;
     /// Socket attachments (CAMERAS_SPEC §5). Owns the reused scratch buffers;
     /// its pose source is this mirror, installed by the constructor.

@@ -102,6 +102,7 @@ public:
             mAccumulator = std::max(0.0, mAccumulator - steps * kStepSeconds);
         }
         mStepCount += uint64_t(steps);
+        mLifetimeSteps += uint64_t(steps);
         mFrameSteps = steps;
         return steps;
     }
@@ -110,6 +111,9 @@ public:
     double time() const { return double(mStepCount) * kStepSeconds; }
     /// Steps run since reset().
     uint64_t steps() const { return mStepCount; }
+    /// Steps run since the clock was MADE: reset() never touches it. What a reader's StepCursor counts, so a
+    /// play edge between two of its reads neither adds nor loses a step.
+    uint64_t lifetimeSteps() const { return mLifetimeSteps; }
     /// Steps the LAST advance() bought.
     int frameSteps() const { return mFrameSteps; }
     /// Simulated seconds the last advance() bought — what a host hands the
@@ -132,7 +136,32 @@ private:
 
     double   mAccumulator = 0.0;
     uint64_t mStepCount = 0;
+    uint64_t mLifetimeSteps = 0;
     int      mFrameSteps = 0;
+};
+
+/// A READER'S CURSOR ON THE CLOCK (ONE-FRAME-1 stage 0, V2 plan 2.1): the steps the clock took since this reader's
+/// last take — read as many times as the reader likes, each step is handed out ONCE. frameSeconds() is "what the
+/// LAST advance() bought", so a reader that adds it per read re-adds the last steps on every read with no advance
+/// between (the mirror's shader clock and focus smoothing did, on every second sync of a frame: a screenshot's, a
+/// thumbnail's, a preview's). A pure function of the clock's lifetime count; a reader that changes clocks
+/// (a new document) primes again on the new one.
+class StepCursor
+{
+public:
+    /// Start counting from the clock's present: the steps it took before are not this reader's.
+    void prime(const SimulationClock &clock) { mSeen = clock.lifetimeSteps(); }
+    /// The steps the clock took since the last take (or prime); 0 on a take with no advance between.
+    uint64_t take(const SimulationClock &clock)
+    {
+        const uint64_t now = clock.lifetimeSteps();
+        const uint64_t steps = now - mSeen;
+        mSeen = now;
+        return steps;
+    }
+
+private:
+    uint64_t mSeen = 0;
 };
 
 } // namespace iris
