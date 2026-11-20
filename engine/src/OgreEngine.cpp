@@ -3118,6 +3118,7 @@ void OgreEngine::beginFrameClocks() {
                 break;
             }
     applyFrameDelta(lead ? float(lead->mClock.dt) : 0.0f);
+    mLeadScene = lead;
 }
 
 
@@ -3391,6 +3392,11 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
 // is read only while a capture runs (its GPU half asks the render system by an attribute a production build answers
 // with a throw — never once a frame); at Off it is the absence the getter reports, the undrained tail included.
 void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
+    // WHAT THIS FRAME DREW (ONE-FRAME-1 stage 2): its grid state and its head pose, the render half's own facts.
+    out.stepSerialDrawn = 0;
+    for (const auto &q : mScenes)
+        if (q.get() == mLeadScene) out.stepSerialDrawn = q->mClock.newest;   // (a scene destroyed since: none)
+    vrSessionFramePose(mVrSession, out.poseSerial, out.displayTimeNs);
     out.presentAlpha = mPresentAlpha;
     out.presentFree = mFreeFrame;
     out.input = mFrameInputStatus;

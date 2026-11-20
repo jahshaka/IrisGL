@@ -9396,6 +9396,12 @@ struct PublishedFrame {
     unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
     /// The record the frame applied (FrameInput::serial; an empty hand-over carries the last) — ENGINE-UPGRADE-U3.
     unsigned long long   serial = 0;
+    /// THE SCENE'S CLOCK AS THIS FRAME LEFT IT (ONE-FRAME-1): the newest grid state it drew (its document's lifetime
+    /// serial, FrameInputScene::stepSerial), its time so far (the steps its frames advanced x the period: what its
+    /// particles, meter, looks and clouds have lived) and this frame's share of it (0 on a frame nobody stepped it).
+    unsigned long long   stepSerial = 0;
+    double               sceneSeconds = 0.0;
+    double               frameSceneSeconds = 0.0;
     std::vector<RiderTag> riderTags;     ///< SORTED by rider (decision 36: the lookups are binary searches)
     /// The rider's owner as the frame drew it (0 = no tag), and its bone into `bone` when given.
     NodeId boneAttachmentOf(NodeId rider, std::string *bone = nullptr) const {
@@ -9863,6 +9869,15 @@ struct PublishedEngineFrame {
     unsigned long long serial = 0;
     bool               recordApplied = false;
     unsigned long long handOver = 0;       ///< which hand-over this frame took (FrameSubmitStatus::handOvers' count)
+    /// WHAT THIS FRAME DREW (ONE-FRAME-1 stage 2; VR's door D4): the grid state — the newest step serial of the scene of
+    /// the frame's first enabled presented view (the scene Ogre's frame clock follows; 0 when no view drew) — and the
+    /// head pose: the session's serial of the pose this frame drew (its count of located poses; 0 = no located pose
+    /// this frame, no session) at its predicted display time (ns, the runtime's clock; 0 without one). All three are
+    /// the RENDER half's: the pose is located on the render thread after the hand-over, so no host writes them. A host
+    /// reader (the wearer's interaction) knows which grid state and which pose a frame used.
+    unsigned long long stepSerialDrawn = 0;
+    unsigned long long poseSerial = 0;
+    long long          displayTimeNs = 0;
     /// THE INTERPOLATION THIS FRAME DREW (U3 stage 5's rows): the weight of the newest step's nodes between their two
     /// grid states (1 = cur, every lockstep frame) and whether the frame was a free one.
     float              presentAlpha = 1.0f;

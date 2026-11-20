@@ -8683,6 +8683,8 @@ void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
 /// Did this frame wait in xrWaitFrame (the runtime paced it)? False without a session (U3 decision 53).
 bool    vrSessionWaitedThisFrame(const VrSession *);
+/// The head pose the session's current frame drew: its serial (0 = none located) and its predicted display time.
+void    vrSessionFramePose(const VrSession *, unsigned long long &poseSerial, long long &displayTimeNs);
 /// The runtime's wait, before the free loop's hand-over (U3 decision 65); the frame's beginFrame takes its result.
 void    vrSessionWaitFrameEarly(VrSession *);
 /// The session's desktop MIRROR workspace (null without one) — the frame
@@ -9185,6 +9187,8 @@ public:
     /// set to the scene time of the frame's first enabled presented view (for any stock Ogre controller; nothing of
     /// ours reads it for scene time — source.scene_time_one_meaning).
     void beginFrameClocks();
+    /// The scene of the frame's first enabled presented view (beginFrameClocks' choice): the grid state the frame drew.
+    const OgreScene *mLeadScene = nullptr;
     mutable std::string mHostError;
 
     /// PROCESS-WIDE: rides Ogre's single frame-time controller value

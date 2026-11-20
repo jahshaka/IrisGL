@@ -742,6 +742,9 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     PublishedFrame &back = mPublished.back();
     back.frame = frame;
     back.serial = serial;
+    back.stepSerial = mClock.newest;   // the scene's clock as the frame left it (ONE-FRAME-1)
+    back.sceneSeconds = sceneSeconds();
+    back.frameSceneSeconds = mClock.dt;
     back.gi = giStatus();
     back.atmosphere = publishedAtmosphere();
     back.giApplied = mFrameApplied.gi;
