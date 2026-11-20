@@ -1174,6 +1174,10 @@ Ogre::Hlms::PropertiesMergeStatus HlmsAtom::notifyPropertiesMergedPreGenerationS
     setProperty(tid, "atomClusterBuf", kClusterBufSlot);
     setProperty(tid, "atomWorldLightBuf", kWorldLightBufSlot);
     setProperty(tid, "atomSlotsPerPool", Ogre::int32(mSlotsPerPool));
+    // THE GPU SCENE'S TWO TABLE STRIDES (GpuScene::setTableStrideProperties says why): the hit mode's level and
+    // skin-row reads (800.Atom_piece_ps.any) index the level table and a row block with them. Constants: no key moves.
+    setProperty(tid, "jah_levels_per_mesh", Ogre::int32(detail::GpuScene::kLevelsPerMesh));
+    setProperty(tid, "jah_submeshes_per_mesh", Ogre::int32(detail::GpuScene::kSubmeshesPerMesh));
     Ogre::int32 texSlotsStart = kReservedBufSlots;
     if (getProperty(tid, Ogre::HlmsBaseProp::ForwardPlus))
         texSlotsStart = getProperty(tid, "f3dGrid") + 1;

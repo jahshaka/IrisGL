@@ -442,9 +442,9 @@ bool OgreScene::recordGpuCull(GpuCull &cull, const GpuCullRequest &req, Ogre::Te
         // THE HZB PROBE (ATOM-6 stage 3): the probe's frame records what the depth test read, at the next free unit.
         const bool hzbProbing = hzb && hzbProbe;
         test->setProperty("cull_probe", hzbProbing ? 1 : 0);
-        // The level table's stride (the walk's and the draw writer's index), from its one home.
-        GpuScene::setLevelTableProperty(test);
-        GpuScene::setLevelTableProperty(draws);
+        // The table strides (the walk's and the draw writer's index), from their one home.
+        GpuScene::setTableStrideProperties(test);
+        GpuScene::setTableStrideProperties(draws);
         test->setNumUavUnits((prior ? 8u : 7u) + (hzbProbing ? 1u : 0u));
         if (hzb) {
             Ogre::DescriptorSetTexture2::TextureSlot ts =

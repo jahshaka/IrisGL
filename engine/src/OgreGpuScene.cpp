@@ -123,8 +123,10 @@ uint32_t roundUpPow2(uint32_t v, uint32_t floorValue) {
 }
 }  // namespace
 
-void GpuScene::setLevelTableProperty(Ogre::HlmsComputeJob *job) {
-    if (job) job->setProperty("jah_levels_per_mesh", Ogre::int32(kLevelsPerMesh));
+void GpuScene::setTableStrideProperties(Ogre::HlmsComputeJob *job) {
+    if (!job) return;
+    job->setProperty("jah_levels_per_mesh", Ogre::int32(kLevelsPerMesh));
+    job->setProperty("jah_submeshes_per_mesh", Ogre::int32(kSubmeshesPerMesh));
 }
 
 GpuScene::~GpuScene() { destroy(); }

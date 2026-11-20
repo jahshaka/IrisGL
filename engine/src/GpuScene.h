@@ -428,12 +428,16 @@ public:
         return meshIndex * kGeomRowsPerMesh + level * kSubmeshesPerMesh + submesh;
     }
     static uint32_t clusterRowIndex(uint32_t meshIndex) { return meshIndex * kGeomRowsPerMesh + kClusterRow; }
-    /// THE LEVEL TABLE'S STRIDE, AS THE SHADERS READ IT (ATOM-HOUSE-1): every compute job that indexes the level
-    /// table (`meshIndex * stride + level`) takes kLevelsPerMesh as the Hlms property `jah_levels_per_mesh`
-    /// (JahLevelRule_piece_cs.any's piece JahLevelTable turns it into JAH_LEVELS_PER_MESH, and refuses to compile
-    /// without it) - one home for the number, never a copy in the media. Called on a job before each dispatch; Ogre's
-    /// setProperty is a no-op on an equal value, so the permutation moves only if the constant does.
-    static void setLevelTableProperty(Ogre::HlmsComputeJob *job);
+    /// THE TWO TABLE STRIDES, AS THE SHADERS READ THEM (ATOM-HOUSE-1): kLevelsPerMesh (the level table,
+    /// `meshIndex * stride + level`) and kSubmeshesPerMesh (a row block, `row + level * stride + submesh`) reach the
+    /// Hlms media as the properties `jah_levels_per_mesh` and `jah_submeshes_per_mesh` - one home for each number,
+    /// never a copy in the media (source.gpu_table_strides lints the media for one). Every compute job that indexes
+    /// either table takes them here, before each dispatch (JahLevelRule_piece_cs.any's piece JahLevelTable turns them
+    /// into JAH_LEVELS_PER_MESH / JAH_SUBMESHES_PER_MESH and refuses to compile without them; Ogre's setProperty is a
+    /// no-op on an equal value, so a permutation moves only if a constant does). HlmsAtom's decode takes the same two
+    /// in its merged properties (HlmsAtom::notifyPropertiesMergedPreGenerationStep). The ray tier's build-time GLSL
+    /// (src/rayquery) carries no stride arithmetic.
+    static void setTableStrideProperties(Ogre::HlmsComputeJob *job);
 
     ~GpuScene();
 
