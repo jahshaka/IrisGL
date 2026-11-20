@@ -87,8 +87,6 @@ public:
     /// Dispatches the compute job (outside any render pass: the frame's GPU-scene step).
     int maskFor(Ogre::TextureGpu *tex, uint32_t cmp, float threshold, unsigned &budget, bool &stale, bool &refused);
     const Mask &mask(int i) const { return mMasks[size_t(i)]; }
-    /// The masks held now (a test walks them: atom.masked_coverage).
-    size_t count() const { return mMasks.size(); }
     /// Moves whenever a mask is made or dropped: every table that may name it is re-written.
     unsigned long long epoch() const { return mEpoch; }
     /// Masks made, ever (RayQueryStatus::alphaMasksMade).
@@ -100,8 +98,6 @@ public:
     void endFrame(Ogre::RenderSystem *rs);
     /// Before Root: every mask's buffer.
     void release();
-    /// A TEST'S READ (atom.masked_coverage): mask `i`'s whole pyramid, synchronously (a measurement, never a frame's).
-    bool readBits(int i, std::vector<uint32_t> &out) const;
 
     /// THE PYRAMID'S SHAPE (JahAlphaMaskPyramid_cs and jah_alpha_mask.glsl compute the same): level k is
     /// max(1, w >> k) x max(1, h >> k), the levels run until both sides are 1, level k's bits start at word

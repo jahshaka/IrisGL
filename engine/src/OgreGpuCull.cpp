@@ -21,11 +21,10 @@
 // uploaded, and three dispatches recorded. `GpuCullResult::requestMs` measures
 // it rather than claiming it.
 //
-// WHY THE CONSUMER IS A SUITE TODAY. The contract makes Atom own the job and
-// write it generically; Photon's ray tiles (GA-2) and Atom's own clustered pass
-// (stage 3) are the readers, and neither exists. So the substrate ships with
-// `engine.gpu_cull` as its only caller, which is also why this lane moves no
-// pixel: nothing in a frame reads a survivor list yet.
+// ITS CONSUMERS are the id pass and the caster cut (OgreAtomIdPass.cpp,
+// OgreAtomCasterPass.cpp), every frame; engine.lod_rule_parity drives it through
+// the public `gpuCull` door, and atom.hidden_cut / atom.cluster_occlusion read
+// what its lists draw.
 //
 // THE BARRIERS. Every hand-off between the jobs goes through Ogre's
 // BarrierSolver (`analyzeBarriers` + `executeResourceTransition`), which is
@@ -164,7 +163,7 @@ void GpuCull::noteCutOverflow(uint32_t overflowedInstances, uint32_t indicesAske
     if (!overflowedInstances) return;
     // SIZED FROM WHAT WAS ASKED, never a blind doubling: the ring reports the same
     // overflow for every frame in flight (4-5 of them), and a doubling per report
-    // overshot a 209 k need to 4.4 M (measured, atom.cluster_crack E).
+    // overshot a 209 k need to 4.4 M (measured by the archived atom.cluster_crack's part E).
     uint32_t want = mCutWantBudget;
     while (want < kCutIndexBudgetCeiling &&
            (want - reserveFor(want) < indicesAsked || want / kCutIndicesPerRecord < recordsAsked))

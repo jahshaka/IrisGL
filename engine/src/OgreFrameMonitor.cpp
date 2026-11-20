@@ -1337,8 +1337,8 @@ constexpr ArmDef kArms[] = {
       "gi.gather_reference, gi.gather_phase2). Was JAHSHAKA_GATHER_NO_TEMPORAL (a per-frame read)." },
     { ArmId::AtomDecode, 1.0, 0.0, 1.0,
       "The screen decode armed in the decode pass. 0 = unarmed: the Atom items are drawn by NOTHING "
-      "in that pass (engine.atom_draw's proof that the view's passes skip their queue; scale's "
-      "negative control). Was JAHSHAKA_ATOM_DECODE_OFF (a per-frame read)." },
+      "in that pass (the proof that the view's passes skip their queue; scale's negative control). "
+      "Was JAHSHAKA_ATOM_DECODE_OFF (a per-frame read)." },
     { ArmId::AtomClusterOcclusion, 1.0, 0.0, 1.0,
       "THE PER-CLUSTER OCCLUSION'S A/B DOOR (ATOM-8): 1 = the id pass's cut tests every cluster it would draw against "
       "the depth pyramid (the two passes) and culls one whose bound covers no pixel centre; 0 = it tests no cluster "
@@ -1548,8 +1548,8 @@ constexpr ArmDef kArms[] = {
     { ArmId::AtomMaskPyramid, 1.0, 0.0, 1.0,
       "THE CUT-OUTS' MASK PYRAMID (ATOM-3 stage 2): 1 = shipped, the id pass and the caster cut sample each "
       "cut-out's 1-bit mask at the level its fragment's UV footprint asks for (a coverage-preserving pyramid: every "
-      "level's set fraction is level 0's). 0 = level 0 alone, nearest (the base's mask): the level-0 reference of "
-      "atom.masked_id's and shadow.caster_route's silhouette bounds. The rays read level 0 either way." },
+      "level's set fraction is level 0's). 0 = level 0 alone, nearest (the base's mask): the level-0 reference a "
+      "cut-out's silhouette bound is measured against. The rays read level 0 either way." },
     { ArmId::GatherHitsReadback, 0.0, 0.0, 1.0,
       "THE GATHER-HITS READBACK (FAR-SUN-1, an instrument): every ray of every uniform probe records "
       "what answered it (the card, the voxels and which cascade, the sky, a decode record, a far one, "
@@ -1694,7 +1694,7 @@ constexpr ArmDef kArms[] = {
       "Engine::pumpTextureLoads steps never agrees the queues are empty (the frame's own drain is untouched), 2 = and "
       "its step THROWS - the exception path that must leave the next wait clean. A test door." },
     { ArmId::AtomDensityJobsMissing, 0.0, 0.0, 1.0,
-      "THE DENSITY COUNT'S FAIL-SAFE (BUGS-1 item 6, atom.cut_probe): 1 = the Atom view's Density count finds its "
+      "THE DENSITY COUNT'S FAIL-SAFE (BUGS-1 item 6): 1 = the Atom view's Density count finds its "
       "compute jobs missing, as on a tree whose media did not stage them - the frame must paint nothing and report no "
       "figures, never the table a frame before it wrote. A test door." },
     { ArmId::GatherHistoryReadback, 0.0, 0.0, 1.0,

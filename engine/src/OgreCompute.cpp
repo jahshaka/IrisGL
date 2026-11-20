@@ -15,12 +15,10 @@
 // `IndirectWorkCpu`. They were the PROOF of fork 1bccc3f93+a98e2b0af (was 0032) while it had no consumer;
 // it has one now, and the cull's job 3 makes the same claim on the same device
 // with real work behind it: the survivor count is written by a compute shader
-// and the next dispatch is sized from it. `engine.gpu_cull` asserts the
-// GPU-written count and the groups that ran at 0, 7 and the whole table — the
-// same three shapes (empty, an arbitrary small count no host arithmetic could
-// predict, and the worst case) that `compute.indirect_dispatch` used, over real
-// instances instead of a synthetic list. A proof with a consumer is the
-// consumer's suite.
+// and the next dispatch is sized from it. The archived `engine.gpu_cull` asserted
+// the GPU-written count and the groups that ran at 0, 7 and the whole table; no
+// live row holds those three shapes now — the id pass draws from that count every
+// frame (atom.hidden_cut, atom.cluster_occlusion read what it drew).
 #include "EnginePrivate.h"
 
 #include <OgreHlmsCompute.h>

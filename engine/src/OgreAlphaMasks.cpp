@@ -19,7 +19,6 @@
 #include <OgreRoot.h>
 #include <OgreSubItem.h>
 #include <OgreTextureGpu.h>
-#include <Vao/OgreAsyncTicket.h>
 #include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVaoManager.h>
 
@@ -305,19 +304,6 @@ void AlphaMaskStore::endFrame(Ogre::RenderSystem *rs) {
             ++i;
         }
     }
-}
-
-bool AlphaMaskStore::readBits(int i, std::vector<uint32_t> &out) const {
-    out.clear();
-    if (i < 0 || size_t(i) >= mMasks.size() || !mMasks[size_t(i)].bits) return false;
-    const Mask &m = mMasks[size_t(i)];
-    Ogre::UavBufferPacked *b = m.bits;
-    const size_t words = b->getNumElements();
-    Ogre::AsyncTicketPtr t = b->readRequest(0u, words);
-    const auto *src = static_cast<const uint32_t *>(t->map());
-    if (src) out.assign(src, src + words);
-    t->unmap();
-    return !out.empty();
 }
 
 void AlphaMaskStore::release() {

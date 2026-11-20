@@ -13,8 +13,8 @@
 //      `RenderQueue::clearState()` drops the last VAO / index buffer / texture sets
 //      the render queue keeps across draws. Both public; together they are the whole
 //      restoration (stage 0's P-B: 0 differing bytes over 120 frames with our
-//      pipeline bound in the same frame, RTX and lavapipe — engine.atom_negative_control
-//      keeps it that way).
+//      pipeline bound in the same frame, RTX and lavapipe — measured by the spike;
+//      its row, engine.atom_negative_control, is archived and no live row repeats it).
 //
 // THE REGISTRY. A customId is served by a RECORDER registered here; the product's
 // is the visibility buffer's id pass (`atom_id`, OgreAtomIdPass.cpp). Registering is

@@ -130,7 +130,7 @@ constexpr uint32_t kMaxBuckets = (1u << 24u) - 1u;
 constexpr float kClassDepthStep = 1.0f / 16777216.0f;   // 2^-24 = 1 / (kMaxBuckets + 1)
 
 /// The id image's two words (R32G32_UINT), the contract between whatever WRITES the
-/// id buffer (the id pass, and the hand-made images of engine.atom_parity) and the
+/// id buffer (the id pass; the archived engine.atom_parity wrote hand-made ones) and the
 /// screen decode — ATOM-CLUSTER-CUT's encoding (SPECS/v2/CLUSTER_CUT_DESIGN.md D3;
 /// the GLSL statement is src/rayquery/include/jah_atom_id.glsl):
 ///   x = the GPU scene's ITEM SLOT (bits 0-23) | the drawn cluster's DAG DEPTH

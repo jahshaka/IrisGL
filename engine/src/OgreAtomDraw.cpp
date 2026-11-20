@@ -151,9 +151,9 @@ public:
         if (!pass || pass->getType() != Ogre::PASS_SCENE || !mView) return;
         const auto *def = static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition());
         if (!def || def->mIdentifier != kScreenDecodePassIdentifier) return;
-        // A MEASUREMENT ARM, never a mode ("atom.decode", engine.atom_draw sets it): the
-        // decode left unarmed, so the Atom items are drawn by NOTHING in this pass —
-        // engine.atom_draw's proof that the view's passes really skip their queue.
+        // A MEASUREMENT ARM, never a mode ("atom.decode"): the decode left unarmed, so the
+        // Atom items are drawn by NOTHING in this pass — the proof that the view's passes
+        // really skip their queue (no live row sets it; the archived engine.atom_draw did).
         if (mView->mEngine && !mView->mEngine->armRegistry().on(detail::ArmId::AtomDecode)) return;
         OgreScene *scene = mView->ogreScene();
         HlmsAtom *atom = registeredAtom();

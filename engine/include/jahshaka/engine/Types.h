@@ -65,8 +65,9 @@ inline MaterialId reserveMaterialId()
 // ---- ATOM stage 1: THE LEVEL THAT STANDS IN FOR A MESH AT A GIVEN SIZE -----
 //
 // THE RULE, written ONCE and cited from all of its callers
-// (`MeshData::lodForWorldError` below; the voxel gather's `jahLevelForAllowed`
-// in irisgl/engine/media/Hlms/Jahshaka/JahVoxelGather_cs.glsl, which spends it on
+// (`MeshData::lodForWorldError` below; the device's `jahLevelForAllowed` in
+// irisgl/engine/media/Hlms/Jahshaka/JahLevelRule_piece_cs.any, which the voxel
+// gather (JahVoxelGather_cs.glsl) spends on
 // Photon's cascades on the device (terms from OgreScene::cascadeGatherInputs); and the
 // engine's view LOD strategy in OgreMesh.cpp, which is the same `lower_bound`
 // over the same errors done four-wide in Ogre's own SoA loop):
@@ -129,12 +130,12 @@ inline MaterialId reserveMaterialId()
 // other way (a deviation expressed in samples), and it is what a cull's shader
 // computes because the GPU has the bound and wants the count.
 //
-// THE GLSL TWIN of the three functions below lives in the cull's own job 1,
-// media/Hlms/Jahshaka/JahCullTest_cs.glsl (`jahSampleFootprint`,
-// `jahAllowedWorldError`, `jahLevelForAllowed`), and `engine.lod_rule_parity`
-// asserts the two agree over 10,000 evaluations of that shader on the device. There are two
-// copies because a compute shader cannot include a C++ header; there is one
-// RULE because the suite fails when they drift.
+// THE GLSL TWIN of the three functions below is ONE piece file,
+// media/Hlms/Jahshaka/JahLevelRule_piece_cs.any (`jahSampleFootprint`,
+// `jahAllowedWorldError`, `jahLevelForAllowed`), inserted by the cull's job 1 and
+// the voxel gather, and `engine.lod_rule_parity` asserts the two halves agree
+// through both jobs on the device. There are two halves because a compute shader
+// cannot include a C++ header; there is one RULE because the suite fails when they drift.
 
 /// THE WORLD SIZE OF ONE SAMPLE of a PERSPECTIVE view, at an object whose
 /// nearest surface is `distanceToSurface` metres away (Ogre's own
@@ -232,8 +233,9 @@ inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allo
 // WHY IT IS ONE CUT: the bake makes every group's error at least every child
 // group's, and every group's sphere contain every child group's — so a group
 // that is affordable has only affordable children, and the drawn clusters are
-// exactly one frontier through the DAG. `atom.cluster_cut` asserts it over the
-// shipped meshes; `atom.cluster_crack` renders it.
+// exactly one frontier through the DAG. `engine.lod_rule_parity` asserts it of
+// the device's cut over the shipped meshes (no drawn cluster under a drawn one,
+// every level-0 triangle covered once).
 //
 // THE GLSL TWIN is media/Hlms/Jahshaka/JahClusterCut.glsl (`jahClusterGroupAllowed`,
 // `jahClusterDrawn`); `engine.lod_rule_parity`'s fourth copy runs it on the device
