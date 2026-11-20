@@ -9171,6 +9171,10 @@ struct FrameInputGesture {
     bool operator==(const FrameInputGesture &o) const { return active == o.active && nodes == o.nodes; }
 };
 struct FrameInputScene {
+    /// THE MOST STEPS ONE FRAME HANDS A SCENE (ONE-FRAME-1; the stage-1 audit's bug 1): the document's own catch-up bound
+    /// (iris::SimulationClock::kMaxStepsPerAdvance, asserted equal in the mirror). Steps owed past it when the scene is
+    /// next drawn are DROPPED: time nobody saw is not shown at once.
+    static constexpr unsigned long long kMaxStepsPerFrame = 8;
     Scene *scene = nullptr;
     /// THE GI SCHEDULER'S INPUTS that only the document knows (U0 3c; read only on a record that carries `gi`):
     /// world.refreshGi()'s serial (a change = an explicit re-solve) and a material HOVER PREVIEW on screen (the

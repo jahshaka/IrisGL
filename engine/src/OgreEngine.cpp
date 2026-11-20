@@ -1008,10 +1008,6 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             drainFrameInput(record, any, budgeted);
             if (budgeted) mLastFreeDrainMs = mFrameInputStatus.drainMicros / 1000.0;
         }
-        // THE FRAME'S CLOCKS (ONE-FRAME-1), once, after the drain counted what the records stepped and before anything
-        // of the frame reads time (the scene graph's particles, the views' globals, the cloud clock): an empty hand-over
-        // owes nothing, so every scene advances 0.
-        beginFrameClocks();
         mDeferNodeWrites = false;
         // THE SHADER CACHE'S CHUNKED COPY CONTINUES (FRAME-MONITOR-DOOR-1 stage 4): one step a frame, here at the drain,
         // when the frame's own messages ran none (a save message is a step) — a copy of N new entries costs
@@ -1327,6 +1323,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // enabled flag, so one snapshot is honest.
         std::vector<OgreScene *> updated;
         scenesFeedingEnabledViews(updated);
+        // THE FRAME'S CLOCKS (ONE-FRAME-1), once, after the drain counted what the records stepped and before anything of
+        // the frame reads time (Ogre's frame start below, the scene graph's particles, the views' globals, the cloud
+        // clock): a scene this frame DRAWS consumes its owed steps (bounded); one it does not keeps them for the frame
+        // that does (the stage-1 audit's bug 1: a thumbnail's frame ate the editor's steps).
+        beginFrameClocks(updated);
         // ...AND THE BLANK WORLD, when a scene-less View is drawing its
         // clear-only workspace this frame (lane STALE-VIEW-1). This is the
         // "a future feature that creates a workspace not owned by a View has to
@@ -1979,7 +1980,7 @@ unsigned long long OgreEngine::queueSubmissionTag() const {
 void OgreEngine::harnessStep(unsigned steps) {
     mRenderThread.runOn([this, steps] {
         for (auto &q : mScenes)
-            if (!q->mClock.hostStamped) q->mClock.owed += steps;
+            q->mClock.harnessStep(steps);
     });
 }
 
@@ -3108,8 +3109,8 @@ void OgreEngine::interpolateFrame() {
 // THE FRAME'S CLOCKS (ONE-FRAME-1 stage 1): each scene consumes what its records stepped; Ogre's one frame delay
 // follows the scene of the frame's first enabled presented view (a window first, else any enabled view) — for a stock
 // Ogre controller only: nothing of ours reads it for scene time (source.scene_time_one_meaning).
-void OgreEngine::beginFrameClocks() {
-    for (auto &q : mScenes) q->beginFrameClock();
+void OgreEngine::beginFrameClocks(const std::vector<OgreScene *> &drawn) {
+    for (auto &q : mScenes) q->beginFrameClock(std::find(drawn.begin(), drawn.end(), q.get()) != drawn.end());
     const OgreScene *lead = nullptr;
     for (int pass = 0; pass < 2 && !lead; ++pass)
         for (auto &v : mViews)

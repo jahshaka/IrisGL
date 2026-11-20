@@ -24,6 +24,7 @@
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "AlphaMasks.h"   // the cut-outs' masks (ENGINE-POLISH-ATOM-1 stage 3)
 #include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
+#include "SceneClock.h"     // a scene's clock, a pure value type (ONE-FRAME-1)
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
 #include "photon/PhotonComponent.h"
@@ -4287,26 +4288,17 @@ public:
     void restoreInterpolated() { interpolate(1.0f); }
     unsigned long long interpolationStep() const { return mInterpStep; }
     // ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; FrameInputScene::stepSerial says the law) ----------------------------
-    /// The scene's time, kept WITH the scene because documents are plural: the cursor on its document's lifetime
-    /// serial, the steps owed to the next frame, what this frame advanced, and the presentation clock.
-    struct Clock {
-        bool               primed = false;   ///< a part's serial has been seen (since the last `reassert`)
-        unsigned long long seen = 0;         ///< the last serial a part carried
-        unsigned long long owed = 0;         ///< steps counted by drains (a frame's or a join's) not yet consumed
-        bool               hostStamped = false;   ///< a host ever stamped it: the harness door never steps it again
-        double             period = 1.0 / 60.0;   ///< FrameInputScene::stepPeriod
-        float              particleScale = 1.0f;  ///< FrameInputScene::particleTimeScale
-        unsigned long long steps = 0;        ///< the steps the scene's frames have advanced, in all (scene time = x period)
-        double             dt = 0.0;         ///< THIS frame's scene time (steps x period): what every reader takes
-        double             particleDt = 0.0; ///< ...and its particles' (dt x particleScale), handed to PFX2
-        unsigned long long newest = 0;       ///< the newest grid state (the presentation's hi)
-        double             presentTime = 0.0;   ///< the presentation clock (U3 stage 5), in this scene's step time
-    } mClock;
+    /// The scene's time, kept WITH the scene because documents are plural (SceneClock.h, a pure value type): the cursor
+    /// on its document's lifetime serial, the steps owed to the frame that next DRAWS it, what this frame advanced, and
+    /// the presentation clock.
+    detail::SceneClock mClock;
+    using Clock = detail::SceneClock;
     /// A drain's part (the frame's or a join's): the period, the particle scale, and owed += serial - seen.
-    void takeClockPart(const FrameInputScene &part);
-    /// THE FRAME's clock, once per frame before anything of it reads time: dt = owed x period, owed = 0, the
-    /// particles' time handed to the scene manager's PFX2 (the fork's setTimeSinceLast).
-    void beginFrameClock();
+    void takeClockPart(const FrameInputScene &part) { mClock.take(part); }
+    /// THE FRAME's clock, once per frame before anything of it reads time (`drawn`: this frame draws the scene): the
+    /// owed steps consumed, bounded, and the particles' time handed to the scene manager's PFX2 (the fork's
+    /// setTimeSinceLast); an undrawn scene keeps its steps and is handed 0.
+    void beginFrameClock(bool drawn);
     /// The serial a node record of this frame is stamped with (the newest grid state).
     unsigned long long clockSerial() const { return mClock.newest; }
     std::vector<NodeId> mInterpNodes;   ///< the newest step's nodes (each once)
@@ -4706,7 +4698,7 @@ public:
     /// wrapped) into its datablocks' userValue[2].zw, master and cull twins.
     void applyScrollOffsets();
     float shaderTime() const override;
-    double sceneSeconds() const override { return double(mClock.steps) * mClock.period; }
+    double sceneSeconds() const override { return mClock.sceneSeconds(); }
     double frameSceneSeconds() const override { return mClock.dt; }
     double particleSeconds() const override;
     unsigned long long newestStep() const override { return mClock.newest; }
@@ -9186,7 +9178,7 @@ public:
     /// THE FRAME's CLOCKS (ONE-FRAME-1 stage 1): every scene's beginFrameClock, then Ogre's process-wide frame delay
     /// set to the scene time of the frame's first enabled presented view (for any stock Ogre controller; nothing of
     /// ours reads it for scene time — source.scene_time_one_meaning).
-    void beginFrameClocks();
+    void beginFrameClocks(const std::vector<OgreScene *> &drawn);
     /// The scene of the frame's first enabled presented view (beginFrameClocks' choice): the grid state the frame drew.
     const OgreScene *mLeadScene = nullptr;
     mutable std::string mHostError;

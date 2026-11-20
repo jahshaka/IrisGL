@@ -566,40 +566,14 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
     } JAH_CATCH(mError, false);
 }
 
-// ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; FrameInputScene::stepSerial says the law) -----------------------------------
-void OgreScene::takeClockPart(const FrameInputScene &part) {
-    Clock &c = mClock;
-    if (part.stepPeriod && *part.stepPeriod > 0.0f) c.period = double(*part.stepPeriod);
-    if (part.particleTimeScale) c.particleScale = std::max(0.0f, *part.particleTimeScale);
-    if (part.reassert) c.primed = false;   // a new document on this scene (the mirror's setSource): another clock
-    if (!part.stepSerial) return;
-    const unsigned long long serial = *part.stepSerial;
-    c.hostStamped = true;   // the harness door never steps it again: one source of this scene's time
-    if (c.primed && serial >= c.seen) {
-        c.owed += serial - c.seen;   // the steps since the last part, ONCE (an equal serial: 0)
-        if (serial > c.newest) c.newest = serial;
-    } else {
-        // PRIMED HERE: the scene's first serial, or the first after a reassert (a lower serial with no reassert is a
-        // host stamping another document's clock on this scene: re-primed the same way, 0 steps, never a jump). The
-        // presentation starts at the incoming grid state.
-        c.newest = serial;
-        c.presentTime = double(serial) * c.period;
-    }
-    c.seen = serial;
-    c.primed = true;
-}
-
-void OgreScene::beginFrameClock() {
-    Clock &c = mClock;
-    c.dt = double(c.owed) * c.period;
-    c.steps += c.owed;
-    c.owed = 0;
-    c.particleDt = c.dt * double(c.particleScale);
-    // THE PARTICLES' TIME, per scene manager (fork ParticleSystemManager2::setTimeSinceLast): this scene's steps x
+// ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; SceneClock.h is the law) -----------------------------------------------------
+void OgreScene::beginFrameClock(bool drawn) {
+    mClock.beginFrame(drawn);
+    // THE PARTICLES' TIME, per scene manager (fork ParticleSystemManager2::setTimeSinceLast): this scene's consumed steps x
     // its particle time scale, whatever Ogre's process-wide frame delay says — the one place the scale is applied.
     if (mSceneMgr)
         if (Ogre::ParticleSystemManager2 *pm = mSceneMgr->getParticleSystemManager2())
-            pm->setTimeSinceLast(Ogre::Real(c.particleDt));
+            pm->setTimeSinceLast(Ogre::Real(mClock.particleDt));
 }
 
 double OgreScene::particleSeconds() const {

@@ -1057,6 +1057,9 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // (monotone across play edges: SimulationClock::steps() resets there and the engine's cursor would read a rewind),
     // its grid step and its particle time scale; the engine advances the scene by the steps the serial moved since its
     // last part, once (Types.h FrameInputScene::stepSerial). A second sync of the same frame stamps the same serial.
+    static_assert(jahshaka::engine::FrameInputScene::kMaxStepsPerFrame
+                      == static_cast<unsigned long long>(iris::SimulationClock::kMaxStepsPerAdvance),
+                  "a frame hands a scene at most the document's own catch-up bound");
     if (mSource) {
         scenePart.stepSerial = mSource->simulationClock().lifetimeSteps();
         scenePart.stepPeriod = float(iris::SimulationClock::kStepSeconds);
