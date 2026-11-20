@@ -1,7 +1,8 @@
 // THE ATOM VIEW'S ONE SHADER (JahAtomView.material has the contract).
 //
 // Every read is a texelFetch clamped into its image (no filtering, no derivatives:
-// a discarded lane stops nothing, DOCS/traps/ENGINE.md), and the pixel coordinate
+// a discarded lane stops nothing - the decode's prologue says why, the piece
+// AtomDecodePrologue in Hlms/Atom/Any/800.Atom_piece_ps.any), and the pixel coordinate
 // comes from uv0 - the quad's own mapping onto the target - never gl_FragCoord.
 #version ogre_glsl_ver_330
 
