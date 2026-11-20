@@ -1053,6 +1053,15 @@ int SceneMirror::sync(const FrameViews &frameViews)
     scenePart.reassert = mReassertPending;
     scenePart.shaderTime = mFrameShaderTime;
     scenePart.grid = mFrameGrid;
+    // THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): this mirror is its ONE writer. The document's LIFETIME step serial
+    // (monotone across play edges: SimulationClock::steps() resets there and the engine's cursor would read a rewind),
+    // its grid step and its particle time scale; the engine advances the scene by the steps the serial moved since its
+    // last part, once (Types.h FrameInputScene::stepSerial). A second sync of the same frame stamps the same serial.
+    if (mSource) {
+        scenePart.stepSerial = mSource->simulationClock().lifetimeSteps();
+        scenePart.stepPeriod = float(iris::SimulationClock::kStepSeconds);
+        scenePart.particleTimeScale = mSource->particleTimeScale;
+    }
     if (mSource) scenePart.pixelTolerance = float(mSource->atomPixelError);   // the World Mode's pixel-error row (ATOM-3)
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
     // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a

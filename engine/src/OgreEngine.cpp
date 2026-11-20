@@ -260,11 +260,11 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         mNullWindow = mRoot->initialise(cfg.headless, "jahshaka-headless");
         // THE ENGINE HAS NO WALL CLOCK (Engine.h "Simulation clock"): its
         // frame-time source is put in frame-delay mode right here, before any
-        // frame, and stays there. The host's SimulationClock pushes the real
-        // per-frame value; this default is what a host that never pushes gets.
+        // frame, and stays there, FROZEN: every frame sets it (beginFrameClocks)
+        // to the scene time of its first presented view, 0 until a scene is stepped.
         // After initialise(), not after the Root constructor: Root creates its
         // ControllerManager in initialise() (OgreRoot.cpp:751).
-        Ogre::ControllerManager::getSingleton().setFrameDelay(kDefaultFrameDelta);
+        Ogre::ControllerManager::getSingleton().setFrameDelay(0.0f);
         // ATOM stage 1's view rule, before anything can create a mesh: the LOD
         // value arrays are written against the DEFAULT strategy's base value and
         // an Item caches the array's address at _initialise (OgreMesh.cpp).
@@ -1008,6 +1008,10 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             drainFrameInput(record, any, budgeted);
             if (budgeted) mLastFreeDrainMs = mFrameInputStatus.drainMicros / 1000.0;
         }
+        // THE FRAME'S CLOCKS (ONE-FRAME-1), once, after the drain counted what the records stepped and before anything
+        // of the frame reads time (the scene graph's particles, the views' globals, the cloud clock): an empty hand-over
+        // owes nothing, so every scene advances 0.
+        beginFrameClocks();
         mDeferNodeWrites = false;
         // THE SHADER CACHE'S CHUNKED COPY CONTINUES (FRAME-MONITOR-DOOR-1 stage 4): one step a frame, here at the drain,
         // when the frame's own messages ran none (a save message is a step) — a copy of N new entries costs
@@ -1971,6 +1975,14 @@ unsigned long long OgreEngine::queueSubmissionTag() const {
     return (unsigned long long)monitor::queueSubmissionTag(mRoot ? mRoot->getRenderSystem() : nullptr);
 }
 
+// THE HARNESS's GRID (inspect::EngineEcho::harnessStep, ONE-FRAME-1): on the render thread, between frames.
+void OgreEngine::harnessStep(unsigned steps) {
+    mRenderThread.runOn([this, steps] {
+        for (auto &q : mScenes)
+            if (!q->mClock.hostStamped) q->mClock.owed += steps;
+    });
+}
+
 // THE RESOURCE HALF OF A FRAME, ON ITS OWN (lane OPEN-FRAMES-1, 2026-09-15).
 //
 // WHAT A FRAME DOES THAT NOTHING ELSE DOES. Inside
@@ -2479,7 +2491,7 @@ bool OgreEngine::updateScene(Scene *scene) {
         {
             std::vector<SceneMessage> messages;
             std::vector<NodeRecord> nodes;
-            unsigned long long step = 0ull;
+            unsigned long long step = target->clockSerial();
             mRenderThread.withPending([&](FrameInput &rec, bool) {
                 for (FrameInputScene &p : rec.scenes)
                     if (p.scene == scene) {
@@ -2487,8 +2499,9 @@ bool OgreEngine::updateScene(Scene *scene) {
                         for (NodeRecord &r : p.nodes) nodes.push_back(std::move(r));
                         p.messages.clear();
                         p.nodes.clear();
+                        // the grid state the records are (read, not counted: the frame's drain takes the clock)
+                        step = p.stepSerial.value_or(target->clockSerial());
                     }
-                step = rec.stepSerial.value_or(0ull);
             });
             if (!messages.empty() || !nodes.empty()) {
                 EngineSideScope engineSide;
@@ -3002,9 +3015,7 @@ void OgreEngine::applyPendingEngineMessages() {
         any = a;
         pending.engineMessages.swap(rec.engineMessages);
         pending.scenes.swap(rec.scenes);
-        pending.views.swap(rec.views);
-        pending.stepSerial = rec.stepSerial;
-        pending.stepPeriod = rec.stepPeriod;
+        pending.views.swap(rec.views);   // (each scene part carries its own clock: a join's drain counts it, owed)
     });
     if (pending.engineMessages.empty() && pending.scenes.empty() && pending.views.empty()) return;
     EngineSideScope engineSide;
@@ -3056,12 +3067,16 @@ void OgreEngine::onRecordSplit() {
 void OgreEngine::beginPresentation() {
     if (mPresentBegun) return;
     mPresentBegun = true;
-    // THE GRID'S STEP (decision 55): the simulation clock's period the record carries — never the particles' delta.
-    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
-    const double hi = double(mNewestStep) * step, lo = hi - step;
-    if (!mFreeFrame) { mPresentTime = hi; return; }
-    if (mPresentTime < lo) mPresentTime = lo;
-    if (mPresentTime > hi) mPresentTime = hi;
+    // EACH SCENE's PRESENTATION CLOCK (ONE-FRAME-1: per scene, in its document's step time), clamped to its newest two
+    // grid states. THE GRID'S STEP (decision 55): the scene's period its part carries — never a particles' time.
+    for (auto &q : mScenes) {
+        OgreScene::Clock &c = q->mClock;
+        const double step = c.period > 0.0 ? c.period : 1.0 / 60.0;
+        const double hi = double(c.newest) * step, lo = hi - step;
+        if (!mFreeFrame) { c.presentTime = hi; continue; }
+        if (c.presentTime < lo) c.presentTime = lo;
+        if (c.presentTime > hi) c.presentTime = hi;
+    }
 }
 
 void OgreEngine::interpolateScene(OgreScene *sc) {
@@ -3069,9 +3084,9 @@ void OgreEngine::interpolateScene(OgreScene *sc) {
     sc->mInterpFrame = mPresentFrame;
     beginPresentation();
     if (!mFreeFrame) { mPresentAlpha = 1.0f; sc->restoreInterpolated(); return; }   // lockstep: cur (written only where owed)
-    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
+    const double step = sc->mClock.period > 0.0 ? sc->mClock.period : 1.0 / 60.0;
     const double sLo = (double(sc->interpolationStep()) - 1.0) * step;
-    const float alpha = float((mPresentTime - sLo) / step);
+    const float alpha = float((sc->mClock.presentTime - sLo) / step);
     if (!sc->mInterpNodes.empty()) mPresentAlpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
     sc->interpolate(alpha);
 }
@@ -3080,13 +3095,29 @@ void OgreEngine::interpolateFrame() {
     beginPresentation();
     for (auto &s : mScenes) interpolateScene(s.get());
     if (!mFreeFrame) return;
-    const double step = mStepPeriod > 0.0 ? mStepPeriod : 1.0 / 60.0;
     // The display's period the driver sends (a session's predicted one while it runs); under Unlimited none is sent
     // and the measured start-to-start interval of the free frames advances the clock (worth-a-look 3).
     double period = double(mRenderThread.displayPeriod());
     if (!(period > 0.0)) period = double(mRenderThread.measuredPeriod());
-    mPresentTime += period > 0.0 ? period : step;
-    mLastAlphaPresent = mPresentTime;
+    for (auto &q : mScenes) {
+        OgreScene::Clock &c = q->mClock;
+        c.presentTime += period > 0.0 ? period : (c.period > 0.0 ? c.period : 1.0 / 60.0);
+    }
+}
+
+// THE FRAME'S CLOCKS (ONE-FRAME-1 stage 1): each scene consumes what its records stepped; Ogre's one frame delay
+// follows the scene of the frame's first enabled presented view (a window first, else any enabled view) — for a stock
+// Ogre controller only: nothing of ours reads it for scene time (source.scene_time_one_meaning).
+void OgreEngine::beginFrameClocks() {
+    for (auto &q : mScenes) q->beginFrameClock();
+    const OgreScene *lead = nullptr;
+    for (int pass = 0; pass < 2 && !lead; ++pass)
+        for (auto &v : mViews)
+            if (v->isEnabled() && v->boundOgreScene() && (pass == 1 || v->presentsAsWindow())) {
+                lead = v->boundOgreScene();
+                break;
+            }
+    applyFrameDelta(lead ? float(lead->mClock.dt) : 0.0f);
 }
 
 
@@ -3127,8 +3158,6 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
     if (!any) { ++mFrameInputStatus.drainedEmpty; return; }
     FrameInput in = std::move(handed);
     unsigned applied = 0;
-    if (in.stepSerial && *in.stepSerial > mNewestStep) mNewestStep = *in.stepSerial;   // the presentation's grid
-    if (in.stepPeriod && *in.stepPeriod > 0.0f) mStepPeriod = double(*in.stepPeriod);   // the grid's step (decision 55)
 
     // THE ONE ORDER (decision 46; stage 3's FIFO law across every stream): the engine's messages, every scene's
     // messages and every view's binding, in the order the host posted them (their sequence). A create precedes the
@@ -3231,9 +3260,8 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
         }
     }
 
-    // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the
-    // delta persists; the epoch and the gesture are facts the frame reads.
-    if (in.frameDelta && *in.frameDelta != appliedFrameDelta()) { applyFrameDelta(*in.frameDelta); ++applied; }
+    // THE FRAME'S OWN FIELDS. cause / pace are this frame's (renderOneFrame consumes and resets them); the epoch and
+    // the gesture are facts the frame reads. (No delta: a scene's time is its part's serial, below.)
     if (in.cause) mNextFrameCause = *in.cause;
 
     // EACH SCENE'S ENVIRONMENT, in the order the host used to push it.
@@ -3241,7 +3269,10 @@ void OgreEngine::drainFrameInput(FrameInput &handed, bool any, bool budgeted) {
         OgreScene *sc = nullptr;
         for (auto &q : mScenes) if (static_cast<Scene *>(q.get()) == part.scene) { sc = q.get(); break; }
         if (!sc) continue;   // destroyed before its frame
-        applySceneStream(sc, {}, part.nodes, in.stepSerial.value_or(0ull));   // its messages ran in the one order above
+        // THE SCENE'S CLOCK FIRST (ONE-FRAME-1): the steps its serial moved are owed to the next frame (this one, or
+        // the frame after a join), and its node records are stamped with the newest grid state.
+        sc->takeClockPart(part);
+        applySceneStream(sc, {}, part.nodes, sc->clockSerial());   // its messages ran in the one order above
         // THE CHANGE SET NEXT (U0 3b): what the document wrote, before anything of the frame reads a box.
         mFrameInputStatus.changesMoved += unsigned(part.changes.moved.size());
         if (!part.changes.complete) ++mFrameInputStatus.changesIncomplete;
@@ -3447,9 +3478,6 @@ bool OgreEngine::pendingGiConfiguration(const Scene *scene) const {
     });
 }
 
-float OgreEngine::appliedFrameDelta() const {
-    return float(Ogre::ControllerManager::getSingleton().getFrameDelay());
-}
 
 // Shadow filter and resolution (and the atlas rebuild they trigger) live in
 // OgreShadow.cpp, beside the definition builder they drive.

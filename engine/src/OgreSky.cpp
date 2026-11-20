@@ -21,7 +21,6 @@
 #include <OgrePass.h>
 #include <OgreTextureUnitState.h>
 #include <OgreMaterialManager.h>
-#include <OgreControllerManager.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreShaderParams.h>
@@ -2497,14 +2496,14 @@ void OgreScene::bakeCloudField() {
 // THE LAYER'S CLOCK, ONCE PER DRAWN FRAME AND FROM NOWHERE ELSE (OgreEngine's
 // renderOneFrame; the fix round's F1: this used to live inside the constant
 // push, which setSky also runs on every look change — a dragged sun over the
-// realistic sky ticked it three times a frame). The frame delta the host
-// pushed for this frame (the document's SimulationClock through
-// FrameInput::frameDelta — zero on a paused scene, a fixed 1/60 grid under
-// a script). Then the constants for the frame.
+// realistic sky ticked it three times a frame). THIS SCENE's time this frame
+// (OgreScene::Clock::dt, ONE-FRAME-1: its document's steps x period, zero on a
+// paused scene or a frame nobody stepped it — never Ogre's process-wide frame
+// delay, which another scene's view may set). Then the constants for the frame.
 void OgreScene::tickCloudClock() {
     if (!cloudLayerDrawn()) return;
     const CloudLayerDesc &c = mSkyDesc.clouds;
-    const double dt = double(Ogre::ControllerManager::getSingleton().getFrameDelay());
+    const double dt = mClock.dt;
     const bool scrolling = (c.wind[0] != 0.0f || c.wind[1] != 0.0f);
     if (scrolling && dt > 0.0) {
         ++mCloudStatus.clockTicks;

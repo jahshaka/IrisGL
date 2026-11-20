@@ -9108,14 +9108,15 @@ class Engine;
 /// Nothing a frame depends on is written into the engine on the spot any more: a value lands in the frame that
 /// renders it, in one place, in one order.
 ///
-/// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is (a host that only steps the clock
-/// submits a record with `frameDelta` alone). Two submits before one frame MERGE, field by field: every field the
+/// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is. Two submits before one frame MERGE, field by field: every field the
 /// newer record carries wins and one it does not carry keeps the older value — for the frame, each VIEW and each SCENE
 /// (FrameInputStatus::scenePartsMerged counts a scene part merged into an earlier one).
 /// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
 /// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame field
-/// (`cause`) resets after the drain to its default (Driver); the pace is the driver's setter (Engine::setFramePace, U3);
-/// `frameDelta` persists until a record says otherwise (it boots at Engine::kDefaultFrameDelta).
+/// (`cause`) resets after the drain to its default (Driver); the pace is the driver's setter (Engine::setFramePace, U3).
+/// THE ENGINE HAS NO CLOCK OF ITS OWN: a SCENE's time is its document's grid, carried by its part's `stepSerial`
+/// (FrameInputScene, ONE-FRAME-1) — a frame advances each scene by the steps its serial moved since the last, once,
+/// and 0 when nobody stepped it.
 /// THE FRAME'S CHANGE SET (U0 3b UPGRADE-CHANGESET-1): what the DOCUMENT wrote into the shared scene graph since the
 /// scene's last record, by engine node — the one source of "what moved" the engine has. A document node's transform
 /// is written straight into the Ogre node the engine renders (one hierarchy, until U2), so no engine verb runs when a
@@ -9195,6 +9196,24 @@ struct FrameInputScene {
     std::optional<SkyDesc>                sky;
     std::optional<float>                  shaderTime;
     std::optional<GridDesc>               grid;
+    // ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1, V2 plan 2.1). ONE WRITER: the scene's mirror (SceneMirror's emit), from
+    // its document's iris::SimulationClock — every host (the editor, the player, a preview, a thumbnail) steps a scene
+    // only by advancing its document. The engine keeps the cursor WITH THE SCENE: a frame advances the scene by
+    // (serial - the last serial it saw) x stepPeriod — ONCE (a second sync of the same steps moves nothing) and 0 on a
+    // frame nobody stepped it (an empty hand-over, a picture's settle). Documents are plural, so time is per scene:
+    // two hosts in one hand-over are two scenes' parts and never collide. `reassert` re-primes the cursor (a new
+    // document on the same scene). Everything the engine simulates for the scene reads the result: its particles
+    // (x particleTimeScale, the fork's ParticleSystemManager2::setTimeSinceLast), the HDR meter and the looks of every
+    // view showing it, its cloud clock, its interpolation (the newest grid state). Newest wins in a merge (a serial
+    // is monotone, so the newest is the right one).
+    /// The document clock's LIFETIME step count (iris::SimulationClock::lifetimeSteps: never reset by a play edge) the
+    /// part was built at — also the grid state its node records are (the interpolation draws between the last two).
+    std::optional<unsigned long long>     stepSerial;
+    /// THE GRID'S STEP, in seconds (iris::SimulationClock::kStepSeconds, 1/60); 1/60 until a part says.
+    std::optional<float>                  stepPeriod;
+    /// The document's particle time scale: the scene's particles advance by its steps x stepPeriod x this, and
+    /// nothing else of the scene reads it (a slow-motion flame never slows the exposure). Persists; 1 until a part says.
+    std::optional<float>                  particleTimeScale;
     /// THE VIEW'S PIXEL-ERROR THRESHOLD (ATOM-3 stage 1): the World Mode's `atomPixelError` row, in pixels
     /// (Scene::setPixelTolerance).
     std::optional<float>                  pixelTolerance;
@@ -9242,7 +9261,6 @@ struct EngineMessage {
 };
 struct FrameInput {
     std::vector<EngineMessage>        engineMessages;  ///< the engine's own stream (decision 39 c), drained first
-    std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
@@ -9253,16 +9271,7 @@ struct FrameInput {
     /// hand-over at its frame head — one serial per frame that applies a record (an empty hand-over keeps the last).
     /// A submitter never sets it: submitFrame ignores the field. PublishedEngineFrame::serial is the one a frame applied.
     unsigned long long                serial = 0;
-    /// The document clock's step count (iris::SimulationClock::steps) the record was built at — the grid state its
-    /// node records are (stage 5 interpolates between the last two of them). Newest wins in a merge.
-    std::optional<unsigned long long> stepSerial;
-    /// THE GRID'S STEP, in seconds (iris::SimulationClock::kStepSeconds, 1/60): the interpolation's period (U3
-    /// decision 55) — never `frameDelta`, which is the particles' (simulated x particleTimeScale: 0 on a stepless
-    /// frame, k steps on a hitch). Newest wins in a merge; 1/60 until a record says.
-    std::optional<float>              stepPeriod;
-
-    /// The usual one-field records.
-    static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
+    /// The usual one-field record.
     static FrameInput withCause(FrameCause c) { FrameInput f; f.cause = c; return f; }
 };
 /// WHAT THE SUBMITS DID — Engine::frameSubmitStatus(): the GAME side of the hand-over (ENGINE-UPGRADE-U3 F4: each half

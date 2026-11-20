@@ -153,6 +153,14 @@ public:
     /// teleport may not change for a still world (the same TOOL path).
     virtual bool rayNearAddresses(std::vector<unsigned long long> &addresses) const = 0;
     virtual int giUpdateBudget() const = 0;   ///< GiParams::updateBudget as the scene took it (0 = GI paused)
+    /// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): its time so far (the steps its frames advanced x the period), the
+    /// last frame's (what every reader of the scene took), and the time the last frame handed its particles (the
+    /// fork's ParticleSystemManager2 override: the frame's x particleTimeScale).
+    virtual double sceneSeconds() const = 0;
+    virtual double frameSceneSeconds() const = 0;
+    virtual double particleSeconds() const = 0;
+    /// ...and the newest grid state its parts carried (the presentation's hi; its document's lifetime serial).
+    virtual unsigned long long newestStep() const = 0;
 };
 /// The scene's record; null for a scene this engine did not make.
 const SceneEcho *scene(const Scene *s);
@@ -175,6 +183,9 @@ public:
     virtual const ViewPipDesc     &pip() const = 0;
     virtual bool                   asyncShaders() const = 0;
     virtual ViewRoutes             routes() const = 0;
+    /// THE METER's TIME (ONE-FRAME-1 stage 1): what the view's last globals push handed its HDR meter — its scene's
+    /// time this frame (steps x period, never x particleTimeScale); -1 for a chain that runs no meter.
+    virtual float                  meterSeconds() const = 0;
 };
 /// The view's record; null for a view this engine did not make.
 const ViewEcho *view(const View *v);
@@ -197,6 +208,11 @@ public:
     /// where the SceneManagers' workers run — in steady_clock nanoseconds, the newest last (a bounded ring). Safe from
     /// any thread.
     virtual void poolSpans(std::vector<std::pair<unsigned long long, unsigned long long>> &out) const = 0;
+    /// THE HARNESS's GRID (ONE-FRAME-1 stage 1): advances by `steps` every scene NO HOST has ever stamped (its parts
+    /// never carried a stepSerial: an engine-only fixture's scenes), owed to the next frame. A scene a mirror stamps
+    /// leaves the harness's set for good (never two sources of one scene's time). enginetest::frames() calls it with 1
+    /// before each frame: the harness's law "a frame is one grid step". The test surface only: no src/ caller.
+    virtual void harnessStep(unsigned steps) = 0;
 };
 /// The engine's probes; null for an engine of another kind.
 const EngineEcho *engine(const Engine *e);
