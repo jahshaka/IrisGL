@@ -13,13 +13,11 @@
 //
 // THE LEVEL RULE is the quality currency's cascade case: one SAMPLE is a cell,
 // the tolerance is kCascadeLodCellFraction of it, and the instance's largest
-// axis scale takes it into the units the baked bounds are in. The two functions
-// below are the same text as JahCullTest_cs.glsl's, whose copy
-// engine.lod_rule_parity holds to the C++ header; THIS copy is held to it by
-// gi.cascade_lod's exact per-level counts and gi.voxel_feed's in-test reference.
-// THE SCALE IS THE LONGEST COLUMN of the 3x3 (the transformed basis vector),
-// which is the node's derived scale for any rotation. The cull's copy takes the
-// longest ROW, which agrees only for uniform or axis-aligned scale.
+// axis scale takes it into the units the baked bounds are in. The scale, the
+// currency and the walk are the cull's own pieces (JahLevelRule_piece_cs.any:
+// ONE definition each), and engine.lod_rule_parity runs THIS job's walk against
+// the C++ header too. THE SCALE IS THE LONGEST COLUMN of the 3x3 (the
+// transformed basis vector), which is the node's derived scale for any rotation.
 @insertpiece( SetCrossPlatformSettings )
 
 struct VoxelGatherParams
@@ -87,7 +85,8 @@ layout( std430, ogre_U7 ) writeonly restrict buffer recordLayout { Record record
 layout( std430, ogre_U8 ) restrict buffer readoutLayout { uint readout[]; };
 layout( std430, ogre_U9 ) readonly restrict buffer maskLayout { uint budgetMask[]; };
 
-#define JAH_LEVELS_PER_MESH 8u
+// Levels per mesh in the range table: GpuScene::kLevelsPerMesh, set from C++.
+@insertpiece( JahLevelTable )
 #define JAH_NONE 0xFFFFFFFFu
 #define JAH_GI_VISIBLE 8u
 // GpuScene.h kGpuCaster: casts a shadow in a caster channel (castShadow AND the channel) - the
@@ -117,22 +116,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 // ONE definition, in JahLevelRule_piece_cs.any (shared with the cull).
 @insertpiece( JahLevelRuleCurrency )
 
-// The COARSEST level whose bound is STRICTLY below what the consumer affords, the
-// bounds being non-decreasing so the first failure ends the walk.
-uint jahLevelForAllowed( uint meshIndex, uint levelCount, float allowed )
-{
-	if( allowed <= 0.0 )
-		return 0u;
-	uint level = 0u;
-	uint base = meshIndex * JAH_LEVELS_PER_MESH;
-	for( uint i = 1u; i < levelCount && i < JAH_LEVELS_PER_MESH; ++i )
-	{
-		if( !( levels[base + i].bound < allowed ) )
-			break;
-		level = i;
-	}
-	return level;
-}
+// THE LEVEL WALK (jahLevelForAllowed): ONE definition, in
+// JahLevelRule_piece_cs.any, shared with the cull.
+@insertpiece( JahLevelRuleWalk )
 
 void main()
 {

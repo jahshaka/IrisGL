@@ -49,7 +49,8 @@ layout( std430, ogre_U5 ) restrict buffer cntLayout { uint counter[]; };
 // of a contract to keep in step. 160 bytes = 10 lanes; boundsMin is lane 6.
 #define JAH_INSTANCE_LANES 10u
 #define JAH_LANE_BOUNDS_MIN 6u
-#define JAH_LEVELS_PER_MESH 8u
+// Levels per mesh in the range table: GpuScene::kLevelsPerMesh, set from C++.
+@insertpiece( JahLevelTable )
 
 layout( local_size_x = @value( threads_per_group_x ),
 		local_size_y = @value( threads_per_group_y ),

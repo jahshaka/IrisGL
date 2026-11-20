@@ -41,3 +41,38 @@
 		return tolerance * footprint / meshToWorldScale;
 	}
 @end
+
+// THE LEVEL TABLE'S STRIDE: levels per mesh entry, GpuScene::kLevelsPerMesh in
+// GpuScene.h, its one home. The C++ sets it on every job that indexes the level
+// table (GpuScene::setLevelTableProperty, the property jah_levels_per_mesh); a job
+// dispatched without it fails to compile rather than read another mesh's rows.
+@piece( JahLevelTable )
+@property( !jah_levels_per_mesh )
+	#error "jah_levels_per_mesh is not set (GpuScene::setLevelTableProperty)"
+@end
+	#define JAH_LEVELS_PER_MESH @value( jah_levels_per_mesh )u
+@end
+
+// THE LEVEL WALK, ONE DEFINITION for both jobs that pick a mesh level on the
+// device (the GPU cull's test job, the voxel gather): the COARSEST level whose
+// bound is STRICTLY below what the consumer affords, the bounds being
+// non-decreasing so the first failure ends the walk. Its C++ twin is
+// lodLevelForWorldError in Types.h; engine.lod_rule_parity runs this piece in BOTH
+// jobs against that twin. A job that inserts it declares the level table as
+// levels[] (GpuScene.h's GpuMeshLevel rows) and inserts JahLevelTable first.
+@piece( JahLevelRuleWalk )
+	uint jahLevelForAllowed( uint meshIndex, uint levelCount, float allowed )
+	{
+		if( allowed <= 0.0 )
+			return 0u;
+		uint level = 0u;
+		uint base = meshIndex * JAH_LEVELS_PER_MESH;
+		for( uint i = 1u; i < levelCount && i < JAH_LEVELS_PER_MESH; ++i )
+		{
+			if( !( levels[base + i].bound < allowed ) )
+				break;
+			level = i;
+		}
+		return level;
+	}
+@end

@@ -10,10 +10,10 @@
 //      hierarchical depth test against the pyramid.
 //   2. WHICH LEVEL? the quality currency's level walk (jahshaka/engine/Types.h,
 //      `allowedWorldError` + `lodLevelForWorldError`), evaluated here on the
-//      device. THIS IS THE GLSL HALF OF A PAIR and `engine.lod_rule_parity`
-//      holds it to the C++ half to 1e-4 over 10,000 triples; a change here that
-//      is not made there fails that suite and nothing else, which is exactly
-//      why the suite exists.
+//      device through the ONE walk piece (JahLevelRule_piece_cs.any, which the
+//      voxel gather inserts too). THIS IS THE GLSL HALF OF A PAIR and
+//      `engine.lod_rule_parity` holds it to the C++ half over 10,000 triples; a
+//      change to one half that is not made in the other fails that suite.
 //
 // THE TABLE'S LAYOUT IS A CONTRACT (irisgl/engine/src/GpuScene.h): the world
 // transform is THREE vec4 ROWS and not a mat3x4 — a GLSL matrix in std430 is
@@ -125,8 +125,8 @@ layout( std430, ogre_U7 ) writeonly restrict buffer hzbProbeLayout { uvec4 hzbPr
 	vulkan_layout( ogre_t0 ) uniform texture2D hzbTexture;
 @end
 
-// Levels per mesh in the range table (GpuScene::kLevelsPerMesh).
-#define JAH_LEVELS_PER_MESH 8u
+// Levels per mesh in the range table: GpuScene::kLevelsPerMesh, set from C++.
+@insertpiece( JahLevelTable )
 
 @insertpiece( JahLevelRuleScale )
 @insertpiece( JahHzbTest )
@@ -140,23 +140,9 @@ layout( local_size_x = @value( threads_per_group_x ),
 // JahLevelRule_piece_cs.any, shared with the voxel gather and the cluster cut.
 @insertpiece( JahLevelRuleCurrency )
 
-// THE LEVEL WALK, identical to lodLevelForWorldError: the COARSEST level whose
-// bound is STRICTLY below what the consumer affords, the bounds being
-// non-decreasing so the first failure ends the walk.
-uint jahLevelForAllowed( uint meshIndex, uint levelCount, float allowed )
-{
-	if( allowed <= 0.0 )
-		return 0u;
-	uint level = 0u;
-	uint base = meshIndex * JAH_LEVELS_PER_MESH;
-	for( uint i = 1u; i < levelCount && i < JAH_LEVELS_PER_MESH; ++i )
-	{
-		if( !( levels[base + i].bound < allowed ) )
-			break;
-		level = i;
-	}
-	return level;
-}
+// THE LEVEL WALK (jahLevelForAllowed, the twin of lodLevelForWorldError): ONE
+// definition, in JahLevelRule_piece_cs.any, shared with the voxel gather.
+@insertpiece( JahLevelRuleWalk )
 
 void main()
 {
