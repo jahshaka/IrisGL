@@ -66,6 +66,7 @@
 #include "ReflectChainRules.h"
 #include "EnginePrivate.h"
 #include "HitListLaw.h"   // the reflection rest's record allowance (URGENT #157)
+#include "RayQueryViewCache.h"   // the views of Ogre textures, cached per texture (GATHER-HANG-1)
 #include "GpuCheckpoints.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
@@ -1158,7 +1159,7 @@ private:
         /// R5's storage images take the same road: a resize frees them while the
         /// frames that dispatched against them are still in flight.
         ReflectImage img;
-        /// ...and the per-frame UNCACHED image views of the chain's textures.
+        /// ...and the views of Ogre textures the view cache retires (their image went: RayQueryViewCache.h).
         VkImageView view = VK_NULL_HANDLE;
         /// ...and the reflection pass' descriptor sets: `vkFreeDescriptorSets`
         /// on a set a submitted command buffer still refers to is illegal, and
@@ -1219,13 +1220,32 @@ private:
     /// view of all of them, which is what every screen shader declares.
     bool makeStorageImage(unsigned w, unsigned h, VkFormat fmt, ReflectImage &out,
                           std::string &err, unsigned layers = 0u);
-    /// A 2D_ARRAY VIEW OF EVERY LAYER of an Ogre screen texture (LAYERED-STEREO-1):
-    /// a mono view's texture is a 2D image and gets a one-layer array view, a
-    /// stereo view's is a two-layer array — so every screen shader of the tier
-    /// declares arrays, the eye being the layer. Uncached and retired, for the
-    /// reason sampledView's note gives (a cached view of a texture recreated at the
-    /// same address is a view of a dead image).
-    VkImageView layerView(Ogre::TextureGpu *t, bool storage);
+    /// THE VIEWS OF OGRE TEXTURES (GATHER-HANG-1 stage 1): every ray job's view of an Ogre texture comes out of this
+    /// one cache, made once per (texture, kind) on the image it is built on and retired into the bin when that image
+    /// goes (RayQueryViewCache.h says the law; before it each job made a fresh view a frame, and the card faulted on
+    /// that create-and-destroy around a scene change). The layer kinds are a 2D_ARRAY VIEW OF EVERY LAYER of a screen
+    /// texture (LAYERED-STEREO-1): a mono view's texture gets a one-layer array, a stereo view's a two-layer one, so
+    /// every screen shader of the tier declares arrays, the eye being the layer. Null for a null texture or one with
+    /// no image.
+    VkImageView textureView(Ogre::TextureGpu *t, RayViewKind kind);
+    /// the cache's three injected functions: the real view; the one listener a texture registers or takes away
+    uint64_t makeView(const RayViewKey &key, uint64_t image);
+    void watchView(const void *texture, bool on);
+    struct ViewListener final : public Ogre::TextureGpuListener {
+        explicit ViewListener(RayQueryViewCache &c) : cache(c) {}
+        RayQueryViewCache &cache;
+        /// LostResidency: the images were destroyed for an in-place re-make; Deleted: the texture goes.
+        void notifyTextureChanged(Ogre::TextureGpu *t, Reason reason, void *) override {
+            if (reason == LostResidency) cache.lostResidency(t);
+            else if (reason == Deleted) cache.deleted(t);
+        }
+        /// the cache never asks a texture to stay resident: a re-make only retires its views
+        bool shouldStayLoaded(Ogre::TextureGpu *) override { return false; }
+    };
+    RayQueryViewCache mViewCache{ [this](const RayViewKey &k, uint64_t image) { return makeView(k, image); },
+                                  [this](uint64_t v) { retireView(reinterpret_cast<VkImageView>(v)); },
+                                  [this](const void *t, bool on) { watchView(t, on); } };
+    ViewListener mViewListener{ mViewCache };
     void drainRetired();
     void evictStaleBlas(SceneAs &sa);
 
@@ -1633,10 +1653,7 @@ public:
         img.view = view;
         retireImage(img);
     }
-    void gatherRetireView(VkImageView view) override { retireView(view); }
-    VkImageView gatherLayerView(Ogre::TextureGpu *t, bool storage) override {
-        return layerView(t, storage);
-    }
+    VkImageView gatherView(Ogre::TextureGpu *t, RayViewKind kind) override { return textureView(t, kind); }
     void gatherRetireSet(VkDescriptorSet set, VkDescriptorPool pool) override {
         retireSet(set, pool);
     }
@@ -2636,30 +2653,66 @@ bool RayQueryTier::makeStorageImage(unsigned w, unsigned h, VkFormat fmt, Reflec
     return true;
 }
 
-VkImageView RayQueryTier::layerView(Ogre::TextureGpu *t, bool storage) {
+VkImageView RayQueryTier::textureView(Ogre::TextureGpu *t, RayViewKind kind) {
     if (!t) return VK_NULL_HANDLE;
     auto *vt = static_cast<Ogre::VulkanTextureGpu *>(t);
-    // The format Ogre's own views use: a storage view takes the LINEAR equivalent
-    // (an sRGB format has no storage), a sampled one the texture's own.
+    const bool layer = kind == RayViewKind::LayerSampled || kind == RayViewKind::LayerStorage;
+    RayViewKey key;
+    key.texture = t;
+    key.kind = kind;
+    // The format Ogre's own views use: a layer storage view takes the LINEAR equivalent (an sRGB format has no
+    // storage); a sampled one and Ogre's storage view (the jobs' UAV slots named the texture's own) the texture's own.
     Ogre::PixelFormatGpu pf = t->getPixelFormat();
-    if (storage) pf = Ogre::PixelFormatGpuUtils::getEquivalentLinear(pf);
-    VkImageViewUsageCreateInfo usage{};
-    usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
-    usage.usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
-    VkImageViewCreateInfo vci{};
-    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    vci.pNext = &usage;
-    vci.image = vt->getFinalTextureName();
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-    vci.format = Ogre::VulkanMappings::get(pf);
-    // A depth texture is sampled through its DEPTH aspect alone.
-    vci.subresourceRange.aspectMask = Ogre::VulkanMappings::getImageAspect(pf, true);
-    vci.subresourceRange.levelCount = storage ? 1u : std::max<uint32_t>(t->getNumMipmaps(), 1u);
-    vci.subresourceRange.layerCount = std::max<uint32_t>(t->getNumSlices(), 1u);
+    if (kind == RayViewKind::LayerStorage) pf = Ogre::PixelFormatGpuUtils::getEquivalentLinear(pf);
+    key.format = uint32_t(pf);
+    switch (kind) {
+    case RayViewKind::Sampled: key.mipCount = 0u; break;   // every mip, every remaining layer, the texture's own type
+    case RayViewKind::Storage: key.mipCount = 1u; break;
+    case RayViewKind::LayerSampled: key.mipCount = std::max<uint32_t>(t->getNumMipmaps(), 1u); break;
+    case RayViewKind::LayerStorage: key.mipCount = 1u; break;
+    }
+    if (layer) key.layerCount = std::max<uint32_t>(t->getNumSlices(), 1u);
+    // EACH KIND READS THE IMAGE IT IS BUILT ON: Ogre's `_createView` builds on the DISPLAY image (the manager's blank
+    // one while the texture is not ready), the layer views on the FINAL image (0 while the texture has no storage).
+    const VkImage image = layer ? vt->getFinalTextureName() : vt->getDisplayTextureName();
+    return reinterpret_cast<VkImageView>(mViewCache.view(key, reinterpret_cast<uint64_t>(image)));
+}
+
+uint64_t RayQueryTier::makeView(const RayViewKey &key, uint64_t image) {
+    auto *vt = static_cast<Ogre::VulkanTextureGpu *>(const_cast<void *>(key.texture));
+    const auto pf = Ogre::PixelFormatGpu(key.format);
     VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(mVk, &vci, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
-    retireView(view);
-    return view;
+    if (key.kind == RayViewKind::Sampled || key.kind == RayViewKind::Storage) {
+        // Ogre's own view, on the display image (the one textureView read): what `createView(slot, false)` made
+        // with the slots every job wrote (makeEmpty, and for a UAV the texture's own format).
+        view = vt->_createView(pf, Ogre::uint8(key.baseMip), Ogre::uint8(key.mipCount), Ogre::uint16(key.baseLayer),
+                               key.cubeAsArray, key.kind == RayViewKind::Storage, key.layerCount);
+    } else {
+        const bool storage = key.kind == RayViewKind::LayerStorage;
+        VkImageViewUsageCreateInfo usage{};
+        usage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+        usage.usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT;
+        VkImageViewCreateInfo vci{};
+        vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.pNext = &usage;
+        vci.image = reinterpret_cast<VkImage>(image);
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        vci.format = Ogre::VulkanMappings::get(pf);
+        // A depth texture is sampled through its DEPTH aspect alone.
+        vci.subresourceRange.aspectMask = Ogre::VulkanMappings::getImageAspect(pf, true);
+        vci.subresourceRange.baseMipLevel = key.baseMip;
+        vci.subresourceRange.levelCount = key.mipCount;
+        vci.subresourceRange.baseArrayLayer = key.baseLayer;
+        vci.subresourceRange.layerCount = key.layerCount;
+        if (vkCreateImageView(mVk, &vci, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
+    }
+    return reinterpret_cast<uint64_t>(view);
+}
+
+void RayQueryTier::watchView(const void *texture, bool on) {
+    auto *t = static_cast<Ogre::TextureGpu *>(const_cast<void *>(texture));
+    if (on) t->addListener(&mViewListener);
+    else t->removeListener(&mViewListener);
 }
 
 void RayQueryTier::drainRetired() {
@@ -2671,6 +2724,7 @@ void RayQueryTier::drainRetired() {
     // of sets exhausts their pool).
     static constexpr size_t kRetireStructuresPerFrame = 48u;
     size_t structures = 0u, out = 0u;
+    std::vector<Ogre::TextureGpu *> dueTextures;
     for (size_t i = 0; i < mRetireBin.size(); ++i) {
         // Unsigned subtraction: the pin's counter wraps, and "now - then" is
         // the elapsed count either way as long as the gap is small.
@@ -2682,8 +2736,7 @@ void RayQueryTier::drainRetired() {
             dropBuffer(mRetireBin[i].buf);
             if (mRetireBin[i].set && mRetireBin[i].setPool)
                 vkFreeDescriptorSets(mVk, mRetireBin[i].setPool, 1, &mRetireBin[i].set);
-            if (mRetireBin[i].tex && mRs && mRs->getTextureGpuManager())
-                mRs->getTextureGpuManager()->destroyTexture(mRetireBin[i].tex);
+            if (mRetireBin[i].tex) dueTextures.push_back(mRetireBin[i].tex);
             if (mRetireBin[i].view) vkDestroyImageView(mVk, mRetireBin[i].view, nullptr);
             if (mRetireBin[i].img.view) vkDestroyImageView(mVk, mRetireBin[i].img.view, nullptr);
             if (mRetireBin[i].img.image) vkDestroyImage(mVk, mRetireBin[i].img.image, nullptr);
@@ -2694,6 +2747,10 @@ void RayQueryTier::drainRetired() {
         }
     }
     mRetireBin.resize(out);
+    // THE DUE TEXTURES AFTER THE COMPACTION: a texture's destroy fires its Deleted, and the view cache retires its
+    // views into this bin from inside the call - never while the loop above walks it.
+    if (mRs && mRs->getTextureGpuManager())
+        for (Ogre::TextureGpu *t : dueTextures) mRs->getTextureGpuManager()->destroyTexture(t);
 }
 
 namespace {
@@ -3099,6 +3156,11 @@ void RayQueryTier::close() {
     // OgreEngine::shutdownRayQuery, before Root is deleted — the same rule the
     // engine's MeshPtrs obey, and for the same reason.
     vkDeviceWaitIdle(mVk);
+    // THE VIEW CACHE FIRST (GATHER-HANG-1): every cached view into the bin emptied below, every registration taken
+    // away - before anything here destroys a texture (a live registration would push into the bin while its last
+    // loop walks it) and because the tier closes while the views and scenes still live (a registration left behind
+    // is a dangling listener at a later Deleted). The device is idle: the bin's loop destroys them at once.
+    mViewCache.close();
     for (auto &kv : mReflects) dropReflect(kv.second);
     mReflects.clear();
     // THE HIT LISTS (PHOTON-HIT-SHADE-1): the counters are Ogre UAV buffers (the
@@ -5883,10 +5945,7 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     Ogre::TextureGpu *const layers[kImgs] = { depth, radiance, cardView[0], cardView[1], cardView[2],
                                               cardView[3], cardView[4], cardView[5], cardView[6] };
     for (unsigned i = 0; i < kImgs; ++i) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot =
-            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = layers[i];
-        views[i] = static_cast<Ogre::VulkanTextureGpu *>(layers[i])->createView(slot, false);
+        views[i] = textureView(layers[i], RayViewKind::Sampled);   // (shared with the hit set's views of these layers)
         imgs[i].sampler = mCardParitySampler;
         imgs[i].imageView = views[i];
         imgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -6009,8 +6068,6 @@ bool RayQueryTier::cardPickBlocking(OgreScene *scene, const std::vector<CardRead
     vkFreeCommandBuffers(mVk, pool, 1, &cmd);
     vkDestroyCommandPool(mVk, pool, nullptr);
     vkFreeDescriptorSets(mVk, mCardParityPool, 1, &set);
-    for (VkImageView v : views)
-        if (v) vkDestroyImageView(mVk, v, nullptr);
     dropBuffer(rowBuf);
     dropBuffer(qBuf);
     dropBuffer(aBuf);
@@ -7690,30 +7747,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     rv.prevStereo = stereo;
 
     // ---- THE DESCRIPTOR SET, rewritten every frame --------------------------
-    // IMAGE VIEWS, UNCACHED AND RETIRED — and the cache is not an optimisation
-    // we passed up, it is a TRAP measured here. `createView(slot, bUseCache =
-    // true)` hands back a REFCOUNTED view out of VulkanTextureGpuManager keyed
-    // by the slot's contents, and the key contains the TextureGpu POINTER, not
-    // the VkImage. A compositor texture that is recreated at the same address —
-    // which is every texture in the chain on every window resize — therefore
-    // answers with the view of the DESTROYED image, and the descriptor set we
-    // write points at memory that is gone. Measured exactly that way: frames 1
-    // and 2 bound a view of frame 0's `jahSsrReflection`, the validation layer
-    // named the dead image, the command buffer was invalidated by the
-    // destruction of frame 0's depth texture, `vkEndCommandBuffer` failed and
-    // the frame died with VK_ERROR_DEVICE_LOST. (A cached view must also be
-    // handed back with `destroyView`, which is a second thing to get wrong.)
-    //
-    // So: a fresh view per frame, retired into the same bin as everything else
-    // here, destroyed once the frames that could still be reading it have.
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot =
-            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
+    // IMAGE VIEWS OUT OF THE TIER's ONE CACHE (RayQueryViewCache.h, GATHER-HANG-1), NEVER OGRE's. Ogre's view
+    // cache (the manager's refcounted views) is keyed by the slot's contents, and the key holds the TextureGpu
+    // POINTER, not the VkImage: a compositor texture recreated at the same address - every texture in the chain on
+    // every window resize - answers with the view of the DESTROYED image. Measured exactly that way: frames 1 and 2
+    // bound a view of frame 0's `jahSsrReflection`, the validation layer named the dead image, `vkEndCommandBuffer`
+    // failed and the frame died with VK_ERROR_DEVICE_LOST. Ours keys the IMAGE beside the pointer and the kind, and
+    // retires a texture's views at its LostResidency and its Deleted - so a view is made once for its image's life
+    // (the fresh view a frame it replaced was what the card faulted on around a scene change).
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     // THE PING-PONG: a traced frame reads [flip & 1] and writes the other; a HELD frame writes nothing and binds the
     // last written half as "cur" (the filter composites it), which the next traced frame then reads as "prev". A REST
     // frame from k = 2 (fix F1) binds as a held one — the frozen moving history in "prev", the handed-over answer in
@@ -7729,14 +7771,14 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     Ogre::TextureGpu *const sampledSrc[3] = { normalTex, roughTex, depthTex };
     for (int i = 0; i < 3; ++i) {
         sampled[i].sampler = mPointSampler;
-        sampled[i].imageView = layerView(sampledSrc[i], false);   // every eye's layer
+        sampled[i].imageView = textureView(sampledSrc[i], RayViewKind::LayerSampled);   // every eye's layer
         sampled[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     // The depth texture's view carries the DEPTH aspect, but its LAYOUT under
     // `ResourceLayout::Texture` is the plain shader-read one for every format
     // (OgreVulkanMappings.cpp:603) — which is the layout the transition below
     // asks the solver for, so the descriptor and the barrier agree.
-    storage[0].imageView = layerView(ssrTex, true);
+    storage[0].imageView = textureView(ssrTex, RayViewKind::LayerStorage);
     storage[1].imageView = rv.hist[prev].view;
     storage[2].imageView = rv.hist[cur].view;
     storage[3].imageView = rv.state[prev].view;
@@ -7775,7 +7817,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE PHOTON VIEW'S OVERLAY (36): the view's, or — the knob off — the reflection
     // target's own storage view as a stand-in of the same format, never written.
     VkDescriptorImageInfo photonImg{};
-    photonImg.imageView = photon ? layerView(photon, true) : storage[0].imageView;
+    photonImg.imageView = photon ? textureView(photon, RayViewKind::LayerStorage) : storage[0].imageView;
     photonImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!photonImg.imageView) { bail("the photon overlay view is null"); return; }
     w[kReflectPhotonBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -9235,13 +9277,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     mp.skin[0] = skinSa ? 1.0f : 0.0f;
     mp.skin[1] = float(skinGeomSlots);
     memcpy(rv.motionParams[ring].mapped, &mp, sizeof(mp));
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     VkDescriptorBufferInfo ub{};
     ub.buffer = rv.motionParams[ring].buffer;
     ub.range = sizeof(MotionParams);
@@ -9256,12 +9292,7 @@ void RayQueryTier::recordMotion(const ReflectPassListener *key, OgreView *view,
     img[1].imageView = sampledView(ids);
     img[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = vel;
-        slot.access = Ogre::ResourceAccess::Write;
-        slot.pixelFormat = vel->getPixelFormat();
-        img[2].imageView = static_cast<Ogre::VulkanTextureGpu *>(vel)->createView(slot, false);
-        retireView(img[2].imageView);
+        img[2].imageView = textureView(vel, RayViewKind::Storage);
         img[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     if (!img[0].imageView || !img[1].imageView || !img[2].imageView || !img[3].imageView) return;
@@ -10541,13 +10572,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
         memcpy(av.params[ring].mapped, &pp, sizeof(pp));
 
         // ---- THE DESCRIPTOR SETS ---------------------------------------------
-        const auto sampledView = [this](Ogre::TextureGpu *t) {
-            Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-            slot.texture = t;
-            VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-            retireView(v);
-            return v;
-        };
+        const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
         VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
         asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
         asWrite.accelerationStructureCount = 1;
@@ -10566,12 +10591,7 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
         depth.imageView = sampledView(depthTex);
         depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         {
-            Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-            slot.texture = av.vis;
-            slot.access = Ogre::ResourceAccess::Write;
-            slot.pixelFormat = av.vis->getPixelFormat();
-            store.imageView = static_cast<Ogre::VulkanTextureGpu *>(av.vis)->createView(slot, false);
-            retireView(store.imageView);
+            store.imageView = textureView(av.vis, RayViewKind::Storage);
             store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         }
         if (!normals.imageView || !depth.imageView || !store.imageView || !rough.imageView) {
@@ -10979,16 +10999,8 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     sv.range = range;
     sv.toSun[0] = toSun.x; sv.toSun[1] = toSun.y; sv.toSun[2] = toSun.z;
 
-    // ---- THE DESCRIPTOR SET, rewritten every frame (uncached, retired views —
-    // the reflection's measured trap about a cached view of a recreated texture)
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot =
-            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
+    // ---- THE DESCRIPTOR SET, rewritten every frame (the views out of the tier's cache: recordReflect's note)
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     asWrite.accelerationStructureCount = 1;
@@ -11004,12 +11016,7 @@ void RayQueryTier::recordSunContact(const ReflectPassListener *key, OgreView *vi
     depth.imageView = sampledView(depthTex);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = sv.vis;
-        slot.access = Ogre::ResourceAccess::Write;
-        slot.pixelFormat = sv.vis->getPixelFormat();
-        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(sv.vis)->createView(slot, false);
-        retireView(store.imageView);
+        store.imageView = textureView(sv.vis, RayViewKind::Storage);
         store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     if (!normals.imageView || !depth.imageView || !store.imageView) {
@@ -11242,14 +11249,7 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     memcpy(cv.params[ring].mapped, &pp, sizeof(pp));
     memcpy(cv.records[ring].mapped, job.records, size_t(count) * kCardMoverRecordFloats * sizeof(float));
 
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot =
-            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     asWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     asWrite.accelerationStructureCount = 1;
@@ -11274,41 +11274,21 @@ bool RayQueryTier::traceCardMovers(OgreScene *scene, const CardMoverTrace &job) 
     normal.imageView = sampledView(job.normal);
     normal.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.vis;
-        slot.access = Ogre::ResourceAccess::Write;
-        slot.pixelFormat = job.vis->getPixelFormat();
-        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.vis)->createView(slot, false);
-        retireView(store.imageView);
+        store.imageView = textureView(job.vis, RayViewKind::Storage);
         store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.shadowRough;
-        slot.access = Ogre::ResourceAccess::ReadWrite;
-        slot.pixelFormat = job.shadowRough->getPixelFormat();
-        rough.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.shadowRough)->createView(slot, false);
-        retireView(rough.imageView);
+        rough.imageView = textureView(job.shadowRough, RayViewKind::Storage);
         rough.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.sunVis;
-        slot.access = Ogre::ResourceAccess::ReadWrite;
-        slot.pixelFormat = job.sunVis->getPixelFormat();
-        sunVisInfo.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.sunVis)->createView(slot, false);
-        retireView(sunVisInfo.imageView);
+        sunVisInfo.imageView = textureView(job.sunVis, RayViewKind::Storage);
         sunVisInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     // THE OPEN FRACTION (PHOTON-7 11-2 (5)): the still mode writes it, the others read it
     VkDescriptorImageInfo openInfo{};
     if (job.open) {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.open;
-        slot.access = job.still ? Ogre::ResourceAccess::ReadWrite : Ogre::ResourceAccess::Read;
-        slot.pixelFormat = job.open->getPixelFormat();
-        openInfo.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.open)->createView(slot, false);
-        retireView(openInfo.imageView);
+        openInfo.imageView = textureView(job.open, RayViewKind::Storage);
         openInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     // ...AND THE GEOMETRY ROWS for its buried test (the hit set's two: the per-slot table copied into this ring's
@@ -11686,22 +11666,12 @@ CardGatherResult RayQueryTier::gatherCards(OgreScene *scene, const CardGatherTra
     cb.range = kCardGatherCountWords * sizeof(uint32_t);
     VkDescriptorImageInfo store{};
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.gather;
-        slot.access = Ogre::ResourceAccess::ReadWrite;
-        slot.pixelFormat = job.gather->getPixelFormat();
-        store.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.gather)->createView(slot, false);
-        retireView(store.imageView);
+        store.imageView = textureView(job.gather, RayViewKind::Storage);
         store.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     VkDescriptorImageInfo openInfo{};
     if (job.open) {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = job.open;
-        slot.access = Ogre::ResourceAccess::Read;
-        slot.pixelFormat = job.open->getPixelFormat();
-        openInfo.imageView = static_cast<Ogre::VulkanTextureGpu *>(job.open)->createView(slot, false);
-        retireView(openInfo.imageView);
+        openInfo.imageView = textureView(job.open, RayViewKind::Storage);
         openInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
     if (!store.imageView || !openInfo.imageView) return CardGatherResult::Wait;
@@ -12097,18 +12067,15 @@ int RayQueryTier::gatherVoxelSides(OgreScene *scene, const Ogre::PhotonVoxelSide
     shb.buffer = v.shares.buffer;
     shb.range = v.shares.size;
     own(kVoxelSideShareBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo = &shb;
-    // VOXEL-R13 stage 1: the cascade's halves' own faces (views uncached and retired, the hit set's rule)
+    // VOXEL-R13 stage 1: the cascade's halves' own faces (the views out of the tier's cache, the hit set's rule)
     VkDescriptorImageInfo halfImg[6] = {};
     for (unsigned i = 0; i < 6u; ++i) {
         Ogre::TextureGpu *t = i < 3u ? job.halfSide[i] : job.halfNrm[i - 3u];
         if (!t) return wait();
-        Ogre::DescriptorSetTexture2::TextureSlot ts = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        ts.texture = t;
-        const VkImageView view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(ts, false);
-        if (!view) return wait();
-        gatherRetireView(view);
+        const VkImageView half = textureView(t, RayViewKind::Sampled);
+        if (!half) return wait();
         halfImg[i].sampler = gatherLinearSampler();
-        halfImg[i].imageView = view;
+        halfImg[i].imageView = half;
         halfImg[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         own(kVoxelSideHalfBinding + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).pImageInfo = &halfImg[i];
     }
@@ -12737,18 +12704,9 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                              &b, 0, nullptr, 0, nullptr);
     }
-    const auto uavView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = t;
-        slot.access = Ogre::ResourceAccess::Write;
-        slot.pixelFormat = t->getPixelFormat();
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
     out.on = true;
-    out.ids = uavView(hv.ids);
-    out.dest = uavView(hv.dest);
+    out.ids = textureView(hv.ids, RayViewKind::Storage);
+    out.dest = textureView(hv.dest, RayViewKind::Storage);
     if (!out.ids || !out.dest) { hitStandIns(out); return false; }
     out.buf = bufInfo.buffer;
     out.bufOffset = bufInfo.offset;
@@ -13113,13 +13071,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     if (hv.scene) hv.scene->fogAlong(pp.fog, fogAerial);
     std::memcpy(hv.params[ring].mapped, &pp, sizeof(pp));
 
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView v = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        retireView(v);
-        return v;
-    };
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     VkDescriptorBufferInfo ub{};
     ub.buffer = hv.params[ring].buffer;
     ub.range = sizeof(CompositeParams);
@@ -13155,12 +13107,7 @@ void RayQueryTier::recordHitComposite(const ReflectPassListener *key) {
     // THE RECORDS (5) and THE AIR'S TABLE (6): the reflection's fog along its ray.
     VkDescriptorImageInfo idsImg{}, fogImg{};
     {
-        Ogre::DescriptorSetUav::TextureSlot slot = Ogre::DescriptorSetUav::TextureSlot::makeEmpty();
-        slot.texture = hv.ids;
-        slot.access = Ogre::ResourceAccess::Read;
-        slot.pixelFormat = hv.ids->getPixelFormat();
-        idsImg.imageView = static_cast<Ogre::VulkanTextureGpu *>(hv.ids)->createView(slot, false);
-        retireView(idsImg.imageView);
+        idsImg.imageView = textureView(hv.ids, RayViewKind::Storage);
         idsImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!idsImg.imageView) return;
     }
@@ -13715,16 +13662,9 @@ void RayQueryTier::traceGlassEscape(const ReflectPassListener *key, OgreView *vi
     aub.range = sizeof(GlassEscapeAddParams);
     VkDescriptorImageInfo fogImg{}, targetImg{};
     fogImg.sampler = mLinearSampler;
-    if (fogAerial) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = fogAerial;
-        fogImg.imageView = static_cast<Ogre::VulkanTextureGpu *>(fogAerial)->createView(slot, false);
-        retireView(fogImg.imageView);
-    } else {
-        fogImg.imageView = mDummyVolume.view;
-    }
+    fogImg.imageView = fogAerial ? textureView(fogAerial, RayViewKind::Sampled) : mDummyVolume.view;
     fogImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    targetImg.imageView = layerView(target, true);
+    targetImg.imageView = textureView(target, RayViewKind::LayerStorage);
     targetImg.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!fogImg.imageView || !targetImg.imageView) return;
     const auto own = [&](VkWriteDescriptorSet &e, VkDescriptorSet set, uint32_t binding,

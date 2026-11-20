@@ -9,13 +9,11 @@
 #include <algorithm>
 #include <cstring>
 
-#include <OgreDescriptorSetTexture.h>
 #include <OgreGpuProgram.h>
 #include <OgreDescriptorSetUav.h>
 #include <OgreResourceTransition.h>
 #include <Vao/OgreUavBufferPacked.h>
 
-#include "OgreVulkanTextureGpu.h"
 #include "Vao/OgreVulkanBufferInterface.h"
 
 namespace jahshaka {
@@ -55,19 +53,13 @@ bool HitSetWrite::writeVolumes(GatherHost &host, VkDescriptorSet set, const uint
     if (!host.gatherDummies(dummyCube, dummyVolume, dummyFlat, dummyStorage, err)) return false;
     const VkSampler linear = host.gatherLinearSampler();
     // every kind for every slot the shaders index: past the chain's length the last cascade's (a slot with no chain at
-    // all the black stand-in, never read: the cascade count is 0). Views uncached and retired, as `write`'s.
+    // all the black stand-in, never read: the cascade count is 0). The views out of the tier's cache, as `write`'s.
     for (unsigned k = 0; k < kGatherVoxelKinds; ++k) {
         if (binding[k] == kNoBinding) continue;
         for (unsigned c = 0; c < kGatherMaxCascades; ++c) {
             const unsigned from = c < src.cascadeCount ? c : (src.cascadeCount ? src.cascadeCount - 1u : 0u);
             Ogre::TextureGpu *t = src.cascadeCount ? src.voxel[from][k] : nullptr;
-            VkImageView view = dummyVolume;
-            if (t) {
-                Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-                slot.texture = t;
-                view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-                host.gatherRetireView(view);
-            }
+            const VkImageView view = t ? host.gatherView(t, detail::RayViewKind::Sampled) : dummyVolume;
             mVolumes[k][c].sampler = linear;
             mVolumes[k][c].imageView = view;
             mVolumes[k][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -87,16 +79,11 @@ bool HitSetWrite::writeVolumes(GatherHost &host, VkDescriptorSet set, const uint
 
 bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots &s, const HitSetSources &src,
                         VkBuffer rowOfSlot, VkWriteDescriptorSet *w, std::string &err) {
-    // IMAGE VIEWS, UNCACHED AND RETIRED (the reflection's measured trap, OgreRayQuery.cpp recordReflect: Ogre's view
-    // cache is keyed by the TextureGpu POINTER, and a texture recreated at the same address answers with the view of
-    // the destroyed image): a fresh view a frame, retired into the tier's window.
-    const auto sampledView = [&host](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot = Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        host.gatherRetireView(view);
-        return view;
-    };
+    // THE VIEWS OUT OF THE TIER's ONE CACHE (RayQueryViewCache.h, GATHER-HANG-1): made once per texture and kind on
+    // the image they are built on, retired when that image goes - never Ogre's own view cache, which is keyed by the
+    // TextureGpu POINTER and answers a texture recreated at the same address with the view of the destroyed image
+    // (the reflection's measured trap, OgreRayQuery.cpp recordReflect).
+    const auto sampledView = [&host](Ogre::TextureGpu *t) { return host.gatherView(t, detail::RayViewKind::Sampled); };
     const auto bufferInfo = [](Ogre::UavBufferPacked *b) {
         VkDescriptorBufferInfo info{};
         auto *bi = static_cast<Ogre::VulkanBufferInterface *>(b->getBufferInterface());

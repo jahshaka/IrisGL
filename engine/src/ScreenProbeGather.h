@@ -42,6 +42,7 @@
 #include "jahshaka/engine/Types.h"
 #include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
 #include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
+#include "RayQueryViewCache.h"   // the ray tier's views of Ogre textures (GATHER-HANG-1)
 
 #include <algorithm>
 #include <cmath>
@@ -137,14 +138,15 @@ public:
     virtual bool gatherMakeImage(unsigned w, unsigned h, unsigned layers, VkFormat fmt,
                                  VkImage &image, VkDeviceMemory &memory, VkImageView &view,
                                  std::string &err) = 0;
-    /// A retired 2D_ARRAY view of every layer of an Ogre screen texture (the
-    /// tier's layerView): what the gather's screen shaders declare.
-    virtual VkImageView gatherLayerView(Ogre::TextureGpu *t, bool storage) = 0;
+    /// THE VIEW OF AN OGRE TEXTURE, out of the tier's one cache (RayQueryViewCache.h, GATHER-HANG-1): made once per
+    /// (texture, kind) on the image it is built on, retired by the tier when that image goes - never by the caller.
+    /// The layer kinds are the 2D_ARRAY views of every layer the gather's screen shaders declare. Null for a null
+    /// texture or one with no image.
+    virtual VkImageView gatherView(Ogre::TextureGpu *t, detail::RayViewKind kind) = 0;
 
     /// ...and the retire window on every one of them.
     virtual void gatherRetireBuffer(VkBuffer buffer, VkDeviceMemory memory) = 0;
     virtual void gatherRetireImage(VkImage image, VkDeviceMemory memory, VkImageView view) = 0;
-    virtual void gatherRetireView(VkImageView view) = 0;
     virtual void gatherRetireSet(VkDescriptorSet set, VkDescriptorPool pool) = 0;
     virtual void gatherRetireTexture(Ogre::TextureGpu *texture) = 0;
 

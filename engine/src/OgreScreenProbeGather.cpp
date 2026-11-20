@@ -2129,17 +2129,9 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     std::memcpy(v.paramsMapped[ring], &pp, sizeof(pp));
 
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
-    // Uncached views, retired: the reflection path's measured trap (a cached
-    // view of a texture recreated at the same address is a view of a dead
-    // image) applies here word for word.
-    const auto sampledView = [this](Ogre::TextureGpu *t) {
-        Ogre::DescriptorSetTexture2::TextureSlot slot =
-            Ogre::DescriptorSetTexture2::TextureSlot::makeEmpty();
-        slot.texture = t;
-        VkImageView view = static_cast<Ogre::VulkanTextureGpu *>(t)->createView(slot, false);
-        mHost.gatherRetireView(view);
-        return view;
-    };
+    // The views of Ogre textures come out of the tier's one cache (RayQueryViewCache.h, GATHER-HANG-1): made once
+    // per texture and kind on the image they are built on, retired by the tier when that image goes.
+    const auto sampledView = [this](Ogre::TextureGpu *t) { return mHost.gatherView(t, detail::RayViewKind::Sampled); };
     VkImageView dummyCube = VK_NULL_HANDLE, dummyVolume = VK_NULL_HANDLE,
                 dummyFlat = VK_NULL_HANDLE;
     VkBuffer dummyStorage = VK_NULL_HANDLE;
@@ -2167,15 +2159,15 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     cellStoreInfo.range = VK_WHOLE_SIZE;
     VkDescriptorImageInfo normals{}, depth{};
     normals.sampler = mHost.gatherPointSampler();
-    normals.imageView = mHost.gatherLayerView(in.normals, false);
+    normals.imageView = mHost.gatherView(in.normals, detail::RayViewKind::LayerSampled);
     normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     depth.sampler = mHost.gatherPointSampler();
-    depth.imageView = mHost.gatherLayerView(in.depth, false);
+    depth.imageView = mHost.gatherView(in.depth, detail::RayViewKind::LayerSampled);
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     // THE PREPASS'S SHADOW / ROUGHNESS (7-3: the rough specular's roughness, point-sampled as the reflection reads it)
     VkDescriptorImageInfo shadowRough{};
     shadowRough.sampler = mHost.gatherPointSampler();
-    shadowRough.imageView = mHost.gatherLayerView(in.shadowRough, false);
+    shadowRough.imageView = mHost.gatherView(in.shadowRough, detail::RayViewKind::LayerSampled);
     shadowRough.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!normals.imageView || !depth.imageView || !shadowRough.imageView) return;
 
@@ -2211,7 +2203,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // it, and the trace's overlay binding stands it in for the photon overlay (never written there)
     // - one view, not a second one created and retired every traced frame.
     VkDescriptorImageInfo irradianceStore{};
-    irradianceStore.imageView = mHost.gatherLayerView(v.irradiance, true);
+    irradianceStore.imageView = mHost.gatherView(v.irradiance, detail::RayViewKind::LayerStorage);
     irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     if (!irradianceStore.imageView) return;
     {   // the trace set: its own six, then THE HIT SET (the one writer, HitSetWrite: kTraceHitSlots)
@@ -2246,7 +2238,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         hitsOverlay.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         hitsOverlay.imageView = irradianceStore.imageView;
         if (in.photonOverlay && in.photonOverlayGatherHits)
-            hitsOverlay.imageView = mHost.gatherLayerView(in.photonOverlay, true);
+            hitsOverlay.imageView = mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage);
         if (!hitsOverlay.imageView) return;
         w[kTraceOverlayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kTraceOverlayBinding].pImageInfo = &hitsOverlay;
@@ -2334,7 +2326,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         photon.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         photon.imageView = irradianceStore.imageView;
         if (in.photonOverlay) {
-            photon.imageView = mHost.gatherLayerView(in.photonOverlay, true);
+            photon.imageView = mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage);
             if (!photon.imageView) return;
         }
         w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -2365,7 +2357,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[13].pImageInfo = &filteredRead;
         VkDescriptorImageInfo roughOut{};
-        roughOut.imageView = mHost.gatherLayerView(v.roughSpec, true);
+        roughOut.imageView = mHost.gatherView(v.roughSpec, detail::RayViewKind::LayerStorage);
         roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!roughOut.imageView) return;
         w[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -2391,7 +2383,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             return;
         // THE SKY VISIBILITY (51, 10-4 R11)
         VkDescriptorImageInfo skyOut{};
-        skyOut.imageView = mHost.gatherLayerView(v.skyVis, true);
+        skyOut.imageView = mHost.gatherView(v.skyVis, detail::RayViewKind::LayerStorage);
         skyOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         if (!skyOut.imageView) return;
         w[kIntegrateSkyVisBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
