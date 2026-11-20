@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define IRIS_SIMULATIONCLOCK_H
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 
@@ -155,6 +156,9 @@ public:
     uint64_t take(const SimulationClock &clock)
     {
         const uint64_t now = clock.lifetimeSteps();
+        // A cursor taken on a clock it was not primed on (a lower count) is a reader's defect: asserted, never
+        // clamped (a clamp would hide it). (assert, not Q_ASSERT: this header is Qt-free by design.)
+        assert(now >= mSeen);
         const uint64_t steps = now - mSeen;
         mSeen = now;
         return steps;

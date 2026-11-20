@@ -449,6 +449,10 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // and a pin was a viewing control on the OUTGOING scene, so it goes too.
     mAnyCustomPiece = false;
     mShaderTimeOverride = -1.0f;
+    // ...AND THE CLOCK ITSELF RESTARTS (ONE-FRAME-1 stage 0, the lead's ruling: "went live" is PER SOURCE): the
+    // incoming document's animated materials start at phase 0 in every run, never at the phase of the session's
+    // history (the HISTORY-1 class). A play edge inside one document still never rewinds them (the count runs on).
+    mShaderSteps = 0;
     mVerifierCursor = 0;
     mCharacterRigs.clear();
     // THE RIDERS COME OFF THEIR BONES FIRST: their engine nodes hang off THIS
@@ -519,8 +523,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // owner's evacuation hook (another mirror over this document) first.
     if (mSource) {
         // THE STEP CURSOR reads the INCOMING document's clock from its present: the steps it took before this bind
-        // were never this mirror's (ONE-FRAME-1 stage 0). The shader clock's count is not reset (a play edge or a
-        // new document never rewinds a scrolling surface).
+        // were never this mirror's (ONE-FRAME-1 stage 0).
         mStepCursor.prime(mSource->simulationClock());
         mSource->bindMirror(this);
         mSource->_setMirrorEvacuationHook([this] { evacuateEngineObjects(); });

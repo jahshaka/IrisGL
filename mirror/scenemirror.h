@@ -562,7 +562,7 @@ public:
     /// Pins the shader clock generated pieces and scrolling maps read
     /// (HLMS_ADOPTION P5, TORNADO-1) to an exact number of seconds; a NEGATIVE
     /// value hands it back to the free clock — the document SimulationClock's
-    /// whole 1/60 s steps, accumulated (no wall clock, trap 7). This is what
+    /// whole 1/60 s steps, counted (no wall clock, trap 7). This is what
     /// makes an animated graph material reproducible — a suite that renders at
     /// t = 0.25 gets the same pixels every run, and a scrubbed timeline can
     /// drive the surface from its own playhead. The verb is world.shaderTime.
@@ -1637,8 +1637,9 @@ private:
     /// The steps the clock took since the last sync (0 on a second sync of the same frame).
     quint64 mSyncSteps = 0;
     /// The shader clock: the document's steps COUNTED while the clock is live and unpinned — whole 1/60 s steps, an
-    /// integer count (seconds = steps x 1/60), never reset by a play edge (SimulationClock::time() is). No wall clock
-    /// (trap 7).
+    /// integer count (seconds = steps x 1/60), restarted at 0 by setSource (per document: a freshly opened scene's
+    /// animated materials start at the same phase in every run), never reset by a play edge (SimulationClock::time()
+    /// is). No wall clock (trap 7).
     quint64 mShaderSteps = 0;
     /// FOCUS SMOOTHING's dt for THIS sync (CAMERA_LENS_SPEC §3 P2): this sync's steps (capped at the clock's catch-up
     /// bound) x 1/60, 0 on a sync that took none. One value for the whole walk, so every tracking camera eases by the
