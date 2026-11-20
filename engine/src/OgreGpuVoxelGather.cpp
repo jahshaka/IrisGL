@@ -269,6 +269,7 @@ bool OgreScene::runVoxelGather(detail::VoxelFeed &feed, Ogre::PhotonVoxelizer *v
     JAH_TRY {
         // ---- job 1: count ----------------------------------------------------
         for (Ogre::HlmsComputeJob *job : { count, write }) {
+            GpuScene::setLevelTableProperty(job);   // the level table's stride, from its one home
             job->_setUavBuffer(0u, gatherSlotPublic(feed.params(), Ogre::ResourceAccess::Read));
             job->_setUavBuffer(1u, gatherSlotPublic(mGpuScene.instanceBuffer(), Ogre::ResourceAccess::Read));
             job->_setUavBuffer(2u, gatherSlotPublic(mGpuScene.meshBuffer(), Ogre::ResourceAccess::Read));

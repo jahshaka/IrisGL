@@ -54,6 +54,7 @@
 #include <vector>
 
 namespace Ogre {
+class HlmsComputeJob;
 class HlmsManager;
 class Mesh;
 class RenderSystem;
@@ -427,6 +428,12 @@ public:
         return meshIndex * kGeomRowsPerMesh + level * kSubmeshesPerMesh + submesh;
     }
     static uint32_t clusterRowIndex(uint32_t meshIndex) { return meshIndex * kGeomRowsPerMesh + kClusterRow; }
+    /// THE LEVEL TABLE'S STRIDE, AS THE SHADERS READ IT (ATOM-HOUSE-1): every compute job that indexes the level
+    /// table (`meshIndex * stride + level`) takes kLevelsPerMesh as the Hlms property `jah_levels_per_mesh`
+    /// (JahLevelRule_piece_cs.any's piece JahLevelTable turns it into JAH_LEVELS_PER_MESH, and refuses to compile
+    /// without it) - one home for the number, never a copy in the media. Called on a job before each dispatch; Ogre's
+    /// setProperty is a no-op on an equal value, so the permutation moves only if the constant does.
+    static void setLevelTableProperty(Ogre::HlmsComputeJob *job);
 
     ~GpuScene();
 

@@ -27,6 +27,7 @@
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreTexBufferPacked.h>
 
+#include <OgreHlmsComputeJob.h>
 #include <OgreLogManager.h>
 #include <stdexcept>
 #include <OgreHlmsPbsDatablock.h>
@@ -121,6 +122,10 @@ uint32_t roundUpPow2(uint32_t v, uint32_t floorValue) {
     return n;
 }
 }  // namespace
+
+void GpuScene::setLevelTableProperty(Ogre::HlmsComputeJob *job) {
+    if (job) job->setProperty("jah_levels_per_mesh", Ogre::int32(kLevelsPerMesh));
+}
 
 GpuScene::~GpuScene() { destroy(); }
 
