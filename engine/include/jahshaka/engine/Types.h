@@ -2711,7 +2711,7 @@ struct GiParams {
     /// It is here — an engine parameter rather than a document row — because it
     /// is the A/B: the same scene, the same chain, one term moved, so the cost
     /// it saves and the voxels it moves can be measured against each other in
-    /// ONE process (gi.cascade_lod does exactly that). A mesh with no LOD chain
+    /// ONE process (no live row does; the archived gi.cascade_lod did). A mesh with no LOD chain
     /// is unaffected either way, and that is most of what a scene holds today:
     /// only IMPORTED static meshes are baked with one (document primitives are
     /// not).
