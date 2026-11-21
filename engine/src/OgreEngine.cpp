@@ -2855,10 +2855,12 @@ std::string OgreEngine::takeLastError()
 }
 
 // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) --
-// SceneManager::updateSceneGraph feeds the particle manager
-// `ControllerManager::getFrameTimeSource()->getValue()` — one value, shared by
-// every scene in the process. There is no per-scene or per-view delta to hook,
-// which is why the header says the verb is process-wide and means it.
+// Ogre's ControllerManager keeps ONE frame time for the whole process; nothing
+// of ours reads it for scene time (ONE-FRAME-1: a scene's time is its own clock,
+// SceneClock.h — its particles through the fork's per-manager
+// ParticleSystemManager2::setTimeSinceLast, its meter, looks and clouds through
+// their own params). beginFrameClocks sets it each frame to the scene time of
+// the frame's first enabled presented view, for any stock Ogre controller.
 //
 // FrameTimeControllerValue has two modes and they cancel each other inside
 // Ogre (OgrePredefinedControllers.cpp:80-95): setTimeFactor zeroes mFrameDelay
@@ -2866,8 +2868,8 @@ std::string OgreEngine::takeLastError()
 // delta per frame). Since A4.2 the engine lives in the second mode for its
 // whole life — set at boot (init, below) and only ever re-set here — so the
 // wall clock is never consulted and a frame delay of 0 means "frozen", not
-// "back to the wall clock". A time factor never existed as a host concept:
-// the scene's particle time scale is multiplied into the delta by the host.
+// "back to the wall clock". A time factor never existed as a host concept: a
+// scene's particle time scale is applied to its particles alone (SceneClock).
 
 void OgreEngine::applyFrameDelta(float seconds) {
     JAH_TRY {
