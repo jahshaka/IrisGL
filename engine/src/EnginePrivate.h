@@ -1973,11 +1973,11 @@ struct SsrReprojection {
     Ogre::Matrix4 prevWorldToImage = Ogre::Matrix4::IDENTITY;
     bool          have = false;
 };
-/// Returns the time it handed the view's HDR meter this frame (its scene's frame time, ONE-FRAME-1), -1 for a view
-/// whose chain runs no meter.
+/// `meterSeconds` is the time the view's HDR meter adapts by this frame (OgreEngine::meterSecondsFor); returns what it
+/// handed the meter, -1 for a view whose chain runs no meter.
 float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                        unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
-                       OgreScene *scene);
+                       OgreScene *scene, float meterSeconds);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
@@ -8007,6 +8007,8 @@ public:
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).
     void initOffscreenContract(OffscreenContract c) { declareStandIn(c); mOffscreenContract = c; }
+    /// The contract in force (the meter's rule reads it: a StillPicture offscreen view is a picture).
+    OffscreenContract contractInForce() const { return mOffscreenContract; }
     /// THE STAND-IN's IDENTITY AT BIRTH (TEST-STREAMLINE-1 3a item 2b; View::presentsAsWindow): set once, before the
     /// view is anyone's but its creator's - never after (setOffscreenContract refuses a change either way).
     void declareStandIn(OffscreenContract c) { mIdentityStandIn = c == OffscreenContract::PresentedStandIn; }
@@ -9184,6 +9186,15 @@ public:
     void beginFrameClocks(const std::vector<OgreScene *> &drawn);
     /// The scene of the frame's first enabled presented view (beginFrameClocks' choice): the grid state the frame drew.
     const OgreScene *mLeadScene = nullptr;
+    /// THE METER's TIME IS THE VIEWER's (ONE-FRAME-1; the lead's ruling, reversing R6): what view `v`'s HDR meter adapts
+    /// by this frame. A PICTURE (an offscreen StillPicture view: a shot, a thumbnail, a preview tile) has no history:
+    /// kMeterNoHistorySeconds, so 0.25^dt = 0 and the frame's own key is its exposure — a still picture's brightness does
+    /// not depend on how many settle frames it took (the HISTORY-1 law). A LIVE view adapts in PRESENTED time: a
+    /// lockstep frame one grid step of its scene (deterministic: every test), a free frame the display's period (the
+    /// measured one under Unlimited) — never the particles' time, never Ogre's process-wide clock, and a paused scene
+    /// still adapts as the camera turns.
+    float meterSecondsFor(const OgreView &v) const;
+    static constexpr float kMeterNoHistorySeconds = 1.0e4f;
     mutable std::string mHostError;
 
     /// PROCESS-WIDE: rides Ogre's single frame-time controller value

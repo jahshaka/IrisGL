@@ -4794,7 +4794,7 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
 
 float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                        unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
-                       OgreScene *scene) {
+                       OgreScene *scene, float meterTime) {
     float meterSeconds = -1.0f;
     // THE ASPECT THE SCENE PASSES WILL DRAW AT (REFLECT-FIX-1), set FIRST — before
     // updateSsao, updateSsr or anything else below reads the camera's projection. An
@@ -4826,11 +4826,10 @@ float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &
         // auto-exposed view somebody else's pattern.
         if (!desc.tonemapFixed) {
             setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
-            // THE METER ADAPTS IN ITS SCENE's TIME (ONE-FRAME-1 stage 1; R6: exposure is a grid quantity): the steps the
-            // scene this view shows advanced this frame x its period — 0 on a frame nobody stepped it (a picture's
-            // settle, a free frame between grid steps), never x particleTimeScale, never Ogre's frame_time (the
+            // THE METER ADAPTS IN THE VIEWER's TIME (ONE-FRAME-1; OgreEngine::meterSecondsFor says the rule): a picture
+            // with no history, a live view in presented time — never x particleTimeScale, never Ogre's frame_time (the
             // process-wide delay another scene's view may set). JahHdrMeterResolve_cs: mix(new, old, 0.25^dt).
-            meterSeconds = float(scene ? scene->frameSceneSeconds() : 0.0);
+            meterSeconds = meterTime;
             setMeterParam(kMeterResolveJob, "timeSinceLast", meterSeconds);
         }
         if (bloomLadder(desc)) {
@@ -4886,7 +4885,8 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (mView->isCaptureWorkspace(ws)) {
         SsrReprojection scratch = mSsrReprojectionAtFrameStart;
         applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(), mView->width(),
-                         mView->height(), scratch, mView->ogreScene());
+                         mView->height(), scratch, mView->ogreScene(),
+                         mView->mEngine ? mView->mEngine->meterSecondsFor(*mView) : 0.0f);
         return;
     }
     // COUNTED, because "did this view's globals reach the frame at all" is a
@@ -4904,7 +4904,8 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     // though the materials themselves are process-wide singletons.
     mSsrReprojectionAtFrameStart = mSsrReprojection;
     mView->mMeterSecondsPushed = applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
-                                                  mView->width(), mView->height(), mSsrReprojection, mView->ogreScene());
+                                                  mView->width(), mView->height(), mSsrReprojection, mView->ogreScene(),
+                                                  mView->mEngine ? mView->mEngine->meterSecondsFor(*mView) : 0.0f);
 }
 
 }   // namespace chain

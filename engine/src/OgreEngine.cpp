@@ -3109,6 +3109,17 @@ void OgreEngine::interpolateFrame() {
     }
 }
 
+float OgreEngine::meterSecondsFor(const OgreView &v) const {
+    if (!v.presentsAsWindow() && v.contractInForce() == OffscreenContract::StillPicture)
+        return kMeterNoHistorySeconds;   // a picture: the frame's own key, no history
+    const OgreScene *s = v.boundOgreScene();
+    const double step = s && s->mClock.period > 0.0 ? s->mClock.period : 1.0 / 60.0;
+    if (!mFreeFrame) return float(step);   // a lockstep frame presents one grid step
+    double period = double(mRenderThread.displayPeriod());
+    if (!(period > 0.0)) period = double(mRenderThread.measuredPeriod());
+    return float(period > 0.0 ? period : step);
+}
+
 // THE FRAME'S CLOCKS (ONE-FRAME-1 stage 1): each scene consumes what its records stepped; Ogre's one frame delay
 // follows the scene of the frame's first enabled presented view (a window first, else any enabled view) — for a stock
 // Ogre controller only: nothing of ours reads it for scene time (source.scene_time_one_meaning).
