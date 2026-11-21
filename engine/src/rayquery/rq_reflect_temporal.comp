@@ -490,6 +490,7 @@ void main()
 			// kReflectStopSamples samples since it first came within it (jah_reflect_rest.glsl) - the window's samples stand
 			// across a frame out of the share (its frame count restarts); it closes only while not settled
 			const uvec4 refineWas = refine;
+			const uint stopWas = st.stop;
 			if( capped )
 				st.stop = kReflectStopFrames;
 			else if( !( e <= share && settled && !reference ) )
@@ -508,6 +509,12 @@ void main()
 				const bool enough = v - float( refine.z ) >= kReflectStopSamples;
 				st.stop = min( st.stop + 1u, enough ? kReflectStopFrames : kReflectStopFrames - 1u );
 			}
+			// THE REST'S SAMPLE LAW's word (the final read's M1): the samples at which a texel STOPS, past rest frame 2N (the
+			// population word 9's need was taken over), their largest in word 10 of the rest - atomicMax, held across the
+			// rest's frames (the trace zeroes it up to 2N). A capped texel is not a stop by the law (it is counted apart).
+			if( JAH_HIT_ON && !capped && !reference && stopWas < kReflectStopFrames && st.stop >= kReflectStopFrames &&
+				uint( p.knobs2.x + 0.5 ) > 2u * uint( N + 0.5 ) )
+				atomicMax( jahHitBuf[8], uint( v ) );
 			// B2: A REFINING texel's shown answer slews a code toward its composed answer, every frame of its re-convergence
 			if( ( refine.w & kRefineRefining ) != 0u )
 				refine = jahRefineWithD( refine, refineSlew( jahRefineD( refine ), answer ) );
@@ -536,19 +543,19 @@ void main()
 				}
 			}
 			imageStore( stateCur, ivec3( tc, gEye ), uvec4( jahStatePack( st ), 0u, 0u ) );
-			// THE REST'S BOUND (PHOTON-7 stage 11, 11-1c), at rest frame 2N - every texel's hand-over is done: a texel
-			// still converging needs v_need = v ( e / share )^2 samples (its standard error over v is e, the stop's bar its
-			// share: sigma^2 = e^2 v, and sigma^2 / v_need = share^2), so it still owes max( 0, v_need - v ). The words:
-			// 8 = their sum (each clamped at 2^20), 9 = the largest v_need (over kReflectRestVCap PREDICTS a capped texel).
-			// The trace zeroes both at every frame up to 2N; past it they hold this frame's (OgreRayQuery.cpp publishes
-			// RayQueryStatus::reflectRestBound = 2N + ceil( sum / the tail's rays a frame ) + kReflectStopFrames).
+			// THE REST'S NEED (PHOTON-7 stage 11, 11-1c; the final read's M1), at rest frame 2N - every texel's hand-over is
+			// done: a texel still converging needs v_need = v ( e / share )^2 samples to come within its share (its
+			// standard error over v is e: sigma^2 = e^2 v, and sigma^2 / v_need = share^2). Word 9 = the largest v_need
+			// (over kReflectRestVCap PREDICTS a capped texel); word 8 = the largest v at which one of them STOPS (above).
+			// THE LAW they make (RayQueryStatus::reflectRestStopVMax): every such texel stops at v <= v_need + 512 - its
+			// window opens at the crossing and closes after kReflectStopSamples samples AND kReflectStopFrames frames, at
+			// most 64 a frame (kReflectRestRaysCap): max( 300 + 64, 8 x 64 ). (The frames the hold takes are the tail's
+			// ray budget's, not a stop law: no frame bound is published.)
 			if( JAH_HIT_ON && uint( p.knobs2.x + 0.5 ) == 2u * uint( N + 0.5 ) && !capped && st.stop < kReflectStopFrames &&
 				!reference && share > 0.0 && finite1( e ) )
 			{
 				const float r = e / share;
 				const float need = min( ceil( v * r * r ), 16777216.0 );
-				const uint owe = need > v ? uint( min( need - v, 1048576.0 ) ) : 0u;
-				atomicAdd( jahHitBuf[8], owe );
 				atomicMax( jahHitBuf[9], uint( need ) );
 			}
 			return;

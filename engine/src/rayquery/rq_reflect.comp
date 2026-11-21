@@ -1900,8 +1900,9 @@ void main()
 	{
 		jahHitBuf[5] = floatBitsToUint( gExposure );
 		jahHitBuf[6] = floatBitsToUint( restN );
-		// THE REST'S BOUND's two words (PHOTON-7 11-1c): zeroed on every frame up to the rest's 2N, where the temporal
-		// pass fills them; past it they hold that frame's (the host's copy of every later frame reads them)
+		// THE REST'S SAMPLE LAW's two words (PHOTON-7 11-1c; the final read's M1): zeroed on every frame up to the rest's
+		// 2N, where the temporal pass fills word 9 (the largest need) and from where it raises word 8 (the largest v at a
+		// stop); they hold across the rest (the host's copy of every later frame reads them)
 		if( restK <= 2.0 * restN + 0.5 )
 		{
 			jahHitBuf[8] = 0u;

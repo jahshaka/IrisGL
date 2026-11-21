@@ -291,9 +291,6 @@ constexpr unsigned kGlassRestSequence = 0x10000u;
 /// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two.
 constexpr unsigned kReflectRestRaysCap = 64u;
 constexpr unsigned kReflectRestTailDivisor = 8u;
-/// THE STOP'S FRAMES (jah_reflect_rest.glsl kReflectStopFrames): a texel stops after its standard error stayed within its
-/// share this many frames - the rest bound's last term (PHOTON-7 11-1c).
-constexpr unsigned kReflectStopFrames = 8u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
@@ -1881,9 +1878,10 @@ private:
         /// THE NEE's CONE HIT RATE (PHOTON-7 11-1b, counter words 10-11; the lead's condition): the NEE rays and those
         /// whose first hit was the target drawn, summed over every retired frame read.
         unsigned long long neeRays = 0ull, neeHits = 0ull;
-        /// THE REST'S BOUND's words (PHOTON-7 11-1c, counter words 8-9: filled at rest frame 2N, held after it) as the
-        /// newest retired frame that carried them read them, with that frame's rest tag.
-        uint32_t boundOwed = 0u, boundNeedMax = 0u, boundTag = 0u;
+        /// THE REST'S SAMPLE LAW's words (PHOTON-7 11-1c, the final read's M1; counter words 8-9, filled from rest frame 2N
+        /// and held across the rest): word 8 the largest v at a stop past 2N, word 9 the largest need at 2N - as the newest
+        /// retired frame that carried them read them, with that frame's rest tag.
+        uint32_t stopVMax = 0u, boundNeedMax = 0u, boundTag = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -6774,16 +6772,12 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (const auto h = mHits.find(kv.first); h != mHits.end()) {
             st.reflectNeeRays += h->second.neeRays;
             st.reflectNeeHits += h->second.neeHits;
-            // THE REST'S BOUND (PHOTON-7 stage 11, 11-1c): the samples the texels converging at rest frame 2N still owe,
-            // over the tail's rays a frame (the rest's count / kReflectRestTailDivisor), past 2N, plus the stop's frames
+            // THE REST'S SAMPLE LAW (PHOTON-7 stage 11, 11-1c; the final read's M1): the largest need at rest frame 2N and
+            // the largest v at a stop after it, this rest's (RayQueryStatus::reflectRestStopVMax has the law)
             const uint32_t tag = h->second.boundTag;
             if (rv.restFrames > 0u && tag && (tag >> 20u) == (rv.restSession & 0xFFFu)) {
-                const unsigned long long tail =
-                    std::max<unsigned long long>(rv.restRayCount / kReflectRestTailDivisor, 1ull);
-                st.reflectRestBoundOwed = h->second.boundOwed;
                 st.reflectRestNeedMax = h->second.boundNeedMax;
-                st.reflectRestBound = int(2u * rv.restN + unsigned((h->second.boundOwed + tail - 1ull) / tail) +
-                                          kReflectStopFrames);
+                st.reflectRestStopVMax = h->second.stopVMax;
             }
         }
     }
@@ -9283,7 +9277,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
-    // THE REST BOUND's WORDS (M1): the temporal pass's atomics on words 8-9 are done (every reflection dispatch of the
+    // THE REST'S SAMPLE LAW's WORDS (M1): the temporal pass's atomics on words 8-9 are done (every reflection dispatch of the
     // frame is recorded above) - their copy, into the slot the composite's copy filled, ordered after them and before
     // the host's read. THE PICK (M2): the trace's and the temporal pass's shader writes into the host-visible pick buffer
     // made visible to the host (no barrier carried SHADER_WRITE to HOST before: the frame barrier's scope ends at
@@ -12469,7 +12463,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
             if (w[9] > 0u && pd.restTag != 0u) {
-                hv.boundOwed = w[8];
+                hv.stopVMax = w[8];
                 hv.boundNeedMax = w[9];
                 hv.boundTag = pd.restTag;
             }
