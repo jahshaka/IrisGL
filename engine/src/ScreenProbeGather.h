@@ -513,6 +513,8 @@ struct GatherInputs {
     /// THE GATHER-HITS READBACK (FAR-SUN-1, the arm "gather.hitsReadback"): every uniform
     /// probe's rays recorded and read back (GatherStatus::rays); the view never holds.
     bool hitsReadback = false;
+    /// ROUGH-LOBE-HISTORY-1's MEASURING ARM "gather.roughCarry" (reverted after its measurement): 1 bare, 2 clamp count.
+    unsigned roughCarryArm = 0u;
 };
 
 /// The Component.

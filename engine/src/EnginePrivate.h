@@ -2246,6 +2246,7 @@ private:
     X(GatherHistory, "gather.historyFrames") /* the pixel history's floor in frames (0 = shipped) */ \
     X(GatherFilterRadius, "gather.filterRadius") /* the probe-space filter's reach (0 = shipped) */ \
     X(GatherRestOff, "gather.restOff") /* no rest mean: every frame is the history's */ \
+    X(GatherRoughCarry, "gather.roughCarry") /* ROUGH-LOBE-HISTORY-1 measuring arm: 1 bare, 2 clamp count */ \
     X(GatherRestFrames, "gather.restFrames") /* the rest mean's length (0 = the settle) */ \
     X(GatherRestSeed, "gather.restSeed") /* the rest frames' sequence offset */ \
     X(GatherAgeView, "gather.ageView") /* paint pixels whose history is younger than N frames */ \
