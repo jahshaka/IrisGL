@@ -3052,21 +3052,20 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
     }
     sceneResult = desc.composedTexture();   // (the last linear stage: the picture the composed stop reads, by the one rule)
 
-    // THE PHOTON VIEW'S TERM SHOWN (ChainDesc::photonTerm): the scene result copied, the opaque surfaces' term
-    // composited over it where a term shader wrote it (straight alpha: 1 written, 0 the transparent clear), into a
-    // picture of its own - jahRt0 and every texture the screen trace and the composed stop read keep the scene's light.
-    // Everything after (the exposure, bloom, the tonemap, the radiance readback) takes the shown picture, as it took the
-    // in-place isolated one. In front of the exposure, after the AO apply: the term is not darkened by the camera's AO.
+    // THE PHOTON VIEW'S TERM SHOWN (ChainDesc::photonTerm): ONE quad (Jahshaka/PhotonTerm) reads the scene result and the
+    // opaque surfaces' term and writes the term where a term shader wrote it (straight alpha: 1 written, 0 the
+    // transparent clear), the scene result elsewhere, into a picture of its own - jahRt0 and every texture the screen
+    // trace and the composed stop read keep the scene's light. Everything after (the exposure, bloom, the tonemap, the
+    // radiance readback) takes the shown picture. In front of the exposure, after the AO apply: the term is not darkened
+    // by the camera's AO. ONE PASS FOR EVERY EYE SHAPE (the final read's M4; CODING_RULES 1, MULTIVIEW IS THE TARGET): the
+    // quad's program includes JahScreen.glsl, so a stereo chain layers both textures and draws its multiview twin
+    // (applyStereo) - the copy that went before it (Ogre/Copy/4xFP32, no multiview arm) made the term view mono-only.
     if (desc.photonTerm) {
-        auto *c = addQuad(n, kPhotonShown, "Ogre/Copy/4xFP32", "Jahshaka photon term base");
-        c->addQuadTextureSource(0, sceneResult);
-        c->mStoreActionColour[0] = Ogre::StoreAction::Store;
-        if (desc.letterbox) scissor(handlesOut, c);
         auto *q = addQuad(n, kPhotonShown, kPhotonTermMaterial, "Jahshaka photon term");
         q->addQuadTextureSource(0, kPhotonTerm);
-        q->mLoadActionColour[0] = Ogre::LoadAction::Load;
+        q->addQuadTextureSource(1, sceneResult);
         q->mStoreActionColour[0] = Ogre::StoreAction::Store;
-        if (desc.letterbox) scissor(handlesOut, q, /*clear=*/false);
+        if (desc.letterbox) scissor(handlesOut, q);
         sceneResult = kPhotonShown;
     }
 

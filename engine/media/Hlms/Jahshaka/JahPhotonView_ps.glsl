@@ -8,6 +8,10 @@
 #include "JahScreen.glsl"
 
 vulkan_layout( ogre_t0 ) uniform JahScreenTexture photonOverlay;
+#if defined( PHOTON_TERM )
+// (the term's composite reads the scene result too: unit 1, the same size)
+vulkan_layout( ogre_t1 ) uniform JahScreenTexture sceneResult;
+#endif
 
 vulkan( layout( ogre_s0 ) uniform sampler pointSampler );
 
@@ -40,8 +44,10 @@ void main()
 	vec4 o = texelFetch( photonOverlay, jahScreenTexel( pix ), 0 );
 #if defined( PHOTON_TERM )
 	// THE OPAQUE SURFACES' TERM (ChainDesc::photonTerm): linear radiance at the scene's scale, straight alpha - 1 where a
-	// term shader wrote it, 0 the transparent clear - over the copied scene result, before the tonemap: no clamp.
-	fragColour = vec4( o.rgb, o.a > 0.5 ? 1.0 : 0.0 );
+	// term shader wrote it, 0 the transparent clear - else the scene result at the same texel, before the tonemap: no
+	// clamp, no blend (one pass writes the shown picture whole).
+	const vec4 scene = texelFetch( sceneResult, jahScreenTexel( pix ), 0 );
+	fragColour = o.a > 0.5 ? vec4( o.rgb, 1.0 ) : scene;
 #elif defined( PHOTON_COVERAGE )
 	// The photon scene pass' layer: covered wherever anything was drawn.
 	const bool covered = any( greaterThan( o, vec4( 0.0 ) ) );

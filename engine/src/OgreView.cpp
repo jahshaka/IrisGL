@@ -356,8 +356,9 @@ ChainDesc OgreView::chainDesc() const {
     // anti-aliasing the window's samples. The post shapes render at 1x into their own
     // targets and always carry it. AtomDrawStatus::passthroughViews counts these.
     d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
-    // THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm): the scene's view isolates a term, on a mono post chain.
-    if (mScene && !mStereo && d.anyEffect()) {
+    // THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm): the scene's view isolates a term, on a post chain of either
+    // eye shape (its composite is one multiview quad: the final read's M4).
+    if (mScene && d.anyEffect()) {
         const PhotonView pv = mScene->photonView();
         d.photonTerm = pv == PhotonView::Diffuse || pv == PhotonView::Reflections;
     }
@@ -1834,23 +1835,6 @@ bool OgreView::readReflectionHdr(ImageF &out) {
     if (!mTexture) { mError = "readReflectionHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mWorkspace) { mError = "readReflectionHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
-}
-
-bool OgreView::readSsrHistoryHdr(ImageF &out) {
-    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
-    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readSsrHistoryHdr(out); }, nullptr); return r; }
-    if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' is on-screen"; return false; }
-    if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' has no workspace"; return false; }
-    if (!readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr")) return false;
-    // ...with the history's DEPTH in alpha (REFLECT-FIX-1): -1 where no surface shows.
-    ImageF depth;
-    if (!readChainTexture(chain::ssrHistoryDepthTextureName(), depth, "readSsrHistoryHdr")) return false;
-    if (depth.width != out.width || depth.height != out.height) {
-        mError = "readSsrHistoryHdr: the history's colour and depth differ in size";
-        return false;
-    }
-    for (size_t i = 0; i < size_t(out.width) * out.height; ++i) out.rgba[i * 4u + 3u] = depth.rgba[i * 4u];
-    return true;
 }
 
 bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {

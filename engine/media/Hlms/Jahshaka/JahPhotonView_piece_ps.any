@@ -29,12 +29,14 @@
 // whose pass never carries this property (atom_hit_mode is in the guard anyway).
 //
 // BESIDE THE RADIANCE, NEVER IN ITS PLACE (PHOTON-7-9A; the pass property jah_photon_term, ChainDesc::photonTerm):
-// on a mono post chain the pass's target holds a SECOND colour attachment for the term, the last of its attachments,
+// on a post chain of either eye shape the pass's target holds a SECOND colour attachment for the term, the last of its
+// attachments (layered with the target in a stereo chain - the multiview render pass writes every attachment per eye),
 // so this file declares that output after the template's own (the same counter the template numbers its outputs
 // with) and writes the term there with an alpha of one; the picture's own colour stays the scene's light, which
 // the reflection's screen trace and its rest's stop read from the next frame on. The chain composites the term over
-// the scene result in front of the tonemap (Jahshaka/PhotonTerm). Without the property (a stereo chain) the term
-// replaces the picture's colour as before.
+// the scene result in front of the tonemap (Jahshaka/PhotonTerm). Without the property (a view with NO post chain - the
+// passthrough shape renders into the window, and no term target or composite exists there) the term replaces the
+// picture's colour.
 //
 // SPELLED OUT, NO DIRECTIVE MARK IN ANY COMMENT: the Hlms parser reads them there.
 @property( jah_photon_view && jah_photon_term && ( hlms_normal || hlms_qtangent ) && !hlms_shadowcaster && !hlms_prepass && !hlms_render_depth_only && !atom_hit_mode )
@@ -68,6 +70,9 @@
 				outPhotonTerm = midf4( finalColour, 1.0 );
 			@end
 		@else
+			// THE PASSTHROUGH SHAPE ONLY (the final read's M4): a view with NO post chain has no term target and no
+			// composite, so the term replaces the picture's colour here - NOT a stereo leftover: a stereo chain carries
+			// the term attachment like a mono one (ChainDesc::photonTerm needs a post chain, never a mono view).
 			@property( !hw_gamma_write )
 				outPs_colour0.xyz = sqrt( finalColour );
 			@else

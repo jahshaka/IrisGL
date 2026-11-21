@@ -8077,7 +8077,6 @@ public:
     bool readPixels(Image &out) override;
     bool readPixelsHdr(ImageF &out) override;
     bool readReflectionHdr(ImageF &out) override;
-    bool readSsrHistoryHdr(ImageF &out) override;
     /// Downloads one of this view's chain textures (a local of its scene node)
     /// into float: the radiance readback and the reflection readback share it.
     bool readChainTexture(const char *textureName, ImageF &out, const char *who);
