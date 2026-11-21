@@ -3,19 +3,25 @@
 // preflight, spikes/gather-hang-1/PREFLIGHT-stage-1.md).
 //
 // Before it every ray job made a fresh VkImageView of each Ogre texture it bound, every frame, and retired it into the
-// tier's bin: fifteen sites in three files. Around a scene change that per-frame create-and-destroy is what the card
-// faulted on (Xid 109, a page fault in rq_probe_gather reading the closed scene's destroyed voxel volume; stage 0: the
-// base 5 faults in 6, the views cached 0 in 6). THE LAW: one view per (texture, kind, parameters), made once and kept
-// for the life of the IMAGE it was built on; retired (through the tier's bin, never destroyed here) exactly once when
-// that image goes - the texture's LostResidency (an in-place re-make: its images are destroyed first) or its Deleted -
-// or when a lookup finds the texture on a DIFFERENT image (the blank-to-final display swap fires neither reason). An
-// image of 0 (a texture with no storage) is refused: no view, a null handle. ONE registration per texture however
-// often it is looked up (Ogre's addListener does not de-duplicate), taken away at Deleted and at close().
+// tier's bin: fifteen sites in three files, up to about 420 views made and destroyed a frame (counted from the code's
+// loops: spikes/gather-hang-1/AUDIT-stage-1.md section 6). The cache removes that churn with the same picture. (It
+// was written while the card hung around a scene change; that hang was the 595.99.02 driver on the RTX 5060 Ti - it
+// faulted with the cache too, and the base WITHOUT it ran 0 in 18 on 615.71.09: the cache is not its cure and claims
+// no fix.) THE LAW: one view per (texture, kind), made once and kept for the life of the IMAGE it was built on and of
+// the parameters it was made with; retired (through the tier's bin, never destroyed here) exactly once when that
+// image goes - the texture's LostResidency (an in-place re-make: its images are destroyed first) or its Deleted - or
+// when a lookup of the same (texture, kind) finds a DIFFERENT image (the blank-to-final display swap fires neither
+// reason) or different parameters (a re-format while not resident fires none either: the old view is never left
+// behind as an orphan). An image of 0 (a texture with no storage) is refused: no view, a null handle. A failed make
+// caches and registers nothing, and an entry whose re-make failed keeps its old view. ONE registration per texture
+// however often it is looked up (Ogre's addListener does not de-duplicate), taken away at Deleted and at close().
 //
 // THE KEY carries the image the view is really built on beside the texture POINTER because a texture re-made at the
 // same address is a different texture (the reflection's measured trap, OgreRayQuery.cpp recordReflect: Ogre's own view
 // cache is keyed by the pointer and answered with a dead view), and the KIND because one texture is read several
-// ways (hv.dest sampled and as storage; the chain's depth as a plain view and as a layer array).
+// ways (hv.dest sampled and as storage; the chain's depth as a plain view and as a layer array). A kind's other fields
+// (format, mips, layers, cube-as-array) are the texture's own at the lookup (RayQueryTier::textureView), so one
+// (texture, kind) holds ONE entry: a lookup with other fields means the texture changed under it.
 //
 // No Vulkan and no Ogre type here: the tier injects make (the real view), retire (its bin) and watch (its
 // TextureGpuListener) as functions, so the law is a CPU row (tests/engine/test_ray_view_cache.cpp, engine.ray_view_cache).
@@ -66,20 +72,20 @@ public:
     RayQueryViewCache(const RayQueryViewCache &) = delete;
     RayQueryViewCache &operator=(const RayQueryViewCache &) = delete;
 
-    /// The view of `key` on `image`, made at the first lookup of that pair. A cached view of the same key on another
-    /// image is retired first. `image` 0, a null texture or a failed make: 0, nothing cached, nothing registered.
+    /// The view of `key` on `image`, made at the first lookup of that pair. A cached view of the same (texture, kind) on
+    /// another image or with other parameters is retired after its replacement is made. `image` 0, a null texture or a
+    /// failed make: 0, nothing cached, nothing registered (a failed re-make keeps the old entry).
     uint64_t view(const RayViewKey &key, uint64_t image) {
         if (!key.texture || !image) return 0u;
         auto it = mTextures.find(key.texture);
         if (it != mTextures.end()) {
             for (Cached &c : it->second) {
-                if (!(c.key == key)) continue;
-                if (c.image == image) return c.view;
+                if (c.key.kind != key.kind) continue;
+                if (c.image == image && c.key == key) return c.view;
                 const uint64_t made = mMake(key, image);
                 if (!made) return 0u;
                 const uint64_t old = c.view;
-                c.image = image;
-                c.view = made;
+                c = Cached{ key, image, made };
                 mRetire(old);
                 return made;
             }

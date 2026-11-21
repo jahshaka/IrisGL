@@ -1222,11 +1222,10 @@ private:
                           std::string &err, unsigned layers = 0u);
     /// THE VIEWS OF OGRE TEXTURES (GATHER-HANG-1 stage 1): every ray job's view of an Ogre texture comes out of this
     /// one cache, made once per (texture, kind) on the image it is built on and retired into the bin when that image
-    /// goes (RayQueryViewCache.h says the law; before it each job made a fresh view a frame, and the card faulted on
-    /// that create-and-destroy around a scene change). The layer kinds are a 2D_ARRAY VIEW OF EVERY LAYER of a screen
-    /// texture (LAYERED-STEREO-1): a mono view's texture gets a one-layer array, a stereo view's a two-layer one, so
-    /// every screen shader of the tier declares arrays, the eye being the layer. Null for a null texture or one with
-    /// no image.
+    /// goes (RayQueryViewCache.h says the law; before it each job made and retired a fresh view a frame). The layer
+    /// kinds are a 2D_ARRAY VIEW OF EVERY LAYER of a screen texture (LAYERED-STEREO-1): a mono view's texture gets a
+    /// one-layer array, a stereo view's a two-layer one, so every screen shader of the tier declares arrays, the eye
+    /// being the layer. Null for a null texture or one with no image.
     VkImageView textureView(Ogre::TextureGpu *t, RayViewKind kind);
     /// the cache's three injected functions: the real view; the one listener a texture registers or takes away
     uint64_t makeView(const RayViewKey &key, uint64_t image);
@@ -7753,8 +7752,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // every window resize - answers with the view of the DESTROYED image. Measured exactly that way: frames 1 and 2
     // bound a view of frame 0's `jahSsrReflection`, the validation layer named the dead image, `vkEndCommandBuffer`
     // failed and the frame died with VK_ERROR_DEVICE_LOST. Ours keys the IMAGE beside the pointer and the kind, and
-    // retires a texture's views at its LostResidency and its Deleted - so a view is made once for its image's life
-    // (the fresh view a frame it replaced was what the card faulted on around a scene change).
+    // retires a texture's views at its LostResidency and its Deleted - so a view is made once for its image's life,
+    // never a fresh one a frame.
     const auto sampledView = [this](Ogre::TextureGpu *t) { return textureView(t, RayViewKind::Sampled); };
     // THE PING-PONG: a traced frame reads [flip & 1] and writes the other; a HELD frame writes nothing and binds the
     // last written half as "cur" (the filter composites it), which the next traced frame then reads as "prev". A REST

@@ -144,7 +144,8 @@ public:
     /// texture or one with no image.
     virtual VkImageView gatherView(Ogre::TextureGpu *t, detail::RayViewKind kind) = 0;
 
-    /// ...and the retire window on every one of them.
+    /// THE RETIRE WINDOW for what the gather made itself (its buffers, images, sets and Ogre textures) - never for a
+    /// gatherView view, which the tier's cache retires.
     virtual void gatherRetireBuffer(VkBuffer buffer, VkDeviceMemory memory) = 0;
     virtual void gatherRetireImage(VkImage image, VkDeviceMemory memory, VkImageView view) = 0;
     virtual void gatherRetireSet(VkDescriptorSet set, VkDescriptorPool pool) = 0;
