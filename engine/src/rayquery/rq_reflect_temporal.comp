@@ -43,10 +43,11 @@
 // same descriptor set and the same Params (declared through `denoiser`).
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 #include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"

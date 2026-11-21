@@ -3,6 +3,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 // THE PIXEL'S AREA LIGHT VISIBILITY, JOB 1 OF 2: THE TRACE (PHOTON-7 stage 7, 7-A; SPECS/PHOTON_7_SPEC.md "AREA LIGHTS,
 // ONE LAW ON EVERY PATH" (a)). Ogre-Next draws an LTC area light with no shadow, so a pixel's area direct passed
@@ -18,7 +19,7 @@
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 #define JAH_AREA_VIS_PARAMS_BINDING 1
 #include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
@@ -57,13 +58,13 @@ layout( set = 0, binding = 18 ) uniform sampler2D gBufShadowRoughness;
 /// pane between passes its transmittance)
 float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 {
-	rayQueryEXT rqa;
-	rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), uint( p.knobs.z ), originQ,
+	JahRq rqa;
+	jahRqInit( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), uint( p.knobs.z ), originQ,
 						   0.0, wq, reachQ );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8)
 	float T = 1.0;
 	JAH_RQ_PROCEED_TRANSMIT( rqa, T )
-	return rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
+	return jahRqType( rqa, true ) == JAH_RQ_HIT_TRIANGLE ? 0.0 : T;
 }
 #define JAH_AREA_DEPTH( pix ) texelFetch( sceneDepth, pix, 0 ).x
 #define JAH_AREA_NORMAL( pix ) texelFetch( gBufNormals, pix, 0 ).xyz

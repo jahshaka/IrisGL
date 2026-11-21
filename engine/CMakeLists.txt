@@ -965,6 +965,7 @@ set(JAH_VOXEL_READER_SOURCES "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_alpha_mask.glsl"
+                             "${JAH_VOXEL_READER_INCLUDE}/jah_rq.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl"
                              "${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl"
@@ -1046,16 +1047,18 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE LAMP'S SHADOW RAY IN THE FRAGMENT (PHOTON-7 10-4 R9): the colour passes' Forward+ lamps, one TLAS ray each
     # (jah_lamp_ray.glsl), with the alpha machinery and the origin rule the compute rays use - their includes stripped
-    # (the files are concatenated in their dependency order; each carries its own guard)
+    # (the files are concatenated in their dependency order; each carries its own guard): the ray seam's names first
+    # (jah_rq.glsl, DOORS-0: every ray call by its names)
     COMMAND ${CMAKE_COMMAND} -DPIECE=JahLampRayLib -DSTRIP_INCLUDES=1
             -DOUT=${JAHSHAKA_MEDIA_DIR}/Hlms/Jahshaka/JahLampRayLib_piece_ps.any
-            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
-            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
-            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_alpha_mask.glsl
-            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl
-            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl
-            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl
-            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl
+            -DIN0=${JAH_VOXEL_READER_INCLUDE}/jah_rq.glsl
+            -DIN1=${JAH_VOXEL_READER_INCLUDE}/jah_rq_finite.glsl
+            -DIN2=${JAH_VOXEL_READER_INCLUDE}/jah_geom_rows.glsl
+            -DIN3=${JAH_VOXEL_READER_INCLUDE}/jah_alpha_mask.glsl
+            -DIN4=${JAH_VOXEL_READER_INCLUDE}/jah_rq_alpha.glsl
+            -DIN5=${JAH_VOXEL_READER_INCLUDE}/jah_ray_origin.glsl
+            -DIN6=${JAH_VOXEL_READER_INCLUDE}/jah_lamp_ray.glsl
+            -DIN7=${JAH_VOXEL_READER_INCLUDE}/jah_oct_dir.glsl
             -P "${JAH_WRAP_HLMS_PIECE}"
     # THE ONE DIFFUSE CONE INTEGRATOR (PHOTON-CARDS-2): the cone frame, the cone
     # sets, the start bias and the escape weight - read by the pixel shader's

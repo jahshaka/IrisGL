@@ -27,31 +27,32 @@
 #ifndef JAH_RQ_SUN_RAY_GLSL
 #define JAH_RQ_SUN_RAY_GLSL
 
+#include "jah_rq.glsl"
 #include "jah_rq_alpha.glsl"
 
 float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range )
 {
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+	JahRq rq;
+	jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 						   mask, origin, 0.0, toSun, hardEnd );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8): a pane is crossed, its T multiplied (an opaque hit still answers 0; with none
 	// the traversal ran whole, so every pane on the way was met - the product has no cap)
 	float vis = 1.0;
 	JAH_RQ_PROCEED_TRANSMIT( rq, vis )
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		return 0.0;
 	if( range > hardEnd && vis > 0.0 )
 	{
-		rayQueryEXT rqFade;
-		rayQueryInitializeEXT( rqFade, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask, origin, hardEnd,
+		JahRq rqFade;
+		jahRqInit( rqFade, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, origin, hardEnd,
 							   toSun, range );
 		JahPanes panesFade = jahPanesNone();
 		JAH_RQ_PROCEED_PANES( rqFade, panesFade )
 		float tEnd = range;
-		if( rayQueryGetIntersectionTypeEXT( rqFade, true ) ==
-			gl_RayQueryCommittedIntersectionTriangleEXT )
+		if( jahRqType( rqFade, true ) ==
+			JAH_RQ_HIT_TRIANGLE )
 		{
-			const float t = rayQueryGetIntersectionTEXT( rqFade, true );
+			const float t = jahRqT( rqFade, true );
 			vis *= clamp( ( t - hardEnd ) / ( range - hardEnd ), 0.0, 1.0 );
 			tEnd = t;
 		}

@@ -25,6 +25,7 @@
 #ifndef JAH_RAY_ORIGIN_GLSL
 #define JAH_RAY_ORIGIN_GLSL
 
+#include "jah_rq.glsl"
 #include "jah_rq_finite.glsl"
 
 /// The drawn surface's bound against level 0 at a VIEW's point: `drawnFootprints` (the host's
@@ -110,18 +111,18 @@ bool jahRayOriginBuried( vec3 surface, vec3 geomN, vec3 origin, float pointError
 {
 	const float behind = jahRayFloatBound( surface, 0.0 ) + max( pointError, 0.0 );
 	const float lift = length( origin - surface );
-	rayQueryEXT q;
-	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask, surface - geomN * behind, 0.0, geomN,
+	JahRq q;
+	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, surface - geomN * behind, 0.0, geomN,
 						   behind + lift );
 	JAH_RQ_PROCEED( q )
-	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( q, true ) != JAH_RQ_HIT_TRIANGLE )
 		return false;
 	vec3 wound;
 	const bool known =
-		jahHitWoundNormal( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) ),
-						   uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) ),
-						   uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) ),
-						   rayQueryGetIntersectionObjectToWorldEXT( q, true ), wound );
+		jahHitWoundNormal( uint( jahRqCustomIndex( q, true ) ),
+						   uint( jahRqGeometry( q, true ) ),
+						   uint( jahRqPrimitive( q, true ) ),
+						   jahRqObjectToWorld( q, true ), wound );
 	return known && dot( wound, geomN ) < 0.0;   // a front face crossed (a back face - the point's own - ignored)
 }
 #endif

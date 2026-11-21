@@ -29,10 +29,11 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 layout( set = 0, binding = 1 ) uniform Params
 {

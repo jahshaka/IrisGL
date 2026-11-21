@@ -23,6 +23,7 @@
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -45,7 +46,7 @@ layout( set = 0, binding = 2 ) uniform usampler2D atomIds;
 layout( std430, set = 0, binding = 3 ) readonly buffer Instances { uvec4 inst[]; };
 layout( rgba16f, set = 0, binding = 4 ) uniform writeonly image2D velocity;
 layout( set = 0, binding = 5 ) uniform sampler2D idDepth;
-layout( set = 0, binding = 6 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 6 ) uniform JahTlas tlas;
 layout( std430, set = 0, binding = 7 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
 layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
 
@@ -102,21 +103,21 @@ void main()
 	const vec2 uv = ( vec2( px ) + 0.5 ) / vec2( res );
 	const vec3 ray = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
 	const vec3 world = p.camPos.xyz + ray * dist;
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, p.camPos.xyz, dist * ( 1.0 - kSkinWindow ), ray,
+	JahRq rq;
+	jahRqInit( rq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, p.camPos.xyz, dist * ( 1.0 - kSkinWindow ), ray,
 						   dist * ( 1.0 + kSkinWindow ) );
-	while( rayQueryProceedEXT( rq ) )
+	while( jahRqProceed( rq ) )
 	{
 	}
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( rq, true ) != JAH_RQ_HIT_TRIANGLE )
 		return;
-	const uint slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
+	const uint slot = uint( jahRqCustomIndex( rq, true ) );
 	if( slot >= uint( p.resolution.z ) || ( inst[slot * 10u + 7u].w & kJahMotionSkinned ) == 0u )
 		return;
 	vec3 was;
-	if( !jahSkinnedPrevPoint( slot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
-							  uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
-							  rayQueryGetIntersectionBarycentricsEXT( rq, true ), world, was ) )
+	if( !jahSkinnedPrevPoint( slot, uint( jahRqGeometry( rq, true ) ),
+							  uint( jahRqPrimitive( rq, true ) ),
+							  jahRqBary( rq, true ), world, was ) )
 		return;
 	vec2 uvWas;
 	float zWas;

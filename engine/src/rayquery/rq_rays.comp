@@ -20,10 +20,11 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 /// One ray. `origin.w` is tMin, `dir.w` is tMax, `mask.x` is the instance mask
 /// the ray asks for (Types.h `kRayMask*`: bit 0 a shadow caster, bit 1 a mover,
@@ -68,8 +69,8 @@ void main()
     const uint asked = ray.mask.x;
     const uint cull = ( asked & kNearField ) != 0u ? ( asked & kNearField ) : ( asked & kFar );
 
-    rayQueryEXT rq;
-    rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), cull, ray.origin.xyz,
+    JahRq rq;
+    jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), cull, ray.origin.xyz,
                            ray.origin.w, ray.dir.xyz, ray.dir.w );
     // THE CANDIDATE LOOP (REFLECT-MOVERS-2): every BLAS is opaque, so an opaque
     // triangle commits inside the traversal; an alpha-tested item's instance is
@@ -77,12 +78,12 @@ void main()
     JAH_RQ_PROCEED( rq )
 
     vec4 answer = vec4( -1.0, -1.0, -1.0, 0.0 );
-    if( rayQueryGetIntersectionTypeEXT( rq, true ) ==
-        gl_RayQueryCommittedIntersectionTriangleEXT )
+    if( jahRqType( rq, true ) ==
+        JAH_RQ_HIT_TRIANGLE )
     {
-        answer.x = rayQueryGetIntersectionTEXT( rq, true );
-        answer.y = float( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-        answer.z = float( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
+        answer.x = jahRqT( rq, true );
+        answer.y = float( jahRqCustomIndex( rq, true ) );
+        answer.z = float( jahRqPrimitive( rq, true ) );
         answer.w = 1.0;
     }
     hits.h[id] = answer;

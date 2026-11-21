@@ -28,12 +28,12 @@ float jahLampRay( uvec2 tlasAddress, vec3 surface, vec3 geomN, float carried, ve
 	const float len = length( d );
 	if( !( len > 1e-4 ) )
 		return 1.0;
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, accelerationStructureEXT( tlasAddress ), jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+	JahRq rq;
+	jahRqInit( rq, JahTlas( tlasAddress ), jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 						   0x01u, origin, 0.0, d * ( 1.0 / len ), len );
 	float T = 1.0;
 	JAH_RQ_PROCEED_TRANSMIT( rq, T )
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		return 0.0;
 	return T;
 }
@@ -45,12 +45,12 @@ float jahSunMediumRay( uvec2 tlasAddress, vec3 p, vec3 toSun )
 {
 	if( ( tlasAddress.x | tlasAddress.y ) == 0u || !finite3( p ) || !finite3( toSun ) )
 		return 1.0;
-	rayQueryEXT rq;
-	rayQueryInitializeEXT( rq, accelerationStructureEXT( tlasAddress ), jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+	JahRq rq;
+	jahRqInit( rq, JahTlas( tlasAddress ), jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 						   0x01u, p, 0.0, normalize( toSun ), 1e6 );
 	float T = 1.0;
 	JAH_RQ_PROCEED_TRANSMIT( rq, T )
-	if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		return 0.0;
 	return T;
 }

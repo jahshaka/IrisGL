@@ -19,8 +19,8 @@
 // 7-6) as the Hlms piece JahAreaStrata - and its VISIBILITY is the producer's: the ray below (jahAreaStratum, compiled
 // only for an includer that defines JAH_AREA_STRATA_RAY - glslang predefines every extension's macro it SUPPORTS, so
 // GL_EXT_ray_query cannot tell), the voxel chain's march on the no-ray route.
-// Needs of the ray's includer: `tlas` (accelerationStructureEXT), jahAlphaRayFlags() and JAH_RQ_PROCEED
-// (jah_rq_alpha.glsl).
+// Needs of the ray's includer: `tlas` (a JahTlas), jahAlphaRayFlags() and JAH_RQ_PROCEED_TRANSMIT
+// (jah_rq_alpha.glsl, which brings the seam's names: jah_rq.glsl).
 #ifndef JAH_AREA_STRATA_GLSL
 #define JAH_AREA_STRATA_GLSL
 
@@ -105,13 +105,13 @@ float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, v
 	V = 1.0;
 	if( reachQ > 0.0 )
 	{
-		rayQueryEXT rqa;
-		rayQueryInitializeEXT( rqa, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ), mask, originQ, 0.0, wq,
+		JahRq rqa;
+		jahRqInit( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), mask, originQ, 0.0, wq,
 							   reachQ );
 		// THROUGH THE PANES (PHOTON-7 10-4 R8)
 		float T = 1.0;
 		JAH_RQ_PROCEED_TRANSMIT( rqa, T )
-		V = rayQueryGetIntersectionTypeEXT( rqa, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
+		V = jahRqType( rqa, true ) == JAH_RQ_HIT_TRIANGLE ? 0.0 : T;
 	}
 	return f;
 }

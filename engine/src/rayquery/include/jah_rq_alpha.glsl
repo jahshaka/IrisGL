@@ -49,6 +49,7 @@
 #ifndef JAH_RQ_ALPHA_GLSL
 #define JAH_RQ_ALPHA_GLSL
 
+#include "jah_rq.glsl"
 #include "jah_geom_rows.glsl"
 #include "jah_alpha_mask.glsl"
 
@@ -70,7 +71,7 @@ const uint kJahAlphaNone = 0xFFFFFFFFu;
 /// opaque.)
 uint jahAlphaRayFlags( uint extra )
 {
-	return gl_RayFlagsNoneEXT | extra;
+	return JAH_RQ_FLAGS_NONE | extra;
 }
 
 /// Is the candidate triangle SOLID at its barycentrics? `instanceId` is the TLAS
@@ -117,19 +118,19 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 	return jahMaskSolidAt( masks, rec, uv );
 }
 
-/// THE LOOP every ray query runs in place of `while( rayQueryProceedEXT( q ) ) {}`:
+/// THE LOOP every ray query runs in place of `while( jahRqProceed( q ) ) {}`:
 /// a triangle candidate (only an alpha-tested instance makes one) is confirmed
 /// where its mask is solid.
 #define JAH_RQ_PROCEED( q )                                                                       \
-	while( rayQueryProceedEXT( q ) )                                                              \
+	while( jahRqProceed( q ) )                                                                    \
 	{                                                                                             \
-		if( rayQueryGetIntersectionTypeEXT( q, false ) == gl_RayQueryCandidateIntersectionTriangleEXT && \
-			jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),       \
-						   uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),                \
-						   uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),             \
-						   uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),            \
-						   rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                   \
-			rayQueryConfirmIntersectionEXT( q );                                                  \
+		if( jahRqType( q, false ) == JAH_RQ_CANDIDATE_TRIANGLE &&                                        \
+			jahAlphaSolid( uint( jahRqCustomIndex( q, false ) ),                                    \
+						   uint( jahRqInstanceId( q, false ) ),                                     \
+						   uint( jahRqGeometry( q, false ) ),                                       \
+						   uint( jahRqPrimitive( q, false ) ),                                      \
+						   jahRqBary( q, false ) ) )                                                \
+			jahRqConfirm( q );                                                                    \
 	}
 
 /// THE PANES (PHOTON-7 10-4 R7; L9: a transparent surface transmits a ray, attenuated by its material). A blended
@@ -196,9 +197,9 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 /// - the nearest kept: the farther of it and the list's farthest goes to the overflow (applied, never confirmed).
 #define JAH_RQ_PANE_CANDIDATE( q, panes, w )                                                          \
 	{                                                                                                 \
-		if( ( ( w ) & kJahPaneTwoSided ) != 0u || rayQueryGetIntersectionFrontFaceEXT( q, false ) )   \
+		if( ( ( w ) & kJahPaneTwoSided ) != 0u || jahRqFrontFace( q, false ) )                        \
 		{                                                                                             \
-			const float ct_ = rayQueryGetIntersectionTEXT( q, false );                               \
+			const float ct_ = jahRqT( q, false );                                                    \
 			int k_ = -1;                                                                              \
 			if( ( panes ).n < kJahPanesMax )                                                          \
 				k_ = ( panes ).n++;                                                                   \
@@ -219,11 +220,11 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 			{                                                                                         \
 				( panes ).t[k_] = ct_;                                                                \
 				( panes ).word[k_] = ( w );                                                           \
-				( panes ).slotFar[k_] = ( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ) & 0xFFFFFFu ) | \
-					( ( uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ) & 127u ) << 24u ) |       \
-					( ( uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ) & 1u ) << 31u );            \
-				( panes ).prim[k_] = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) );    \
-				( panes ).bary[k_] = packHalf2x16( rayQueryGetIntersectionBarycentricsEXT( q, false ) ); \
+				( panes ).slotFar[k_] = ( uint( jahRqCustomIndex( q, false ) ) & 0xFFFFFFu ) |                              \
+					( ( uint( jahRqGeometry( q, false ) ) & 127u ) << 24u ) |                                 \
+					( ( uint( jahRqInstanceId( q, false ) ) & 1u ) << 31u );                                 \
+				( panes ).prim[k_] = uint( jahRqPrimitive( q, false ) );                              \
+				( panes ).bary[k_] = packHalf2x16( jahRqBary( q, false ) );                              \
 			}                                                                                         \
 		}                                                                                             \
 	}
@@ -232,40 +233,40 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 /// pane's T multiplied as it is met into the float `T` (order-free: no list, no cap); an alpha-tested candidate
 /// confirmed where its mask is solid. The caller answers 0 on an opaque commit, else T.
 #define JAH_RQ_PROCEED_TRANSMIT( q, T )                                                               \
-	while( rayQueryProceedEXT( q ) )                                                                  \
+	while( jahRqProceed( q ) )                                                                        \
 	{                                                                                                 \
-		if( rayQueryGetIntersectionTypeEXT( q, false ) != gl_RayQueryCandidateIntersectionTriangleEXT ) \
+		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
-		const uint w_ = uint( rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT( q, false ) ); \
+		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \
 		if( ( w_ & kJahPaneOn ) != 0u )                                                               \
 		{                                                                                             \
-			if( ( w_ & kJahPaneTwoSided ) != 0u || rayQueryGetIntersectionFrontFaceEXT( q, false ) )  \
+			if( ( w_ & kJahPaneTwoSided ) != 0u || jahRqFrontFace( q, false ) )                       \
 				( T ) *= jahPaneT( w_ );                                                              \
 		}                                                                                             \
-		else if( jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),    \
-								uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),             \
-								uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),          \
-								uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),         \
-								rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                \
-			rayQueryConfirmIntersectionEXT( q );                                                      \
+		else if( jahAlphaSolid( uint( jahRqCustomIndex( q, false ) ),                                 \
+								uint( jahRqInstanceId( q, false ) ),                                  \
+								uint( jahRqGeometry( q, false ) ),                                    \
+								uint( jahRqPrimitive( q, false ) ),                                   \
+								jahRqBary( q, false ) ) )                                             \
+			jahRqConfirm( q );                                                                        \
 	}
 
 /// THE LOOP of a ray that CROSSES panes (the caches' gathers, the screen gather, the reflection; R8 the light rays):
 /// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0.
 #define JAH_RQ_PROCEED_PANES( q, panes )                                                              \
-	while( rayQueryProceedEXT( q ) )                                                                  \
+	while( jahRqProceed( q ) )                                                                        \
 	{                                                                                                 \
-		if( rayQueryGetIntersectionTypeEXT( q, false ) != gl_RayQueryCandidateIntersectionTriangleEXT ) \
+		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
-		const uint w_ = uint( rayQueryGetIntersectionInstanceShaderBindingTableRecordOffsetEXT( q, false ) ); \
+		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \
 		if( ( w_ & kJahPaneOn ) != 0u )                                                               \
 			JAH_RQ_PANE_CANDIDATE( q, panes, w_ )                                                     \
-		else if( jahAlphaSolid( uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, false ) ),    \
-								uint( rayQueryGetIntersectionInstanceIdEXT( q, false ) ),             \
-								uint( rayQueryGetIntersectionGeometryIndexEXT( q, false ) ),          \
-								uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, false ) ),         \
-								rayQueryGetIntersectionBarycentricsEXT( q, false ) ) )                \
-			rayQueryConfirmIntersectionEXT( q );                                                      \
+		else if( jahAlphaSolid( uint( jahRqCustomIndex( q, false ) ),                                 \
+								uint( jahRqInstanceId( q, false ) ),                                  \
+								uint( jahRqGeometry( q, false ) ),                                    \
+								uint( jahRqPrimitive( q, false ) ),                                   \
+								jahRqBary( q, false ) ) )                                             \
+			jahRqConfirm( q );                                                                        \
 	}
 
 JahPanes jahPanesNone()

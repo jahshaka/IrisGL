@@ -3,6 +3,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 // THE SUN'S AND THE LAMPS' VISIBILITY ON THE CARDS: one ray per card texel towards the sun, in
 // two modes of one job (knobs.y), and one per lamp in a third.
@@ -60,7 +61,7 @@
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 layout( set = 0, binding = 1 ) uniform Params
 {
@@ -281,14 +282,14 @@ void main()
 				const float reach = dO - max( l.attenuation.y, 0.0 ) - kLampEnd;
 				if( reach > 0.0 )
 				{
-					rayQueryEXT rq;
-					rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+					JahRq rq;
+					jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 										   uint( p.knobs.x ), origin, 0.0, Lo, reach );
 					// THROUGH THE PANES (PHOTON-7 10-4 R8; the fix round's F3: a lamp reached through panes keeps its
 					// fraction - the transmitted mask's bit, its share in the transmitted lamps' visibility)
 					float T = 1.0;
 					JAH_RQ_PROCEED_TRANSMIT( rq, T )
-					v = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : T;
+					v = jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE ? 0.0 : T;
 				}
 				if( slot >= 0 )
 				{
@@ -364,13 +365,13 @@ void main()
 																		   r.axisD.xyz ),
 													depth, r.rect.w )
 									: P;
-			rayQueryEXT rq;
-			rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsTerminateOnFirstHitEXT ),
+			JahRq rq;
+			jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );
 			// THROUGH THE PANES (PHOTON-7 10-4 R8): the card's traced sun takes their transmittance
 			float T = 1.0;
 			JAH_RQ_PROCEED_TRANSMIT( rq, T )
-			vis = rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.0 : vis * T;
+			vis = jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE ? 0.0 : vis * T;
 		}
 	}
 	if( p.knobs.y > 0.5 )

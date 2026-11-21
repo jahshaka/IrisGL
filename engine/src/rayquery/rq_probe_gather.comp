@@ -68,6 +68,7 @@
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -94,7 +95,7 @@ uint gCell = 0u;
 #include "jah_ray_origin.glsl"
 #include "jah_half_round.glsl"
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 layout( std430, set = 0, binding = 2 ) readonly buffer Records { JahProbeRecord r[]; } records;
 /// THE PROBE ATLAS: one 8x8 block per probe, rgb = the radiance arriving along
 /// that texel's ray, re-weighted to the texel's centre (see `reweight`), a = how
@@ -407,13 +408,13 @@ void main()
 																	   placedBy.rayDown, p.resolution.w,
 																	   placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
-		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, dir, maxT );
+		JahRq rq;
+		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, dir, maxT );
 		JahPanes panes = jahPanesNone();
 		JAH_RQ_PROCEED_PANES( rq, panes )
-		bool hit = rayQueryGetIntersectionTypeEXT( rq, true ) ==
-				   gl_RayQueryCommittedIntersectionTriangleEXT;
-		float tHit = hit ? rayQueryGetIntersectionTEXT( rq, true ) : -1.0;
+		bool hit = jahRqType( rq, true ) ==
+				   JAH_RQ_HIT_TRIANGLE;
+		float tHit = hit ? jahRqT( rq, true ) : -1.0;
 		// THE PANES IN FRONT (PHOTON-7 10-4 R7): the near query's, before its hit or its end; the far query's past it
 		jahPanesInFront( panes, hit ? tHit : maxT );
 		JahPanes panesFar = jahPanesNone();
@@ -430,11 +431,11 @@ void main()
 		mat4x3 hitToWorld = mat4x3( 1.0 );
 		if( hit )
 		{
-			hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-			hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
-			hitBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-			hitGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
-			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+			hitSlot = uint( jahRqCustomIndex( rq, true ) );
+			hitPrim = uint( jahRqPrimitive( rq, true ) );
+			hitBary = jahRqBary( rq, true );
+			hitGeom = uint( jahRqGeometry( rq, true ) );
+			hitToWorld = jahRqObjectToWorld( rq, true );
 			hitNormalKnown = jahHitGeometricNormal( hitSlot, hitGeom, hitPrim, hitToWorld, dir, hitN );
 		}
 		// THE FAR QUERY, for an escaping ray only: the far copies (kRayMaskFar),
@@ -446,19 +447,19 @@ void main()
 		// already proved no fine surface lies there.
 		if( !hit && farT > maxT )
 		{
-			rayQueryEXT rqFar;
-			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin,
+			JahRq rqFar;
+			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin,
 								   p.plane.z, dir, farT );
 			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) ==
-				gl_RayQueryCommittedIntersectionTriangleEXT )
+			if( jahRqType( rqFar, true ) ==
+				JAH_RQ_HIT_TRIANGLE )
 			{
 				hit = true;
 				far = true;
-				tHit = rayQueryGetIntersectionTEXT( rqFar, true );
-				hitSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
-				hitPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
-				hitBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
+				tHit = jahRqT( rqFar, true );
+				hitSlot = uint( jahRqCustomIndex( rqFar, true ) );
+				hitPrim = uint( jahRqPrimitive( rqFar, true ) );
+				hitBary = jahRqBary( rqFar, true );
 			}
 			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
 			jahPanesBetween( panesFar, maxT, hit ? tHit : farT );

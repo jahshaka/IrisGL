@@ -6,6 +6,7 @@
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 // THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, the lead's design (D); L9: the renderer follows the ray).
 //
@@ -66,7 +67,7 @@ layout( std140, set = 0, binding = 1 ) uniform Params
 } p;
 #include "jah_world_exit.glsl"
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 /// THE LIST (the blended pass's appends): its header - the records appended (past the capacity: dropped, the demand
 /// law's count), this job's indirect groups, the add's - then the records.
@@ -166,39 +167,39 @@ void main()
 			JahPanes panesFar = jahPanesNone();
 			if( tStart < nearEnd )
 			{
-				rayQueryEXT rq;
-				rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), mask & 0x0Fu, origin, tStart, dir,
+				JahRq rq;
+				jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask & 0x0Fu, origin, tStart, dir,
 									   nearEnd );
 				JAH_RQ_PROCEED_PANES( rq, panes )
-				if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+				if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 				{
 					hit = true;
-					t = rayQueryGetIntersectionTEXT( rq, true );
-					slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-					prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
-					geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
-					bary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+					t = jahRqT( rq, true );
+					slot = uint( jahRqCustomIndex( rq, true ) );
+					prim = uint( jahRqPrimitive( rq, true ) );
+					geomIdx = uint( jahRqGeometry( rq, true ) );
+					bary = jahRqBary( rq, true );
+					toWorld = jahRqObjectToWorld( rq, true );
 				}
 				jahPanesInFront( panes, hit ? t : nearEnd );
 			}
 			const float farFrom = max( p.knobs.z, tStart );
 			if( !hit && farOn && farEnd > farFrom )
 			{
-				rayQueryEXT rqFar;
-				rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, farFrom, dir,
+				JahRq rqFar;
+				jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, farFrom, dir,
 									   farEnd );
 				JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-				if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+				if( jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 				{
 					hit = true;
 					far = true;
-					t = rayQueryGetIntersectionTEXT( rqFar, true );
-					slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
-					prim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
-					geomIdx = uint( rayQueryGetIntersectionGeometryIndexEXT( rqFar, true ) );
-					bary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
-					toWorld = rayQueryGetIntersectionObjectToWorldEXT( rqFar, true );
+					t = jahRqT( rqFar, true );
+					slot = uint( jahRqCustomIndex( rqFar, true ) );
+					prim = uint( jahRqPrimitive( rqFar, true ) );
+					geomIdx = uint( jahRqGeometry( rqFar, true ) );
+					bary = jahRqBary( rqFar, true );
+					toWorld = jahRqObjectToWorld( rqFar, true );
 				}
 				// (a pane the near query crossed is not crossed twice: the far copies' past its end)
 				jahPanesBetween( panesFar, max( nearT, tStart ), hit ? t : farEnd );
@@ -281,8 +282,8 @@ void main()
 		const float dist = length( toPoint );
 		if( dist > 1e-3 && finite3( toPoint ) )
 		{
-			rayQueryEXT rqEye;
-			rayQueryInitializeEXT( rqEye, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
+			JahRq rqEye;
+			jahRqInit( rqEye, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
 								   0.0, toPoint * ( 1.0 / dist ), dist * ( 1.0 - 1e-4 ) );
 			float front = 1.0;
 			JAH_RQ_PROCEED_TRANSMIT( rqEye, front )

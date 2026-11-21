@@ -37,6 +37,7 @@
 #ifndef JAH_RQ_HIT_RADIANCE_GLSL
 #define JAH_RQ_HIT_RADIANCE_GLSL
 
+#include "jah_rq.glsl"
 #include "jah_rq_hit_direct.glsl"
 
 /// `slot` = the hit instance's item slot (0xFFFFFFFF: no instance the card
@@ -133,19 +134,19 @@ vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float footprint, out bool 
 	answered = true;
 	const vec3 L3 = reflect( L2, n2 );
 	const vec3 o3 = jahRayOrigin( P2, n2, carried, 0.0 );
-	rayQueryEXT q3;
-	rayQueryInitializeEXT( q3, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
+	JahRq q3;
+	jahRqInit( q3, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
 						   jahWorldExitT( o3, L3, 1.0e4 ) );
 	JAH_RQ_PROCEED( q3 )
-	if( rayQueryGetIntersectionTypeEXT( q3, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( q3, true ) != JAH_RQ_HIT_TRIANGLE )
 		return w2 * JAH_HIT_LOBE_SKY( L3, alpha, true );   // an exit: the sky
-	const float t3 = rayQueryGetIntersectionTEXT( q3, true );
-	const uint slot3 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q3, true ) );
+	const float t3 = jahRqT( q3, true );
+	const uint slot3 = uint( jahRqCustomIndex( q3, true ) );
 	jahHitMirrorSlot = slot3;
-	const uint prim3 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q3, true ) );
-	const uint geom3 = uint( rayQueryGetIntersectionGeometryIndexEXT( q3, true ) );
-	const vec2 bary3 = rayQueryGetIntersectionBarycentricsEXT( q3, true );
-	const mat4x3 toWorld3 = rayQueryGetIntersectionObjectToWorldEXT( q3, true );
+	const uint prim3 = uint( jahRqPrimitive( q3, true ) );
+	const uint geom3 = uint( jahRqGeometry( q3, true ) );
+	const vec2 bary3 = jahRqBary( q3, true );
+	const mat4x3 toWorld3 = jahRqObjectToWorld( q3, true );
 	vec3 wound3;
 	const bool known3 = jahHitWoundNormal( slot3, geom3, prim3, toWorld3, wound3 );
 	const bool back3 = known3 && dot( wound3, L3 ) > 0.0 && ( jahHitFlags( slot3 ) & kJahHitGpuTwoSided ) == 0u;
@@ -289,9 +290,9 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	const float wSkyB = centre || !( sky.pdfB > 0.0 ) ? 1.0 : qB / max( qB + sky.pdfB, 1e-30 );
 	// THE RAY: the one origin law off a hit on level 0 (no drawn surface's bound), to the world's exit
 	const vec3 o = jahRayOrigin( P, N, carried, 0.0 );
-	rayQueryEXT q;
+	JahRq q;
 	const float exitB = jahWorldExitT( o, L2, 1.0e4 );
-	rayQueryInitializeEXT( q, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
+	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
 	JAH_RQ_PROCEED( q )
 	jahC2SegO = o;
 	jahC2Seg[0] = vec4( L2, exitB );
@@ -302,20 +303,20 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickSpec = vec3( 0.0 );
 	jahC2PickMirror = vec3( 0.0 );
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
-	if( rayQueryGetIntersectionTypeEXT( q, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+	if( jahRqType( q, true ) != JAH_RQ_HIT_TRIANGLE )
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
 	else
 	{
-		const float t2 = rayQueryGetIntersectionTEXT( q, true );
-		const uint slot2 = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( q, true ) );
+		const float t2 = jahRqT( q, true );
+		const uint slot2 = uint( jahRqCustomIndex( q, true ) );
 		jahC2PickSlot = slot2;
 		jahC2PickT = t2;
 		jahC2Seg[0].w = t2;
 		jahC2HitR = max( 2.0 * t2 * sqrt( alpha ), 1e-4 );
-		const uint prim2 = uint( rayQueryGetIntersectionPrimitiveIndexEXT( q, true ) );
-		const uint geom2 = uint( rayQueryGetIntersectionGeometryIndexEXT( q, true ) );
-		const vec2 bary2 = rayQueryGetIntersectionBarycentricsEXT( q, true );
-		const mat4x3 toWorld2 = rayQueryGetIntersectionObjectToWorldEXT( q, true );
+		const uint prim2 = uint( jahRqPrimitive( q, true ) );
+		const uint geom2 = uint( jahRqGeometry( q, true ) );
+		const vec2 bary2 = jahRqBary( q, true );
+		const mat4x3 toWorld2 = jahRqObjectToWorld( q, true );
 		vec3 wound;
 		const bool known = jahHitWoundNormal( slot2, geom2, prim2, toWorld2, wound );
 		const bool backFace = known && dot( wound, L2 ) > 0.0 && ( jahHitFlags( slot2 ) & kJahHitGpuTwoSided ) == 0u;
@@ -366,13 +367,13 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	// ...AND THE PORTALS' DRAW: its ray to the world's exit - the sky it sees at p_l / ( q + p_l ), 0 on geometry
 	if( sky.ok && dot( sky.L, N ) > 0.0 )
 	{
-		rayQueryEXT qn;
+		JahRq qn;
 		const float exitN = jahWorldExitT( o, sky.L, 1.0e4 );
-		rayQueryInitializeEXT( qn, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
+		jahRqInit( qn, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
 		JAH_RQ_PROCEED( qn )
-		jahC2Seg[1] = vec4( sky.L, rayQueryGetIntersectionTypeEXT( qn, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
-										? rayQueryGetIntersectionTEXT( qn, true ) : exitN );
-		if( rayQueryGetIntersectionTypeEXT( qn, true ) != gl_RayQueryCommittedIntersectionTriangleEXT )
+		jahC2Seg[1] = vec4( sky.L, jahRqType( qn, true ) == JAH_RQ_HIT_TRIANGLE
+										? jahRqT( qn, true ) : exitN );
+		if( jahRqType( qn, true ) != JAH_RQ_HIT_TRIANGLE )
 		{
 			const float qL = jahReflectFoldedPdf( N, N, V, sky.L, alpha );
 			const float ab = sa + sb;
@@ -388,21 +389,21 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickImage = vec3( 0.0 );
 	if( img.ok && dot( img.L, N ) > 0.0 && sa + sb > 1e-4 )
 	{
-		rayQueryEXT qi;
+		JahRq qi;
 		const float exitI = jahWorldExitT( o, img.L, 1.0e4 );
-		rayQueryInitializeEXT( qi, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
+		jahRqInit( qi, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
 		JAH_RQ_PROCEED( qi )
-		jahC2Seg[2] = vec4( img.L, rayQueryGetIntersectionTypeEXT( qi, true ) == gl_RayQueryCommittedIntersectionTriangleEXT
-										 ? rayQueryGetIntersectionTEXT( qi, true ) : exitI );
+		jahC2Seg[2] = vec4( img.L, jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE
+										 ? jahRqT( qi, true ) : exitI );
 		const JahImage m = jahImageAt( img.index );
-		if( rayQueryGetIntersectionTypeEXT( qi, true ) == gl_RayQueryCommittedIntersectionTriangleEXT &&
-			uint( rayQueryGetIntersectionInstanceCustomIndexEXT( qi, true ) ) == m.mirror )
+		if( jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE &&
+			uint( jahRqCustomIndex( qi, true ) ) == m.mirror )
 		{
-			const float ti = rayQueryGetIntersectionTEXT( qi, true );
+			const float ti = jahRqT( qi, true );
 			vec3 wi;
-			const bool knownI = jahHitWoundNormal( m.mirror, uint( rayQueryGetIntersectionGeometryIndexEXT( qi, true ) ),
-												   uint( rayQueryGetIntersectionPrimitiveIndexEXT( qi, true ) ),
-												   rayQueryGetIntersectionObjectToWorldEXT( qi, true ), wi );
+			const bool knownI = jahHitWoundNormal( m.mirror, uint( jahRqGeometry( qi, true ) ),
+												   uint( jahRqPrimitive( qi, true ) ),
+												   jahRqObjectToWorld( qi, true ), wi );
 			const bool backI = knownI && dot( wi, img.L ) > 0.0 && ( jahHitFlags( m.mirror ) & kJahHitGpuTwoSided ) == 0u;
 			if( !backI )
 			{

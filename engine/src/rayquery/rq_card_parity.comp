@@ -10,6 +10,7 @@
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 64, local_size_y = 1, local_size_z = 1 ) in;
 
@@ -66,7 +67,7 @@ void jahCardLobeHemi( float r, out float a, out float b )
 #define JAH_HIT_TABLE cnt.hit.xy
 #include "jah_rq_card_lights.glsl"
 
-layout( set = 0, binding = 7 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 7 ) uniform JahTlas tlas;
 layout( std430, set = 0, binding = 8 ) readonly buffer JahGeomRowOfSlot { uint jahGeomRowOfSlot[]; };
 layout( std430, set = 0, binding = 9 ) readonly buffer JahGeomRows { uvec4 jahGeomRows[]; };
 #define JAH_GEOM_SLOTS cnt.counts.w
@@ -95,18 +96,18 @@ void main()
 	uint hitFlag = 0u;
 	if( q.facing.w > 0.5 )
 	{
-		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, q.pos.xyz, 0.0,
+		JahRq rq;
+		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, q.pos.xyz, 0.0,
 							   normalize( q.facing.xyz ), 1000.0 );
 		JAH_RQ_PROCEED( rq )
-		if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		{
 			const vec3 dir = normalize( q.facing.xyz );
-			slot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-			point = q.pos.xyz + dir * rayQueryGetIntersectionTEXT( rq, true );
-			jahHitGeometricNormal( slot, uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) ),
-								   uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) ),
-								   rayQueryGetIntersectionObjectToWorldEXT( rq, true ), dir, facing );
+			slot = uint( jahRqCustomIndex( rq, true ) );
+			point = q.pos.xyz + dir * jahRqT( rq, true );
+			jahHitGeometricNormal( slot, uint( jahRqGeometry( rq, true ) ),
+								   uint( jahRqPrimitive( rq, true ) ),
+								   jahRqObjectToWorld( rq, true ), dir, facing );
 			hitFlag = 4u;
 			view = -dir;
 			a.hit = vec4( point, float( slot ) );

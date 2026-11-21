@@ -41,6 +41,7 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+#include "jah_rq.glsl"   // the ray seam: every ray call by its names (DOORS-0)
 
 layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 
@@ -49,7 +50,7 @@ layout( local_size_x = 8, local_size_y = 8, local_size_z = 1 ) in;
 /// repeats the last one into the unused slots (a descriptor array may not have
 /// holes).
 
-layout( set = 0, binding = 0 ) uniform accelerationStructureEXT tlas;
+layout( set = 0, binding = 0 ) uniform JahTlas tlas;
 
 #include "jah_half_round.glsl"   // the fp16 store truncates on NVIDIA 595.x: every half-float store rounds first
 #include "jah_reflect_params.glsl"
@@ -996,8 +997,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	{
 		// (2) THE TLAS NEAR RAY from the origin above (lifted along the geometric normal by the float error and the
 		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
-		rayQueryEXT rq;
-		rayQueryInitializeEXT( rq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, L, maxT );
+		JahRq rq;
+		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, L, maxT );
 		JahPanes panes = jahPanesNone();
 		JahPanes panesFar = jahPanesNone();
 		JAH_RQ_PROCEED_PANES( rq, panes )
@@ -1005,15 +1006,15 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		vec3 hitN = -L;
 		bool hitNormalKnown = false;
 		mat4x3 hitToWorld = mat4x3( 1.0 );
-		if( rayQueryGetIntersectionTypeEXT( rq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		{
 			slotHit = true;
-			t = rayQueryGetIntersectionTEXT( rq, true );
-			recSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rq, true ) );
-			recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rq, true ) );
-			recGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( rq, true ) );
-			recBary = rayQueryGetIntersectionBarycentricsEXT( rq, true );
-			hitToWorld = rayQueryGetIntersectionObjectToWorldEXT( rq, true );
+			t = jahRqT( rq, true );
+			recSlot = uint( jahRqCustomIndex( rq, true ) );
+			recPrim = uint( jahRqPrimitive( rq, true ) );
+			recGeom = uint( jahRqGeometry( rq, true ) );
+			recBary = jahRqBary( rq, true );
+			hitToWorld = jahRqObjectToWorld( rq, true );
 			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
 		}
 		jahPanesInFront( panes, slotHit ? t : maxT );
@@ -1024,18 +1025,18 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// a coarse surface just inside the near length whose fine one lies just outside is not passed by both
 			// queries, and a coarse hit in that overlap is honest (the near query proved no fine surface lies there).
 			// A far hit names no near row and no card: the cascades answer it, else the decode.
-			rayQueryEXT rqFar;
-			rayQueryInitializeEXT( rqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, L,
+			JahRq rqFar;
+			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, L,
 								   p.screen2.w );
 			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-			if( rayQueryGetIntersectionTypeEXT( rqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			if( jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
 				slotHit = true;
 				recFar = true;
-				t = rayQueryGetIntersectionTEXT( rqFar, true );
-				recSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( rqFar, true ) );
-				recPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( rqFar, true ) );
-				recBary = rayQueryGetIntersectionBarycentricsEXT( rqFar, true );
+				t = jahRqT( rqFar, true );
+				recSlot = uint( jahRqCustomIndex( rqFar, true ) );
+				recPrim = uint( jahRqPrimitive( rqFar, true ) );
+				recBary = jahRqBary( rqFar, true );
 			}
 			// (a pane the near query already crossed is not crossed twice: the far copies' past its end)
 			jahPanesBetween( panesFar, maxT, slotHit ? t : p.screen2.w );
@@ -1195,22 +1196,22 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	bool neeHitMoving = false;
 	if( neeTrace && neeVouch < 1.0 )
 	{
-		rayQueryEXT nq;
-		rayQueryInitializeEXT( nq, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x0Fu, origin, 0.0, nee.L, maxT );
+		JahRq nq;
+		jahRqInit( nq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, nee.L, maxT );
 		JAH_RQ_PROCEED( nq )
 		vec3 El = vec3( 0.0 );
 		bool neeHit = false, neeFar = false;
 		uint nSlot = 0u, nPrim = 0u, nGeom = 0u;
 		vec2 nBary = vec2( 0.0 );
-		if( rayQueryGetIntersectionTypeEXT( nq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+		if( jahRqType( nq, true ) == JAH_RQ_HIT_TRIANGLE )
 		{
 			neeHit = true;
-			neeT = rayQueryGetIntersectionTEXT( nq, true );
-			nSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( nq, true ) );
-			nPrim = uint( rayQueryGetIntersectionPrimitiveIndexEXT( nq, true ) );
-			nGeom = uint( rayQueryGetIntersectionGeometryIndexEXT( nq, true ) );
-			nBary = rayQueryGetIntersectionBarycentricsEXT( nq, true );
-			const mat4x3 nToWorld = rayQueryGetIntersectionObjectToWorldEXT( nq, true );
+			neeT = jahRqT( nq, true );
+			nSlot = uint( jahRqCustomIndex( nq, true ) );
+			nPrim = uint( jahRqPrimitive( nq, true ) );
+			nGeom = uint( jahRqGeometry( nq, true ) );
+			nBary = jahRqBary( nq, true );
+			const mat4x3 nToWorld = jahRqObjectToWorld( nq, true );
 			vec3 nN = -nee.L;
 			const bool nKnown = jahHitGeometricNormal( nSlot, nGeom, nPrim, nToWorld, nee.L, nN );
 			jahHitSurf = JahHitSurface( nSlot, nGeom, nPrim, nBary, nToWorld, neeT, false, nKnown );
@@ -1219,16 +1220,16 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		else if( p.screen2.w > maxT )
 		{
 			// (a far copy's hit has no material row at the hit: E 0 - and the BRDF's far hit reads none either)
-			rayQueryEXT nqFar;
-			rayQueryInitializeEXT( nqFar, tlas, jahAlphaRayFlags( gl_RayFlagsNoneEXT ), 0x10u, origin, p.screen2.z, nee.L,
+			JahRq nqFar;
+			jahRqInit( nqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, nee.L,
 								   p.screen2.w );
 			JAH_RQ_PROCEED( nqFar )
-			if( rayQueryGetIntersectionTypeEXT( nqFar, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			if( jahRqType( nqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
 				neeHit = true;
 				neeFar = true;
-				neeT = rayQueryGetIntersectionTEXT( nqFar, true );
-				nSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( nqFar, true ) );
+				neeT = jahRqT( nqFar, true );
+				nSlot = uint( jahRqCustomIndex( nqFar, true ) );
 			}
 		}
 		if( any( greaterThan( El, vec3( 0.0 ) ) ) )
@@ -1833,20 +1834,20 @@ void main()
 			// one frame of a limb's turn moves the virtual-image construction by far
 			// less than the lobe it averages.
 			const vec3 ray = thisEye.rayTL + thisEye.rayRight * localUv.x + thisEye.rayDown * localUv.y;
-			rayQueryEXT idq;
-			rayQueryInitializeEXT( idq, tlas, gl_RayFlagsOpaqueEXT, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
+			JahRq idq;
+			jahRqInit( idq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
 								   dist * 1.01 );
-			while( rayQueryProceedEXT( idq ) )
+			while( jahRqProceed( idq ) )
 			{
 			}
-			if( rayQueryGetIntersectionTypeEXT( idq, true ) == gl_RayQueryCommittedIntersectionTriangleEXT )
+			if( jahRqType( idq, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
-				const uint idSlot = uint( rayQueryGetIntersectionInstanceCustomIndexEXT( idq, true ) );
+				const uint idSlot = uint( jahRqCustomIndex( idq, true ) );
 				vec3 was;
 				if( idSlot < JAH_HIT_INSTANCES && ( jahHitFlags( idSlot ) & kJahHitGpuSkinned ) != 0u &&
-					jahSkinnedPrevPoint( idSlot, uint( rayQueryGetIntersectionGeometryIndexEXT( idq, true ) ),
-										 uint( rayQueryGetIntersectionPrimitiveIndexEXT( idq, true ) ),
-										 rayQueryGetIntersectionBarycentricsEXT( idq, true ), world, was ) )
+					jahSkinnedPrevPoint( idSlot, uint( jahRqGeometry( idq, true ) ),
+										 uint( jahRqPrimitive( idq, true ) ),
+										 jahRqBary( idq, true ), world, was ) )
 				{
 					ownMoving = true;
 					prevSurf = was;
