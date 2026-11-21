@@ -78,6 +78,142 @@ bool jahInjNonFinite4( vec4 v )
 	return jahInjNonFinite( v.x ) || jahInjNonFinite( v.y ) || jahInjNonFinite( v.z ) || jahInjNonFinite( v.w );
 }
 
+/// THE CHAIN'S VOLUMES BY A CONSTANT INDEX (NONDET-1 F1). An array of sampled images indexed by a non-constant needs the
+/// SPIR-V capability SampledImageArrayDynamicIndexing, which no module of ours declares (glslang never emits it), and
+/// current Vulkan requires constant indices without it (VUID-StandaloneSpirv-SampledImageArrayDynamicIndexing-10128) - so
+/// the shell loop's counter picks its cascade by a ladder of constant indices, at most eight (the chain's longest).
+#if JAH_INJ_CHAIN > 8
+#error "the chain's volumes: at most eight cascades (the ladders below)"
+#endif
+vec4 jahInjCovP( uint j, ivec3 iv )
+{
+#if JAH_INJ_CHAIN > 7
+	if( j == 7u )
+		return texelFetch( chainCovP[7], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 6
+	if( j == 6u )
+		return texelFetch( chainCovP[6], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 5
+	if( j == 5u )
+		return texelFetch( chainCovP[5], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 4
+	if( j == 4u )
+		return texelFetch( chainCovP[4], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 3
+	if( j == 3u )
+		return texelFetch( chainCovP[3], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 2
+	if( j == 2u )
+		return texelFetch( chainCovP[2], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 1
+	if( j == 1u )
+		return texelFetch( chainCovP[1], iv, 0 );
+#endif
+	return texelFetch( chainCovP[0], iv, 0 );
+}
+vec4 jahInjCovN( uint j, ivec3 iv )
+{
+#if JAH_INJ_CHAIN > 7
+	if( j == 7u )
+		return texelFetch( chainCovN[7], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 6
+	if( j == 6u )
+		return texelFetch( chainCovN[6], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 5
+	if( j == 5u )
+		return texelFetch( chainCovN[5], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 4
+	if( j == 4u )
+		return texelFetch( chainCovN[4], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 3
+	if( j == 3u )
+		return texelFetch( chainCovN[3], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 2
+	if( j == 2u )
+		return texelFetch( chainCovN[2], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 1
+	if( j == 1u )
+		return texelFetch( chainCovN[1], iv, 0 );
+#endif
+	return texelFetch( chainCovN[0], iv, 0 );
+}
+vec4 jahInjPosP( uint j, ivec3 iv )
+{
+#if JAH_INJ_CHAIN > 7
+	if( j == 7u )
+		return texelFetch( chainPosP[7], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 6
+	if( j == 6u )
+		return texelFetch( chainPosP[6], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 5
+	if( j == 5u )
+		return texelFetch( chainPosP[5], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 4
+	if( j == 4u )
+		return texelFetch( chainPosP[4], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 3
+	if( j == 3u )
+		return texelFetch( chainPosP[3], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 2
+	if( j == 2u )
+		return texelFetch( chainPosP[2], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 1
+	if( j == 1u )
+		return texelFetch( chainPosP[1], iv, 0 );
+#endif
+	return texelFetch( chainPosP[0], iv, 0 );
+}
+vec4 jahInjPosN( uint j, ivec3 iv )
+{
+#if JAH_INJ_CHAIN > 7
+	if( j == 7u )
+		return texelFetch( chainPosN[7], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 6
+	if( j == 6u )
+		return texelFetch( chainPosN[6], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 5
+	if( j == 5u )
+		return texelFetch( chainPosN[5], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 4
+	if( j == 4u )
+		return texelFetch( chainPosN[4], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 3
+	if( j == 3u )
+		return texelFetch( chainPosN[3], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 2
+	if( j == 2u )
+		return texelFetch( chainPosN[2], iv, 0 );
+#endif
+#if JAH_INJ_CHAIN > 1
+	if( j == 1u )
+		return texelFetch( chainPosN[1], iv, 0 );
+#endif
+	return texelFetch( chainPosN[0], iv, 0 );
+}
+
 /// THE TRANSMITTANCE from `sW` (metres from THIS cascade's box corner, inside voxel `ivSelf` of it) along the unit
 /// direction `w` to the lamp at `tEnd` metres (a directional light: past any box) - THROUGH THE CHAIN ON FIXED
 /// SHELLS (PHOTON-7 stage 1, L1: LIGHT IS A WORLD FUNCTION; PREFLIGHT_1_2 §3). It used to end at this cascade's box,
@@ -91,8 +227,8 @@ bool jahInjNonFinite4( vec4 v )
 /// they lie inside their boxes; a shell that leaves its box first (THE BAND: a voxel within its shell's reach of its
 /// box's face) hands over there, mid-cell, and that voxel is the placement's (the stage's named residual, gated
 /// out of gi.light_is_world). A cascade whose box does not hold the point the march has reached is passed over: the
-/// next one reads on from it. AN OUTER LOOP OVER THE SHELLS, the DDA inside: the chain's arrays are indexed by the
-/// loop's own counter, the same for every invocation still marching.
+/// next one reads on from it. AN OUTER LOOP OVER THE SHELLS, the DDA inside: the chain's arrays are read through
+/// constant indices chosen by the loop's own counter (jahInjCovP and its three siblings, above).
 float jahInjectVisibility( vec3 sW, vec3 w, float tEnd, ivec3 ivSelf, int oAxis, float oCoord, float oSign )
 {
 	// THE INSIDE FRACTION (SUN-INJECTION-RES-1, ENGINE-UPGRADE-U5 stage 5 and decision 22.2). A ray that crosses a
@@ -175,12 +311,12 @@ float jahInjectVisibility( vec3 sW, vec3 w, float tEnd, ivec3 ivSelf, int oAxis,
 		for( int it = 0; it < maxSteps && T > 0.0f; ++it )
 		{
 			const float tOut = min( min( min( tMax.x, tMax.y ), tMax.z ), tStop );
-			const vec3 cP = texelFetch( chainCovP[j], iv, 0 ).xyz;
-			const vec3 cN = texelFetch( chainCovN[j], iv, 0 ).xyz;
+			const vec3 cP = jahInjCovP( j, iv ).xyz;
+			const vec3 cN = jahInjCovN( j, iv ).xyz;
 			if( cP.x + cP.y + cP.z + cN.x + cN.y + cN.z > 0.0f )
 			{
-				const vec4 pP4 = texelFetch( chainPosP[j], iv, 0 );
-				const vec4 pN4 = texelFetch( chainPosN[j], iv, 0 );
+				const vec4 pP4 = jahInjPosP( j, iv );
+				const vec4 pN4 = jahInjPosN( j, iv );
 				// THE VOXEL'S FACES THE RAY CROSSES: up to two per axis (a front, a back), each with where it is crossed.
 				float evT[6], evC[6];
 				bool evFront[6];

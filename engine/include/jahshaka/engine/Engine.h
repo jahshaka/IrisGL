@@ -27,7 +27,7 @@
 //       - THE HOST'S OWN RECORD: what the host set, kept on its side of the boundary and never a read of the engine
 //         — the boundary's identities (Scene/View name, Scene::engine, View::isOffscreen, Engine::isHeadless), its
 //         bindings (View::scene, Engine::vrView / vrMirrorView, listViews), what the host pushed (View::pushed*,
-//         Engine::vsync / rayTracing / fixedFrameDelta / frameMonitor / shadowFilter / shadowResolution / vrPolicy /
+//         Engine::vsync / rayTracing / frameMonitor / shadowFilter / shadowResolution / vrPolicy /
 //         shadowMeshOptimization / texture loader config, hasEnabledViews over them) and the device's constants
 //         fixed when the device was made (deviceInfo, rayQueryAvailable). The echo getters the host never needs
 //         are gone; the fixtures read the engine's own record through EngineInspect.h.
@@ -1983,12 +1983,10 @@ class Engine {
 public:
     // ---- THE HOST'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2, F5) ---------------------------------------------------
     // What the host itself set — never a read of the engine's state, which U3 moves to its own thread: the monitor
-    // level it asked for, the ray-tracing switch, the frame delta it last submitted, the views the engine made for
+    // level it asked for, the ray-tracing switch, the views the engine made for
     // it and whether one of them (or a VR session, whose loop IS its heartbeat) has anything to draw.
     MonitorLevel frameMonitor() const { return mHostMonitorLevel; }
     bool rayTracing() const { return mHostRayTracing; }
-    /// The frame delta the host last submitted (FrameInput::frameDelta), kDefaultFrameDelta until one is.
-    float fixedFrameDelta() const { return mPushedFrameDelta; }
     /// Is there anything to draw? A VR session always (its frame loop is the session's heartbeat), else any view
     /// enabled as the host (or, for its own view, the session) last set it — View::pushedEnabled.
     bool hasEnabledViews() const {
@@ -2163,7 +2161,7 @@ public:
     /// until the SECOND publish after it was taken. Before the first frame every field is its default.
     virtual const PublishedEngineFrame &published() const = 0;
     /// THE DISPLAY'S PERIOD the host draws at, seconds (ENGINE-UPGRADE-U3: a display property, not a record — set on
-    /// change by the render driver). Never read by the engine's clock (trap 7: that is the record's `frameDelta`);
+    /// change by the render driver). Never read by a scene's clock (trap 7: that is its part's `stepSerial`);
     /// stage 5's interpolation weight divides by it. 0 = unknown.
     virtual void setDisplayPeriod(float seconds) = 0;
     /// THE DOOR, COUNTED (host.sync_getters, ENGINE-UPGRADE-U3 stage 2): every synchronous getter that stays, with
@@ -2700,25 +2698,13 @@ public:
     /// createView()/createOffscreenView() there is no device to ask and this
     /// reads false on hardware that has rays.
 
-    // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2) ----
-    // The engine advances its own simulations inside renderOneFrame — the
-    // particle systems and the shader `time` auto-params — by ONE frame delta
-    // it never measures itself: THE HOST'S CLOCK IS THE ONLY CLOCK. There is
-    // no wall-clock mode. The value is PROCESS-WIDE, not per scene and not per
-    // view (the backend has exactly one frame-time source), so "freeze the
-    // editor's particles while the player window runs" is not expressible;
-    // the document's SimulationClock (iris::Scene::advance) decides how many
-    // seconds a frame simulated and the host pushes that product here, every
-    // frame, scaled by the scene's particle time scale.
-    /// The seconds EVERY renderOneFrame advances the engine-side simulation
-    /// by — FrameInput::frameDelta, applied at the drain and kept until a
-    /// record says otherwise. 0 freezes it (a paused scene, a frame that
-    /// bought no clock step). Boots at kDefaultFrameDelta so a host that never
-    /// submits one (thumbnails, previews, engine-only suites) still simulates
-    /// one deterministic grid step per frame instead of the milliseconds an
-    /// offscreen frame takes on the wall clock.
-    /// 1/60 — the document's SimulationClock grid (simulationclock.h).
-    static constexpr float kDefaultFrameDelta = 1.0f / 60.0f;
+    // ---- Simulation clock (PARTICLES_FX2_SPEC.md; ENGINEERING_DEBT_SPEC A4.2; ONE-FRAME-1) ----
+    // The engine advances its own simulations inside renderOneFrame — each scene's particle systems, the HDR meter
+    // and the looks of every view showing it, its cloud clock, its interpolation — by time it never measures itself:
+    // THE DOCUMENT'S CLOCK IS THE ONLY CLOCK, and it is PER SCENE (documents are plural). A scene's mirror stamps its
+    // part with the document's lifetime step serial (FrameInputScene::stepSerial), and a frame advances the scene by
+    // the steps that serial moved since the last — once, and 0 for a frame nobody stepped it. There is no wall-clock
+    // mode and no host-written delta.
 
     /// Shadow filter quality for EVERY shadowed light in EVERY scene — the
     /// backend's PBR pipeline has one global filter, not a per-light one
@@ -3222,7 +3208,6 @@ public:
 protected:
     MonitorLevel        mHostMonitorLevel = MonitorLevel::Off;
     bool                mHostRayTracing = false;
-    float               mPushedFrameDelta = 1.0f / 60.0f;
     bool                mHostVrSessionLive = false;
     std::vector<View *> mHostViews;
     bool                mHostRecordsMode = false;   ///< EngineConfig::hostRecords (the snapshot backs the VR records)

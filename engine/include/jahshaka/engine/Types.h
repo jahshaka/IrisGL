@@ -1106,8 +1106,8 @@ struct CloudLayerDesc {
     /// on the ground (1 = all of it).
     float     shadow = 1.0f;
     /// Wind, world metres per second of SCENE time along x and z. The scroll is
-    /// the engine's own fixed clock (the frame deltas the host pushes), so a
-    /// paused scene holds still and a scripted frame is reproducible.
+    /// the scene's own time (its document's steps, ONE-FRAME-1), so a paused
+    /// scene holds still and a scripted frame is reproducible.
     float     wind[2] = { 0.0f, 0.0f };
     /// An optional weather map (its red channel scales the coverage over one
     /// tile of the layer); 0 = none. Sampled as data, never sRGB-decoded.
@@ -1172,7 +1172,7 @@ struct CloudStatus {
     unsigned changeCaptures = 0;
     unsigned scrollCaptures = 0;
     /// Frames the layer's clock advanced (one per drawn frame with wind and a
-    /// non-zero frame delta, never more).
+    /// non-zero scene time, never more).
     unsigned clockTicks = 0;
     /// Frames between two scroll captures (0 = no scroll captures: still wind).
     unsigned capturePeriodFrames = 0;
@@ -1932,8 +1932,7 @@ enum class ShadowFilter { Hard, Soft, VerySoft };
 ///
 /// Scene::setShadowSettings takes the resolved per-scene answer and applies it
 /// to the global state, dropping a push that asks for what is already in
-/// force. The last scene to push a value owns it, exactly as before — the same
-/// contract the fixed simulation clock documents (ENGINEERING_DEBT_SPEC A4.2): the host pushes the simulated seconds as the engine frame delta.
+/// force. The last scene to push a value owns it, exactly as before.
 struct ShadowDesc {
     /// false = "this scene has no opinion about the filter": whatever is in
     /// force stays. That is a scene with no shadow-casting light and no pinned
@@ -3384,6 +3383,18 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
 // Medium c0 32 -> 15, c1 24 -> 15, c2 16 -> 15; High c0 64 -> 33, c1 48 -> 33,
 // c2 16 -> 15; every outermost cascade and every pinned step unchanged.
 inline constexpr float kGiNearFieldRadiusFraction = 0.45f;
+
+/// THE RESOLUTION A CASCADE IS BUILT AT (NONDET-1 D1): a pinned row's (cascadeSet) clamped to 16..256 and ROUNDED UP
+/// to a multiple of 8. Every voxel pass runs in whole groups with no bound check: the bounce and the brick copy in
+/// 8^3 bricks, the injection in 4^3 groups. jahHalfTexel (jah_voxel_halves.glsl) maps a cell at x >= W into the next
+/// half's block of the half store, in bounds, so a cell past the edge overwrote another half's direct term and total.
+/// The direction volumes' y and z are h >> 1, so an odd resolution also dropped the last row. Up, never down: a
+/// cascade is never coarser than its row asked for. Every tier row is already a multiple of 8.
+inline int giCascadeResolution(int requested)
+{
+    const int clamped = requested < 16 ? 16 : (requested > 256 ? 256 : requested);
+    return (clamped + 7) / 8 * 8;
+}
 
 /// The near-field radius this cascade is REQUIRED to guarantee, in metres.
 inline float giNearFieldRadius(const GiParams::GiCascadeDesc &c)
@@ -5110,6 +5121,23 @@ struct GiStatus {
         unsigned bricks = 0;
         unsigned bricksDirectLast = 0, bricksBounceLast = 0, bricksActiveLast = 0;
         unsigned long long brickUpdates = 0, brickReadings = 0, brickReadingsSkipped = 0;
+        /// NONDET-1's DETECTOR (the measuring arm gi.foreignDetect = N codes; 0 = off, every field 0): over the landed
+        /// readings of the frames since the arm came on, the largest word 0 (the injection's relative change of a brick's
+        /// direct term) and word 1 (the bounce's of its total), in codes (1 % relative), and the FIRST reading over N - its
+        /// light frame (0 = none), word (0 direct, 1 bounce; 0 when both cross), its LARGEST brick in that reading, its value,
+        /// the bricks over N in it, and the cascade's skipped readings by then; each word's largest over the record with
+        /// its brick; and THE SIGN BAR (word 0 over 100 codes: an old and a new direct term of opposite signs, READ-9):
+        /// the readings that held one, and the first - its frame, largest brick, value and the bricks over 100.
+        /// A word is written by the pass that CHANGES the store: a value written into the direct term by anything else
+        /// shows only when the next injection of that voxel reads it as its old term.
+        float foreignDirectMax = 0.0f, foreignBounceMax = 0.0f;
+        unsigned foreignDirectMaxBrick = 0, foreignBounceMaxBrick = 0;
+        unsigned long long foreignReadings = 0, foreignFirstFrame = 0, foreignFirstSkipped = 0;
+        unsigned foreignFirstBrick = 0, foreignFirstWord = 0, foreignFirstCount = 0;
+        float foreignFirstCodes = 0.0f;
+        unsigned long long signReadings = 0, signFirstFrame = 0;
+        unsigned signFirstBrick = 0, signFirstCount = 0;
+        float signFirstCodes = 0.0f;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera
@@ -9079,14 +9107,15 @@ class Engine;
 /// Nothing a frame depends on is written into the engine on the spot any more: a value lands in the frame that
 /// renders it, in one place, in one order.
 ///
-/// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is (a host that only steps the clock
-/// submits a record with `frameDelta` alone). Two submits before one frame MERGE, field by field: every field the
+/// EVERY FIELD IS OPTIONAL: an absent field leaves the engine's value as it is. Two submits before one frame MERGE, field by field: every field the
 /// newer record carries wins and one it does not carry keeps the older value — for the frame, each VIEW and each SCENE
 /// (FrameInputStatus::scenePartsMerged counts a scene part merged into an earlier one).
 /// At the drain each field is COMPARED with what the engine last applied from a record and applied only when it
 /// differs — so a still document drains to nothing (FrameInputStatus::fieldsApplied == 0). The per-frame field
-/// (`cause`) resets after the drain to its default (Driver); the pace is the driver's setter (Engine::setFramePace, U3);
-/// `frameDelta` persists until a record says otherwise (it boots at Engine::kDefaultFrameDelta).
+/// (`cause`) resets after the drain to its default (Driver); the pace is the driver's setter (Engine::setFramePace, U3).
+/// THE ENGINE HAS NO CLOCK OF ITS OWN: a SCENE's time is its document's grid, carried by its part's `stepSerial`
+/// (FrameInputScene, ONE-FRAME-1) — a frame advances each scene by the steps its serial moved since the last, once,
+/// and 0 when nobody stepped it.
 /// THE FRAME'S CHANGE SET (U0 3b UPGRADE-CHANGESET-1): what the DOCUMENT wrote into the shared scene graph since the
 /// scene's last record, by engine node — the one source of "what moved" the engine has. A document node's transform
 /// is written straight into the Ogre node the engine renders (one hierarchy, until U2), so no engine verb runs when a
@@ -9141,6 +9170,10 @@ struct FrameInputGesture {
     bool operator==(const FrameInputGesture &o) const { return active == o.active && nodes == o.nodes; }
 };
 struct FrameInputScene {
+    /// THE MOST STEPS ONE FRAME HANDS A SCENE (ONE-FRAME-1; the stage-1 audit's bug 1): the document's own catch-up bound
+    /// (iris::SimulationClock::kMaxStepsPerAdvance, asserted equal in the mirror). Steps owed past it when the scene is
+    /// next drawn are DROPPED: time nobody saw is not shown at once.
+    static constexpr unsigned long long kMaxStepsPerFrame = 8;
     Scene *scene = nullptr;
     /// THE GI SCHEDULER'S INPUTS that only the document knows (U0 3c; read only on a record that carries `gi`):
     /// world.refreshGi()'s serial (a change = an explicit re-solve) and a material HOVER PREVIEW on screen (the
@@ -9166,6 +9199,28 @@ struct FrameInputScene {
     std::optional<SkyDesc>                sky;
     std::optional<float>                  shaderTime;
     std::optional<GridDesc>               grid;
+    // ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1, V2 plan 2.1). ONE WRITER: the scene's mirror (SceneMirror's emit), from
+    // its document's iris::SimulationClock — every host (the editor, the player, a preview, a thumbnail) steps a scene
+    // only by advancing its document. The engine keeps the cursor WITH THE SCENE: a frame advances the scene by
+    // (serial - the last serial it saw) x stepPeriod — ONCE (a second sync of the same steps moves nothing) and 0 on a
+    // frame nobody stepped it (an empty hand-over, a picture's settle). Documents are plural, so time is per scene:
+    // two hosts in one hand-over are two scenes' parts and never collide. `reassert` re-primes the cursor (a new
+    // document on the same scene). Everything the engine simulates for the scene reads the result: its particles
+    // (x particleTimeScale, the fork's ParticleSystemManager2::setTimeSinceLast), the HDR meter and the looks of every
+    // view showing it, its cloud clock, its interpolation (the newest grid state). Newest wins in a merge (a serial
+    // is monotone, so the newest is the right one).
+    /// The document clock's LIFETIME step count (iris::SimulationClock::lifetimeSteps: never reset by a play edge) the
+    /// part was built at — also the grid state its node records are (the interpolation draws between the last two).
+    std::optional<unsigned long long>     stepSerial;
+    /// THE GRID'S STEP, in seconds (iris::SimulationClock::kStepSeconds, 1/60); 1/60 until a part says.
+    std::optional<float>                  stepPeriod;
+    /// The document's particle time scale: the scene's particles advance by its steps x stepPeriod x this, and
+    /// nothing else of the scene reads it (a slow-motion flame never slows the exposure). Persists; 1 until a part says.
+    std::optional<float>                  particleTimeScale;
+    /// THE DOCUMENT the serial counts (ONE-FRAME-1, the stage-1 audit's bug 2): the scene's mirror moves it at every
+    /// setSource, and only a moved epoch re-primes the scene's cursor (a new document's serial is another clock's). A
+    /// `reassert` (re-apply every field: a page switch, a re-take) keeps the steps. Newest wins in a merge.
+    std::optional<unsigned long long>     clockEpoch;
     /// THE VIEW'S PIXEL-ERROR THRESHOLD (ATOM-3 stage 1): the World Mode's `atomPixelError` row, in pixels
     /// (Scene::setPixelTolerance).
     std::optional<float>                  pixelTolerance;
@@ -9213,7 +9268,6 @@ struct EngineMessage {
 };
 struct FrameInput {
     std::vector<EngineMessage>        engineMessages;  ///< the engine's own stream (decision 39 c), drained first
-    std::optional<float>              frameDelta;      ///< seconds every renderOneFrame advances by (persists)
     std::optional<FrameCause>         cause;           ///< why the next frame renders (resets to Driver)
     std::optional<unsigned>           shadowMapBudget; ///< engine-wide (the shadow map pool's size)
     bool                              refreshShadows = false;   ///< the document asked for a shadow re-render
@@ -9224,16 +9278,7 @@ struct FrameInput {
     /// hand-over at its frame head — one serial per frame that applies a record (an empty hand-over keeps the last).
     /// A submitter never sets it: submitFrame ignores the field. PublishedEngineFrame::serial is the one a frame applied.
     unsigned long long                serial = 0;
-    /// The document clock's step count (iris::SimulationClock::steps) the record was built at — the grid state its
-    /// node records are (stage 5 interpolates between the last two of them). Newest wins in a merge.
-    std::optional<unsigned long long> stepSerial;
-    /// THE GRID'S STEP, in seconds (iris::SimulationClock::kStepSeconds, 1/60): the interpolation's period (U3
-    /// decision 55) — never `frameDelta`, which is the particles' (simulated x particleTimeScale: 0 on a stepless
-    /// frame, k steps on a hitch). Newest wins in a merge; 1/60 until a record says.
-    std::optional<float>              stepPeriod;
-
-    /// The usual one-field records.
-    static FrameInput delta(float seconds) { FrameInput f; f.frameDelta = seconds; return f; }
+    /// The usual one-field record.
     static FrameInput withCause(FrameCause c) { FrameInput f; f.cause = c; return f; }
 };
 /// WHAT THE SUBMITS DID — Engine::frameSubmitStatus(): the GAME side of the hand-over (ENGINE-UPGRADE-U3 F4: each half
@@ -9358,6 +9403,12 @@ struct PublishedFrame {
     unsigned long long   frame = 0;     ///< the engine frame it was published at (0 = never drawn)
     /// The record the frame applied (FrameInput::serial; an empty hand-over carries the last) — ENGINE-UPGRADE-U3.
     unsigned long long   serial = 0;
+    /// THE SCENE'S CLOCK AS THIS FRAME LEFT IT (ONE-FRAME-1): the newest grid state it drew (its document's lifetime
+    /// serial, FrameInputScene::stepSerial), its time so far (the steps its frames advanced x the period: what its
+    /// particles, meter, looks and clouds have lived) and this frame's share of it (0 on a frame nobody stepped it).
+    unsigned long long   stepSerial = 0;
+    double               sceneSeconds = 0.0;
+    double               frameSceneSeconds = 0.0;
     std::vector<RiderTag> riderTags;     ///< SORTED by rider (decision 36: the lookups are binary searches)
     /// The rider's owner as the frame drew it (0 = no tag), and its bone into `bone` when given.
     NodeId boneAttachmentOf(NodeId rider, std::string *bone = nullptr) const {
@@ -9825,6 +9876,15 @@ struct PublishedEngineFrame {
     unsigned long long serial = 0;
     bool               recordApplied = false;
     unsigned long long handOver = 0;       ///< which hand-over this frame took (FrameSubmitStatus::handOvers' count)
+    /// WHAT THIS FRAME DREW (ONE-FRAME-1 stage 2; VR's door D4): the grid state — the newest step serial of the scene of
+    /// the frame's first enabled presented view (the scene Ogre's frame clock follows; 0 when no view drew) — and the
+    /// head pose: the session's serial of the pose this frame drew (its count of located poses; 0 = no located pose
+    /// this frame, no session) at its predicted display time (ns, the runtime's clock; 0 without one). All three are
+    /// the RENDER half's: the pose is located on the render thread after the hand-over, so no host writes them. A host
+    /// reader (the wearer's interaction) knows which grid state and which pose a frame used.
+    unsigned long long stepSerialDrawn = 0;
+    unsigned long long poseSerial = 0;
+    long long          displayTimeNs = 0;
     /// THE INTERPOLATION THIS FRAME DREW (U3 stage 5's rows): the weight of the newest step's nodes between their two
     /// grid states (1 = cur, every lockstep frame) and whether the frame was a free one.
     float              presentAlpha = 1.0f;

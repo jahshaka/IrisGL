@@ -1726,6 +1726,12 @@ constexpr ArmDef kArms[] = {
       "ABSENT (never admitted, evicted if resident); card 63 names EVERY card of the node (gi.card_truth holds a lit "
       "wall's cards absent so its hits read the voxels). A card's presence moves its readers by at most the face's "
       "card-voxel disagreement (gi.card_residency (8)). 0 = shipped." },
+    { ArmId::GiForeignDetect, 0.0, 0.0, 100000.0,
+      "NONDET-1's DETECTOR (a measuring instrument): while set to N > 0, every landed brick-mask reading of every "
+      "cascade (word 0: the injection's largest relative change of a brick's direct term; word 1: the bounce's of its "
+      "total) taken at a frame at or after the arm came on is judged against N codes (1 code = 1 % relative): the "
+      "largest of each and the first reading over N (its frame, cascade, brick, word) are published "
+      "(GiStatus::CascadeStatus::foreign*). A chain built while it is on starts its own record. 0 = off (shipped)." },
     { ArmId::GiTruthRays, 0.0, 0.0, 4096.0,
       "A MEASURING DOOR (PHOTON-7 stage 10, (8)'s truth): the cards' indirect gather (rq_card_gather.comp) and the voxel "
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "

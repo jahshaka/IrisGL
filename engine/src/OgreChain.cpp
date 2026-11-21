@@ -3995,6 +3995,19 @@ void setMeterParam(const char *jobName, const char *param, const Ogre::Vector4 &
     p->setManualValue(v);
     sp.setDirty();
 }
+/// ...a scalar one (the meter's time: a `float` uniform takes exactly one value).
+void setMeterParam(const char *jobName, const char *param, float v) {
+    Ogre::Root *root = Ogre::Root::getSingletonPtr();
+    Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr;
+    Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+    Ogre::HlmsComputeJob *job = hc ? hc->findComputeJobNoThrow(jobName) : nullptr;
+    if (!job) return;
+    Ogre::ShaderParams &sp = job->getShaderParams("default");
+    Ogre::ShaderParams::Param *p = sp.findParameter(param);
+    if (!p) return;
+    p->setManualValue(v);
+    sp.setDirty();
+}
 }   // namespace
 
 void setExposure(float exposure, float minAutoExposure, float maxAutoExposure) {
@@ -4754,12 +4767,17 @@ void updateDistortion(const ChainDesc &desc) {
 // material that only has `lookParams0` simply drops the second write instead of
 // throwing. It keeps the boundary's LookDesc a POD with no per-kind knowledge
 // on this side of it.
-void updateLooks(const ChainDesc &desc) {
+// THE LOOKS' CLOCK (ONE-FRAME-1 stage 1): `lookTime` is the view's SCENE time (seconds, wrapping every hour: long enough
+// that the wrap is never seen, short enough that the float stays precise) — never Ogre's time_0_x, the process-wide
+// frame clock another scene's view may set. Pushed blind like the parameters: a look that reads no time drops it.
+void updateLooks(const ChainDesc &desc, double sceneSeconds) {
+    const float lookTime = float(std::fmod(std::max(0.0, sceneSeconds), 3600.0));
     for (const LookDesc &look : desc.looks) {
         Ogre::Pass *pass = materialPass(lookMaterial(look.kind));
         if (!pass || !pass->hasFragmentProgram()) continue;
         Ogre::GpuProgramParametersSharedPtr ps = pass->getFragmentProgramParameters();
         ps->setIgnoreMissingParams(true);
+        ps->setNamedConstant("lookTime", lookTime);
         ps->setNamedConstant("lookParams0",
                              Ogre::Vector4(look.p[0], look.p[1], look.p[2], look.p[3]));
         ps->setNamedConstant("lookParams1",
@@ -4774,9 +4792,10 @@ void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
     if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
 }
 
-void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
-                      OgreScene *scene) {
+float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
+                       unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                       OgreScene *scene, float meterTime) {
+    float meterSeconds = -1.0f;
     // THE ASPECT THE SCENE PASSES WILL DRAW AT (REFLECT-FIX-1), set FIRST — before
     // updateSsao, updateSsr or anything else below reads the camera's projection. An
     // auto-aspect camera is re-aspected by every PASS_SCENE it renders (Viewport::
@@ -4805,8 +4824,14 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
         // the fixed grade has no meter, and writing a process-wide job's
         // uniforms for a view that never dispatches it would hand the next
         // auto-exposed view somebody else's pattern.
-        if (!desc.tonemapFixed)
+        if (!desc.tonemapFixed) {
             setMeter(desc.meterPattern, desc.meterLowPercent, desc.meterHighPercent);
+            // THE METER ADAPTS IN THE VIEWER's TIME (ONE-FRAME-1; OgreEngine::meterSecondsFor says the rule): a picture
+            // with no history, a live view in presented time — never x particleTimeScale, never Ogre's frame_time (the
+            // process-wide delay another scene's view may set). JahHdrMeterResolve_cs: mix(new, old, 0.25^dt).
+            meterSeconds = meterTime;
+            setMeterParam(kMeterResolveJob, "timeSinceLast", meterSeconds);
+        }
         if (bloomLadder(desc)) {
             setBloomThreshold(desc.bloomThreshold,
                               desc.bloomThreshold + std::max(0.01f, desc.bloomKnee));
@@ -4837,8 +4862,9 @@ void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &d
     } else {
         reprojection.have = false;
     }
-    if (!desc.looks.empty()) updateLooks(desc);
+    if (!desc.looks.empty()) updateLooks(desc, scene ? scene->sceneSeconds() : 0.0);
     if (desc.distortion) updateDistortion(desc);
+    return meterSeconds;
 }
 
 float exposureSeed(float exposure) {
@@ -4859,7 +4885,8 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (mView->isCaptureWorkspace(ws)) {
         SsrReprojection scratch = mSsrReprojectionAtFrameStart;
         applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(), mView->width(),
-                         mView->height(), scratch, mView->ogreScene());
+                         mView->height(), scratch, mView->ogreScene(),
+                         mView->mEngine ? mView->mEngine->meterSecondsFor(*mView) : 0.0f);
         return;
     }
     // COUNTED, because "did this view's globals reach the frame at all" is a
@@ -4876,8 +4903,9 @@ void ViewGlobalsListener::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     // so two workspaces in one frame can carry two different exposures even
     // though the materials themselves are process-wide singletons.
     mSsrReprojectionAtFrameStart = mSsrReprojection;
-    applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
-                     mView->width(), mView->height(), mSsrReprojection, mView->ogreScene());
+    mView->mMeterSecondsPushed = applyViewGlobals(mRoot, mView->camera(), mView->chainDesc(),
+                                                  mView->width(), mView->height(), mSsrReprojection, mView->ogreScene(),
+                                                  mView->mEngine ? mView->mEngine->meterSecondsFor(*mView) : 0.0f);
 }
 
 }   // namespace chain

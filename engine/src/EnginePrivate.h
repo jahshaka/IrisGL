@@ -24,6 +24,7 @@
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "AlphaMasks.h"   // the cut-outs' masks (ENGINE-POLISH-ATOM-1 stage 3)
 #include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
+#include "SceneClock.h"     // a scene's clock, a pure value type (ONE-FRAME-1)
 #include "GpuCull.h"
 #include "GpuSceneSubstrate.h"   // the tables' one writer (GpuScene.h inside it)
 #include "photon/PhotonComponent.h"
@@ -1972,9 +1973,11 @@ struct SsrReprojection {
     Ogre::Matrix4 prevWorldToImage = Ogre::Matrix4::IDENTITY;
     bool          have = false;
 };
-void applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
-                      unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
-                      OgreScene *scene);
+/// `meterSeconds` is the time the view's HDR meter adapts by this frame (OgreEngine::meterSecondsFor); returns what it
+/// handed the meter, -1 for a view whose chain runs no meter.
+float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
+                       unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,
+                       OgreScene *scene, float meterSeconds);
 
 /// The seed value the HDR adaptation history holds for a given exposure — the
 /// same `e^(E-2) / 0.18` grey-card constant the fixed tonemap uses, so a
@@ -2315,6 +2318,7 @@ private:
     X(CardDemandCount, "cards.demandCount") /* the card readers count their carded and uncarded hits (a measuring arm, PHOTON-7 stage 5) */ \
     X(CardGatherLate, "cards.gatherLate") /* the gather's demand stamps within N frames of a demand change dropped: a late first reader (a test door) */ \
     X(CardForce, "cards.force") /* one card FORCED resident (+(node x 64 + card)) or absent (-(node x 64 + card)); card 63 = every card of the node: L1's test door (PHOTON-7 stage 10) */ \
+    X(GiForeignDetect, "gi.foreignDetect") /* NONDET-1: the brick mask readings judged against a relative change of N codes a frame (0 = off); GiStatus::CascadeStatus::foreign* */ \
     X(GiTruthRays, "gi.truthRays") /* the cards' indirect gather and the voxel sides' gather at N rays (0 = the tier's; the high-sample truth, PHOTON-7 stage 10 (8)) */
 
 enum class ArmId : unsigned {
@@ -4283,6 +4287,23 @@ public:
     void interpolate(float alpha);
     void restoreInterpolated() { interpolate(1.0f); }
     unsigned long long interpolationStep() const { return mInterpStep; }
+    // ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; FrameInputScene::stepSerial says the law) ----------------------------
+    /// The scene's time, kept WITH the scene because documents are plural (SceneClock.h, a pure value type): the cursor
+    /// on its document's lifetime serial, the steps owed to the frame that next DRAWS it, what this frame advanced, and
+    /// the presentation clock.
+    detail::SceneClock mClock;
+    using Clock = detail::SceneClock;
+    /// A drain's part (the frame's or a join's): the period, the particle scale, and owed += serial - seen.
+    void takeClockPart(const FrameInputScene &part) { mClock.take(part); }
+    /// THE FRAME's clock, once per frame before anything of it reads time (`drawn`: this frame draws the scene): the
+    /// owed steps consumed, bounded, and the particles' time handed to the scene manager's PFX2 (the fork's
+    /// setTimeSinceLast); an undrawn scene keeps its steps and is handed 0.
+    void beginFrameClock(bool drawn);
+    /// ...and after the frame's own scene-graph update: the particles' time set to 0, so any FURTHER update of the scene
+    /// before the next frame (a pose resolve, Engine::updateScene; the sky's equirect export) advances them nothing.
+    void endFrameParticleTime();
+    /// The serial a node record of this frame is stamped with (the newest grid state).
+    unsigned long long clockSerial() const { return mClock.newest; }
     std::vector<NodeId> mInterpNodes;   ///< the newest step's nodes (each once)
     std::vector<NodeId> mInterpStale;   ///< the step before's, owed cur where not re-recorded (by id: after a removal)
     unsigned long long mInterpStep = 0;
@@ -4470,7 +4491,7 @@ public:
     /// frame is past it by more than the dynamic buffer multiplier (OgreSky.cpp).
     bool skyReadDue(unsigned long long issued) const;
     /// Once per drawn frame (OgreEngine, beside pollSkyShRead): advances the
-    /// layer's own clock by the frame delta the host pushed, writes the scroll
+    /// layer's own clock by the scene's time this frame (ONE-FRAME-1), writes the scroll
     /// into the layer, the disc and the ground shadow, and runs the capture
     /// cadence while the layer scrolls.
     void updateCloudLayer();
@@ -4680,6 +4701,9 @@ public:
     /// wrapped) into its datablocks' userValue[2].zw, master and cull twins.
     void applyScrollOffsets();
     float shaderTime() const override;
+    double sceneSeconds() const override { return mClock.sceneSeconds(); }
+    double frameSceneSeconds() const override { return mClock.dt; }
+    unsigned long long newestStep() const override { return mClock.newest; }
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
     float lodBias() const override { return mLodBias; }
@@ -6368,7 +6392,7 @@ private:
     Ogre::TextureGpu  *mCloudField = nullptr;   // 2048^2 R16F optical depth, one 64 km tile
     Ogre::Camera      *mCloudBakeCamera = nullptr;
     bool     mCloudFieldPending = false;
-    /// The layer's own clock: the sum of the frame deltas of the frames this
+    /// The layer's own clock: the sum of the scene times of the frames this
     /// scene was drawn in (the engine has no wall clock).
     double   mCloudClock = 0.0;
     float    mCloudScroll[2] = { 0.0f, 0.0f };
@@ -7971,6 +7995,9 @@ public:
     void setLodHysteresisOffscreen(bool on) override;
     bool lodHysteresisOffscreen() const override { return mLodHysteresisOffscreen; }
     inspect::ViewRoutes routes() const override { return inspect::ViewRoutes{ mChainProbeGather, mChainScreenIntegrate, mChainRayReflect }; }
+    float meterSeconds() const override { return mMeterSecondsPushed; }
+    /// The time the last globals push handed this view's HDR meter (applyViewGlobals' answer; -1 = no meter).
+    float mMeterSecondsPushed = -1.0f;
     /// The BUILT chain carries the ray reflection (its recordReflect runs each frame it draws: the build's need).
     bool chainRayReflect() const { return mChainRayReflect; }
     /// ChainDesc::photonTerm as the definition was built: the opaque passes' term attachment exists (OgrePhotonView.cpp).
@@ -7979,6 +8006,8 @@ public:
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).
     void initOffscreenContract(OffscreenContract c) { declareStandIn(c); mOffscreenContract = c; }
+    /// The contract in force (the meter's rule reads it: a StillPicture offscreen view is a picture).
+    OffscreenContract contractInForce() const { return mOffscreenContract; }
     /// THE STAND-IN's IDENTITY AT BIRTH (TEST-STREAMLINE-1 3a item 2b; View::presentsAsWindow): set once, before the
     /// view is anyone's but its creator's - never after (setOffscreenContract refuses a change either way).
     void declareStandIn(OffscreenContract c) { mIdentityStandIn = c == OffscreenContract::PresentedStandIn; }
@@ -8650,6 +8679,8 @@ void    vrSessionBeginFrame(VrSession *);
 void    vrSessionEndFrame(VrSession *);
 /// Did this frame wait in xrWaitFrame (the runtime paced it)? False without a session (U3 decision 53).
 bool    vrSessionWaitedThisFrame(const VrSession *);
+/// The head pose the session's current frame drew: its serial (0 = none located) and its predicted display time.
+void    vrSessionFramePose(const VrSession *, unsigned long long &poseSerial, long long &displayTimeNs);
 /// The runtime's wait, before the free loop's hand-over (U3 decision 65); the frame's beginFrame takes its result.
 void    vrSessionWaitFrameEarly(VrSession *);
 /// The session's desktop MIRROR workspace (null without one) — the frame
@@ -8864,6 +8895,7 @@ public:
     bool deviceLost() const;
     GpuFault gpuFault() const;
     unsigned long long queueSubmissionTag() const override;   // inspect::EngineEcho (U3 stage 3)
+    void harnessStep(unsigned steps) override;   // inspect::EngineEcho (ONE-FRAME-1 stage 1)
     /// THE FRAME'S POOL SPANS (ENGINE-UPGRADE-U4 stage 6, the core budget's measurement): each frame's span from its
     /// updateSceneGraph to the end of _updateAllRenderTargets — where the SceneManagers' workers run (the scene
     /// graph, the GPU scene's compose, the culling) — in steady_clock ns, the last kPoolSpans frames.
@@ -9129,8 +9161,6 @@ public:
     bool mFrameWaitedOnRuntime = false;
     unsigned long long mVrFramesOffRenderThread = 0;
     std::chrono::steady_clock::time_point mFakeRuntimeNext{};   ///< vr.fakeRuntimePace's next display time (render side)
-    /// THE GRID'S STEP in seconds (FrameInput::stepPeriod; decision 55): never the particles' delta.
-    double mStepPeriod = 1.0 / 60.0;
     /// The presentation's frame (once per frame: clamped at the drain's head, advanced at the frame's).
     unsigned long long mPresentFrame = 0;
     bool mPresentBegun = false;
@@ -9145,21 +9175,31 @@ public:
     float mPresentAlpha = 1.0f;   ///< the last interpolateScene's weight (PublishedEngineFrame::presentAlpha)
     void beginPresentation();
     void interpolateScene(OgreScene *sc);
-    /// THE PRESENTATION CLOCK (U3 stage 5), in the document's step time: advanced by the display period per free frame,
-    /// held between the newest record's two grid states — never a wall clock read by the engine.
-    double mPresentTime = 0.0;
-    unsigned long long mNewestStep = 0;
-    double mLastAlphaPresent = 0.0;
+    /// THE PRESENTATION CLOCK (U3 stage 5) is PER SCENE (OgreScene::Clock::presentTime, ONE-FRAME-1), in its
+    /// document's step time: advanced by the display period per free frame, held between the scene's newest two grid
+    /// states — never a wall clock read by the engine.
     void interpolateFrame();
+    /// THE FRAME's CLOCKS (ONE-FRAME-1 stage 1): every scene's beginFrameClock, then Ogre's process-wide frame delay
+    /// set to the scene time of the frame's first enabled presented view (for any stock Ogre controller; nothing of
+    /// ours reads it for scene time — source.scene_time_one_meaning).
+    void beginFrameClocks(const std::vector<OgreScene *> &drawn);
+    /// The scene of the frame's first enabled presented view (beginFrameClocks' choice): the grid state the frame drew.
+    const OgreScene *mLeadScene = nullptr;
+    /// THE METER's TIME IS THE VIEWER's (ONE-FRAME-1; the lead's ruling, reversing R6): what view `v`'s HDR meter adapts
+    /// by this frame. A PICTURE (an offscreen StillPicture view: a shot, a thumbnail, a preview tile) has no history:
+    /// kMeterNoHistorySeconds, so 0.25^dt = 0 and the frame's own key is its exposure — a still picture's brightness does
+    /// not depend on how many settle frames it took (the HISTORY-1 law). A LIVE view adapts in PRESENTED time: a
+    /// lockstep frame one grid step of its scene (deterministic: every test), a free frame the display's period (the
+    /// measured one under Unlimited) — never the particles' time, never Ogre's process-wide clock, and a paused scene
+    /// still adapts as the camera turns.
+    float meterSecondsFor(const OgreView &v) const;
+    static constexpr float kMeterNoHistorySeconds = 1.0e4f;
     mutable std::string mHostError;
 
     /// PROCESS-WIDE: rides Ogre's single frame-time controller value
     /// (ControllerManager -> FrameTimeControllerValue), held in its
     /// frame-delay mode for the whole process (setFrameDelay zeroes the time
-    /// factor, so the wall clock never gets back in).
-    /// The frame delta Ogre's clock is applying (the drain's compare); the host's own is Engine::fixedFrameDelta.
-    float appliedFrameDelta() const;
-    /// FrameInput::frameDelta's application (the drain's).
+    /// factor, so the wall clock never gets back in). beginFrameClocks is its one caller.
     void  applyFrameDelta(float seconds);
 
     /// GLOBAL by construction: HlmsPbs keeps ONE ShadowFilter for every shadowed

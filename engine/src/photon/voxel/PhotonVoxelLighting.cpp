@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "OgreStableHeaders.h"
 
 #include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/voxel/PhotonRegionGrid.h"
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
@@ -170,6 +171,49 @@ namespace Ogre
     }
 
     unsigned long long PhotonVoxelLighting::numMipStepJobs() { return gMipStepJobs; }
+
+    namespace
+    {
+        /// THE SHARED JOBS' BLOCKS (the injection and the feedback are found by name: one job, one ShaderParams, for
+        /// every lighting of the process).
+        struct SharedParamBlocks
+        {
+            PhotonParamArray<uint32, 4u * PhotonCommitLight::kMaxInjectBoxes> injectBoxLo, injectBoxHi;
+            PhotonParamArray<float, 4u * 8u> chainOrigin, chainRes;   // (c_maxCascades below)
+            PhotonParamArray<uint32, 4u * PhotonFeedbackActivation::kMaxBoxes> fbBoxLo, fbBoxHi;
+        };
+        SharedParamBlocks *gSharedParamBlocks = nullptr;
+        HlmsManager *gSharedParamBlocksManager = nullptr;
+        SharedParamBlocks &sharedParamBlocks( HlmsManager *hlmsManager )
+        {
+            if( !gSharedParamBlocks )
+                gSharedParamBlocks = new SharedParamBlocks();
+            gSharedParamBlocksManager = hlmsManager;
+            return *gSharedParamBlocks;
+        }
+    }  // namespace
+
+    void PhotonVoxelLighting::releaseParamBlocks()
+    {
+        // NOTHING KEEPS A POINTER INTO A FREED BLOCK: the shared jobs' parameters that point at one are made inline (empty)
+        // first - they live until Root dies, and a forced updateParameters would read them.
+        if( gSharedParamBlocksManager && gSharedParamBlocksManager->getComputeHlms() )
+        {
+            HlmsCompute *hlmsCompute = gSharedParamBlocksManager->getComputeHlms();
+            if( HlmsComputeJob *inject = hlmsCompute->findComputeJobNoThrow( "VCT/LightInjection" ) )
+            {
+                ShaderParams &params = inject->getShaderParams( "default" );
+                for( const char *name : { "injectBoxLo", "injectBoxHi", "chainOrigin", "chainRes" } )
+                    if( ShaderParams::Param *p = params.findParameter( name ) )
+                        { const float none[1] = { 0.0f }; p->setManualValue( none, 0u ); }
+            }
+            if( HlmsComputeJob *feedback = hlmsCompute->findComputeJobNoThrow( "Photon/BrickFeedback" ) )
+                feedback->getShaderParams( "default" ).mParams.clear();   // (rebuilt whole by every dispatch)
+        }
+        delete gSharedParamBlocks;
+        gSharedParamBlocks = nullptr;
+        gSharedParamBlocksManager = nullptr;
+    }
 
     static const size_t c_maxCascades = 8u;
 
@@ -476,8 +520,9 @@ namespace Ogre
         // would be undefined. The direct volumes are float too since CONTACT-OCCLUSION-1
         // and carry no Reinterpretable either (their UAV views are their formats).
         // Jahshaka (ENGINE-UPGRADE-ASYNC-3 stage 1): a UAV and nothing more - the chains are
-        // written by compute (PhotonMipChain), never blitted.
-        const uint32 texFlags = TextureFlags::Uav;
+        // written by compute (PhotonMipChain), never blitted. ManualTexture by CODING_RULES section 2 (a texture we create):
+        // no code path moves - TextureGpu::isManualTexture already counts Uav (NONDET-1 READ-9 D).
+        const uint32 texFlags = TextureFlags::ManualTexture | TextureFlags::Uav;
 
         const bool bSdfQuality = shouldEnableSpecularSdfQuality();
 
@@ -486,6 +531,16 @@ namespace Ogre
         const uint32 width = albedoVox->getWidth();
         const uint32 height = albedoVox->getHeight();
         const uint32 depth = albedoVox->getDepth();
+        // EVERY AXIS A MULTIPLE OF 8 (NONDET-1 D1; giCascadeResolution, Types.h): the passes run whole 8^3 bricks and
+        // 4^3 groups with no bound check, and a cell past the edge lands in the next half's block of the half store.
+        if( width % 8u || height % 8u || depth % 8u )
+        {
+            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
+                         "a voxel volume of " + StringConverter::toString( width ) + "x" +
+                             StringConverter::toString( height ) + "x" + StringConverter::toString( depth ) +
+                             ": every axis must be a multiple of 8 (whole bricks)",
+                         "PhotonVoxelLighting::createTextures" );
+        }
 
         const uint32 widthAniso = std::max( 1u, width );
         const uint32 heightAniso = std::max( 1u, height >> 1u );
@@ -648,6 +703,13 @@ namespace Ogre
         if( mVoxelizerTexturesChanged )
         {
             createTextures();
+            // THE STORES ARE NEW, AND UNWRITTEN (NONDET-1 H3): this update injects WHOLE (a delta would read the old
+            // direct term and the total from fresh memory) and every brick starts cleared, as a fresh chain's does.
+            mCommit = CommitLightState();
+            resetBrickState();
+            LogManager::getSingleton().logMessage(
+                "PhotonVoxelLighting " + StringConverter::toString( getId() ) +
+                ": the light stores were re-created (the voxeliser's volumes changed): a whole injection follows" );
             // The textures have been re-created; the request has been served. Without
             // this the flag stays raised for the object's whole life (it is only ever
             // assigned false in the constructor), so a voxelizer that loses residency
@@ -661,25 +723,6 @@ namespace Ogre
             mVoxelizer->getAlbedoVox()->addListener( this );
             mVoxelizerListenersRemoved = false;
         }
-    }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::setVoxelizer( PhotonVoxelizerSourceBase *voxelizer )
-    {
-        if( !voxelizer || voxelizer == mVoxelizer )
-            return;
-
-        if( !mVoxelizerListenersRemoved )
-        {
-            mVoxelizer->getAlbedoVox()->removeListener( this );
-        }
-
-        mVoxelizer = voxelizer;
-        // The same two requests a LostResidency notification raises, served immediately:
-        // re-create the light voxels from the new voxelizer's resolution and re-register
-        // as a listener on its albedo/normal textures.
-        mVoxelizerTexturesChanged = true;
-        mVoxelizerListenersRemoved = true;
-        checkTextures();
     }
     //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setupBounceTextures( bool bSetSamplerRefs )
@@ -886,26 +929,20 @@ namespace Ogre
         /// cells - [regionLo, regionHi) of level 0 rounded OUT (every texel a changed cell reaches), or the whole level
         /// `levelRes` - its first texel as the job's regionOrigin and its 4^3 groups set by hand (the jobs are shared:
         /// the count is asserted per dispatch).
-        void setRegionGrid( HlmsComputeJob *job, ShaderParams::Param *origin, const uint32 *regionLo,
+        /// FALSE when the box holds no texel of the level (empty, or past its end: NONDET-1 H2) - the caller dispatches
+        /// NOTHING then (the arithmetic: PhotonRegionGrid.h, engine.region_grid_law).
+        bool setRegionGrid( HlmsComputeJob *job, ShaderParams::Param *origin, const uint32 *regionLo,
                             const uint32 *regionHi, uint32 cellsPerTexel, const uint32 levelRes[3], uint32 w = 0u )
         {
             uint32 lo[4] = { 0u, 0u, 0u, w }, n[3];
-            for( int a = 0; a < 3; ++a )
-            {
-                uint32 l = 0u, h = levelRes[a];
-                if( regionLo && regionHi )
-                {
-                    l = std::min( regionLo[a] / cellsPerTexel, levelRes[a] );
-                    h = std::min( ( regionHi[a] + cellsPerTexel - 1u ) / cellsPerTexel, levelRes[a] );
-                }
-                lo[a] = l;
-                n[a] = std::max( h, l + 1u ) - l;
-            }
+            if( !jahshaka::engine::detail::regionGridOf( regionLo, regionHi, cellsPerTexel, levelRes, lo, n ) )
+                return false;
             const uint32 *tpg = job->getThreadsPerGroup();
             job->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
             job->setNumThreadGroups( ( n[0] + tpg[0] - 1u ) / tpg[0], ( n[1] + tpg[1] - 1u ) / tpg[1],
                                      ( n[2] + tpg[2] - 1u ) / tpg[2] );
             origin->setManualValue( lo, 4u );
+            return true;
         }
         ShaderParams::Param *regionOriginParam( HlmsComputeJob *job )
         {
@@ -917,7 +954,8 @@ namespace Ogre
         /// THE FEEDBACK'S BRICK LIST ON A DIRECTIONAL-LEVEL JOB (PHOTON-7 stage 4): `list` binds it after the job's
         /// `textureUavs` image UAVs and sizes the dispatch from `args` (one group a listed brick: the arguments' words
         /// 4..6); null puts the job back as every other caller dispatches it (the jobs are shared). Each piece is
-        /// change-guarded: setNumUavUnits and setProperty void the PSO hash whatever they are told.
+        /// change-guarded: setNumUavUnits voids the PSO hash on every call for a job that informs its shader of
+        /// texture data (these do: Voxelizer.material.json), setProperty only on a change of value.
         void setBrickListMode( HlmsComputeJob *job, UavBufferPacked *list, UavBufferPacked *args, uint8 textureUavs )
         {
             const int32 on = list ? 1 : 0;
@@ -986,6 +1024,7 @@ namespace Ogre
             }
             // (one thread per directional level-0 texel of a half: two cells)
             ShaderParams::Param *origin = regionOriginParam( mAnisoGeneratorStep0 );
+            bool any = true;   // (false: the region holds no texel of the level - no dispatch, H2)
             setBrickListMode( mAnisoGeneratorStep0, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr,
                               3u );
             if( brickList )
@@ -993,12 +1032,15 @@ namespace Ogre
                 const uint32 lo[4] = { 0u, 0u, 0u, 1u };   // w: a texel covers 2^1 cells
                 origin->setManualValue( lo, 4u );
             }
-            else
+            else if( !setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes ) )
             {
-                setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes );
+                any = false;   // (an empty region: no texel to write)
             }
-            mAnisoGeneratorStep0->getShaderParams( "default" ).setDirty();
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
+            if( any )
+            {
+                mAnisoGeneratorStep0->getShaderParams( "default" ).setDirty();
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
+            }
             setBrickListMode( mAnisoGeneratorStep0, nullptr, nullptr, 3u );
         }
 
@@ -1026,18 +1068,22 @@ namespace Ogre
             const uint32 levelRes[3] = { std::max( 1u, dirRes[0] >> ( i + 1u ) ), std::max( 1u, dirRes[1] >> ( i + 1u ) ),
                                          std::max( 1u, dirRes[2] >> ( i + 1u ) ) };
             ShaderParams::Param *origin = regionOriginParam( mipJob );
+            bool any = true;   // (false: the region holds no texel of this level - no dispatch, H2)
             setBrickListMode( mipJob, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr, 3u );
             if( brickList )
             {
                 const uint32 lo[4] = { 0u, 0u, 0u, uint32( i ) + 2u };   // w: a texel covers 2^(i + 2) cells
                 origin->setManualValue( lo, 4u );
             }
-            else
+            else if( !setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes ) )
             {
-                setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes );
+                any = false;   // (an empty region at this level)
             }
-            mipJob->getShaderParams( "default" ).setDirty();
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
+            if( any )
+            {
+                mipJob->getShaderParams( "default" ).setDirty();
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
+            }
             setBrickListMode( mipJob, nullptr, nullptr, 3u );
         }
         renderSystem->debugAnnotationPop();
@@ -1096,12 +1142,14 @@ namespace Ogre
                 mLightVctBounceInject->setProperty( NumVctCascadesProp, numCascadesI32 );
         }
 
-        mBounceInvResMaxLod->setManualValue( &vctInvResMaxLod[0].x,
-                                             static_cast<uint32>( numCascades * 4u ) );
+        mBounceInvResMaxLodBlock.set( mBounceInvResMaxLod, &vctInvResMaxLod[0].x,
+                                      static_cast<uint32>( numCascades * 4u ) );   // (D2: > 4 cascades is > 16)
         if( !mExtraCascades.empty() )
         {
-            mBounceFromPreviousProbeToNext->setManualValueEx(
-                &fromPreviousProbeToNext[0]->x, static_cast<uint32>( ( numCascades - 1u ) * 2u * 4u ) );
+            // (NONDET-1 H5: the values in the lighting's own block - setManualValueEx keeps the pointer, and this
+            // function's stack array died at its return while the parameter still named it)
+            mBounceFromPreviousProbeToNextBlock.set( mBounceFromPreviousProbeToNext, &fromPreviousProbeToNext[0]->x,
+                                                     static_cast<uint32>( ( numCascades - 1u ) * 2u * 4u ) );
         }
         else
         {
@@ -1122,7 +1170,7 @@ namespace Ogre
                     sh[i * 4u + c] = mEnvSh[i * 3u + c];
                 sh[i * 4u + 3u] = 0.0f;
             }
-            mBounceEnvSh->setManualValue( sh, 36u );
+            mBounceEnvShBlock.set( mBounceEnvSh, sh, 36u );   // (D2: nine float4, past setManualValue's 16)
         }
         {
             const uint32 mark[4] = { 1u, mBrickDims[0], mBrickDims[1], 0u };
@@ -1354,8 +1402,11 @@ namespace Ogre
         pShift.name = "fbShift";
         pDims.setManualValue( dims, 4u );
         pFlags.setManualValue( flags, 4u );
-        pLo.setManualValue( boxLo, 4u * PhotonFeedbackActivation::kMaxBoxes );
-        pHi.setManualValue( boxHi, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        {   // (D2: sixteen boxes, past setManualValue's 16 values; the job is shared - its blocks are the process's)
+            SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+            blocks.fbBoxLo.set( &pLo, boxLo, 4u * PhotonFeedbackActivation::kMaxBoxes );
+            blocks.fbBoxHi.set( &pHi, boxHi, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        }
         pSelf.setManualValue( self4, 4u );
         pSrc.setManualValue( src4, 4u );
         pSrcDims.setManualValue( srcDims, 4u );
@@ -1463,7 +1514,7 @@ namespace Ogre
     bool PhotonVoxelLighting::takeFeedbackReading( PhotonFeedbackReading &out, uint64 frame )
     {
         // TAKEN AT A FIXED LAG, NEVER "WHEN IT LANDED" (gi.walk L1/L2, PHOTON-7 stage 4): the host DECIDES on a reading
-        // (a cascade still owes passes; the chain's rest re-integrates the field and moves the lighting serial), and a
+        // (a cascade still owes passes; the chain's rest is counted and moves the lighting serial), and a
         // reading polled for landing arrives 1 to 4 frames after its frame depending on the GPU's pace - so the rest fell
         // on a different frame in another process. A reading is taken exactly when the HOST'S frame is past its own by the
         // dynamic buffer multiplier (PHOTON-7 stage 4's read R2: the engine's frame, never the VaoManager's count, which a
@@ -1526,8 +1577,8 @@ namespace Ogre
         // hlms_num_vct_cascades from mExtraCascades.size() + 1 on every injection, and
         // the generated compute shader declares one light-voxel texture per cascade
         // (four with anisotropy) — but the job's TEXTURE UNIT COUNT and its bindings are
-        // only ever derived in setupBounceTextures(), which upstream calls from
-        // setAllowMultipleBounces() and resetTexturesFromBuildRelative(). Add a cascade
+        // only ever derived in setupBounceTextures(), which setAllowMultipleBounces()
+        // calls. Add a cascade
         // after enabling bounces and the shader asks for ogre_t6 while the root layout
         // still has six units: "'ogre_t6': unrecognized layout identifier", the compute
         // program fails to compile, and the whole PhotonVoxelLighting arm renders no GI at all
@@ -1548,8 +1599,8 @@ namespace Ogre
         TextureGpuManager *textureManager = mVoxelizer->getTextureGpuManager();
         if( bAllowMultipleBounces )
         {
-            // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): not Reinterpretable -- see createTextures.
-            const uint32 texFlags = TextureFlags::Uav;
+            // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): not Reinterpretable -- see createTextures (and ManualTexture).
+            const uint32 texFlags = TextureFlags::ManualTexture | TextureFlags::Uav;
 
             char tmpBuffer[128];
             LwString texName( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
@@ -1573,7 +1624,7 @@ namespace Ogre
                 texName.a( "VctLightingDirectDir", i, "/Id", getId() );
                 TextureGpu *t = textureManager->createTexture(
                     texName.c_str(), GpuPageOutStrategy::Discard,
-                    TextureFlags::Uav, TextureTypes::Type3D );
+                    TextureFlags::ManualTexture | TextureFlags::Uav, TextureTypes::Type3D );
                 t->setResolution( mLightVoxel[1]->getWidth(), mLightVoxel[1]->getHeight(),
                                   mLightVoxel[1]->getDepth() );
                 // (level 0 alone: a hit reads the store's bounce part as T - D at its own level-0 half - BISTRO-REST-1)
@@ -1586,7 +1637,8 @@ namespace Ogre
             texName.clear();
             texName.a( "VctLightingHalfDirect/Id", getId() );
             mHalfDirect = textureManager->createTexture( texName.c_str(), GpuPageOutStrategy::Discard,
-                                                         TextureFlags::Uav, TextureTypes::Type3D );
+                                                         TextureFlags::ManualTexture | TextureFlags::Uav,
+                                                         TextureTypes::Type3D );
             mHalfDirect->setResolution( mHalfLight->getWidth(), mHalfLight->getHeight(), mHalfLight->getDepth() );
             mHalfDirect->setNumMipmaps( 1u );
             mHalfDirect->setPixelFormat( jahLightVoxelFormat() );
@@ -1624,6 +1676,7 @@ namespace Ogre
         }
         else
         {
+            if( mLightBounce )   // (NONDET-1 H6: guarded only by getAllowMultipleBounces() before)
                 textureManager->destroyTexture( mLightBounce );
             mLightBounce = 0;
             for( uint8 i = 0u; i < 3u; ++i )
@@ -1778,8 +1831,11 @@ namespace Ogre
             }
         }
         mInjectChainSelf->setManualValue( mChainIndex );
-        mInjectChainOrigin->setManualValue( chainOrigin, 4u * chainLength );
-        mInjectChainRes->setManualValue( chainRes, 4u * chainLength );
+        {   // (D2: a chain over 4 cascades is past setManualValue's 16 values; the job is shared)
+            SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+            blocks.chainOrigin.set( mInjectChainOrigin, chainOrigin, 4u * chainLength );
+            blocks.chainRes.set( mInjectChainRes, chainRes, 4u * chainLength );
+        }
 
         const bool delta = mCommit.on && mCommit.light.delta && mHalfDirect && mCommitCountBuf;
         bindInjectionUavs( delta );
@@ -1885,15 +1941,20 @@ namespace Ogre
                         lo[4u * b + uint32( a )] = mCommit.light.injectLo[b][a];
                         hi[4u * b + uint32( a )] = mCommit.light.injectHi[b][a];
                     }
-                mInjectBoxLo->setManualValue( lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
-                mInjectBoxHi->setManualValue( hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
+                // (D2: sixteen boxes, past setManualValue's 16 values; the job is shared - its blocks are the process's)
+                SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+                blocks.injectBoxLo.set( mInjectBoxLo, lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
+                blocks.injectBoxHi.set( mInjectBoxHi, hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
             }
+            bool counted = false;   // (the delta's word 2 - the injections themselves - on its first DISPATCHED box)
             for( uint32 b = 0u; b < std::max( boxes, 1u ); ++b )
             {
                 const uint32 prior[4] = { b, 0u, 0u, 0u };
                 mInjectPrior->setManualValue( prior, 4u );
-                setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
-                               boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && b == 0u ? 1u : 0u );
+                if( !setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
+                                    boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && !counted ? 1u : 0u ) )
+                    continue;   // (NONDET-1 H2: a box with no cell of the volume dispatches nothing)
+                counted = true;
                 mShaderParams->setDirty();
                 jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
             }
@@ -1935,7 +1996,7 @@ namespace Ogre
             // Jahshaka (PHOTON-VIEW-1; an upstream defect): setTrackingVoxel writes the
             // voxel-space box into the WORLD slot too, and the visualizer is STATIC - nothing
             // re-derives it, so the picture was culled wherever the volume is not at the
-            // world origin. Re-derived here, as resetTexturesFromBuildRelative does.
+            // world origin. Re-derived here.
             mDebugVoxelVisualizer->getWorldAabbUpdated();
         }
 
@@ -2061,10 +2122,12 @@ namespace Ogre
         }
         r.ticket = mBrickBuffer->readRequest( 0u, mBrickZeros.size(), /*accurateTracking=*/false );
         r.origin = mVoxelizer->getVoxelOrigin();
+        r.frame = mLightFrame;
         mBrickNextIssue = ( mBrickNextIssue + 1u ) % kBrickReadingSlots;
     }
     //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] )
+    bool PhotonVoxelLighting::takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3],
+                                                uint64 *frame )
     {
         BrickReading &r = mBrickReadings[mBrickNextTake];
         if( !r.ticket.get() || !r.ticket->queryIsTransferDone() )
@@ -2074,6 +2137,8 @@ namespace Ogre
         r.ticket->unmap();
         r.ticket.reset();
         origin = r.origin;
+        if( frame )
+            *frame = r.frame;
         for( int a = 0; a < 3; ++a )
             dims[a] = mBrickDims[a];
         mBrickNextTake = ( mBrickNextTake + 1u ) % kBrickReadingSlots;
@@ -2127,29 +2192,6 @@ namespace Ogre
             mCommitDownloadOwed = false;
         }
         return true;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::resetTexturesFromBuildRelative()
-    {
-        if( mDebugVoxelVisualizer )
-        {
-            Node *visNode = mDebugVoxelVisualizer->getParentNode();
-            visNode->setPosition( mVoxelizer->getVoxelOrigin() );
-            visNode->setScale( mVoxelizer->getVoxelCellSize() );
-
-            // The visualizer is static so force-update its transform manually
-            visNode->_getFullTransformUpdated();
-            mDebugVoxelVisualizer->getWorldAabbUpdated();
-        }
-
-        if( mVoxelizerTexturesChanged )
-        {
-            checkTextures();
-            return;
-        }
-
-        if( getAllowMultipleBounces() )
-            setupBounceTextures();
     }
     //-------------------------------------------------------------------------
     size_t PhotonVoxelLighting::getConstBufferSize() const
@@ -2360,7 +2402,7 @@ namespace Ogre
             visNode->attachObject( mDebugVoxelVisualizer );
 
             // Jahshaka (PHOTON-VIEW-1): the node and the box are STATIC - forced current
-            // here as resetTexturesFromBuildRelative does, or the first frames cull the
+            // here, or the first frames cull the
             // picture against the voxel-space box.
             visNode->_getFullTransformUpdated();
             mDebugVoxelVisualizer->getWorldAabbUpdated();

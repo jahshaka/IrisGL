@@ -232,9 +232,9 @@ material Jahshaka/Look/OldMovie
 			fragment_program_ref Jahshaka/Look/OldMovie_ps
 			{
 				param_named			lookParams0	float4 0 0.5 0.5 0.5
-				// Seconds, wrapping every hour: long enough that the wrap is
-				// never seen, short enough that the float stays precise.
-				param_named_auto	lookTime	time_0_x	3600
+				// The view's SCENE time in seconds, wrapping every hour, set per view
+				// (OgreChain.cpp updateLooks) - never time_0_x, the process-wide clock.
+				param_named			lookTime	float 0
 			}
 
 			texture_unit sourceTexture

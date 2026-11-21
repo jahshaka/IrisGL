@@ -11,9 +11,10 @@
 //   * the dirt is a value-noise hash of the texel's cell and the frame number;
 //   * the flicker and the jitter are the same hash of the frame number alone.
 //
-// DETERMINISM. The animation rides Ogre's `time_0_x` auto-parameter, which
-// under the engine's fixed frame delta advances by a known amount per frame —
-// so a gate that steps frames sees the same picture every run. The suite does
+// DETERMINISM. The animation rides `lookTime`, the view's SCENE time (its
+// document's grid steps, set per view by the engine: OgreChain.cpp updateLooks;
+// never Ogre's process-wide time_0_x), which advances by a known amount per
+// stepped frame — so a gate that steps frames sees the same picture every run. The suite does
 // not rely on that: its assertions are STRUCTURAL (sepia means R > G > B), which
 // hold at every phase of the flicker. That is the R3 rule in the spec, and it
 // is the difference between a test and a tripwire.
@@ -33,7 +34,7 @@ in block
 
 vulkan( layout( ogre_P0 ) uniform Params { )
 	uniform vec4  lookParams0;	// x = amount, y = flicker, z = dirt, w = jitter
-	uniform float lookTime;		// auto time_0_x: seconds, cycling
+	uniform float lookTime;		// the view's scene time: seconds, cycling hourly
 vulkan( }; )
 
 vulkan_layout( location = 0 )

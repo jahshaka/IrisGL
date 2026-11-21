@@ -149,10 +149,17 @@ void main()
 @property( jah_brick_copy )
 	// THE COPY-BACK: what the pass wrote into its target becomes the half store over the listed bricks (8 groups of 4^3
 	// a brick, the brick group y; the texture identities never change) - the six halves of each voxel (VOXEL-R13 stage 2)
+	// THE LIST'S LAW (NONDET-1 D, R8-1): the group's row inside the list's buffer, its brick inside the volume's bricks
+	// (the half store's size over 8, six halves along x) - a whole group returns, so no store leaves its resource
+	if( gl_WorkGroupID.y >= uint( fbList.length() ) )
+		return;
 	const uint3 brick = fbUnpack( fbList[gl_WorkGroupID.y] );
+	const int3 storeSize = imageSize( fbTo );
+	const int halfW = storeSize.x / 6;
+	if( any( greaterThanEqual( brick, uint3( uint( halfW ), uint( storeSize.y ), uint( storeSize.z ) ) / 8u ) ) )
+		return;
 	const uint sub = gl_WorkGroupID.x;
 	const uint3 cell = brick * 8u + uint3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
-	const int halfW = imageSize( fbTo ).x / 6;
 	for( int k = 0; k < 6; ++k )
 	{
 		const int3 t = int3( int( cell.x ) + k * halfW, int( cell.y ), int( cell.z ) );
@@ -311,7 +318,8 @@ void main()
 				if( idx < numBricks )
 				{
 					const uint3 bb = uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) );
-					for( uint k = 0u; k < fbFlags.y && !inBox; ++k )
+					// (the boxes' count at its law: the arrays hold 16, NONDET-1 D, R8-3)
+					for( uint k = 0u; k < min( fbFlags.y, 16u ) && !inBox; ++k )
 						inBox = all( greaterThanEqual( bb, fbBoxLo[k].xyz ) ) && all( lessThan( bb, fbBoxHi[k].xyz ) );
 				}
 				if( inBox )
@@ -336,7 +344,8 @@ void main()
 			if( idx < numBricks )
 			{
 				const uint3 bb = uint3( idx % fbDims.x, ( idx / fbDims.x ) % fbDims.y, idx / ( fbDims.x * fbDims.y ) );
-				for( uint k = 0u; k < fbFlags.y && !inBox; ++k )
+				// (the boxes' count at its law: the arrays hold 16, NONDET-1 D, R8-3)
+				for( uint k = 0u; k < min( fbFlags.y, 16u ) && !inBox; ++k )
 					inBox = all( greaterThanEqual( bb, fbBoxLo[k].xyz ) ) && all( lessThan( bb, fbBoxHi[k].xyz ) );
 			}
 			if( inBox )
@@ -398,7 +407,8 @@ void main()
 		// listed region meets, or every brick, (re)starts: its contraction is measured again from its next two passes.
 		// The active bricks are counted; SELECT lists the ones the budget passes.
 		bool start = fbFlags.x != 0u || fbMask[2u * i] != 0u;
-		for( uint k = 0u; k < fbFlags.y && !start; ++k )
+		// (the boxes' count at its law: the arrays hold 16, NONDET-1 D, R8-3)
+		for( uint k = 0u; k < min( fbFlags.y, 16u ) && !start; ++k )
 			start = all( greaterThanEqual( b, fbBoxLo[k].xyz ) ) && all( lessThan( b, fbBoxHi[k].xyz ) );
 		if( start )
 		{
@@ -498,9 +508,11 @@ void main()
 		const float area = 1.7320508 * fbSrc.w * fbSrc.w;   // sqrt(3) a^2: the source brick's largest silhouette
 		const float halfSum = 0.5 * ( fbSelf.w + fbSrc.w );
 		const bool own = fbFlags.w != 0u;
-		const uint count = own ? fbArgs[8] : fbSrcArgs[8];
-		const uint carried = own ? fbArgs[11] : fbSrcArgs[11];
 		const uint srcBricks = fbSrcDims.x * fbSrcDims.y * fbSrcDims.z;
+		// THE LIST'S LAW (NONDET-1 D, R8-2): the two sections together inside the source's bricks (the list's length), so
+		// the carried section's index srcBricks - 1 - j never wraps; and each brick read inside the source's dims (below)
+		const uint count = min( own ? fbArgs[8] : fbSrcArgs[8], srcBricks );
+		const uint carried = min( own ? fbArgs[11] : fbSrcArgs[11], srcBricks - count );
 		float sum = 0.0;   // codes, over the list in its order: the passed section, then the carried one
 		for( uint k = 0u; k < count + carried; ++k )
 		{
@@ -509,6 +521,8 @@ void main()
 				continue;   // (the test door gi.feedbackCarriedRoute: the carried section alone)
 			const uint e = passed ? k : srcBricks - 1u - ( k - count );
 			const uint3 o = fbUnpack( own ? fbList[e] : fbSrcList[e] );
+			if( any( greaterThanEqual( o, fbSrcDims.xyz ) ) )
+				continue;
 			const uint oi = o.x + fbSrcDims.x * ( o.y + fbSrcDims.y * o.z );
 			// THE SOURCE'S WHOLE MOVE THIS FRAME: its pass's [4] plus its injection's [7] - the pass gathers from the total
 			// the delta already wrote, so [4] alone never sees a direct term's change, and a voxel's total moved by at most

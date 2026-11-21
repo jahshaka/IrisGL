@@ -86,12 +86,9 @@ namespace {
 void mergeRecord(FrameInput &p, FrameInput &&in) {
     p.engineMessages.insert(p.engineMessages.end(), std::make_move_iterator(in.engineMessages.begin()),
                             std::make_move_iterator(in.engineMessages.end()));   // the engine's stream, in order
-    if (in.frameDelta) p.frameDelta = in.frameDelta;
     if (in.cause) p.cause = in.cause;
     if (in.shadowMapBudget) p.shadowMapBudget = in.shadowMapBudget;
     p.refreshShadows = p.refreshShadows || in.refreshShadows;
-    if (in.stepSerial) p.stepSerial = in.stepSerial;
-    if (in.stepPeriod) p.stepPeriod = in.stepPeriod;
     for (FrameInputScene &sc : in.scenes) {
         auto it = std::find_if(p.scenes.begin(), p.scenes.end(),
                                [&](const FrameInputScene &q) { return q.scene == sc.scene; });
@@ -116,6 +113,10 @@ void mergeRecord(FrameInput &p, FrameInput &&in) {
         if (sc.sky) it->sky = sc.sky;
         if (sc.shaderTime) it->shaderTime = sc.shaderTime;
         if (sc.grid) it->grid = sc.grid;
+        if (sc.stepSerial) it->stepSerial = sc.stepSerial;   // monotone per document: the newest is the right one
+        if (sc.stepPeriod) it->stepPeriod = sc.stepPeriod;
+        if (sc.particleTimeScale) it->particleTimeScale = sc.particleTimeScale;
+        if (sc.clockEpoch) it->clockEpoch = sc.clockEpoch;
         if (sc.pixelTolerance) it->pixelTolerance = sc.pixelTolerance;
         it->reassert = it->reassert || sc.reassert;
         if (sc.giRefreshSerial) it->giRefreshSerial = sc.giRefreshSerial;
@@ -156,7 +157,6 @@ void RenderThread::submit(FrameInput &&in) {
     for (EngineMessage &m : in.engineMessages) m.seq = ++mPostSeq;   // the one order (decision 46)
     for (FrameInputScene &sc : in.scenes) for (SceneMessage &m : sc.messages) m.seq = ++mPostSeq;
     for (FrameInputView &v : in.views) if (v.scene) v.sceneSeq = ++mPostSeq;
-    if (in.frameDelta) mEngine.mPushedFrameDelta = *in.frameDelta;   // the host's record (Engine::fixedFrameDelta)
     // WHAT THE HOST PUSHED, kept on its side (View::pushed*, ENGINE-UPGRADE-U3 stage 2 F5): a part a host builds on top
     // of its own last push reads it, never the engine's applied state.
     for (const FrameInputView &v : in.views) if (v.view) static_cast<OgreView *>(v.view)->notePushed(v);
@@ -198,8 +198,8 @@ FrameSubmitStatus RenderThread::submitStatus() const {
 
 // THE HAND-OVER (U3 F1/F2): the whole slot, once, at the frame head. The serial is stamped HERE — one per frame that
 // applies a record, never one per submit — and an empty slot is a legal hand-over that carries the last serial: the
-// frame draws the last applied state with the engine's own frameDelta, exactly as a frame nobody submitted for always
-// did. A submit made after this point (a trailing settle's, a photo's) is the next hand-over's.
+// frame draws the last applied state and advances no scene's clock (ONE-FRAME-1: a scene's time is the steps its
+// part's serial moved, and an empty hand-over moved none). A submit made after this point (a trailing settle's, a photo's) is the next hand-over's.
 RenderThread::Slot RenderThread::handOver() {
     std::lock_guard<std::mutex> lock(mSlotLock);
     Slot out = std::move(mSlot);

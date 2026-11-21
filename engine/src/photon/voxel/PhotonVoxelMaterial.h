@@ -146,7 +146,8 @@ namespace Ogre
 
             JAHSHAKA (ATOM P4b): a hit used to hand back the row exactly as it was first
             written. That was harmless while every store died with its voxelizer on each
-            rebuild; a store SHARED by a chain outlives rebuilds, and a material edited
+            rebuild; a store SHARED by a chain outlives its cascades' rebuilds (it dies
+            with the chain: PhotonComponent::teardownVct), and a material edited
             after its first conversion kept its first parameters for the rest of its life
             (measured: emissive converted at 0.5 read 0.5 at 1, 3 and 12). The row is now
             always re-read, so (bucketIdx, slotIdx) - the pair a GPU instance table names
@@ -168,7 +169,7 @@ namespace Ogre
         /** RE-READS EVERY CONVERTED DATABLOCK, in place where it can, and reports the ones
             that had to move. The owner calls it when a material's parameters may have
             changed; it is the store's end of the VCT lifecycle's "always from scratch"
-            rule for the one piece of state that now outlives a rebuild. The texture pool
+            rule for the one piece of state that now outlives a cascade's rebuild. The texture pool
             is RE-COPIED too (its by-pointer slice cache is forgotten first), so an edited
             or dead texture never survives in it. Needs the temp resources (every texture
             a row binds is rendered into the pool).

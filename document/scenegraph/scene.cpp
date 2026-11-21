@@ -708,16 +708,15 @@ void Scene::updateSceneAnimation(float time)
     if (rootNode) rootNode->updateAnimation(time);
 }
 
-float Scene::advance(float dt)
+void Scene::advance(float dt)
 {
     // The clock ticks whether or not anything in the document consumes it:
-    // the return value feeds the renderer's particle and shader-time delta,
-    // which run in the editor too.
+    // the mirror stamps its lifetime steps on the engine's scene, whose
+    // particles and shader time run in the editor too.
     const int steps = clock.advance(dt);
-    const float simDt = float(clock.frameSeconds());
-    if (!rootNode || steps == 0) return simDt;
+    if (!rootNode || steps == 0) return;
     const bool simulating = environment && environment->isSimulating();
-    if (!playing && !simulating) return simDt;
+    if (!playing && !simulating) return;
 
     // THE POSE, at the clock's time — once, not per step: clips and property
     // tracks are evaluated at an ABSOLUTE time (the document keeps the clock,
@@ -755,7 +754,6 @@ float Scene::advance(float dt)
     if (playing && possession) possession->updateFollowCamera();
 
 	refresh();
-	return simDt;
 }
 
 void Scene::refresh()

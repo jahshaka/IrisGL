@@ -41,6 +41,7 @@ THE SOFTWARE.
 #include <vector>
 
 #include "SceneLightList.h"
+#include "photon/voxel/PhotonParamArray.h"
 
 #include "OgreHeaderPrefix.h"
 
@@ -320,6 +321,7 @@ namespace Ogre
         {
             AsyncTicketPtr ticket;
             Vector3 origin = Vector3::ZERO;
+            uint64 frame = 0u;   ///< the light frame whose mask it holds (NONDET-1's detector)
         };
         BrickReading mBrickReadings[kBrickReadingSlots];
         uint32 mBrickNextIssue = 0u, mBrickNextTake = 0u;
@@ -395,6 +397,10 @@ namespace Ogre
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
         ShaderParams::Param *mBounceEnvMips;      ///< Jahshaka (PHOTON-ENV-1): w the cube's mips (xyz the pad)
         ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4 (radiance)
+        /// THE BOUNCE'S LONG ARRAYS' VALUES (NONDET-1 D2, PhotonParamArray): the local parameters point here.
+        PhotonParamArray<float, 4u * 8u> mBounceInvResMaxLodBlock;
+        PhotonParamArray<float, 36u>     mBounceEnvShBlock;
+        PhotonParamArray<float, 7u * 2u * 4u> mBounceFromPreviousProbeToNextBlock;   ///< (cascades - 1) x 2 float4, at 8
         ShaderParams        *mBounceShaderParams;
 
         ResourceTransitionArray mResourceTransitions;
@@ -538,6 +544,8 @@ namespace Ogre
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.
         /// Destroys the pooled anisotropic mip-step jobs (BUGS-6 stage 3) - the engine's teardown.
         static void releaseMipStepPool();
+        /// Frees the shared jobs' parameter blocks (NONDET-1 D2, PhotonParamArray) - the engine's teardown, before Root.
+        static void releaseParamBlocks();
         /// Mip-step jobs ever cloned, process-wide (a pooled one is cloned once per kind).
         static unsigned long long numMipStepJobs();
 
@@ -636,7 +644,7 @@ namespace Ogre
         void regenerateDirectional() { generateAnisotropicMips(); }
         /** THE BRICK MASK'S OLDEST LANDED READING (PHOTON-7 stage 3), taken: `words` two per brick (x fastest over `dims`),
             `origin` the box corner the update ran at. False while none has landed. */
-        bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] );
+        bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3], uint64 *frame = nullptr );
         uint32 getNumBricks() const { return mBrickDims[0] * mBrickDims[1] * mBrickDims[2]; }
         /// Frames that wrote a mask, and those whose reading was skipped (every slot in flight).
         uint64 getBrickUpdates() const { return mBrickUpdates; }
@@ -675,39 +683,6 @@ namespace Ogre
         PhaseListener *mPhaseListener = nullptr;
 
     public:
-
-        /** Points this PhotonVoxelLighting at a DIFFERENT voxelizer, in place.
-
-            A PhotonVoxelLighting is normally bound to the voxelizer it was constructed with for
-            its whole life. That is a problem for any caller that must re-voxelize with a
-            FRESH PhotonVoxelizer rather than rebuild an existing one -- PhotonVoxelMaterial caches
-            each datablock's conversion by raw pointer for the voxelizer's lifetime, so a
-            material whose parameters changed (or whose datablock died and whose address
-            was recycled) can only be answered by a new voxelizer. Destroying the
-            PhotonVoxelLighting as well is not an option when it is part of a cascade chain:
-            addCascade() hands the cascades inside this one raw pointers to it and
-            fillConstBufferData() walks them on every pass, so replacing one cascade's
-            lighting forces every cascade inside it to be rebuilt in the same frame.
-
-            Everything this object holds that depends on the voxelizer is re-derived here:
-            the TextureGpuListener registrations move to the new albedo/normal textures
-            and the light voxel textures are re-created from the new resolution -- the
-            same recovery the LostResidency path performs.
-        @remarks
-            The new voxelizer must already have been built (its albedo texture is what the
-            light voxels are sized from), and the caller keeps ownership of both: the old
-            one is only safe to destroy AFTER this returns.
-        @param voxelizer
-            The voxelizer to sample from now. Null or the current one is a no-op.
-        */
-        void setVoxelizer( PhotonVoxelizerSourceBase *voxelizer );
-
-        /// Upstream's VctImageVoxelizer::buildRelative called this (its voxeliser's
-        /// textures - albedo, normal, emissive - could be swapped for a copy). That class
-        /// is not in this fork (6be1ae1d7) and nothing here calls this any more.
-        ///
-        /// This function notifies us that buildRelative to update some of our references
-        void resetTexturesFromBuildRelative();
 
         size_t getNumCascades() const { return mExtraCascades.size() + 1u; }
 

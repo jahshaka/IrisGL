@@ -594,6 +594,15 @@ public:
         unsigned brickUnionReadings = 0u;
         unsigned bricksDirectLast = 0u, bricksBounceLast = 0u, bricksActiveLast = 0u;
         unsigned long long brickReadings = 0u;
+        /// NONDET-1's DETECTOR (gi.foreignDetect): the readings judged, the largest words (codes), the first over the bar
+        float foreignDirectMax = 0.0f, foreignBounceMax = 0.0f;
+        unsigned foreignDirectMaxBrick = 0u, foreignBounceMaxBrick = 0u;
+        unsigned long long foreignReadings = 0u, foreignFirstFrame = 0u, foreignFirstSkipped = 0u;
+        unsigned foreignFirstBrick = 0u, foreignFirstWord = 0u, foreignFirstCount = 0u;
+        float foreignFirstCodes = 0.0f;
+        unsigned long long signReadings = 0u, signFirstFrame = 0u;
+        unsigned signFirstBrick = 0u, signFirstCount = 0u;
+        float signFirstCodes = 0.0f;
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }
@@ -1455,6 +1464,7 @@ private:
     /// until stage 5 replaces it), and an outer commit's inner cascades whose marches no moved face reaches (D4: no delta).
     bool mGiRelightAllOwed = false;
     bool mInjectingRelight = false;
+    unsigned long long mForeignArmedFrame = 0u;   ///< NONDET-1: the frame gi.foreignDetect came on (0: off)
     bool mJacobiOn = false;           ///< the measuring door gi.bounceJacobi was on at the last writer point   ///< the injection in progress is a relight (its region is the list's Lamp already)
     bool mGiFeedbackForceAll = false;
     bool mGiFeedbackOwedLast = false;

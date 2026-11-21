@@ -1128,6 +1128,22 @@ GiStatus PhotonComponent::giStatus() const {
             cs.brickUpdates = c.lighting ? c.lighting->getBrickUpdates() : 0ull;
             cs.brickReadings = c.brickReadings;
             cs.brickReadingsSkipped = c.lighting ? c.lighting->getBrickReadingsSkipped() : 0ull;
+            cs.foreignDirectMax = c.foreignDirectMax;   // NONDET-1's detector (gi.foreignDetect)
+            cs.foreignBounceMax = c.foreignBounceMax;
+            cs.foreignReadings = c.foreignReadings;
+            cs.foreignFirstFrame = c.foreignFirstFrame;
+            cs.foreignFirstBrick = c.foreignFirstBrick;
+            cs.foreignFirstWord = c.foreignFirstWord;
+            cs.foreignFirstCodes = c.foreignFirstCodes;
+            cs.foreignFirstSkipped = c.foreignFirstSkipped;
+            cs.foreignDirectMaxBrick = c.foreignDirectMaxBrick;
+            cs.foreignBounceMaxBrick = c.foreignBounceMaxBrick;
+            cs.foreignFirstCount = c.foreignFirstCount;
+            cs.signReadings = c.signReadings;
+            cs.signFirstFrame = c.signFirstFrame;
+            cs.signFirstBrick = c.signFirstBrick;
+            cs.signFirstCodes = c.signFirstCodes;
+            cs.signFirstCount = c.signFirstCount;
             cs.commitInjectCells = c.commitInjectCells;
             cs.commitCounted     = c.commitCounted;
             cs.deltaMarched      = c.deltaMarched;
@@ -3277,10 +3293,10 @@ void PhotonComponent::endDragGesture() {
 //     buffers are all KEPT.
 //   * whether the ITEM SET changed — answered by each build's gather, which
 //     reads membership off the GPU scene (ATOM P4b); nothing is held to re-select.
-//   * whether a DATABLOCK died or a material PARAMETER changed — the only case
-//     that needs a new voxeliser, and it gets one per cascade per frame with
-//     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
-//     untouched (`PhotonVoxelLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
+//   * whether a DATABLOCK died or a material PARAMETER changed — answered by
+//     the chain's one material store, refreshed in place and evicted on a death;
+//     no voxeliser is replaced (they are made only by a chain build,
+//     buildCascadeArm; setVoxelizer, which once swapped one, is deleted: NONDET-1 N1).
 //   * and, when nothing geometric moved at all and the host asked, a whole RELIGHT — a re-INJECTION of every
 //     cascade's direct term over the voxels that are already there, never a re-voxelisation (a lamp is the
 //     changed-region list's: PHOTON-7 stage 4).
@@ -4159,12 +4175,56 @@ void PhotonComponent::harvest() {
 // reading's counts are the status's: a brick is ACTIVE when a word reads one code or more (a relative change of 1 %).
 void PhotonComponent::harvestBrickMasks() {
     std::vector<Ogre::uint32> words;
+    // NONDET-1's DETECTOR (gi.foreignDetect = N codes): the readings of the frames since the arm came on
+    const double foreignBar = mEngine ? mEngine->armRegistry().value(ArmId::GiForeignDetect) : 0.0;
+    if (foreignBar <= 0.0) mForeignArmedFrame = 0u;
+    else if (!mForeignArmedFrame) mForeignArmedFrame = giWriterFrame();
     for (VctCascade &c : mVctCascades) {
         if (!c.lighting) continue;
         Ogre::Vector3 origin;
         Ogre::uint32 dims[3];
-        while (c.lighting->takeBrickReading(words, origin, dims)) {
+        Ogre::uint64 readingFrame = 0u;
+        while (c.lighting->takeBrickReading(words, origin, dims, &readingFrame)) {
             ++c.brickReadings;
+            if (mForeignArmedFrame && readingFrame >= mForeignArmedFrame) {
+                // per reading: each word's largest brick (its index) and the bricks over the bar; word 0's over 100 codes
+                // (THE SIGN BAR, READ-9: D is affine in the lamp with non-negative terms, so a relative change over 100 %
+                // needs an old and a new term of OPPOSITE signs - a value no input of the injection makes)
+                ++c.foreignReadings;
+                float most[2] = { -1.0f, -1.0f };
+                unsigned mostBrick[2] = { 0u, 0u }, over[2] = { 0u, 0u }, signOver = 0u;
+                for (size_t i = 0; i + 1u < words.size(); i += 2u) {
+                    for (unsigned w = 0u; w < 2u; ++w) {
+                        float f;
+                        std::memcpy(&f, &words[i + w], sizeof f);
+                        float codes = f / 0.01f;
+                        if (!std::isfinite(codes) || codes > 1e30f) codes = 1e30f;   // (a non-finite word reads over any bar)
+                        if (codes > most[w]) { most[w] = codes; mostBrick[w] = unsigned(i / 2u); }
+                        if (codes > float(foreignBar)) ++over[w];
+                        if (w == 0u && codes > 100.0f) ++signOver;
+                    }
+                }
+                if (most[0] > c.foreignDirectMax) { c.foreignDirectMax = most[0]; c.foreignDirectMaxBrick = mostBrick[0]; }
+                if (most[1] > c.foreignBounceMax) { c.foreignBounceMax = most[1]; c.foreignBounceMaxBrick = mostBrick[1]; }
+                if (!c.foreignFirstFrame && (over[0] || over[1])) {
+                    const unsigned w = over[0] ? 0u : 1u;   // (word 0 named first when both cross in one reading)
+                    c.foreignFirstFrame = readingFrame;
+                    c.foreignFirstWord = w;
+                    c.foreignFirstBrick = mostBrick[w];
+                    c.foreignFirstCodes = most[w];
+                    c.foreignFirstCount = over[w];
+                    c.foreignFirstSkipped = c.lighting->getBrickReadingsSkipped();
+                }
+                if (signOver) {
+                    ++c.signReadings;
+                    if (!c.signFirstFrame) {
+                        c.signFirstFrame = readingFrame;
+                        c.signFirstBrick = mostBrick[0];
+                        c.signFirstCodes = most[0];
+                        c.signFirstCount = signOver;
+                    }
+                }
+            }
             if (c.brickUnion.size() != words.size() || c.brickOrigin != origin || c.brickDims[0] != dims[0] ||
                 c.brickDims[1] != dims[1] || c.brickDims[2] != dims[2]) {
                 c.brickUnion.assign(words.size(), 0u);
@@ -4606,7 +4666,9 @@ bool PhotonComponent::rebuildVct() {
     // ALWAYS from scratch - the arm's SHAPE (resolution, cascades, probe grid) is
     // decided here. (The reason this used to give - a voxeliser holding raw Item*
     // and a per-voxeliser material cache - is gone: the feed is the GPU scene and
-    // the chain shares one store, refreshed in place and evicted on a death.)
+    // the chain shares one store, refreshed in place and evicted on a death. That
+    // store dies with the chain in the teardown below and the build makes a new one;
+    // only a cascade's own rebuild, rebuildCascade, keeps it.)
     teardownVct();
 
     size_t itemCount = 0;
@@ -4799,7 +4861,7 @@ std::vector<GiParams::GiCascadeDesc> PhotonComponent::resolveCascadeTable() cons
         // meaning of "0 = the tier decides".
         if (d.halfSize <= 0.0f || d.resolution <= 0) { table.clear(); break; }
         GiParams::GiCascadeDesc e = d;
-        e.resolution = std::min(std::max(d.resolution, 16), 256);
+        e.resolution = giCascadeResolution(d.resolution);   // 16..256, a multiple of 8 (Types.h: the passes' whole bricks)
         // A PINNED STEP IS VALIDATED LIKE A DERIVED ONE (audit B10). The clamp
         // below was applied only where the engine derived the step, so a table
         // could ask for a step of a tenth of a cell (a re-centre every frame,
@@ -4907,7 +4969,8 @@ void PhotonComponent::harvestCommitCounts() {
 
 size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // A FROM-SCRATCH CHAIN RE-READS EVERY MATERIAL (the VCT lifecycle's own rule):
-    // the store outlives rebuilds, so the refresh is owed and every GI slot is queued.
+    // its store is a new one (teardownVct destroyed the last chain's), so every GI slot
+    // is queued for conversion and the refresh is owed.
     mVctMaterialRefreshOwed = true;
     queueAllGiMaterials();
     const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
@@ -8991,6 +9054,8 @@ void PhotonComponent::teardownVct() {
     // across would mark every cascade of the NEXT chain pending on its first
     // frame.
     clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
+    // ...NOR A MOVER'S REGION (NONDET-1 1a): a box listed before the teardown is in the table the next build voxelises.
+    mMoverVoxelOpen.clear();
     // ...AND NO RELIGHT OR FEEDBACK (PHOTON-7 stage 4): the next chain's build injects every cascade whole, which
     // activates every brick of it.
     mGiRelightAllOwed = false;

@@ -140,8 +140,16 @@
 @piece( BodyCS )
 	// THE PASS'S CELL (PHOTON-7 stage 4): an ACTIVE brick's (the feedback's list, 8 groups of 4^3 a brick: group y the
 	// brick, x its octant).
+	// THE LIST'S LAW (NONDET-1 D, R8-1): the group's row inside the list's buffer, its brick inside the volume's bricks
+	// (the target's size over 8, six halves along x) - the whole group returns, before any barrier
+	if( gl_WorkGroupID.y >= uint( jahFbList.length() ) )
+		return;
 	const uint jahPacked = jahFbList[gl_WorkGroupID.y];
 	const uint3 jahBrick = uint3( jahPacked & 1023u, ( jahPacked >> 10u ) & 1023u, jahPacked >> 20u );
+	const int3 jahTargetSize = imageSize( lightVoxel );
+	if( any( greaterThanEqual( jahBrick, uint3( uint( jahTargetSize.x / 6 ), uint( jahTargetSize.y ),
+												uint( jahTargetSize.z ) ) / 8u ) ) )
+		return;
 	const uint jahSub = gl_WorkGroupID.x;
 	const uint3 jahCell = jahBrick * 8u + uint3( jahSub & 1u, ( jahSub >> 1u ) & 1u, jahSub >> 2u ) * 4u +
 						  gl_LocalInvocationID.xyz;
@@ -177,10 +185,13 @@
 		{
 			const uint3 jahIn = jahCell - jahBrick * 8u;
 			const uint jahBase = ( gl_WorkGroupID.y * 512u + jahIn.x + 8u * jahIn.y + 64u * jahIn.z ) * 12u;
+			// (the scratch's law, NONDET-1 D: a slot's row inside the scratch - rq_voxel_sides.comp writes none past it,
+			// and a row it never wrote gathers nothing)
+			const bool jahRowIn = jahBase + 12u <= uint( jahSideGather.length() );
 			for( int q = 0; q < 6; ++q )
 			{
-				const float2 jahRg = unpackHalf2x16( jahSideGather[jahBase + 2u * uint( q )] );
-				const float2 jahB = unpackHalf2x16( jahSideGather[jahBase + 2u * uint( q ) + 1u] );
+				const float2 jahRg = jahRowIn ? unpackHalf2x16( jahSideGather[jahBase + 2u * uint( q )] ) : float2( 0, 0 );
+				const float2 jahB = jahRowIn ? unpackHalf2x16( jahSideGather[jahBase + 2u * uint( q ) + 1u] ) : float2( 0, 0 );
 				gatheredHalf[q] = float3( jahRg.x, jahRg.y, jahB.x );
 			}
 		}

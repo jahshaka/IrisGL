@@ -566,6 +566,22 @@ bool OgreScene::applyNodeRecord(const NodeRecord &r, unsigned long long stepSeri
     } JAH_CATCH(mError, false);
 }
 
+// ---- THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; SceneClock.h is the law) -----------------------------------------------------
+void OgreScene::beginFrameClock(bool drawn) {
+    mClock.beginFrame(drawn);
+    // THE PARTICLES' TIME, per scene manager (fork ParticleSystemManager2::setTimeSinceLast): this scene's consumed steps x
+    // its particle time scale, whatever Ogre's process-wide frame delay says — the one place the scale is applied.
+    if (mSceneMgr)
+        if (Ogre::ParticleSystemManager2 *pm = mSceneMgr->getParticleSystemManager2())
+            pm->setTimeSinceLast(Ogre::Real(mClock.particleDt));
+}
+
+void OgreScene::endFrameParticleTime() {
+    if (mSceneMgr)
+        if (Ogre::ParticleSystemManager2 *pm = mSceneMgr->getParticleSystemManager2())
+            pm->setTimeSinceLast(Ogre::Real(0));
+}
+
 // ---- THE TWO GRID STATES, INTERPOLATED (ENGINE-UPGRADE-U3 stage 5) -----------------------------------------------------
 void OgreScene::noteInterpolated(Node &rec, NodeId id, unsigned long long step) {
     if (step != mInterpStep) {
@@ -701,6 +717,9 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     PublishedFrame &back = mPublished.back();
     back.frame = frame;
     back.serial = serial;
+    back.stepSerial = mClock.newest;   // the scene's clock as the frame left it (ONE-FRAME-1)
+    back.sceneSeconds = sceneSeconds();
+    back.frameSceneSeconds = mClock.dt;
     back.gi = giStatus();
     back.atmosphere = publishedAtmosphere();
     back.giApplied = mFrameApplied.gi;

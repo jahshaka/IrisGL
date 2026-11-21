@@ -718,18 +718,13 @@ public:
 
     // Particle time scale (PARTICLES_FX2_SPEC.md §10.3). 1 = the simulation
     // clock's own rate, 0 = frozen, 2 = double speed. The DOCUMENT owns the
-    // clock (SimulationClock, below) and the ENGINE simulates — the same split
-    // the animation migration settled on: every frame the host multiplies the
-    // seconds the clock advanced by this and hands the product to the engine
-    // as its frame delta (ENGINEERING_DEBT_SPEC A4.2).
+    // clock (SimulationClock, below) and the ENGINE simulates: the mirror
+    // carries it on the scene's part beside the clock's lifetime steps, and the
+    // frame that draws the scene runs its particles for steps x period x this,
+    // per scene (ONE-FRAME-1: the fork's ParticleSystemManager2::setTimeSinceLast).
     //
-    // It lives on the SCENE and not on the emitter, because the renderer has
-    // exactly ONE frame-time source for the whole process: there is no per-node
-    // and, strictly, no per-scene particle clock to push. Scene-level is the
-    // finest granularity that is not a lie, and the scene the active host
-    // ticks owns it — the same accepted compromise as the process-wide GI
-    // binding. Offscreen thumbnail and preview scenes push nothing, so they do
-    // not fight the editor for it.
+    // It lives on the SCENE and not on the emitter: the engine's particle time
+    // is per scene manager, so there is no per-node particle clock to set.
     float particleTimeScale;
 
     // ---- Post-processing chain (POST_CHAIN_SPEC.md phases 3-7) --------------
@@ -1288,12 +1283,11 @@ public:
     /// is simulating (play, or the editor's Simulate); animation only while
     /// `playing`. A frame that buys no step changes nothing.
     ///
-    /// Returns the simulated seconds this frame advanced (steps x the grid) —
-    /// what the host hands the renderer as its frame delta, so particles and
-    /// shader time stay on the same grid. Every host ticks through this, with
-    /// no other clock: the editor viewport every driver frame, PlayBack in
-    /// play-in-place and the player, editor.frame / player.frame with their dt.
-    float advance(float dt);
+    /// Every host ticks through this, with no other clock: the editor viewport
+    /// every driver frame, PlayBack in play-in-place and the player,
+    /// editor.frame / player.frame with their dt. The renderer is handed no
+    /// time: it reads the clock's lifetime steps through the mirror (ONE-FRAME-1).
+    void advance(float dt);
     /// Derived state without time: the camera's matrices and the node walk —
     /// what a host does after placing a camera (previews, thumbnails, tests).
     /// The old `update(0)` idiom; advance() does the same after every frame

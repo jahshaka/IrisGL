@@ -449,6 +449,10 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // and a pin was a viewing control on the OUTGOING scene, so it goes too.
     mAnyCustomPiece = false;
     mShaderTimeOverride = -1.0f;
+    // ...AND THE CLOCK ITSELF RESTARTS (ONE-FRAME-1 stage 0, the lead's ruling: "went live" is PER SOURCE): the
+    // incoming document's animated materials start at phase 0 in every run, never at the phase of the session's
+    // history (the HISTORY-1 class). A play edge inside one document still never rewinds them (the count runs on).
+    mShaderSteps = 0;
     mVerifierCursor = 0;
     mCharacterRigs.clear();
     // THE RIDERS COME OFF THEIR BONES FIRST: their engine nodes hang off THIS
@@ -518,6 +522,10 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     // ...and the incoming one binds to us. bindMirror fires the PREVIOUS
     // owner's evacuation hook (another mirror over this document) first.
     if (mSource) {
+        // THE STEP CURSOR reads the INCOMING document's clock from its present: the steps it took before this bind
+        // were never this mirror's (ONE-FRAME-1 stage 0).
+        mStepCursor.prime(mSource->simulationClock());
+        ++mClockEpoch;   // ...and the engine's cursor on this scene re-primes on the new document (never on a reassert)
         mSource->bindMirror(this);
         mSource->_setMirrorEvacuationHook([this] { evacuateEngineObjects(); });
     }
@@ -793,11 +801,15 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // maintained on each entry's own transition — noteRigCounts — because a
     // still frame runs no walk to recount them. §3.7.)
     // (SCENE_STATIC RE-PROMOTION runs AFTER the walk below — runStaticSettle.)
-    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): the
-    // simulated seconds the host's frame bought on the document's
-    // SimulationClock (advanced before the sync) — whole 1/60 s steps, capped
-    // by the clock's catch-up bound, so a stall cannot jump the focus.
-    mFocusDt = mSource ? float(mSource->simulationClock().frameSeconds()) : 0.0f;
+    // THIS SYNC's STEPS (ONE-FRAME-1 stage 0): the steps the document's SimulationClock took since the last sync,
+    // taken ONCE here — a second sync of the same frame (a screenshot's helper restore, a thumbnail's, a preview's)
+    // takes 0. The shader clock below and focus smoothing read this one number; neither reads frameSeconds(), which
+    // is what the LAST advance bought and re-added itself on every sync with no advance between.
+    mSyncSteps = mSource ? mStepCursor.take(mSource->simulationClock()) : 0;
+    // The focus-smoothing dt for this walk (CAMERA_LENS_SPEC §3 P2): this sync's steps — whole 1/60 s steps, capped
+    // by the clock's catch-up bound, so a stall cannot jump the focus; 0 on a sync that took none.
+    mFocusDt = float(double(std::min<quint64>(mSyncSteps, quint64(iris::SimulationClock::kMaxStepsPerAdvance)))
+                     * iris::SimulationClock::kStepSeconds);
     // (The per-walk `mMaterialSync.clear()` that stood here is GONE — the memo
     // crosses frames now, validated by a fingerprint; see MaterialSync in the
     // header. It is PRUNED at the end of the walk instead, so it never holds a
@@ -982,14 +994,15 @@ int SceneMirror::sync(const FrameViews &frameViews)
     }
     // THE SHADER CLOCK (HLMS_ADOPTION P5), and only when something reads it.
     // The host owns the number: mShaderTimeOverride is what a deterministic
-    // test or a scrubbed timeline sets; otherwise it ACCUMULATES the document
-    // SimulationClock's frameSeconds() — the grid steps each host frame bought
-    // (no wall clock, trap 7; not time(), which resets at play edges).
+    // test or a scrubbed timeline sets; otherwise it COUNTS the document
+    // SimulationClock's steps while live — this sync's steps, taken once
+    // above (no wall clock, trap 7; not time(), which resets at play edges):
+    // seconds = steps x 1/60, an integer count, never a float running sum.
     if (mAnyCustomPiece) {
         if (mShaderTimeOverride >= 0.0f) mFrameShaderTime = mShaderTimeOverride;
         else {
-            if (mSource) mShaderSeconds += mSource->simulationClock().frameSeconds();
-            mFrameShaderTime = float(mShaderSeconds);
+            mShaderSteps += mSyncSteps;   // (a pin holds the free clock where it was, as before)
+            mFrameShaderTime = float(shaderSeconds());
         }
     }
     // SHARING BEFORE CLIPS (AVATAR_RIG_PERF_SPEC §3.4): a follower carries no
@@ -1041,6 +1054,19 @@ int SceneMirror::sync(const FrameViews &frameViews)
     scenePart.reassert = mReassertPending;
     scenePart.shaderTime = mFrameShaderTime;
     scenePart.grid = mFrameGrid;
+    // THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): this mirror is its ONE writer. The document's LIFETIME step serial
+    // (monotone across play edges: SimulationClock::steps() resets there and the engine's cursor would read a rewind),
+    // its grid step and its particle time scale; the engine advances the scene by the steps the serial moved since its
+    // last part, once (Types.h FrameInputScene::stepSerial). A second sync of the same frame stamps the same serial.
+    static_assert(jahshaka::engine::FrameInputScene::kMaxStepsPerFrame
+                      == static_cast<unsigned long long>(iris::SimulationClock::kMaxStepsPerAdvance),
+                  "a frame hands a scene at most the document's own catch-up bound");
+    if (mSource) {
+        scenePart.stepSerial = mSource->simulationClock().lifetimeSteps();
+        scenePart.stepPeriod = float(iris::SimulationClock::kStepSeconds);
+        scenePart.particleTimeScale = mSource->particleTimeScale;
+        scenePart.clockEpoch = mClockEpoch;   // the document the serial counts (setSource moves it)
+    }
     if (mSource) scenePart.pixelTolerance = float(mSource->atomPixelError);   // the World Mode's pixel-error row (ATOM-3)
     // THE CHANGE SET, SECOND TAKE: the writes made DURING this sync (a socket's fallback placement, a settle's
     // re-expression) join the set, so the record carries every write up to its emit — the frame that renders a
@@ -2078,9 +2104,14 @@ void SceneMirror::resolveFocusTracking(iris::CameraNode *camera)
     float distance = iris::Vec3::dotProduct(toTarget, forward) + camera->focusOffset;
     distance = std::max(camera->minFocusDistance, distance);
 
-    if (camera->smoothFocus && camera->focusSmoothingSpeed > 0.0f && mFocusDt > 0.0f)
+    if (camera->smoothFocus && camera->focusSmoothingSpeed > 0.0f) {
+        // EASED IN STEP TIME (ONE-FRAME-1 stage 0): a sync that took no step is no time at all, so the eased distance
+        // holds — it used to SNAP to the target there (smoothTowards' dt 0), which on a panel faster than the grid
+        // (every other frame steps nothing) defeated the smoothing.
+        if (mFocusDt <= 0.0f) return;
         distance = iris::lens::smoothTowards(camera->focusDistance, distance,
                                              camera->focusSmoothingSpeed, mFocusDt);
+    }
     camera->focusDistance = distance;
 }
 
@@ -7634,11 +7665,10 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
                                  : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
         scene.shadows = shadows;
     }
-        // The particle clock is NOT pushed from here any more: the HOST pushes
-        // the document's simulated seconds x particleTimeScale as the engine's
-        // frame delta every frame (EngineSceneViewport::syncFrame,
-        // EnginePlayerScene::step — ENGINEERING_DEBT_SPEC A4.2), the one clock
-        // physics and animation advance on too.
+        // The particle clock is the scene's part (ONE-FRAME-1): the document
+        // clock's lifetime steps and particleTimeScale, stamped below; the
+        // engine runs the particles of the frame that draws this scene for
+        // the steps it moved, the one clock physics and animation advance on too.
     {
         // world.refreshShadows(): one re-render of every cached shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two

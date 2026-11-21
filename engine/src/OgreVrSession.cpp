@@ -115,6 +115,11 @@ bool colourEncodedOnce() { return true; }   // no session is ever wrong about co
 
 // The engine's four session entry points, for the same reason.
 void vrSessionBeginFrame(VrSession *) {}
+void vrSessionFramePose(const VrSession *, unsigned long long &poseSerial, long long &displayTimeNs)
+{
+    poseSerial = 0ull;
+    displayTimeNs = 0ll;
+}
 void vrSessionEndFrame(VrSession *) {}
 bool vrSessionWaitedThisFrame(const VrSession *) { return false; }
 void vrSessionWaitFrameEarly(VrSession *) {}
@@ -749,6 +754,11 @@ public:
     /// said false and is gone (VR-ENGINE-2 merge).
     void beginFrame();
     bool waitedThisFrame() const { return mWaited; }
+    /// THE POSE THIS FRAME DREW (ONE-FRAME-1 stage 2; door D4): the serial of the head pose its locate found (the
+    /// session's count of located poses; 0 = this frame located none) and the predicted display time it was located
+    /// for (ns, the runtime's clock).
+    unsigned long long framePoseSerial() const { return mFramePoseSerial; }
+    long long frameDisplayTimeNs() const { return mFrameDisplayTimeNs; }
     void waitFrameEarly();
     void endFrame();
 
@@ -1197,6 +1207,9 @@ private:
     bool        mSaidHands = false;
 
     unsigned long long mFrames = 0ull, mRendered = 0ull;
+    unsigned long long mPoseSerial = 0ull;        ///< head poses located (valid) since the session began
+    unsigned long long mFramePoseSerial = 0ull;   ///< ...the one THIS frame drew (0: none located this frame)
+    long long          mFrameDisplayTimeNs = 0ll; ///< ...and the predicted display time it was located for
     /// THE RUNTIME'S REFRESHES WE MISSED (VrStatus::missedDisplayPeriods, ENGINE-UPGRADE-U3 vr.ui_stall): counted on
     /// the runtime's predicted display times, the last one kept to difference the next.
     unsigned long long mMissedDisplayPeriods = 0ull;
@@ -2768,6 +2781,8 @@ void VrSession::waitFrameEarly() {
 
 void VrSession::beginFrame() {
     mWaited = false;   // set by this frame's xrWaitFrame, if it reaches one
+    mFramePoseSerial = 0ull;      // this frame's pose, once its locate finds one (below)
+    mFrameDisplayTimeNs = 0ll;
     // THE EARLY WAIT, TAKEN AT THE TOP (decision 66): consumed into this frame whatever it returns below — a frame never
     // inherits another's wait, never begins without its own — and its poll was the frame's one (no second pollEvents).
     const bool earlyWaited = std::exchange(mEarlyWaited, false);
@@ -2951,6 +2966,8 @@ void VrSession::beginFrame() {
         return;
     }
     mSaidNoPose = false;
+    mFramePoseSerial = ++mPoseSerial;   // THE POSE THIS FRAME DRAWS (ONE-FRAME-1: PublishedEngineFrame::poseSerial)
+    mFrameDisplayTimeNs = (long long)mFrameState.predictedDisplayTime;
     setSessionViewEnabled(true);
     // THE RUNTIME IS DRAWING AGAIN: the desktop is the eye's copy from the
     // first frame that has been DRAWN (setDesktopShowsEye refuses to hide a
@@ -4864,6 +4881,11 @@ void vrSessionBeginFrame(VrSession *s) { if (s) s->beginFrame(); }
 Ogre::CompositorWorkspace *vrSessionMirrorWorkspace(VrSession *s) { return s ? s->mirrorWorkspace() : nullptr; }
 void vrSessionEndFrame(VrSession *s) { if (s) s->endFrame(); }
 bool vrSessionWaitedThisFrame(const VrSession *s) { return s && s->waitedThisFrame(); }
+void vrSessionFramePose(const VrSession *s, unsigned long long &poseSerial, long long &displayTimeNs)
+{
+    poseSerial = s ? s->framePoseSerial() : 0ull;
+    displayTimeNs = s ? s->frameDisplayTimeNs() : 0ll;
+}
 void vrSessionWaitFrameEarly(VrSession *s) { if (s) s->waitFrameEarly(); }
 VrState vrSessionState(const VrSession *s) { return s ? s->state() : VrState::Unavailable; }
 bool vrSessionIsOver(const VrSession *s) { return s && s->isOver(); }

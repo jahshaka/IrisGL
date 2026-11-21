@@ -129,9 +129,10 @@ void main()
 	oldLum = haveHistory ? oldLum : newLum;
 	newLum = ( !haveMeasurement && haveHistory ) ? oldLum : newLum;
 
-	// Adapt 75 % per second, on the engine's FIXED clock (frame_time is
-	// ControllerManager's frame-delay value, 1/60 s - the engine has no wall
-	// clock, CLAUDE.md). Counted in frames, like every settle in the suites.
+	// Adapt 75 % per second of SCENE time (ONE-FRAME-1): timeSinceLast is
+	// the steps the view's scene advanced this frame x its period, set per
+	// view by the engine (OgreChain.cpp) - 0 on a frame nobody stepped the
+	// scene, never the particles' scaled time. The engine has no wall clock.
 	imageStore( lumOut, ivec2( 0, 0 ),
 				vec4( mix( newLum, oldLum, pow( 0.25, timeSinceLast ) ), 0.0, 0.0, 0.0 ) );
 }
