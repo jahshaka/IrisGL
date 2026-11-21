@@ -1,5 +1,11 @@
 @insertpiece( SetCrossPlatformSettings )
 #extension GL_ARB_shader_group_vote: require
+// NONDET-1: THE SMALL FIXED LOOPS ARE UNROLLED ([[unroll]] in LightInjection_piece_cs.any) - every local array of the
+// injection (halfLight, visH, jahHalfVal, emitU, the halves' faces) is then indexed by constants. Dynamically indexed, a
+// driver was measured reading back a value of halfLight that no line assigns (a down-facing half whose lamp term is
+// skipped stored -65504 in the first fade of a process); unrolled, never (SPECS/NONDET_1_SPEC.md, stage 2). The cause
+// below the API is not shown; the unrolled form is correct in itself.
+#extension GL_EXT_control_flow_attributes: require
 
 #define OGRE_imageLoad3D( inImage, iuv ) imageLoad( inImage, int3( iuv ) )
 #define OGRE_imageWrite3D1( outImage, iuv, value ) imageStore( outImage, int3( iuv ), value )

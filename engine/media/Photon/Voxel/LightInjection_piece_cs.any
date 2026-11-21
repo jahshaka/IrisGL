@@ -393,7 +393,7 @@
 	jahHalfNrm[2] = OGRE_Load3D( voxelHalfNrmZ, jahInjCell, 0 );
 
 	float3 halfLight[6];
-	for( int q = 0; q < 6; ++q )
+	[[unroll]] for( int q = 0; q < 6; ++q )
 		halfLight[q] = float3( 0.0f, 0.0f, 0.0f );
 
 	if( anyInvocationARB( c > 0 ) )
@@ -478,15 +478,15 @@
 
 			// each half's visibility, marched once per lamp and only where it is needed
 			float visH[6];
-			for( int q = 0; q < 6; ++q )
+			[[unroll]] for( int q = 0; q < 6; ++q )
 				visH[q] = -1.0f;
 
 			// PER HALF-AXIS: the half's side normal (the canonical normal or its opposite, the
 			// one whose component along the axis looks the half's way; a one-sided voxel's own
 			// normal where it does, the axis otherwise), its cosine, its march from its face.
-			for( int h = 0; h < 2; ++h )
+			[[unroll]] for( int h = 0; h < 2; ++h )
 			{
-				for( int a = 0; a < 3; ++a )
+				[[unroll]] for( int a = 0; a < 3; ++a )
 				{
 					const float o = h == 0 ? covP0[a] : covN0[a];
 					if( !( o > 0.0f ) )
@@ -576,9 +576,9 @@
 	// term's), and the fused step 0's input below (the directional level 0 is composited from the same values). Level 0
 	// holds nothing else: the two sides the store held are deleted (VOXEL-R13 stage 2).
 	float4 jahHalfVal[6];
-	for( int h = 0; h < 2; ++h )
+	[[unroll]] for( int h = 0; h < 2; ++h )
 	{
-		for( int a = 0; a < 3; ++a )
+		[[unroll]] for( int a = 0; a < 3; ++a )
 		{
 			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
 			jahHalfVal[h * 3 + a] = k > 0.0f && c > 0.0f
@@ -619,9 +619,9 @@
 	float jahDirChange = 0.0f;
 	float3 jahAbsDir3 = float3( 0.0f, 0.0f, 0.0f );
 	bool jahChanged = false;
-	for( int h = 0; h < 2; ++h )
+	[[unroll]] for( int h = 0; h < 2; ++h )
 	{
-		for( int a = 0; a < 3; ++a )
+		[[unroll]] for( int a = 0; a < 3; ++a )
 		{
 			const int3 t = jahHalfTexel( voxelId, h, a, jahHalfW );
 			const float4 v = jahHalfVal[h * 3 + a];
@@ -671,9 +671,9 @@
 
 	// THE FUSED STEP 0: the directional level 0 from the block's children per half-axis.
 	const uint li = gl_LocalInvocationIndex;
-	for( int h = 0; h < 2; ++h )
+	[[unroll]] for( int h = 0; h < 2; ++h )
 	{
-		for( int a = 0; a < 3; ++a )
+		[[unroll]] for( int a = 0; a < 3; ++a )
 		{
 			const float k = min( h == 0 ? covP0[a] : covN0[a], 1.0f );
 			jahHalfLight[li * 6u + uint( h * 3 + a )] = jahHalfVal[h * 3 + a];
@@ -693,7 +693,7 @@
 		// the -a texel (even) is read travelling +a: the faces looking -a (half 1); the +a one half 0
 		const uint hIdx = ( dir & 1u ) != 0u ? 0u : 1u;
 		float4 accumVal = float4( 0, 0, 0, 0 );
-		for( int p = 0; p < 4; ++p )
+		[[unroll]] for( int p = 0; p < 4; ++p )
 		{
 			const uint3 cf = bl * 2u + uint3( jahDirOffsets[jahDirFront[dir * 4u + uint( p )]] );
 			const uint3 cb = bl * 2u + uint3( jahDirOffsets[jahDirBack[dir * 4u + uint( p )]] );
