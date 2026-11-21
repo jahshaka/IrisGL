@@ -702,6 +702,13 @@ namespace Ogre
         if( mVoxelizerTexturesChanged )
         {
             createTextures();
+            // THE STORES ARE NEW, AND UNWRITTEN (NONDET-1 H3): this update injects WHOLE (a delta would read the old
+            // direct term and the total from fresh memory) and every brick starts cleared, as a fresh chain's does.
+            mCommit = CommitLightState();
+            resetBrickState();
+            LogManager::getSingleton().logMessage(
+                "PhotonVoxelLighting " + StringConverter::toString( getId() ) +
+                ": the light stores were re-created (the voxeliser's volumes changed): a whole injection follows" );
             // The textures have been re-created; the request has been served. Without
             // this the flag stays raised for the object's whole life (it is only ever
             // assigned false in the constructor), so a voxelizer that loses residency
