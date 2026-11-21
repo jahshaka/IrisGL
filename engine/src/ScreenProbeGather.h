@@ -536,6 +536,11 @@ public:
     /// reflection listener's hook (after the prepass, before the opaque pass
     /// that shades). `key` identifies the view's listener and nothing else.
     void record(const void *key, const GatherInputs &in);
+    /// THE PIPELINES, BUILT AHEAD (COLD-BOOT-1 stage 4; the tier's kAheadGather): every layout, module, pipeline and the
+    /// pool, on the tier's builder thread - Vulkan objects of this object's own, nothing logged. True when made.
+    bool buildPipelines(std::string &err) { return makePipelines(err); }
+    /// The ahead build failed: the gather is off on this device, said ONCE (record() then returns at its head).
+    void notePipelinesFailed(const std::string &err);
     /// THE SECOND HALF of a frame (PHOTON-HIT-SHADE-1): `record` places and
     /// TRACES (in front of the hit decode pass, whose records the traces append
     /// to); this runs the filter, the SH, the integrate and the pass-scoped
@@ -921,6 +926,8 @@ private:
     /// fallback picture (the cones and the field) for the rest of the process.
     /// A failed ALLOCATION does not latch — see `record`.
     bool mFailed = false;
+    /// The "gather is on" line said (record(), the first frame its pipelines are there).
+    bool mAnnounced = false;
     /// ...and why, for `GiStatus::gather.error`: a row that silently does
     /// nothing is the worst of the three outcomes.
     std::string mLastError;

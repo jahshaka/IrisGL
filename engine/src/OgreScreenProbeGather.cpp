@@ -1633,20 +1633,27 @@ void ScreenProbeGather::hold(View &v, const GatherInputs &in, bool temporal) {
     v.recordedDraw = v.scene ? v.scene->drawSerial() : 0u;
 }
 
+void ScreenProbeGather::notePipelinesFailed(const std::string &err) {
+    if (mFailed) return;
+    mFailed = true;
+    mLastError = err;
+    Ogre::LogManager::getSingleton().logMessage("Jahshaka: the screen-probe gather is off on this device — " + err);
+}
+
 void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (mFailed || !in.scene || !in.sceneMgr || !in.hits.tlas || !in.normals || !in.depth || !in.shadowRough) return;
     if (!in.width || !in.height) return;
     const auto cpuStart = Clock::now();
 
-    if (!mPlacePipeline) {
+    if (!mPlacePipeline) {   // the tier's ahead build was refused: built now, in the frame (as before COLD-BOOT-1)
         std::string err;
         if (!makePipelines(err)) {
-            mFailed = true;
-            mLastError = err;
-            Ogre::LogManager::getSingleton().logMessage(
-                "Jahshaka: the screen-probe gather is off on this device — " + err);
+            notePipelinesFailed(err);
             return;
         }
+    }
+    if (!mAnnounced) {
+        mAnnounced = true;
         Ogre::LogManager::getSingleton().logMessage(
             "Jahshaka: the SCREEN-PROBE GATHER is on — the diffuse GI of every covered pixel "
             "is estimated from probe rays (SPECS/SCREEN_PROBE_GATHER_SPEC.md)");

@@ -3600,7 +3600,9 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.running   = c->isRunning();
     out.threads   = c->getNumThreads();
     // THE RAY PIPELINES IN FLIGHT COUNT (ORPHAN-REDS-1): the async-shader rule's other compiles (RayQueryTier::aheadReady)
-    out.pending   = c->getNumOutstanding() + rayAheadInFlight();
+    out.rayBuildsInFlight = rayAheadInFlight();
+    out.pending   = c->getNumOutstanding() + out.rayBuildsInFlight;
+    out.rayBuildsJoinedWaiting = rayAheadJoinedWaiting();
     out.completed = c->getNumCompleted();
     out.failed    = c->getNumFailed();
     out.placeholderDraws = mRetiredPlaceholderDraws;
@@ -3621,8 +3623,10 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     mShaderCache.backgroundCompiles(background, foreground);
     out.compiledInBackground = background;
     out.compiledInForeground = foreground;
-    if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms())
+    if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) {
         out.paramsMisfits = hc->getJahParamsMisfits();
+        out.computeDeferred = hc->getNumDeferredDispatches();
+    }
     out.compileErrors = Ogre::GpuProgram::getJahCompileErrors();
     return out;
 }
@@ -3632,6 +3636,13 @@ void OgreEngine::waitForAsyncShaders() {
     if (!mRoot) return;
     mRoot->getHlmsManager()->getAsyncCompiler()->waitForAll();
     joinRayAhead();   // ...and the ray pipelines' builds in flight (ORPHAN-REDS-1: the same rule's compiles)
+}
+
+void OgreEngine::prepareRayPipelines() {
+    // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
+    if (postedAsMessage([](OgreEngine &e) { e.prepareRayPipelines(); return true; })) return;
+    if (!mRayTracingWanted || mHeadless || !mRoot) return;
+    launchRayPipelines();
 }
 
 ShaderCacheStats OgreEngine::shaderCacheStats() const {
@@ -4750,6 +4761,7 @@ ValidationStatus OgreEngine::validation() const {
 }  // namespace detail
 
 void markProcessExit() { detail::gProcessExit.store(true, std::memory_order_release); }
+bool detail::processExitMarked() { return gProcessExit.load(std::memory_order_acquire); }
 void setProcessExitHook(ProcessExitHook hook) { detail::gProcessExitHook.store(hook, std::memory_order_release); }
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
 unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }

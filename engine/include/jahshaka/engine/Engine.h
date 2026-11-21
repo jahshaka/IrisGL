@@ -3118,6 +3118,13 @@ public:
     /// Blocks until nothing is pending, publishing as jobs land. For tests and for a
     /// caller that must hand over a finished picture; never on an interactive path.
     virtual void waitForAsyncShaders() = 0;
+    /// THE RAY PIPELINES, STARTED NOW (COLD-BOOT-1 stage 4): every ray-tier pipeline the editor's frames can need is
+    /// handed to its build worker at once, the reflection's first - its cold driver compile is two thirds of a first
+    /// launch (spikes/cold-boot-1/S1b: reflect 50.5 s, reflect-compact 49.9 s). Nothing waits: each build counts in
+    /// published().shaders.pending until it is joined, and a frame of an asynchronous scene takes its own "not this
+    /// frame" path meanwhile. The startup gate calls it at its first frame. A no-op without the ray tier (no ray query,
+    /// headless).
+    virtual void prepareRayPipelines() = 0;
 
     /// The startup progress counter's source: shaders compiled so far, shaders
     /// served from the cache so far, and how many the last saved run needed in

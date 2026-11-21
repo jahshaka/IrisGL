@@ -20,8 +20,11 @@
 //   render      the render thread [1] + the primary scene's SceneManager pool [8] = clamp(hardware, 2, 8), measured.
 //               It runs WHILE the game thread steps (physics.step_overlap), so the two sets never share a thread.
 //   dedicated   the shader cache's writer [1], Ogre's texture streaming thread [1], the texture multiload pool
-//               [6] = min(6, max(2, hardware / 2)). BURSTY, NOT PER-FRAME (a texture load, a cache write): sized as
-//               they are and NOT subtracted from the frame's set.
+//               [6] = min(6, max(2, hardware / 2)), the ray tier's pipeline builders [8] = min(8, max(1, hardware / 2))
+//               (COLD-BOOT-1 stage 4: one per ray pipeline group at the startup gate's start, each one uninterruptible
+//               driver compile; at a LOWER priority than the render thread and the scene workers, so a build in a live
+//               session - a headset on - never takes a frame's time). BURSTY, NOT PER-FRAME (a texture load, a cache
+//               write, a cold pipeline): sized as they are and NOT subtracted from the frame's set.
 //   background  each below-normal pool's width [4] = hardware - the active set, at least 2: Qt's global pool (the 28
 //               QtConcurrent sites: parses, bakes, encodes, file I/O), the bake pool's workers (nice 19), the tile
 //               cache's and the bake store's own pools (min(theirs, it)).
@@ -53,9 +56,10 @@ struct ThreadBudget
     int writer = 1;       ///< the shader cache's writer thread
     int streaming = 1;    ///< Ogre's texture streaming thread
     int multiload = 0;    ///< Ogre's texture multiload pool
+    int rayBuilds = 1;    ///< the ray tier's pipeline builders running at once (COLD-BOOT-1 stage 4)
     int background = 2;   ///< each below-normal pool's width (Qt's global pool, the bake pool's workers)
 
-    int dedicated() const { return writer + streaming + multiload; }
+    int dedicated() const { return writer + streaming + multiload + rayBuilds; }
     /// Bullet's scheduler threads: the game thread + its workers (btITaskScheduler::getNumThreads).
     int bulletThreads() const { return game + foreground; }
     /// The per-frame active set: the law's left side (the dedicated set is bursty and not in it).
@@ -77,6 +81,7 @@ inline ThreadBudget threadBudgetFor(int hardware, int sceneThreads = -1, int mul
     b.hardware = std::max(1, hardware);
     b.ogrePool = sceneThreads > 0 ? std::clamp(sceneThreads, 1, 32) : std::clamp(b.hardware, 2, 8);
     b.multiload = multiload >= 0 ? std::clamp(multiload, 0, 32) : std::min(6, std::max(2, b.hardware / 2));
+    b.rayBuilds = std::min(8, std::max(1, b.hardware / 2));
     if (physicsThreads > 0)
         b.foreground = std::clamp(physicsThreads, 1, 32) - b.game;
     else

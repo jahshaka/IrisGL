@@ -3228,6 +3228,9 @@ TextureCache &textureCache();
 //      layer's slot of rule 5's order, under the same key and checksum rules;
 //      never written, locked or wiped. The directory's own layer, once a session
 //      saves one, holds the seed's entries too (the map it saves began as the seed).
+/// The process is ending at the engine's death (markProcessExit, ProcessExit.h, URGENT #102): the exit-only teardown.
+bool processExitMarked();
+
 class ShaderCache {
 public:
     /// Resolves the directory and computes the fingerprint. No I/O beyond
@@ -9448,6 +9451,11 @@ public:
     unsigned rayAheadInFlight() const;
     void joinRayAhead();
     void waitForAsyncShaders() override;
+    void prepareRayPipelines() override;
+    /// The ray tier's joins of a pipeline build that was NOT finished (a frame or a wait that blocked on a driver compile).
+    unsigned long long rayAheadJoinedWaiting() const;
+    /// prepareRayPipelines' body (OgreRayQuery.cpp): the tier opened if it is not, every ahead build launched.
+    void launchRayPipelines();
 
     ~OgreEngine() override;
 

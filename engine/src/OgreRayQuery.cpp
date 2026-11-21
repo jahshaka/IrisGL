@@ -53,6 +53,14 @@
 // exposes neither extension: SPECS/research/MOLTENVK_RAY_QUERY_2026-09-14.md).
 #include "AtomPass.h"
 #include <thread>
+#include <cassert>
+#include <cerrno>
+#include <condition_variable>
+#include <mutex>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include "core/threadbudget.h"   // the ray builders' tier (COLD-BOOT-1 stage 4)
 #include "ReadbackDecode.h"
 #include "ReflectChainRules.h"
 #include "EnginePrivate.h"
@@ -959,7 +967,10 @@ private:
     /// async-shader rule's (OgreScene::compilesInBackground): where the scene compiles in the background the consumer
     /// takes its own "not this frame" path and the build counts as pending (asyncShaderStats; waitForAsyncShaders joins
     /// it); everywhere else the consumer joins it in the frame, so the frames are what they were.
-    enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadGlassEscape, kAheadCount };
+    /// (COLD-BOOT-1 stage 4) kAheadGather: the screen-probe gather's twelve pipelines (its trace and its integrate the two
+    /// heavy ones, 13.4 s cold in the render thread's frame before - spikes/cold-boot-1/S1b) on a worker like the rest.
+    enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadGlassEscape, kAheadGather,
+                   kAheadCount };
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
@@ -968,15 +979,32 @@ private:
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
     };
     Ahead mAhead[kAheadCount];
+    /// THE BUILDERS' SLOTS (COLD-BOOT-1 stage 4; irisgl/core/threadbudget.h, ThreadBudget::rayBuilds): a worker takes one
+    /// before its driver compiles and gives it back after, so no more than the tier's width build at once; the reflection's
+    /// worker, launched first, takes the first. A worker waits for a slot ON ITS OWN THREAD - never the render thread.
+    std::mutex              mSlotMutex;
+    std::condition_variable mSlotCv;
+    int                     mSlotsFree = 0;
+    /// Joins of a build that was NOT finished: a frame or a wait blocked on a driver compile (published:
+    /// AsyncShaderStats::rayBuildsJoinedWaiting). The teardown's joins are not counted.
+    unsigned long long mJoinedWaiting = 0;
+    /// THE JOIN-FREE EXIT (COLD-BOOT-1 stage 4; abandonAhead): set once the process ends at the engine's death with a
+    /// build in flight. A worker that sees it after its driver call returns skips every step of ours that follows.
+    std::atomic<bool> mAbandoned{ false };
     void startAhead();
     /// Starts build `id` on its worker (once; the shared samplers made here first). False when it cannot start (the
     /// samplers refused, or it was built on the render thread already): the consumer's make*Pipeline builds now.
     bool launchAhead(AheadId id);
-    void joinAhead(AheadId id);
+    void joinAhead(AheadId id, bool counted = true);
+    /// The gather's build, on its worker (kAheadGather): the gather object is made on the render thread at the launch.
+    bool makeGatherPipelinesNow(std::string &err);
 public:
     /// THE REFLECTION's NEED (ORPHAN-REDS-1): a drawn view's chain carries the ray reflection, so its recordReflect
     /// runs this frame - its build starts now, if it is not started (the render thread; no wait), before the passes.
     void needReflectAhead() { launchAhead(kAheadReflect); }
+    /// EVERY BUILD AT ONCE (Engine::prepareRayPipelines, COLD-BOOT-1 stage 4): the startup gate's first frame starts them
+    /// all, the reflection's first (the id order) - each on its own worker, none waited for here.
+    void launchAllAhead() { for (unsigned i = 0; i < kAheadCount; ++i) launchAhead(AheadId(i)); }
     /// The finished builds joined, their lines logged (each frame, the render thread: a finished build never waits for
     /// its consumer to be counted done).
     void harvestAhead();
@@ -984,6 +1012,11 @@ public:
     void joinAllAhead() { for (unsigned i = 0; i < kAheadCount; ++i) joinAhead(AheadId(i)); }
     /// The builds started and not joined: AsyncShaderStats::pending counts them.
     unsigned aheadInFlight() const;
+    unsigned long long joinedWaiting() const { return mJoinedWaiting; }
+    /// THE JOIN-FREE EXIT (the lead's ruling, COLD-BOOT-1 stage 4): only in the exit-only teardown (processExitMarked).
+    /// Every build still in flight is DETACHED and the tier is never destroyed (OgreEngine keeps it, as it keeps Root): one
+    /// uninterruptible driver call (a cold rq_reflect: ~50 s) no longer holds the process's end. True when any was.
+    bool abandonAhead();
 private:
     /// THE CONSUMER's DOOR (ORPHAN-REDS-1): its build started if it was not; true = joined (or never startable - the
     /// make*Pipeline's own build now): read the setup; false = in flight in a scene that compiles in the background
@@ -2661,6 +2694,10 @@ VkResult RayQueryTier::createComputePipeline(const VkComputePipelineCreateInfo &
     const VkResult r = vkCreateComputePipelines(mVk, mDev ? mDev->mPipelineCache : VK_NULL_HANDLE, 1, &cpi, nullptr, out);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (tAheadNotes) {   // a worker: noted for the join, never logged here
+        // ABANDONED (abandonAhead): the process is ending at the engine's death. The driver's call has returned into this
+        // kept object; nothing of ours runs after it - the build reports a failure, so its make*Pipeline returns at once
+        // (every one returns on a failed create, building and writing nothing more) and the thread function ends.
+        if (mAbandoned.load(std::memory_order_acquire)) return VK_ERROR_INITIALIZATION_FAILED;
         tAheadNotes->push_back({ name ? name : "", ms, r });
         return r;
     }
@@ -2808,7 +2845,23 @@ void RayQueryTier::startAhead() {
     // THE OPEN (ORPHAN-REDS-1): each starts on its need (needAhead, aheadReady).
     std::string err;
     ensureSamplers(err);   // refused: every launch refuses too and the consumers build now, as before
+    mSlotsFree = std::max(1, iris::threadBudget().rayBuilds);
 }
+
+namespace {
+/// A ray pipeline builder runs BELOW the render thread and the scene workers (the lead's ruling, VR FIRST: a build in a
+/// live session with a headset on never takes a frame's time). Linux: this thread's nice raised by 10, as the Hlms
+/// async compiler's (fork OgreHlmsAsyncCompiler.cpp). (macOS: pthread_set_qos_class_self_np(QOS_CLASS_UTILITY);
+/// Windows: SetThreadPriority(THREAD_PRIORITY_BELOW_NORMAL) - not built.)
+void lowerBuilderPriority() {
+#if defined(__linux__)
+    const id_t tid = static_cast<id_t>(syscall(SYS_gettid));
+    errno = 0;
+    const int current = getpriority(PRIO_PROCESS, tid);
+    if (errno == 0) setpriority(PRIO_PROCESS, tid, std::min(19, current + 10));
+#endif
+}
+}   // namespace
 
 bool RayQueryTier::launchAhead(AheadId id) {
     Ahead &a = mAhead[id];
@@ -2818,13 +2871,29 @@ bool RayQueryTier::launchAhead(AheadId id) {
     static bool (RayQueryTier::*const kMake[kAheadCount])(std::string &) = {
         &RayQueryTier::makeReflectPipelineNow, &RayQueryTier::makeCardGatherPipelineNow,
         &RayQueryTier::makeCardMoverPipelineNow, &RayQueryTier::makeVoxelSidePipelineNow,
-        &RayQueryTier::makeGlassEscapePipelinesNow };
+        &RayQueryTier::makeGlassEscapePipelinesNow, &RayQueryTier::makeGatherPipelinesNow };
     bool (RayQueryTier::*make)(std::string &) = kMake[id];
+    // THE GATHER's OBJECT IS MADE HERE, on the render thread (its readers there test the pointer); the worker builds
+    // only its pipelines.
+    if (id == kAheadGather && !mGather) mGather = new ScreenProbeGather(*this);
     a.started = true;
     a.th = std::thread([this, &a, make]() {
+        lowerBuilderPriority();
+        {   // a slot of the tier's width (mSlotsFree), waited for here, on this thread
+            std::unique_lock<std::mutex> lock(mSlotMutex);
+            mSlotCv.wait(lock, [this] { return mSlotsFree > 0; });
+            --mSlotsFree;
+        }
         tAheadNotes = &a.notes;
         a.ok = (this->*make)(a.err);
         tAheadNotes = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mSlotMutex);
+            ++mSlotsFree;
+        }
+        mSlotCv.notify_one();
+        // ABANDONED: the build ended by the exit's flag reports no success (createComputePipeline) - nothing of it is read.
+        assert(!mAbandoned.load(std::memory_order_acquire) || !a.ok);
         a.done.store(true, std::memory_order_release);
     });
     return true;
@@ -2854,9 +2923,10 @@ unsigned RayQueryTier::aheadInFlight() const {
     return n;
 }
 
-void RayQueryTier::joinAhead(AheadId id) {
+void RayQueryTier::joinAhead(AheadId id, bool counted) {
     Ahead &a = mAhead[id];
     if (!a.started || a.joined) return;
+    if (counted && !a.done.load(std::memory_order_acquire)) ++mJoinedWaiting;   // a wait on a driver compile
     const auto t0 = std::chrono::steady_clock::now();
     if (a.th.joinable()) a.th.join();
     a.joined = true;
@@ -2873,6 +2943,30 @@ void RayQueryTier::joinAhead(AheadId id) {
             " - built ahead on a worker, the render thread waited " + std::to_string(waited) + " ms");
     }
     a.notes.clear();
+}
+
+bool RayQueryTier::abandonAhead() {
+    bool any = false;
+    for (Ahead &a : mAhead)
+        if (a.started && !a.joined && !a.done.load(std::memory_order_acquire)) any = true;
+    if (!any) return false;
+    mAbandoned.store(true, std::memory_order_release);
+    // WHAT A DETACHED WORKER CAN STILL RUN: the driver's vkCreateComputePipelines it is inside returns into this kept
+    // object; createComputePipeline then sees mAbandoned and returns a failure without a note, the make*Pipeline returns
+    // on it (no further create, no log, no status, no cache dirt - those are the render thread's at a join, which never
+    // comes), the slot is given back and `done` set, and the thread function ends - or the process's _Exit ends it first.
+    for (Ahead &a : mAhead)
+        if (a.started && !a.joined && a.th.joinable()) {
+            a.th.detach();
+            a.joined = true;
+        }
+    return true;
+}
+
+bool RayQueryTier::makeGatherPipelinesNow(std::string &err) {
+    // the gather's own build (ScreenProbeGather::buildPipelines): its layouts, modules, twelve pipelines (through this
+    // tier's createComputePipeline: noted on a worker) and its pool - Vulkan objects of its own, no Ogre object
+    return mGather && mGather->buildPipelines(err);
 }
 
 bool RayQueryTier::makePipeline(std::string &err) {
@@ -2963,8 +3057,8 @@ void RayQueryTier::releaseScene(OgreScene *scene) {
 
 void RayQueryTier::close() {
     if (!mVk) return;
-    // the ahead builds first: they write the members this destroys
-    for (unsigned i = 0; i < kAheadCount; ++i) joinAhead(AheadId(i));
+    // the ahead builds first: they write the members this destroys (the teardown's joins: not counted)
+    for (unsigned i = 0; i < kAheadCount; ++i) joinAhead(AheadId(i), false);
     // EVERY STRUCTURE DIES WHILE THE DEVICE IS STILL ALIVE. This runs from
     // OgreEngine::shutdownRayQuery, before Root is deleted — the same rule the
     // engine's MeshPtrs obey, and for the same reason.
@@ -9741,7 +9835,11 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     in.projB = float(projAB.y);
     in.farClip = float(cam->getFarClipDistance());
 
+    // ITS PIPELINES ARE AN AHEAD BUILD (kAheadGather, COLD-BOOT-1 stage 4): in flight in a scene that compiles in the
+    // background, not this frame; joined everywhere else. A launch that was refused builds them now, in record().
+    if (!aheadReady(kAheadGather, view ? view->ogreScene() : nullptr)) return;
     if (!mGather) mGather = new ScreenProbeGather(*this);
+    if (mAhead[kAheadGather].started && !mAhead[kAheadGather].ok) mGather->notePipelinesFailed(mAhead[kAheadGather].err);
     mGather->record(key, in);
     // The overlay holds the discs once an integrate has written it (a held frame
     // keeps the last one).
@@ -14068,10 +14166,19 @@ void registerPhotonRayPasses(AtomPassProvider *provider) {
 }
 
 unsigned OgreEngine::rayAheadInFlight() const { return mRayTier ? mRayTier->aheadInFlight() : 0u; }
+unsigned long long OgreEngine::rayAheadJoinedWaiting() const { return mRayTier ? mRayTier->joinedWaiting() : 0u; }
+
+void OgreEngine::launchRayPipelines() {
+    ensureRayTier();
+    if (mRayTier) mRayTier->launchAllAhead();
+}
 
 void OgreEngine::joinRayAhead() {
     if (mRayTier) mRayTier->joinAllAhead();
 }
+
+/// THE TIER A PROCESS's END KEPT (shutdownRayQuery's join-free exit): reachable, like the kept Root, until the _Exit.
+static RayQueryTier *gKeptRayTier = nullptr;
 
 void OgreEngine::shutdownRayQuery() {
     if (!mRayTier) return;
@@ -14079,6 +14186,15 @@ void OgreEngine::shutdownRayQuery() {
         if (sc) mRayTier->detachFeed(sc.get());
     // EVERY LIVE SCENE'S STRUCTURES FIRST (they are the scene's, not the tier's):
     // released behind one idle device, then the tier's own plumbing.
+    // THE JOIN-FREE EXIT (COLD-BOOT-1 stage 4, the lead's ruling): at the process's end (the exit-only teardown) a build
+    // still in flight is detached and the tier KEPT, as Root is: nothing of ours is destroyed under its worker, and the
+    // process ends at the engine's death (ProcessExit.h) instead of waiting out one uninterruptible driver compile
+    // (~50 s for a cold rq_reflect). A real destroy joins, as before (vkDestroyDevice needs the builds over).
+    if (processExitMarked() && mRayTier->abandonAhead()) {
+        gKeptRayTier = mRayTier;
+        mRayTier = nullptr;
+        return;
+    }
     mRayTier->waitIdle();
     for (auto &sc : mScenes)
         if (sc) mRayTier->releaseScene(sc.get());
@@ -14210,6 +14326,8 @@ void OgreEngine::ensureRayTier() {}
 // reflection, the hits - runs without it; movers are not voxel geometry)
 void OgreEngine::listRayMovers(const std::vector<OgreScene *> &) {}
 unsigned OgreEngine::rayAheadInFlight() const { return 0u; }
+unsigned long long OgreEngine::rayAheadJoinedWaiting() const { return 0u; }
+void OgreEngine::launchRayPipelines() {}
 void OgreEngine::joinRayAhead() {}
 void OgreEngine::shutdownRayQuery() {}
 void registerPhotonRayPasses(AtomPassProvider *) {}

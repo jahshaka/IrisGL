@@ -7308,6 +7308,16 @@ struct AsyncShaderStats {
     double             graphicsPsoMs = 0.0;
     unsigned long long computePsos = 0;
     double             computePsoMs = 0.0;
+    /// THE GATE's LAW (COLD-BOOT-1 stage 4): joins of a ray pipeline build that was NOT finished - a frame or a wait that
+    /// blocked on a driver compile (a running total; the teardown's joins are not counted). After the startup gate and
+    /// in every editor frame it reads 0: the gate waits on `pending`, never on a join.
+    unsigned long long rayBuildsJoinedWaiting = 0;
+    /// Of `pending`, the ray pipeline builds in flight (the rest is the background compiler's): the startup gate's
+    /// world phases wait for these before their consumers' frames (COLD-BOOT-1 stage 4).
+    unsigned           rayBuildsInFlight = 0;
+    /// Compute dispatches DEFERRED because their permutation was building in the background (a running total, the
+    /// fork's HlmsCompute::getNumDeferredDispatches): a frame that moved it did not do all its work.
+    unsigned long long computeDeferred = 0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk
