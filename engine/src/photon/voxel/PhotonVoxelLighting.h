@@ -683,39 +683,6 @@ namespace Ogre
 
     public:
 
-        /** Points this PhotonVoxelLighting at a DIFFERENT voxelizer, in place.
-
-            A PhotonVoxelLighting is normally bound to the voxelizer it was constructed with for
-            its whole life. That is a problem for any caller that must re-voxelize with a
-            FRESH PhotonVoxelizer rather than rebuild an existing one -- PhotonVoxelMaterial caches
-            each datablock's conversion by raw pointer for the voxelizer's lifetime, so a
-            material whose parameters changed (or whose datablock died and whose address
-            was recycled) can only be answered by a new voxelizer. Destroying the
-            PhotonVoxelLighting as well is not an option when it is part of a cascade chain:
-            addCascade() hands the cascades inside this one raw pointers to it and
-            fillConstBufferData() walks them on every pass, so replacing one cascade's
-            lighting forces every cascade inside it to be rebuilt in the same frame.
-
-            Everything this object holds that depends on the voxelizer is re-derived here:
-            the TextureGpuListener registrations move to the new albedo/normal textures
-            and the light voxel textures are re-created from the new resolution -- the
-            same recovery the LostResidency path performs.
-        @remarks
-            The new voxelizer must already have been built (its albedo texture is what the
-            light voxels are sized from), and the caller keeps ownership of both: the old
-            one is only safe to destroy AFTER this returns.
-        @param voxelizer
-            The voxelizer to sample from now. Null or the current one is a no-op.
-        */
-        void setVoxelizer( PhotonVoxelizerSourceBase *voxelizer );
-
-        /// Upstream's VctImageVoxelizer::buildRelative called this (its voxeliser's
-        /// textures - albedo, normal, emissive - could be swapped for a copy). That class
-        /// is not in this fork (6be1ae1d7) and nothing here calls this any more.
-        ///
-        /// This function notifies us that buildRelative to update some of our references
-        void resetTexturesFromBuildRelative();
-
         size_t getNumCascades() const { return mExtraCascades.size() + 1u; }
 
         /// THE INJECTION'S CHAIN (PHOTON-7 stage 1, L1): this cascade's place in the scene's chain, innermost 0

@@ -724,25 +724,6 @@ namespace Ogre
         }
     }
     //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::setVoxelizer( PhotonVoxelizerSourceBase *voxelizer )
-    {
-        if( !voxelizer || voxelizer == mVoxelizer )
-            return;
-
-        if( !mVoxelizerListenersRemoved )
-        {
-            mVoxelizer->getAlbedoVox()->removeListener( this );
-        }
-
-        mVoxelizer = voxelizer;
-        // The same two requests a LostResidency notification raises, served immediately:
-        // re-create the light voxels from the new voxelizer's resolution and re-register
-        // as a listener on its albedo/normal textures.
-        mVoxelizerTexturesChanged = true;
-        mVoxelizerListenersRemoved = true;
-        checkTextures();
-    }
-    //-------------------------------------------------------------------------
     void PhotonVoxelLighting::setupBounceTextures( bool bSetSamplerRefs )
     {
         const size_t numExtraCascades = mExtraCascades.size();
@@ -1595,8 +1576,8 @@ namespace Ogre
         // hlms_num_vct_cascades from mExtraCascades.size() + 1 on every injection, and
         // the generated compute shader declares one light-voxel texture per cascade
         // (four with anisotropy) — but the job's TEXTURE UNIT COUNT and its bindings are
-        // only ever derived in setupBounceTextures(), which upstream calls from
-        // setAllowMultipleBounces() and resetTexturesFromBuildRelative(). Add a cascade
+        // only ever derived in setupBounceTextures(), which setAllowMultipleBounces()
+        // calls. Add a cascade
         // after enabling bounces and the shader asks for ogre_t6 while the root layout
         // still has six units: "'ogre_t6': unrecognized layout identifier", the compute
         // program fails to compile, and the whole PhotonVoxelLighting arm renders no GI at all
@@ -2013,7 +1994,7 @@ namespace Ogre
             // Jahshaka (PHOTON-VIEW-1; an upstream defect): setTrackingVoxel writes the
             // voxel-space box into the WORLD slot too, and the visualizer is STATIC - nothing
             // re-derives it, so the picture was culled wherever the volume is not at the
-            // world origin. Re-derived here, as resetTexturesFromBuildRelative does.
+            // world origin. Re-derived here.
             mDebugVoxelVisualizer->getWorldAabbUpdated();
         }
 
@@ -2205,29 +2186,6 @@ namespace Ogre
             mCommitDownloadOwed = false;
         }
         return true;
-    }
-    //-------------------------------------------------------------------------
-    void PhotonVoxelLighting::resetTexturesFromBuildRelative()
-    {
-        if( mDebugVoxelVisualizer )
-        {
-            Node *visNode = mDebugVoxelVisualizer->getParentNode();
-            visNode->setPosition( mVoxelizer->getVoxelOrigin() );
-            visNode->setScale( mVoxelizer->getVoxelCellSize() );
-
-            // The visualizer is static so force-update its transform manually
-            visNode->_getFullTransformUpdated();
-            mDebugVoxelVisualizer->getWorldAabbUpdated();
-        }
-
-        if( mVoxelizerTexturesChanged )
-        {
-            checkTextures();
-            return;
-        }
-
-        if( getAllowMultipleBounces() )
-            setupBounceTextures();
     }
     //-------------------------------------------------------------------------
     size_t PhotonVoxelLighting::getConstBufferSize() const
@@ -2438,7 +2396,7 @@ namespace Ogre
             visNode->attachObject( mDebugVoxelVisualizer );
 
             // Jahshaka (PHOTON-VIEW-1): the node and the box are STATIC - forced current
-            // here as resetTexturesFromBuildRelative does, or the first frames cull the
+            // here, or the first frames cull the
             // picture against the voxel-space box.
             visNode->_getFullTransformUpdated();
             mDebugVoxelVisualizer->getWorldAabbUpdated();

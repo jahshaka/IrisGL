@@ -3277,10 +3277,10 @@ void PhotonComponent::endDragGesture() {
 //     buffers are all KEPT.
 //   * whether the ITEM SET changed — answered by each build's gather, which
 //     reads membership off the GPU scene (ATOM P4b); nothing is held to re-select.
-//   * whether a DATABLOCK died or a material PARAMETER changed — the only case
-//     that needs a new voxeliser, and it gets one per cascade per frame with
-//     the chain's lighting objects (and so its raw `mExtraCascades` pointers)
-//     untouched (`PhotonVoxelLighting::setVoxelizer`, fork ae2ed529f+822d538f5 (was 0037)).
+//   * whether a DATABLOCK died or a material PARAMETER changed — answered by
+//     the chain's one material store, refreshed in place and evicted on a death;
+//     no voxeliser is replaced (they are made only by a chain build,
+//     buildCascadeArm; setVoxelizer, which once swapped one, is deleted: NONDET-1 N1).
 //   * and, when nothing geometric moved at all and the host asked, a whole RELIGHT — a re-INJECTION of every
 //     cascade's direct term over the voxels that are already there, never a re-voxelisation (a lamp is the
 //     changed-region list's: PHOTON-7 stage 4).
