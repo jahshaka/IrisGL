@@ -520,8 +520,9 @@ namespace Ogre
         // would be undefined. The direct volumes are float too since CONTACT-OCCLUSION-1
         // and carry no Reinterpretable either (their UAV views are their formats).
         // Jahshaka (ENGINE-UPGRADE-ASYNC-3 stage 1): a UAV and nothing more - the chains are
-        // written by compute (PhotonMipChain), never blitted.
-        const uint32 texFlags = TextureFlags::Uav;
+        // written by compute (PhotonMipChain), never blitted. ManualTexture by CODING_RULES section 2 (a texture we create):
+        // no code path moves - TextureGpu::isManualTexture already counts Uav (NONDET-1 READ-9 D).
+        const uint32 texFlags = TextureFlags::ManualTexture | TextureFlags::Uav;
 
         const bool bSdfQuality = shouldEnableSpecularSdfQuality();
 
@@ -1598,8 +1599,8 @@ namespace Ogre
         TextureGpuManager *textureManager = mVoxelizer->getTextureGpuManager();
         if( bAllowMultipleBounces )
         {
-            // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): not Reinterpretable -- see createTextures.
-            const uint32 texFlags = TextureFlags::Uav;
+            // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): not Reinterpretable -- see createTextures (and ManualTexture).
+            const uint32 texFlags = TextureFlags::ManualTexture | TextureFlags::Uav;
 
             char tmpBuffer[128];
             LwString texName( LwString::FromEmptyPointer( tmpBuffer, sizeof( tmpBuffer ) ) );
@@ -1623,7 +1624,7 @@ namespace Ogre
                 texName.a( "VctLightingDirectDir", i, "/Id", getId() );
                 TextureGpu *t = textureManager->createTexture(
                     texName.c_str(), GpuPageOutStrategy::Discard,
-                    TextureFlags::Uav, TextureTypes::Type3D );
+                    TextureFlags::ManualTexture | TextureFlags::Uav, TextureTypes::Type3D );
                 t->setResolution( mLightVoxel[1]->getWidth(), mLightVoxel[1]->getHeight(),
                                   mLightVoxel[1]->getDepth() );
                 // (level 0 alone: a hit reads the store's bounce part as T - D at its own level-0 half - BISTRO-REST-1)
@@ -1636,7 +1637,8 @@ namespace Ogre
             texName.clear();
             texName.a( "VctLightingHalfDirect/Id", getId() );
             mHalfDirect = textureManager->createTexture( texName.c_str(), GpuPageOutStrategy::Discard,
-                                                         TextureFlags::Uav, TextureTypes::Type3D );
+                                                         TextureFlags::ManualTexture | TextureFlags::Uav,
+                                                         TextureTypes::Type3D );
             mHalfDirect->setResolution( mHalfLight->getWidth(), mHalfLight->getHeight(), mHalfLight->getDepth() );
             mHalfDirect->setNumMipmaps( 1u );
             mHalfDirect->setPixelFormat( jahLightVoxelFormat() );
