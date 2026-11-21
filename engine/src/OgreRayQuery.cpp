@@ -61,6 +61,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "core/threadbudget.h"   // the ray builders' tier (COLD-BOOT-1 stage 4)
+#include "RayBuilderSlots.h"
 #include "ReadbackDecode.h"
 #include "ReflectChainRules.h"
 #include "EnginePrivate.h"
@@ -982,9 +983,8 @@ private:
     /// THE BUILDERS' SLOTS (COLD-BOOT-1 stage 4; irisgl/core/threadbudget.h, ThreadBudget::rayBuilds): a worker takes one
     /// before its driver compiles and gives it back after, so no more than the tier's width build at once; the reflection's
     /// worker, launched first, takes the first. A worker waits for a slot ON ITS OWN THREAD - never the render thread.
-    std::mutex              mSlotMutex;
-    std::condition_variable mSlotCv;
-    int                     mSlotsFree = 0;
+    RayBuilderSlots mSlots;   // RayBuilderSlots.h: take (a builder, waited on its own thread), tryTake (a second builder,
+                              // never a wait), give
     /// Joins of a build that was NOT finished: a frame or a wait blocked on a driver compile (published:
     /// AsyncShaderStats::rayBuildsJoinedWaiting). The teardown's joins are not counted.
     unsigned long long mJoinedWaiting = 0;
@@ -2845,7 +2845,7 @@ void RayQueryTier::startAhead() {
     // THE OPEN (ORPHAN-REDS-1): each starts on its need (needAhead, aheadReady).
     std::string err;
     ensureSamplers(err);   // refused: every launch refuses too and the consumers build now, as before
-    mSlotsFree = std::max(1, iris::threadBudget().rayBuilds);
+    mSlots.reset(iris::threadBudget().rayBuilds);
 }
 
 namespace {
@@ -2879,19 +2879,11 @@ bool RayQueryTier::launchAhead(AheadId id) {
     a.started = true;
     a.th = std::thread([this, &a, make]() {
         lowerBuilderPriority();
-        {   // a slot of the tier's width (mSlotsFree), waited for here, on this thread
-            std::unique_lock<std::mutex> lock(mSlotMutex);
-            mSlotCv.wait(lock, [this] { return mSlotsFree > 0; });
-            --mSlotsFree;
-        }
+        mSlots.take();   // a slot of the tier's width, waited for here, on this thread
         tAheadNotes = &a.notes;
         a.ok = (this->*make)(a.err);
         tAheadNotes = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(mSlotMutex);
-            ++mSlotsFree;
-        }
-        mSlotCv.notify_one();
+        mSlots.give();
         // ABANDONED: the build ended by the exit's flag reports no success (createComputePipeline) - nothing of it is read.
         assert(!mAbandoned.load(std::memory_order_acquire) || !a.ok);
         a.done.store(true, std::memory_order_release);
@@ -6570,29 +6562,50 @@ bool RayQueryTier::makeReflectPipelineNow(std::string &err) {
     cpi.stage.module = mReflectModule;
     cpi.stage.pName = "main";
     cpi.layout = mReflectPipeLayout;
-    if (createComputePipeline(cpi, &mReflectPipeline, "reflect") !=
-        VK_SUCCESS) {
+    // THE COMPACT PASS (kReflectCompactTexels): the same shader with its specialisation constant 0 (kCompactPass) true.
+    const VkBool32 compactOn = VK_TRUE;
+    VkSpecializationMapEntry entry{};
+    entry.constantID = 0u;
+    entry.offset = 0u;
+    entry.size = sizeof(VkBool32);
+    VkSpecializationInfo spec{};
+    spec.mapEntryCount = 1u;
+    spec.pMapEntries = &entry;
+    spec.dataSize = sizeof(VkBool32);
+    spec.pData = &compactOn;
+    VkComputePipelineCreateInfo ccpi = cpi;
+    ccpi.stage.pSpecializationInfo = &spec;
+    // THE PAIR SIDE BY SIDE (COLD-BOOT-1 stage 4; measured by its arm, spikes/cold-boot-1/S4arm): the two long driver
+    // compiles of the group - reflect and reflect-compact, 50.5 + 49.9 s serial cold - overlap on two threads (55.5 s,
+    // each own-thread CPU / wall 1.00). On a worker, the compact pass goes to a SECOND builder of the tier when a slot is
+    // free AT ONCE (RayBuilderSlots::tryTake: never a wait - a tier one wide builds the pair serially here and cannot deadlock on its
+    // own slot); its notes are its own, appended after the join in the serial order; it is joined before the four small
+    // passes, so the log's lines and the group's members are what they were. The layouts and the module are made first,
+    // here, and only read by the second builder. The render thread's own build path (no worker) stays serial.
+    VkResult mainR = VK_ERROR_INITIALIZATION_FAILED, compactR = VK_ERROR_INITIALIZATION_FAILED;
+    if (tAheadNotes && mSlots.tryTake()) {
+        std::vector<RayAheadNote> compactNotes;
+        std::thread compact([this, &ccpi, &compactNotes, &compactR]() {
+            lowerBuilderPriority();
+            tAheadNotes = &compactNotes;
+            compactR = createComputePipeline(ccpi, &mReflectCompactPipeline, "reflect-compact");
+            tAheadNotes = nullptr;
+            mSlots.give();
+        });
+        mainR = createComputePipeline(cpi, &mReflectPipeline, "reflect");
+        compact.join();
+        tAheadNotes->insert(tAheadNotes->end(), compactNotes.begin(), compactNotes.end());
+    } else {
+        mainR = createComputePipeline(cpi, &mReflectPipeline, "reflect");
+        if (mainR == VK_SUCCESS) compactR = createComputePipeline(ccpi, &mReflectCompactPipeline, "reflect-compact");
+    }
+    if (mainR != VK_SUCCESS) {
         err = "rayquery/reflect: vkCreateComputePipelines failed";
         return false;
     }
-    // THE COMPACT PASS (kReflectCompactTexels): the same shader with its specialisation constant 0 (kCompactPass) true.
-    {
-        const VkBool32 compactOn = VK_TRUE;
-        VkSpecializationMapEntry entry{};
-        entry.constantID = 0u;
-        entry.offset = 0u;
-        entry.size = sizeof(VkBool32);
-        VkSpecializationInfo spec{};
-        spec.mapEntryCount = 1u;
-        spec.pMapEntries = &entry;
-        spec.dataSize = sizeof(VkBool32);
-        spec.pData = &compactOn;
-        VkComputePipelineCreateInfo ccpi = cpi;
-        ccpi.stage.pSpecializationInfo = &spec;
-        if (createComputePipeline(ccpi, &mReflectCompactPipeline, "reflect-compact") != VK_SUCCESS) {
-            err = "rayquery/reflect: the compact pass's vkCreateComputePipelines failed";
-            return false;
-        }
+    if (compactR != VK_SUCCESS) {
+        err = "rayquery/reflect: the compact pass's vkCreateComputePipelines failed";
+        return false;
     }
     {
         VkShaderModuleCreateInfo fsmi{};
