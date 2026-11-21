@@ -7292,16 +7292,20 @@ struct AsyncShaderStats {
     unsigned long long compileErrors = 0;
     /// WHAT A FRAME BUILT, AND WHAT THE COMPILERS COST (COLD-BOOT-1 stage 3; the lead's ruling 8: counters in the published
     /// status, never log scrapes). Running totals for the process, fed by the fork (its HlmsCompute and its Vulkan render
-    /// system), 0 until it feeds them:
+    /// system, SHADER-SYSTEM-1 3F):
     ///   computeParsedInFrame - compute permutations whose TEMPLATE PARSE ran inside a frame (a compute record's hit
     ///                          skips it: a warm launch's frames read 0);
     ///   computePsoInFrame    - compute pipelines built inside a frame, any path (a parse, a record's hit, a clone);
+    ///   computeDestroyWaits / computeDestroyWaitMs - a compute job destroyed while its permutation was COMPILING: the
+    ///                          frame waited for that compile to end (a clone's teardown), and how long in all;
     ///   glslangMs            - the time in glslang (source to SPIR-V), every thread summed, and its count;
     ///   graphicsPsoMs / computePsoMs - the time in the driver's pipeline creation (vkCreateGraphicsPipelines /
     ///                          vkCreateComputePipelines through Ogre), every thread summed, and their counts.
     /// (The stage-1 table these replace: spikes/cold-boot-1/S1b, read there by an LD_PRELOAD probe.)
     unsigned long long computeParsedInFrame = 0;
     unsigned long long computePsoInFrame = 0;
+    unsigned long long computeDestroyWaits = 0;
+    double             computeDestroyWaitMs = 0.0;
     unsigned long long glslangCompiles = 0;
     double             glslangMs = 0.0;
     unsigned long long graphicsPsos = 0;

@@ -3637,7 +3637,21 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     if (const Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) {
         out.paramsMisfits = hc->getJahParamsMisfits();
         out.computeDeferred = hc->getNumDeferredDispatches();
+        // WHAT A FRAME BUILT (COLD-BOOT-1 stage 3 / SHADER-SYSTEM-1 3F): the fork's in-frame counters, and the waits a
+        // clone's teardown took for its running compile (the start preflight's F4).
+        out.computeParsedInFrame = hc->getJahParsedInFrame();
+        out.computePsoInFrame = hc->getJahPsoInFrame();
+        out.computeDestroyWaits = hc->getJahDestroyWaits();
+        out.computeDestroyWaitMs = double(hc->getJahDestroyWaitUs()) / 1000.0;
     }
+    // ...and WHAT THE COMPILERS COST, every thread summed (the fork's render system).
+    const Ogre::RenderSystem::JahCompileCosts costs = Ogre::RenderSystem::getJahCompileCosts();
+    out.glslangCompiles = costs.shaderCompiles;
+    out.glslangMs = double(costs.shaderCompileUs) / 1000.0;
+    out.graphicsPsos = costs.graphicsPsos;
+    out.graphicsPsoMs = double(costs.graphicsPsoUs) / 1000.0;
+    out.computePsos = costs.computePsos;
+    out.computePsoMs = double(costs.computePsoUs) / 1000.0;
     out.compileErrors = Ogre::GpuProgram::getJahCompileErrors();
     return out;
 }
@@ -4159,6 +4173,10 @@ void OgreEngine::teardown() {
     // dies. The save at the top of this destructor is a hand-off; this is where
     // the old synchronous write used to cost the same wait, so nothing got slower.
     mShaderCache.finishWrites();
+    // ...the compute layer's store with it (its last write is done): it reads the fork's HlmsCompute, which Root owns.
+    mShaderCache.setComputeStore(nullptr);
+    mComputeStore.reset();
+    setForkComputeKeyHook(false);
     // Both log listeners are registered on Ogre's default log, which Root owns.
     mShaderCache.detachCounters();
     detachLogBridge();
@@ -4404,6 +4422,14 @@ void OgreEngine::ensureHlms() {
     {
         Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
         if (!rgm.resourceGroupExists("Jahshaka")) rgm.createResourceGroup("Jahshaka", false);
+    }
+    // THE COMPUTE LAYER's STORE AND KEY (COLD-BOOT-1 stage 3; SHADER-SYSTEM-1 3F (c)): the fork's HlmsCompute files a
+    // code record of every compute permutation it builds, keyed by computeRecordInputKey through the hook, and the
+    // cache saves and reloads them (prewarmCompute, below) - before the load, so the layer is read into a store.
+    if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) {
+        setForkComputeKeyHook(true);
+        mComputeStore = makeForkComputeStore(hc);
+        mShaderCache.setComputeStore(mComputeStore.get());
     }
     mShaderCache.load(mRoot);
     // THE TEXTURE SIDE, in the same breath and for the same reason

@@ -59,8 +59,12 @@ struct ComputeCodeRecord {
 struct ComputeKeyInputs {
     std::string templateText;                                         ///< the template file's bytes
     std::vector<std::pair<std::string, std::string>> pieceFiles;      ///< (file name, bytes), in the job's order
-    std::vector<std::pair<std::string, std::string>> cppPieces;       ///< (piece name, text): the job's C++ pieces
-    std::vector<std::pair<std::uint32_t, std::int32_t>> properties;   ///< (key hash, value), before the parse
+    std::vector<std::pair<std::uint32_t, std::string>> cppPieces;     ///< (piece name's hash, text): the job's C++ pieces
+    /// (key hash, value) as the parse starts: the job's and the render system's (the fork sets those first: F2b)
+    std::vector<std::pair<std::uint32_t, std::int32_t>> properties;
+    /// The root layout's bytes the program is built with: the job's slots' types reach no property, and two jobs of
+    /// equal text with other slot types need two programs (SHADER-SYSTEM-1, the start preflight's F2a).
+    std::string rootLayout;
 };
 
 /// THE INPUT KEY: a pure function of its inputs (the C++ pieces' order does not matter; everything else is as given).
@@ -93,6 +97,10 @@ ComputeLayerRead readComputeLayer(const char *data, std::size_t size);
 unsigned pruneStaleRecords(std::vector<ComputeCodeRecord> &records,
                            const std::function<bool(const std::string &, ComputeKey128 &)> &currentHash);
 
+}  // namespace jahshaka::engine::detail
+namespace Ogre { class HlmsCompute; }
+namespace jahshaka::engine::detail {
+
 /// What the shader cache reads from, and hands back to, the fork's compute layer (P6). The fork's HlmsCompute holds the
 /// records (recorded at a permutation's build, on the main thread) and builds a record's code off the frame (its
 /// AsyncCodeJob); the engine adapts it to this interface. Every call is on the render thread.
@@ -106,5 +114,12 @@ public:
     /// The records a launch read: filed, and their code compiled on the async compiler (code only: no job, no PSO).
     virtual void prewarm(std::vector<ComputeCodeRecord> &&records) = 0;
 };
+
+/// THE FORK's HlmsCompute AS THE STORE (P6; SHADER-SYSTEM-1 stage 3F (c)): its records (HlmsCompute::JahCodeRecord) in
+/// and out - each fork record converted once, held while the fork holds it; the prewarm is its jahPrewarmCode.
+std::unique_ptr<ComputeCodeStore> makeForkComputeStore(Ogre::HlmsCompute *compute);
+/// THE KEY HOOK: the fork's HlmsCompute::msJahComputeKeyHook set to computeRecordInputKey (on) or cleared (off: the fork
+/// files no record and parses every permutation, exactly as upstream).
+void setForkComputeKeyHook(bool on);
 
 }  // namespace jahshaka::engine::detail

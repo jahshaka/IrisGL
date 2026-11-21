@@ -9798,6 +9798,9 @@ private:
     /// threw must not look like a status call that found nothing.
     mutable std::string mLastError;
     ShaderCache     mShaderCache;
+    /// THE FORK's HlmsCompute behind the shader cache's compute layer (COLD-BOOT-1 stage 3 / SHADER-SYSTEM-1 3F (c)):
+    /// set with the key hook before the cache's load, released after its last write (the destructor).
+    std::unique_ptr<ComputeCodeStore> mComputeStore;
     std::vector<std::unique_ptr<OgreScene>> mScenes;
     /// THE SHADOW CACHE'S PER-FRAME SCRATCH (clean-2 lane, 2026-09-13).
     /// applyShadowCache and applyShadowCacheDirties run every frame for ever

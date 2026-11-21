@@ -1,10 +1,12 @@
 // THE COMPUTE LAYER'S RECORDS - the keys and compute.bin's bytes (ComputeRecord.h says why).
 #include "ComputeRecord.h"
 
+#include <OgreHlmsCompute.h>
 #include <OgreIdString.h>
 #include <Hash/MurmurHash3.h>
 
 #include <algorithm>
+#include <map>
 #include <cstring>
 
 namespace jahshaka::engine::detail {
@@ -76,14 +78,16 @@ ComputeKey128 computeRecordInputKey(const ComputeKeyInputs &in) {
     k.u64(in.pieceFiles.size());
     for (const auto &f : in.pieceFiles) { k.str(f.first); k.str(f.second); }
     // The C++ pieces are a MAP on the job (HlmsComputeJob::mPieces): their order is the container's, not an input.
-    std::vector<std::pair<std::string, std::string>> cpp = in.cppPieces;
+    std::vector<std::pair<std::uint32_t, std::string>> cpp = in.cppPieces;
     std::sort(cpp.begin(), cpp.end());
     k.tag('C');
     k.u64(cpp.size());
-    for (const auto &c : cpp) { k.str(c.first); k.str(c.second); }
+    for (const auto &c : cpp) { k.u64(c.first); k.str(c.second); }
     k.tag('P');
     k.u64(in.properties.size());
     for (const auto &p : in.properties) { k.u64(p.first); k.u64(std::uint32_t(p.second)); }
+    k.tag('L');
+    k.str(in.rootLayout);
     return hash128(k.b.data(), k.b.size());
 }
 
@@ -168,5 +172,108 @@ unsigned pruneStaleRecords(std::vector<ComputeCodeRecord> &records,
                   records.end());
     return unsigned(before - records.size());
 }
+
+namespace {
+
+using ForkRecord = Ogre::HlmsCompute::JahCodeRecord;
+
+void forkKeyHook(const Ogre::HlmsCompute::JahKeyInputs &in, Ogre::uint64 out[2]) {
+    ComputeKeyInputs k;
+    k.templateText = *in.templateText;
+    for (const auto &f : *in.pieceFiles) k.pieceFiles.emplace_back(f.first, *f.second);
+    for (const auto &c : *in.cppPieces) k.cppPieces.emplace_back(c.first.mHash, c.second);
+    for (const auto &p : *in.properties) k.properties.emplace_back(p.keyName.mHash, p.value);
+    k.rootLayout = *in.rootLayout;
+    const ComputeKey128 key = computeRecordInputKey(k);
+    out[0] = key[0];
+    out[1] = key[1];
+}
+
+ComputeRecordPtr fromFork(const ForkRecord &f) {
+    auto r = std::make_shared<ComputeCodeRecord>();
+    r->inputKey = { { f.inputKey[0], f.inputKey[1] } };
+    r->programKey = { { f.programKey[0], f.programKey[1] } };
+    r->name = f.name;
+    r->sourceFilename = f.sourceFilename;
+    r->source = f.source;
+    r->rootLayout = f.rootLayout;
+    r->explicitApi = f.explicitApi;
+    r->arrayBindings = f.arrayBindings;
+    r->indirect = f.indirect;
+    r->jobSized = f.jobSized;
+    for (int i = 0; i < 3; ++i) {
+        r->threadsPerGroup[i] = f.threadsPerGroup[i];
+        r->numThreadGroups[i] = f.numThreadGroups[i];
+    }
+    for (const auto &file : f.files) r->files.emplace_back(file.name, ComputeKey128{ { file.hash[0], file.hash[1] } });
+    return r;
+}
+
+ForkRecord toFork(ComputeCodeRecord &&r) {
+    ForkRecord f;
+    f.inputKey[0] = r.inputKey[0]; f.inputKey[1] = r.inputKey[1];
+    f.programKey[0] = r.programKey[0]; f.programKey[1] = r.programKey[1];
+    f.name = std::move(r.name);
+    f.sourceFilename = std::move(r.sourceFilename);
+    f.source = std::move(r.source);
+    f.rootLayout = std::move(r.rootLayout);
+    f.explicitApi = r.explicitApi;
+    f.arrayBindings = r.arrayBindings;
+    f.indirect = r.indirect;
+    f.jobSized = r.jobSized;
+    for (int i = 0; i < 3; ++i) {
+        f.threadsPerGroup[i] = r.threadsPerGroup[i];
+        f.numThreadGroups[i] = r.numThreadGroups[i];
+    }
+    for (auto &file : r.files) {
+        Ogre::HlmsCompute::JahFileHash h;
+        h.name = std::move(file.first);
+        h.hash[0] = file.second[0];
+        h.hash[1] = file.second[1];
+        f.files.push_back(std::move(h));
+    }
+    return f;
+}
+
+class ForkComputeStore final : public ComputeCodeStore {
+public:
+    explicit ForkComputeStore(Ogre::HlmsCompute *compute) : mCompute(compute) {}
+    std::uint64_t generation() const override { return mCompute->getJahRecordGeneration(); }
+    void snapshot(std::vector<ComputeRecordPtr> &out) const override {
+        // Each fork record is converted ONCE (the save runs on the render thread: a source is copied when its record
+        // is new, never again), and its conversion held while the fork still files that record.
+        Ogre::vector<Ogre::HlmsCompute::JahCodeRecordPtr>::type records;
+        mCompute->getJahRecords(records);
+        std::map<const ForkRecord *, std::pair<Ogre::HlmsCompute::JahCodeRecordPtr, ComputeRecordPtr>> kept;
+        out.clear();
+        out.reserve(records.size());
+        for (const Ogre::HlmsCompute::JahCodeRecordPtr &f : records) {
+            auto it = mConverted.find(f.get());
+            ComputeRecordPtr r = it != mConverted.end() ? it->second.second : fromFork(*f);
+            kept.emplace(f.get(), std::make_pair(f, r));
+            out.push_back(std::move(r));
+        }
+        mConverted.swap(kept);
+    }
+    void prewarm(std::vector<ComputeCodeRecord> &&records) override {
+        Ogre::vector<ForkRecord>::type in;
+        in.reserve(records.size());
+        for (ComputeCodeRecord &r : records) in.push_back(toFork(std::move(r)));
+        records.clear();
+        mCompute->jahPrewarmCode(in);
+    }
+
+private:
+    Ogre::HlmsCompute *mCompute;
+    mutable std::map<const ForkRecord *, std::pair<Ogre::HlmsCompute::JahCodeRecordPtr, ComputeRecordPtr>> mConverted;
+};
+
+}  // namespace
+
+std::unique_ptr<ComputeCodeStore> makeForkComputeStore(Ogre::HlmsCompute *compute) {
+    return std::unique_ptr<ComputeCodeStore>(new ForkComputeStore(compute));
+}
+
+void setForkComputeKeyHook(bool on) { Ogre::HlmsCompute::msJahComputeKeyHook = on ? &forkKeyHook : nullptr; }
 
 }  // namespace jahshaka::engine::detail
