@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "OgreStableHeaders.h"
 
 #include "photon/voxel/PhotonVoxelLighting.h"
+#include "photon/voxel/PhotonRegionGrid.h"
 #include "photon/PhotonDispatch.h"
 #include "photon/voxel/PhotonMipChain.h"
 #include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
@@ -939,26 +940,20 @@ namespace Ogre
         /// cells - [regionLo, regionHi) of level 0 rounded OUT (every texel a changed cell reaches), or the whole level
         /// `levelRes` - its first texel as the job's regionOrigin and its 4^3 groups set by hand (the jobs are shared:
         /// the count is asserted per dispatch).
-        void setRegionGrid( HlmsComputeJob *job, ShaderParams::Param *origin, const uint32 *regionLo,
+        /// FALSE when the box holds no texel of the level (empty, or past its end: NONDET-1 H2) - the caller dispatches
+        /// NOTHING then (the arithmetic: PhotonRegionGrid.h, engine.region_grid_law).
+        bool setRegionGrid( HlmsComputeJob *job, ShaderParams::Param *origin, const uint32 *regionLo,
                             const uint32 *regionHi, uint32 cellsPerTexel, const uint32 levelRes[3], uint32 w = 0u )
         {
             uint32 lo[4] = { 0u, 0u, 0u, w }, n[3];
-            for( int a = 0; a < 3; ++a )
-            {
-                uint32 l = 0u, h = levelRes[a];
-                if( regionLo && regionHi )
-                {
-                    l = std::min( regionLo[a] / cellsPerTexel, levelRes[a] );
-                    h = std::min( ( regionHi[a] + cellsPerTexel - 1u ) / cellsPerTexel, levelRes[a] );
-                }
-                lo[a] = l;
-                n[a] = std::max( h, l + 1u ) - l;
-            }
+            if( !jahshaka::engine::detail::regionGridOf( regionLo, regionHi, cellsPerTexel, levelRes, lo, n ) )
+                return false;
             const uint32 *tpg = job->getThreadsPerGroup();
             job->setNumThreadGroupsBasedOn( HlmsComputeJob::ThreadGroupsBasedOnNothing, 0u, 1u, 1u, 1u );
             job->setNumThreadGroups( ( n[0] + tpg[0] - 1u ) / tpg[0], ( n[1] + tpg[1] - 1u ) / tpg[1],
                                      ( n[2] + tpg[2] - 1u ) / tpg[2] );
             origin->setManualValue( lo, 4u );
+            return true;
         }
         ShaderParams::Param *regionOriginParam( HlmsComputeJob *job )
         {
@@ -1040,6 +1035,7 @@ namespace Ogre
             }
             // (one thread per directional level-0 texel of a half: two cells)
             ShaderParams::Param *origin = regionOriginParam( mAnisoGeneratorStep0 );
+            bool any = true;   // (false: the region holds no texel of the level - no dispatch, H2)
             setBrickListMode( mAnisoGeneratorStep0, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr,
                               3u );
             if( brickList )
@@ -1047,12 +1043,15 @@ namespace Ogre
                 const uint32 lo[4] = { 0u, 0u, 0u, 1u };   // w: a texel covers 2^1 cells
                 origin->setManualValue( lo, 4u );
             }
-            else
+            else if( !setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes ) )
             {
-                setRegionGrid( mAnisoGeneratorStep0, origin, regionLo, regionHi, 2u, dirRes );
+                any = false;   // (an empty region: no texel to write)
             }
-            mAnisoGeneratorStep0->getShaderParams( "default" ).setDirty();
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
+            if( any )
+            {
+                mAnisoGeneratorStep0->getShaderParams( "default" ).setDirty();
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, mAnisoGeneratorStep0, renderSystem );
+            }
             setBrickListMode( mAnisoGeneratorStep0, nullptr, nullptr, 3u );
         }
 
@@ -1080,18 +1079,22 @@ namespace Ogre
             const uint32 levelRes[3] = { std::max( 1u, dirRes[0] >> ( i + 1u ) ), std::max( 1u, dirRes[1] >> ( i + 1u ) ),
                                          std::max( 1u, dirRes[2] >> ( i + 1u ) ) };
             ShaderParams::Param *origin = regionOriginParam( mipJob );
+            bool any = true;   // (false: the region holds no texel of this level - no dispatch, H2)
             setBrickListMode( mipJob, brickList ? mBrickList : nullptr, brickList ? mBrickArgs : nullptr, 3u );
             if( brickList )
             {
                 const uint32 lo[4] = { 0u, 0u, 0u, uint32( i ) + 2u };   // w: a texel covers 2^(i + 2) cells
                 origin->setManualValue( lo, 4u );
             }
-            else
+            else if( !setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes ) )
             {
-                setRegionGrid( mipJob, origin, regionLo, regionHi, 2u << ( i + 1u ), levelRes );
+                any = false;   // (an empty region at this level)
             }
-            mipJob->getShaderParams( "default" ).setDirty();
-            jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
+            if( any )
+            {
+                mipJob->getShaderParams( "default" ).setDirty();
+                jahshaka::engine::detail::photonDispatch( hlmsCompute, mipJob, renderSystem );
+            }
             setBrickListMode( mipJob, nullptr, nullptr, 3u );
         }
         renderSystem->debugAnnotationPop();
@@ -1950,12 +1953,15 @@ namespace Ogre
                 blocks.injectBoxLo.set( mInjectBoxLo, lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
                 blocks.injectBoxHi.set( mInjectBoxHi, hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
             }
+            bool counted = false;   // (the delta's word 2 - the injections themselves - on its first DISPATCHED box)
             for( uint32 b = 0u; b < std::max( boxes, 1u ); ++b )
             {
                 const uint32 prior[4] = { b, 0u, 0u, 0u };
                 mInjectPrior->setManualValue( prior, 4u );
-                setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
-                               boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && b == 0u ? 1u : 0u );
+                if( !setRegionGrid( mLightInjectionJob, mInjectOrigin, boxes ? mCommit.light.injectLo[b] : nullptr,
+                                    boxes ? mCommit.light.injectHi[b] : nullptr, 1u, res, delta && !counted ? 1u : 0u ) )
+                    continue;   // (NONDET-1 H2: a box with no cell of the volume dispatches nothing)
+                counted = true;
                 mShaderParams->setDirty();
                 jahshaka::engine::detail::photonDispatch( hlmsCompute, mLightInjectionJob, renderSystem );
             }
