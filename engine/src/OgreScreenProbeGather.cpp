@@ -1993,7 +1993,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     pp.hits[0] = (in.hitsReadback && v.rays) ? 1.0f : 0.0f;
     pp.hits[1] = in.photonOverlay && in.photonOverlayGatherHits ? 1.0f : 0.0f;
     pp.hits[2] = float(v.stride);
-    pp.hits[3] = float(in.roughCarryArm);   // (ROUGH-LOBE-HISTORY-1 measuring arm)
     // PHOTON-GATHER-1c: the previous camera, the view's age, the history's floor,
     // the lever.
     std::memcpy(pp.prevCamPos, v.prevCamPos, sizeof(pp.prevCamPos));

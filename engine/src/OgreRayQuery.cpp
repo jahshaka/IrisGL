@@ -9589,7 +9589,6 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     }
     // THE GATHER-HITS READBACK (FAR-SUN-1): the instrument's arm.
     in.hitsReadback = arm(ArmId::GatherHitsReadback, false);
-    in.roughCarryArm = unsigned(std::lround(armValue(ArmId::GatherRoughCarry)));
     // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
     // `width` is one eye's, and a stereo chain whose depth is not two layers is
     // not a picture the gather can split.

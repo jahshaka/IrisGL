@@ -1343,7 +1343,7 @@ void main()
 		// self-test's fixture B's pillar top, 56 codes). Coverage 0: the field's fallback answers it, below. Before the
 		// hold the hand-over still reads the history (its weight reaches the rest mean at k = N).
 		const bool starved = rest.w < -0.5 && restK >= p.knobs6.y;
-		if( starved && p.hits.w < 1.5 )
+		if( starved )
 			atomicAdd( gatherCounter.words[2], 1u );
 		const vec4 restAnswer = starved ? vec4( 0.0 ) : rest.w < -0.5 ? prev : rest;
 		diffuseRest = rest;
@@ -1423,7 +1423,7 @@ void main()
 		const JahEye before = jahEyeBefore( eye );
 		vec3 lobeDelta;
 		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, toEyeOf( before, pixelWorld ),
-										prevCount > 0u && eyeViewMoved( thisEye, before ) && !( p.hits.w > 0.5 && p.hits.w < 1.5 ), roughness, tapIdx, tapW, nTap,
+										prevCount > 0u && eyeViewMoved( thisEye, before ), roughness, tapIdx, tapW, nTap,
 										weightFloor, lobeFallback, lobeDelta );
 		// (a lobe that fell back to a diffuse with no rest sample is no sample: the rough rest takes none this frame)
 		const bool lobeTakes = restTakes && !( gLobeFellBack && fallbackNone );
@@ -1443,19 +1443,10 @@ void main()
 			// (the diffuse's law at the hold: no rest sample is NO SAMPLE - the rough specular's weight 0, below, so the
 			// probe or the sky answers the lobe)
 			roughStarved = rest.w < -0.5 && restK >= p.knobs6.y;
-			if( roughStarved && p.hits.w < 1.5 )
+			if( roughStarved )
 				atomicAdd( gatherCounter.words[3], 1u );
 			const vec3 restAnswer = rest.w < -0.5 ? prevLobe : rest.xyz;
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
-		}
-		// (ROUGH-LOBE-HISTORY-1's MEASURING ARM, 2: what the clamp at zero cuts - pixels, the largest cut in codes x 16)
-		if( p.hits.w > 1.5 && prevCount > 0u && finite3( meanLobe ) &&
-			( p.hits.w > 2.5 || any( lessThan( meanLobe, vec3( 0.0 ) ) ) ) )
-		{
-			atomicAdd( gatherCounter.words[3], 1u );
-			// (3, the counters' negative control: every carried pixel, its mean's codes)
-			const vec3 cut = dispCodes( p.hits.w > 2.5 ? meanLobe : max( -meanLobe, vec3( 0.0 ) ) );
-			atomicMax( gatherCounter.words[2], uint( max( max( cut.x, cut.y ), cut.z ) * 16.0 + 0.999 ) );
 		}
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );
 		const vec4 roughNew = roughStarved ? vec4( 0.0 ) : roughTexel( meanLobe, diffuseOut, roughness );
