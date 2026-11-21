@@ -1107,7 +1107,6 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
         f.reflRestCapped = pub.rayQuery.reflectRestCapped;
-        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         Image pic;
@@ -1244,7 +1243,6 @@ bool StillnessRun::frameDone(std::string &err)
         f.reflHeld = pub.rayQuery.reflectHeld;
         f.reflRestActive = pub.rayQuery.reflectRestActive;
         f.reflRestCapped = pub.rayQuery.reflectRestCapped;
-        f.reflSources = pub.rayQuery.reflectSources;
         f.cameraCuts = g.cameraCuts;
         f.reflCuts = pub.rayQuery.reflectCameraCuts;
         // THE VIEW HOLDS ONLY WHEN EVERY READER HOLDS (PHOTON-7 stage 10, the lead's ruling on (1)): the gather held AND,
@@ -1404,6 +1402,8 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
         r.pathPixelsDiffering.assign(n + 1, 0u);
         r.pathMeanCodes.assign(n + 1, 0.0);
         r.pathP99Codes.assign(n + 1, 0u);
+        r.pathPixels.assign(n + 1, 0u);
+        r.pathOverCodes.assign(n + 1, std::vector<unsigned>(StillnessReport::kPathTailCodes, 0u));
         if (a.lastPicture.width == b.lastPicture.width && a.lastPicture.height == b.lastPicture.height) {
             std::vector<std::vector<unsigned>> hist(n + 1, std::vector<unsigned>(256, 0u));
             for (size_t i = 0; i < size_t(a.lastPicture.width) * a.lastPicture.height; ++i) {
@@ -1422,6 +1422,12 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
                 unsigned long long total = 0, sum = 0;
                 for (unsigned v = 0; v < 256; ++v) { total += hist[k][v]; sum += (unsigned long long)v * hist[k][v]; }
                 if (!total) continue;
+                r.pathPixels[k] = unsigned(total);
+                for (unsigned t = 1; t <= StillnessReport::kPathTailCodes; ++t) {
+                    unsigned long long over = 0;
+                    for (unsigned v = t + 1u; v < 256; ++v) over += hist[k][v];
+                    r.pathOverCodes[k][t - 1u] = unsigned(over);
+                }
                 r.pathMeanCodes[k] = double(sum) / double(total);
                 unsigned long long acc = 0;
                 for (unsigned v = 0; v < 256; ++v) {
@@ -1464,7 +1470,6 @@ std::string StillnessReport::tsv() const
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
-      << "\trefl_sources"
       << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\thandover_m\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
@@ -1489,9 +1494,7 @@ std::string StillnessReport::tsv() const
             char clk[160];
             std::snprintf(clk, sizeof(clk), "\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%d\t", f.periodMs, f.readMs,
                           f.gpuSpanMs, f.gpuIdleMs, f.gpuUnattributedMs, f.gpuPassesMs, f.gpuRowsMs, f.reflRestCapped);
-            // (the mode label: the sources' name, "-" where nothing traced)
-            o << clk << (f.reflSources < 0 ? "-" : reflectSourcesName(ReflectSources(f.reflSources)));
-            o << "\t" << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
+            o << clk << f.ifdGrant << "\t" << f.ifdSpent << "\t" << f.ifdOwedRestarts << "\t" << f.ifdOwedRefines
               << "\t" << f.ifdOwedIntegrations << "\t" << (f.storeOwed ? 1 : 0) << "\t" << f.ifdMarkedByMoves
               << "\t" << f.ifdReadUnheld << "\t" << f.ifdFollows << "\t" << f.ifdRestartDepth << "\t" << f.ifdMarkLag
               << "\t" << f.cardsAdmitted << "\t" << f.cardsArrivalMark << "\t" << f.cardsFrame << "\t" << f.cardsDemandEvery
@@ -1548,6 +1551,11 @@ std::string StillnessReport::summary() const
             std::snprintf(b, sizeof(b), " %s=%.3f/%u/%u,%u", names[k].c_str(), pathMeanCodes[k], pathP99Codes[k],
                           pathMaxCodes[k], pathPixelsDiffering[k]);
             o << b;
+        }
+        o << " | pixels N and over 1.." << StillnessReport::kPathTailCodes << " codes:";
+        for (size_t k = 0; k < names.size() && k < pathPixels.size() && k < pathOverCodes.size(); ++k) {
+            o << " " << names[k] << "=" << pathPixels[k] << ":";
+            for (unsigned t = 0; t < pathOverCodes[k].size(); ++t) o << (t ? "," : "") << pathOverCodes[k][t];
         }
         o << " | field origin equal " << pathFieldEqual;
         o << " | cascade direct/total/placement equal:";

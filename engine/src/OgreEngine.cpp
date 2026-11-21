@@ -3412,6 +3412,12 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
             f.workspaceGeneration = v->workspaceGeneration();
             f.globalsPushes = v->globalsPushes();
             f.postFx = v->postFx();
+            {
+                const inspect::ViewRoutes r = v->routes();   // the chain as built: the inspect door's own answer
+                f.routeGather = r.probeGather;
+                f.routeIntegrate = r.screenIntegrate;
+                f.routeReflect = r.rayReflect;
+            }
             out.views.push_back(std::move(f));
         }
     out.deviceLost = deviceLost();

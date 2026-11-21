@@ -1284,11 +1284,23 @@ constexpr ArmDef kArms[] = {
       "THE LOBE DRAW'S SEED OFFSET (PHOTON-7 stage 6, the walk's noise/signal split): added to the frame index the "
       "reflection's lobe draw and its resolve's re-derivation take - two walks identical but for it carry independent "
       "ray noise and the same signal (var( rA - rB ) / 2 is the noise). 0 = shipped." },
+    { ArmId::ReflectScreenOff, 0.0, 0.0, 1.0,
+      "THE SCREEN SILENT (PHOTON-7-9A, the lead's ruling for rtreflect.mirror_blend; a test arm no product frame sets): 1 = "
+      "the hybrid's screen half gives no answer - every sample is the ray's, its hits shaded as shipped (the stereo "
+      "chain's route on a mono view) - the reference the screen's share is read against at the same pose; 0 = shipped." },
+    { ArmId::ReflectShapeMismatch, 0.0, 0.0, 1.0,
+      "THE SHAPE REFUSAL's NEGATIVE CONTROL (PHOTON-7-9A, the lead's ruling; a test arm no product frame sets): 1 = every "
+      "STEREO view's reflection recording reads its chain as the other stereo shape, so it is refused and counted "
+      "(RayQueryStatus::reflectShapeRefusals) and is its frame's error - vr.hit_list_stereo sets it for one eye frame and "
+      "reads the count 1, proving the counter counts; 0 = shipped (the shape as built)." },
     { ArmId::ReflectFlatHits, 0.0, 0.0, 1.0,
       "THE HITS FLATTENED (PHOTON-7 stage 6, the lead's attribution arm (H), a measuring arm): 1 = every reflection "
       "ray's hit answered by a constant of its instance (0.2 + 0.6 x the slot's golden-ratio fraction), no cache read, "
-      "no footprint or mip, no fog, no record - the reflection's estimator and denoiser measured alone (the hit caches "
-      "owned ~half the glossy noise map and a third of the lag law). 0 = shipped." },
+      "no footprint or mip, no fog, no record - and the SCREEN gives no answer (its read of the previous picture is a "
+      "cache; PHOTON-7-9A, the lead's ruling (A)) - the reflection's ray estimator and denoiser measured alone, the "
+      "caches out: the STEREO chain's route (no screen sources in stereo); the desktop hybrid's motion and lag are "
+      "rtreflect.walk_world_hybrid's and rtreflect.history_detectors' (the hit caches owned ~half the glossy noise map "
+      "and a third of the lag law). 0 = shipped." },
     { ArmId::ReflectWindow, 0.0, 0.0, 64.0,
       "THE MOVING WINDOW (PHOTON-7 stage 6, the lead's window measurement, a measuring arm): the reflection's "
       "MaxFrames N while moving - and with it every reader of N, the hit's footprint and the sky's mip (1 / sqrt N), "

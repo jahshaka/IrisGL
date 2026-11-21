@@ -174,7 +174,7 @@ public:
         if (!scene || !scene->sceneManager()) return;
         mArmed = scene->sceneManager();
         mArmedPass = pass;
-        FogHlmsListener::setPhotonIsolation(mArmed, mIsolation);
+        FogHlmsListener::setPhotonIsolation(mArmed, mIsolation, mView->chainPhotonTerm());
     }
     /// Only the pass that armed disarms (a shadow node's passes run inside it and
     /// fire this workspace's listeners too — the Atom listener's lesson).

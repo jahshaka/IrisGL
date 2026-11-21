@@ -240,8 +240,6 @@ struct StillnessFrame {
     /// THE REST'S CAPPED TEXELS (commit 8, RayQueryStatus::reflectRestCapped): stopped at their count's ceiling, not by
     /// their standard error - 0 on a healthy rest, -1 none read.
     int                reflRestCapped = -1;
-    /// THE SOURCES THE REFLECTION RAN WITH (RayQueryStatus::reflectSources: the mode label) - -1 none traced.
-    int                reflSources = -1;
     /// THE FRAME'S COST (PHOTON-2 stage 2's round, H4 (e); THE FRAME CLOCK, PHOTON-7 stage 0): the monitor record's BUSY
     /// frame GPU milliseconds (its span less the gaps the GPU waited on a submission - THE one per-frame GPU time the
     /// hitch law reads) and the whole renderOneFrame's wall milliseconds - the CPU's frame, which in a lockstep host
@@ -348,6 +346,12 @@ struct StillnessReport {
     std::vector<unsigned> pathPixelsDiffering;
     std::vector<double>   pathMeanCodes;        ///< per class ([0] = all): the mean |diff| over the class's pixels
     std::vector<unsigned> pathP99Codes;         ///< ...and its 99th percentile
+    /// ...and per class ([0] = all) the pixels compared, N, and THE TAIL: pathOverCodes[k][t - 1] = the pixels whose
+    /// difference is over t codes, t = 1..kPathTailCodes - what a family-wise law (the max against sqrt( 2 ln N )) and a
+    /// tail law (a share over a code count) read (rtreflect.still_after_stop.path, the final read's HEAD 4).
+    static constexpr unsigned kPathTailCodes = 8u;
+    std::vector<unsigned> pathPixels;
+    std::vector<std::vector<unsigned>> pathOverCodes;
     int                   pathFieldEqual = -1;  ///< the field's origin equal under the two paths (1), not (0), none (-1)
     std::vector<int>      pathDirectEqual, pathLightEqual, pathCentreEqual;   ///< per cascade: 1 equal, 0 not, -1 unread
     /// THE FROZEN WALK (StillnessSpec::freezeWalk): the engine frame the freeze took effect on (0: not asked) and the

@@ -71,8 +71,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	/// above is the one camera's, exactly as before. One dispatch, one
 	/// descriptor set, one history ring: the eye is the layer (gEye).
 	///
-	/// y = THE VIEW'S AGE: how many consecutive frames this history has been
-	/// written (0 on a first frame, a resize, a scene bind): the filter's young-VIEW fade (a two-frame screenshot).
+	/// y = unused (was THE VIEW'S AGE for the filter's young-view fade, deleted by PHOTON-7-9A: its fallback was the
+	/// bound environment cube - the sky inside a sealed room).
 	/// z = 1 writes THE PHOTON VIEW'S Hits overlay (binding 37, PHOTON-VIEW-1).
 	/// w = THE REST'S LENGTH N (PHOTON-2 fix F1): the frames the rest mean is handed over in, the gather's own
 	/// settleFramesOf(the reflection's 32-frame history) — after which the view holds.
@@ -130,8 +130,8 @@ layout( set = 0, binding = 1 ) uniform Params
 	vec4 restBrickOrigin[4];
 	vec4 restBrickDims[4];
 	/// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): screen.x = 1 when the SCREEN TRACE runs (the chain's screen
-	/// sources are bound: PostFxDesc::reflectSources Both or Screen, a mono view), y = 1 for THE SCREEN ALONE (Screen: a
-	/// miss is no sample - no ray follows it), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
+	/// sources are bound: the hybrid's screen half on a mono chain, ChainDesc::screenSources), y unused (the screen-alone
+	/// arm is deleted with the mode, PHOTON-7-9A), z = the march's step count, w = its phase rule (PostFxDesc::ssrMarchPhase);
 	/// screen2.x = the march's length (ssrMaxDistance), y = its thickness (ssrThickness), z = where the FAR COPIES' query
 	/// starts (the near length less the far copies' widest hand-over gap, the gather's rule), w = where it ends (the far
 	/// plane; 0 = no far query).

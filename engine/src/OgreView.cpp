@@ -2,6 +2,7 @@
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+#include "ReflectChainRules.h"
 
 // The inset's letterbox rectangle is written straight onto its scene pass'
 // DEFINITION (chain::PipHandles::scenePass) between frames — Ogre re-reads it
@@ -98,6 +99,7 @@ void OgreView::buildChain() {
     mChainSsao = chainDesc().ssao;
     mChainProbeGather = chainDesc().probeGather;
     mChainScreenIntegrate = chainDesc().screenIntegrate;
+    mChainPhotonTerm = chainDesc().photonTerm;
 }
 
 /// How many mip levels a `w x h` closest-depth pyramid has: down to 1x1, the
@@ -283,12 +285,6 @@ ChainDesc OgreView::chainDesc() const {
     d.ditherOff      = mPostFx.ditherOff || (mStereo && !vr::colourEncodedOnce());
     d.smaaPreset     = mPostFx.smaaPreset;
     d.ssr            = mPostFx.ssr;
-    // AND THE SOURCES THE ROW SELECTS (lead's read, 2026-09-18: a missing copy left the chain's own default whatever a
-    // host pushed, so the MONO view of one eye - `vrEyeScreenshot`'s control, offscreen with `allowOffscreen`, copying
-    // the session's PostFxDesc - went on using the screen while its eye could not: the two pictures were not
-    // comparable in the way the control exists to be). Below the offscreen early-out for that reason.
-    // @see PostFxDesc::reflectSources.
-    d.reflectSources = mPostFx.reflectSources;
     d.ssrMaxDistance = mPostFx.ssrMaxDistance;
     d.ssrSteps = mPostFx.ssrSteps;
     d.ssrMarchPhase = mPostFx.ssrMarchPhase;
@@ -360,6 +356,12 @@ ChainDesc OgreView::chainDesc() const {
     // anti-aliasing the window's samples. The post shapes render at 1x into their own
     // targets and always carry it. AtomDrawStatus::passthroughViews counts these.
     d.atomDraw = d.atomDraw && (d.anyEffect() || (!mWindow && targetSamples() <= 1u));
+    // THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm): the scene's view isolates a term, on a post chain of either
+    // eye shape (its composite is one multiview quad: the final read's M4).
+    if (mScene && d.anyEffect()) {
+        const PhotonView pv = mScene->photonView();
+        d.photonTerm = pv == PhotonView::Diffuse || pv == PhotonView::Reflections;
+    }
     finishAtomOcclusion(d);
     return d;
 }
@@ -374,7 +376,9 @@ bool OgreView::sceneShapeMoved() const {
            mChainSsao != d.ssao ||
            // ...and WHO PRODUCES THE OPAQUE PASSES' GI (PHOTON-7 7-5 / 7-6: graph shape): the gather (the scene's ray
            // answer and the view's contract) or the no-ray screen integrate (the scene's GI mode)
-           mChainProbeGather != d.probeGather || mChainScreenIntegrate != d.screenIntegrate;
+           mChainProbeGather != d.probeGather || mChainScreenIntegrate != d.screenIntegrate ||
+           // ...and THE PHOTON VIEW'S TERM TARGET (ChainDesc::photonTerm: the scene's view, graph shape)
+           mChainPhotonTerm != d.photonTerm;
 }
 
 /// THE ID PASS'S OCCLUSION (ChainDesc::atomOcclusion), decided LAST — after every rule
@@ -1127,10 +1131,10 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
         const bool hadWorkspace = detachWorkspace();
         // Only when the shape is wrong: the session's pair is BORN layered
         // (OgreEngine::createStereoPairView), and ending a session makes it 2D.
-        if (mTexture && mTexture->getNumSlices() != (mStereo ? 2u : 1u)) {
+        if (mTexture && mTexture->getNumSlices() != stereoTargetLayers(mStereo)) {
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture);
             mTexture = createRtt(mRoot, processUniqueName("rtt"), mWidth, mHeight,
-                                 mRequestedSamples, mStereo ? 2u : 1u);
+                                 mRequestedSamples, stereoTargetLayers(mStereo));
         }
         rebuildDetachedWorkspaceDef();
         if (hadWorkspace) attachWorkspace();
@@ -1645,6 +1649,7 @@ void OgreView::rebuildDetachedWorkspaceDef() {
     mChainSsao = chainDesc().ssao;
     mChainProbeGather = chainDesc().probeGather;
     mChainScreenIntegrate = chainDesc().screenIntegrate;
+    mChainPhotonTerm = chainDesc().photonTerm;
 }
 
 bool OgreView::dropWorkspaceForShadowRebuild() {
@@ -1830,23 +1835,6 @@ bool OgreView::readReflectionHdr(ImageF &out) {
     if (!mTexture) { mError = "readReflectionHdr: View '" + mIdentityName + "' is on-screen"; return false; }
     if (!mWorkspace) { mError = "readReflectionHdr: View '" + mIdentityName + "' has no workspace"; return false; }
     return readChainTexture(chain::reflectionTextureName(), out, "readReflectionHdr");
-}
-
-bool OgreView::readSsrHistoryHdr(ImageF &out) {
-    // A READBACK IS A REQUEST (U3 stage 4a, decision 39 d): the host's call is answered on the engine's side.
-    if (hostPosts()) { bool r{}; mEngine->request([&](Engine &) { r = readSsrHistoryHdr(out); }, nullptr); return r; }
-    if (!mTexture) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' is on-screen"; return false; }
-    if (!mWorkspace) { mError = "readSsrHistoryHdr: View '" + mIdentityName + "' has no workspace"; return false; }
-    if (!readChainTexture(chain::ssrHistoryTextureName(), out, "readSsrHistoryHdr")) return false;
-    // ...with the history's DEPTH in alpha (REFLECT-FIX-1): -1 where no surface shows.
-    ImageF depth;
-    if (!readChainTexture(chain::ssrHistoryDepthTextureName(), depth, "readSsrHistoryHdr")) return false;
-    if (depth.width != out.width || depth.height != out.height) {
-        mError = "readSsrHistoryHdr: the history's colour and depth differ in size";
-        return false;
-    }
-    for (size_t i = 0; i < size_t(out.width) * out.height; ++i) out.rgba[i * 4u + 3u] = depth.rgba[i * 4u];
-    return true;
 }
 
 bool OgreView::readChainTexture(const char *textureName, ImageF &out, const char *who) {

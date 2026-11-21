@@ -1859,11 +1859,6 @@ public:
     /// SSR rim, the letterbox, the environment match) — offscreen views whose
     /// chain has the SSR stage only; false otherwise, lastError says which.
     virtual bool readReflectionHdr(ImageF &out) = 0;
-    /// ...and the SSR MARCH'S HISTORY (REFLECT-FIX-1) — rgb = the previous frame's linear
-    /// scene picture the march reads its colours from, a = the depth it was drawn at
-    /// (-1 where no surface shows: an editor helper's pixel, which the resolve declines;
-    /// gi.reflect_no_helpers). Offscreen views whose chain marches only; false otherwise.
-    virtual bool readSsrHistoryHdr(ImageF &out) = 0;
 
     /// THE FRAME THIS VIEW PRESENTS, READ BACK (CLOSE-SHOT-2) — the picture the
     /// user is looking at, with no second render and no settle: the view's own

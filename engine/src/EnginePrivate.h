@@ -971,6 +971,8 @@ constexpr Ogre::uint8 kPhotonExecutionBits = kPhotonSceneExecutionBit | kPhotonO
 constexpr const char *kPhotonLayerMaterial   = "Jahshaka/PhotonLayer";         ///< display-encoded (SRGB-ENCODE-1)
 constexpr const char *kPhotonLayerLinearMaterial = "Jahshaka/PhotonLayerLinear"; ///< the Plain instrument's
 constexpr const char *kPhotonOverlayMaterial = "Jahshaka/PhotonOverlay";
+/// THE PHOTON VIEW'S TERM over the scene result (ChainDesc::photonTerm; JahPhotonView.material).
+constexpr const char *kPhotonTermMaterial = "Jahshaka/PhotonTerm";
 /// The cards' quads' material (the same file).
 constexpr const char *kPhotonCardsMaterial = "Jahshaka/PhotonCards";
 
@@ -1384,10 +1386,6 @@ struct ChainDesc {
     bool  displayEncode = false;
     int   smaaPreset = -1;          ///< -1 off, 0 Low, 1 Medium, 2 High, 3 Ultra
     int   ssr = 0;                  ///< 0 off, 1 half-res rays, 2 HQ
-    /// WHERE THE REFLECTION'S ANSWER COMES FROM (PostFxDesc::reflectSources): Both, Rays or Screen. A GRAPH field:
-    /// rasterMarch() and screenSources() below read it (with the stereo shape and the rays) for which passes and
-    /// textures exist.
-    ReflectSources reflectSources = ReflectSources::Both;
     float ssrMaxDistance = 25.0f;   ///< ray length, world units
     int   ssrSteps = 0;             ///< 0 = the row's 48/96 (PostFxDesc::ssrSteps)
     float ssrThickness = 0.5f;      ///< assumed surface thickness, world units
@@ -1440,6 +1438,15 @@ struct ChainDesc {
     bool  screenIntegrate = false;
     /// The opaque passes read the screen products (a gathering chain or the no-ray producer's).
     bool screenGi() const { return probeGather || screenIntegrate; }
+    /// THE PHOTON VIEW'S TERM TARGET (PHOTON-7-9A, the lead's ruling on the crease's cause (1)): while the scene's Photon
+    /// view ISOLATES a term (Diffuse / Reflections) on a mono post chain, the two passes that shade the picture (the
+    /// opaque pass and the opaque screen decode) write the FULL radiance to jahRt0 as every frame does - the screen
+    /// trace's source and the composed stop read the scene's light, never the viewing aid - and the isolated term to a
+    /// SECOND colour attachment (jahPhotonTerm, the target's format, cleared transparent), which the chain composites
+    /// over the scene result in front of the tonemap (Jahshaka/PhotonTerm). The term view is therefore THE OPAQUE
+    /// SURFACES' TERM: the blended and refractive passes draw into jahRt0 only. GRAPH SHAPE (the attachment, its
+    /// target and the composite); a stereo chain keeps the in-place isolation (it has no screen source).
+    bool  photonTerm = false;
     /// HARD SUN CONTACT SHADOWS (PHOTON P5, RY-R3), here for the gather's
     /// reason exactly: the contact job starts each ray from the PREPASS' depth
     /// and normals and the pixel reads its answer back in the `PrePassUse`
@@ -1643,14 +1650,26 @@ struct ChainDesc {
     /// ...the prepass a TRACE reads (the SSR stage, the gather, the sun contact) - the hit decode's condition: the
     /// no-ray producer's prepass appends no hit.
     bool tracedPrepass() const;
-    /// THE SCREEN SOURCES (PHOTON-7 stage 6): does the chain carry this view's previous picture, the depth it was drawn
-    /// at, the editor helpers' mask and the object motion - the screen trace's inputs (the one estimator on a ray chain,
-    /// rq_reflect.comp) and the raster march's? The SSR stage, reflectSources Both or Screen, never STEREO (the copies
-    /// are not per layer). `build` declares them on this answer and the ray tier binds them on it.
+    /// THE SCREEN SOURCES (PHOTON-7 stage 6; PHOTON-7-9A's hybrid): does the chain carry this view's previous picture,
+    /// the depth it was drawn at, the editor helpers' mask and the object motion - the screen trace's inputs (the
+    /// hybrid's screen half on a ray chain, rq_reflect.comp) and the raster march's? The SSR stage, never STEREO (the
+    /// copies are not per layer: a stereo chain's rays answer alone). The reflection has no mode (PostFxDesc::ssr).
+    /// `build` declares them on this answer and the ray tier binds them on it.
     bool screenSources() const;
     /// THE RASTER MARCH (the no-ray chain's screen-space reflection: JahSsrRayMarch + JahSsrResolve): the screen
     /// sources on a chain that traces NO rays. A ray chain answers its screen hits in the trace itself.
     bool rasterMarch() const;
+    /// THE COMPOSED SCENE (PHOTON-7-9A): the chain's last LINEAR picture before the tonemap - the opaque and blended
+    /// composite (jahRt0), or the refraction, distortion or AO pass's copy over it, whichever runs last (`build`'s
+    /// `sceneResult`, one rule). On a ray chain it is KEPT across frames (not DiscardableContent): the reflection
+    /// filter reads frame t-1's composite in photon_resolve - before this frame's first writer of jahRt0, the screen
+    /// decode or the opaque pass, clears it - to judge the rest's stop at the displayed pixel's own colour.
+    const char *composedTexture() const;
+    /// THE SCREEN TRACE's SOURCE (PHOTON-7-9A's hybrid): the last LINEAR stage before the camera-side passes - the
+    /// refractives' copy where refraction runs, else jahRt0; never the distortion's warp (a camera-side pass a reflection
+    /// would read at the wrong place) nor the AO apply (the camera's screen-space estimate; the hit's radiance is the
+    /// GI's own). Kept across frames on a ray chain, read in place by the trace (no colour copy).
+    const char *screenTraceSource() const;
     /// Do these two describe the same GRAPH? Parameters (exposure, AO power)
     /// are uniforms — changing one must never rebuild a workspace.
     static bool sameShape(const ChainDesc &a, const ChainDesc &b);
@@ -2198,6 +2217,8 @@ private:
     X(RaysOriginCut, "rays.originCut") /* the scale on every view ray job's drawn-surface lift (1 shipped; 0 the float bound alone, 0.5 half: the origin rows' controls) */ \
     X(RaysOriginPoint, "rays.originPoint") /* every view ray job's lift carries the depth-rebuilt point's own error - its depth quantum and the rasteriser's sub-pixel snap (0: the float bound alone - the float-only control) */ \
     X(ReflectSeedOffset, "reflect.seedOffset") /* the lobe draw's frame index offset (a second, independent noise) */ \
+    X(ReflectScreenOff, "reflect.screenOff") /* the hybrid's screen half gives no answer: the ray's own picture (rtreflect.mirror_blend's reference) */ \
+    X(ReflectShapeMismatch, "reflect.shapeMismatch") /* a STEREO view's recording reads its chain as the other shape: the shape refusal's negative control (vr.hit_list_stereo) */ \
     X(ReflectFlatHits, "reflect.flatHits") /* every reflection ray's hit answered by a constant of its instance (the estimator and denoiser measured alone) */ \
     X(ReflectWindow, "reflect.window") /* the moving window MaxFrames N (0 = shipped kReflectMaxFrames) and every reader of it */ \
     X(ReflectPosed, "reflect.posed") /* the posed (skinned) identification */ \
@@ -3736,7 +3757,9 @@ public:
     /// `jah_photon_view` (its VALUE is the mode) selects the lighting text's own
     /// isolation (JahPhotonView_piece_ps.any): one lighting text, never a second
     /// shader. 0 takes it away.
-    static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode);
+    /// `term`: the pass's target holds the term attachment (ChainDesc::photonTerm) - the shaders write the radiance as
+    /// always and the term beside it, never in its place.
+    static void setPhotonIsolation(const Ogre::SceneManager *sm, int mode, bool term = false);
 
     /// One extra PASS texture — the sky cube — for a colour pass that asked for
     /// it in preparePassHash. Read from the PROPERTIES, never from the state,
@@ -3817,6 +3840,7 @@ public:
         SunContactBind   sunContact;               ///< PHOTON-RAYS-1 (the pass's copy: PassBinds::sunVis)
         Ogre::TextureGpu *areaVis = nullptr;       ///< PHOTON-7 7-A (the pass's copy: PassBinds::areaVis)
         int              photonIsolation = 0;      ///< PHOTON-VIEW-1: 1 diffuse, 2 specular, 0 none
+        bool             photonTerm = false;       ///< ...written to the term attachment (ChainDesc::photonTerm)
         CloudShadowState cloudShadow;              ///< CLOUDS-2D-1 (the pass's copy: PassBinds::cloudField)
         AtmoBind         atmo;                     ///< SKY-ATMOSPHERE-1 (PassBinds::atmoAerial)
         FogState         fog;
@@ -7755,6 +7779,9 @@ public:
     /// the target and rebuilds the workspace definition.
     /// Called only by the VR session, on the View it owns.
     void setStereo(bool on, const std::string &cullCamera);
+    /// A FAULT A PASS OF THIS VIEW's FRAME FOUND (the reflection's shape refusal, PHOTON-7-9A): written to the engine's
+    /// error sink, which the frame publishes as its error (RenderThread::finishPublish) - never a silent frame.
+    void noteFrameFault(const std::string &text) { mError = text; }
     bool stereo() const { return mStereo; }
     /// The no-ray route's screen-GI listener (PHOTON-7 stage 7, 7-6; null where the chain gathers or draws nothing).
     const ScreenGiListener *screenGiListener() const { return mScreenGiListener.get(); }
@@ -7946,6 +7973,8 @@ public:
     inspect::ViewRoutes routes() const override { return inspect::ViewRoutes{ mChainProbeGather, mChainScreenIntegrate, mChainRayReflect }; }
     /// The BUILT chain carries the ray reflection (its recordReflect runs each frame it draws: the build's need).
     bool chainRayReflect() const { return mChainRayReflect; }
+    /// ChainDesc::photonTerm as the definition was built: the opaque passes' term attachment exists (OgrePhotonView.cpp).
+    bool chainPhotonTerm() const { return mChainPhotonTerm; }
     void setOffscreenContract(OffscreenContract c) override;
     /// THE CONTRACT AT BIRTH (OgreEngine::createOffscreenView, before the view is adopted by the render thread: no
     /// frame, no workspace yet - so no rebuild and no posted field).
@@ -8048,7 +8077,6 @@ public:
     bool readPixels(Image &out) override;
     bool readPixelsHdr(ImageF &out) override;
     bool readReflectionHdr(ImageF &out) override;
-    bool readSsrHistoryHdr(ImageF &out) override;
     /// Downloads one of this view's chain textures (a local of its scene node)
     /// into float: the radiance readback and the reflection readback share it.
     bool readChainTexture(const char *textureName, ImageF &out, const char *who);
@@ -8479,6 +8507,7 @@ private:
     /// re-checked once a frame with the scene's other shape terms (sceneShapeMoved).
     bool                       mChainProbeGather = false;
     bool                       mChainScreenIntegrate = false;
+    bool                       mChainPhotonTerm = false;   ///< ChainDesc::photonTerm as the definition was built
     /// THE HIT LIST'S SIZE (sizeHitList, kHitListWidth): the rows the list holds (0 until the first sizeHitList reads the
     /// built list; a graph is built at max(this, hitListCreateRows())). Never decreases WITHIN A SCENE; 0 again at
     /// detachScene (URGENT #157: the list dies with the workspace there, and a second scene is built at its own creation

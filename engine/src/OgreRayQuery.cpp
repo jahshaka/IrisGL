@@ -54,6 +54,7 @@
 #include "AtomPass.h"
 #include <thread>
 #include "ReadbackDecode.h"
+#include "ReflectChainRules.h"
 #include "EnginePrivate.h"
 #include "HitListLaw.h"   // the reflection rest's record allowance (URGENT #157)
 #include "GpuCheckpoints.h"
@@ -290,13 +291,10 @@ constexpr unsigned kGlassRestSequence = 0x10000u;
 /// ~2.5k of them in by rest frame 100, so >= 44 a frame over the remaining 500 - 64, the next power of two.
 constexpr unsigned kReflectRestRaysCap = 64u;
 constexpr unsigned kReflectRestTailDivisor = 8u;
-/// THE STOP'S FRAMES (jah_reflect_rest.glsl kReflectStopFrames): a texel stops after its standard error stayed within its
-/// share this many frames - the rest bound's last term (PHOTON-7 11-1c).
-constexpr unsigned kReflectStopFrames = 8u;
 /// Bindings in rq_reflect.comp's set 0: the trace's fifteen, then the card
 /// read's four (jah_rq_card_bindings.glsl at JAH_CARD_BINDING_BASE 15 — the
 /// card table, the instance table, the Depth and Radiance layers).
-constexpr unsigned kReflectBindings = 63u;
+constexpr unsigned kReflectBindings = 64u;
 constexpr unsigned kReflectCardBinding = 15u;
 /// ...then the hit's geometric normal (PHOTON-CARDS-2 fix round): the per-slot
 /// geometry-row table the TLAS writer fills (19) and the GPU scene's geometry
@@ -401,7 +399,11 @@ constexpr unsigned kReflectBricksBinding = kReflectRegionsBinding + 1u;
 /// texel and eye - a texel reached at rest by a CARD region alone re-rests in the background showing its answer, then
 /// walks to the new one at a code a frame (the gather's B3, the reflection's form).
 constexpr unsigned kReflectRefineBinding = kReflectBricksBinding + GatherRestInputs::kCascades;
-static_assert(kReflectBindings == kReflectRefineBinding + 1u, "the refinement word is the reflection set's last binding");
+/// ...and THE COMPOSED SCENE (63, PHOTON-7-9A stage 2; ChainDesc::composedTexture): frame t-1's linear composite - the
+/// displayed pixel's colour at rest - read by the filter for the rest's stop share, judged at the pixel the user sees
+/// (rq_reflect_filter.comp); kept across frames on a ray chain, and read before the frame's first writer clears it.
+constexpr unsigned kReflectComposedBinding = kReflectRefineBinding + 1u;
+static_assert(kReflectBindings == kReflectComposedBinding + 1u, "the composed scene is the reflection set's last binding");
 /// THE COMPACT PATH'S BOUND L (the lead's ruling): 16,384 texels - at or below this count last frame the rest's tail runs
 /// one warp a texel, its samples dealt over that warp's lanes, so the busiest warp is one texel's (clustered edge
 /// texels made it ceil( m k / 32 ) rounds, the dispatch's critical path on a near-idle GPU). The path's ENTRY bound,
@@ -410,8 +412,10 @@ constexpr unsigned kReflectCompactTexels = 16384u;
 /// THE COMPACT LIST'S HEADER (rq_reflect.comp's twins): words [0..1] the halves' counts, [2..4] the compact pass's
 /// VkDispatchIndirectCommand (the tile pass raises its groups with an atomicMax - the larger of the warp mode's and the
 /// dense mode's needs; y = z = 1), [5] the hit list's record
-/// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused; the halves after it.
-constexpr unsigned kCompactListHeaderWords = 8u;
+/// count after the tile pass (copied by the host: the compact pass's record budget), [6..7] unused, [8..11] THE TAIL's
+/// RAMP - a half's rate R and samples V as float bits, written in that half's frame, read the next (rq_reflect.comp
+/// jahTailRampPrev: PHOTON-7-9A, the hand-over's one-frame rise); the halves after it.
+constexpr unsigned kCompactListHeaderWords = 12u;
 constexpr unsigned kCompactListDispatchWord = 2u;
 constexpr unsigned kCompactListRecordsWord = 5u;
 /// THE HIT LIST'S BUFFER LAYOUT (jah_rq_hit_record.glsl kJahHitAuxBase / kJahHitAuxWords, 800.Atom_piece_ps.any's read):
@@ -1228,8 +1232,6 @@ private:
         /// a copy per ring slot like the trace's own.
         RawBuffer       motionGeomRowOfSlot[3];
         unsigned        motionFrame = 0;
-        /// THE SOURCES THIS VIEW LAST TRACED WITH (RayQueryStatus::reflectSources).
-        int             sources = -1;
         /// Its GPU time is the monitor row "rq.reflect.motion" (owner = the key).
         /// Frames since a MOVER slot (kGpuMover | kGpuDragMover) last moved in this
         /// view's scene — the trace's departure rule is live only just after one did.
@@ -1285,14 +1287,6 @@ private:
         /// frame, a resize and a scene change all are.
         EyeBasisF prev[2];
         bool  havePrev = false;
-        /// HOW MANY CONSECUTIVE FRAMES THIS HISTORY HAS BEEN WRITTEN — the
-        /// VIEW's age, which is a different fact from a texel's sample count
-        /// (PAN-SMEAR-1). A pixel the camera has just turned onto has no
-        /// previous position on screen, and the shader must tell that apart
-        /// from a view that is two frames old: the second is what the filter's
-        /// warm-up exists for, the first is an ordinary frame of an ordinary
-        /// pan. Restarts with `havePrev`.
-        unsigned historyFrames = 0;
         /// Was the LAST recorded frame a stereo one? A view that changes shape
         /// (a session beginning or ending on it) has a history whose halves mean
         /// something else, so the mean starts again — the same rule as a resize.
@@ -1337,7 +1331,7 @@ private:
         /// frame, from its read-back (0 until it arrives: the first frames run k a texel).
         unsigned long long restRayCount = 0ull;
         bool restAllStopped = false;
-        /// The view CAN rest (not stereo, not the photon overlay's: its still predicate's standing half), at its last
+        /// The view CAN rest (not stereo: its still predicate's standing half; the Hits overlay rests too), at its last
         /// record - the cards' rest decision waits only on a view that can (cardReadersRestComplete).
         bool restableLast = false;
         /// ...and the frame it last recorded (frameNow), and its scene's draw count then (OgreScene::drawSerial): a view
@@ -1514,6 +1508,9 @@ private:
     /// The pipeline could not be made on this device; say so ONCE and take the
     /// fallback picture for the rest of the process.
     bool                  mReflectFailed = false;
+    /// Recordings refused for a chain not at the view's stereo shape (ReflectChainRules.h; a defect: 0 is the law).
+    unsigned long long mReflectShapeRefusals = 0ull;
+    bool mReflectShapeLogged = false;   ///< the genuine refusal's one log line spent (a forced one never spends it)
 
     // ---- THE SCREEN-PROBE GATHER (GATHER-1a) ---------------------------
     // Three more compute dispatches on the SAME frame command buffer and the
@@ -1866,6 +1863,8 @@ private:
         /// eye's target (stamped at every prepare), the list the newest read-back frame held and the list the FIRST
         /// read-back frame held (the creation size; never rewritten).
         unsigned eyes = 1u, eyeWidth = 0u, eyeHeight = 0u;
+        /// The view's BUILT chain carries the Photon term view's attachment (OgreView::chainPhotonTerm, PHOTON-7-9A M4).
+        bool photonTerm = false;
         uint32_t readCapacity = 0u, firstCapacity = 0u;
         /// The largest demand of a retired frame that overflowed its list, not yet taken (takeHitOverflow).
         unsigned long long overflowDemand = 0ull;
@@ -1881,9 +1880,10 @@ private:
         /// THE NEE's CONE HIT RATE (PHOTON-7 11-1b, counter words 10-11; the lead's condition): the NEE rays and those
         /// whose first hit was the target drawn, summed over every retired frame read.
         unsigned long long neeRays = 0ull, neeHits = 0ull;
-        /// THE REST'S BOUND's words (PHOTON-7 11-1c, counter words 8-9: filled at rest frame 2N, held after it) as the
-        /// newest retired frame that carried them read them, with that frame's rest tag.
-        uint32_t boundOwed = 0u, boundNeedMax = 0u, boundTag = 0u;
+        /// THE REST'S SAMPLE LAW's words (PHOTON-7 11-1c, the final read's M1; counter words 8-9, filled from rest frame 2N
+        /// and held across the rest): word 8 the largest v at a stop past 2N, word 9 the largest need at 2N - as the newest
+        /// retired frame that carried them read them, with that frame's rest tag.
+        uint32_t stopVMax = 0u, boundNeedMax = 0u, boundTag = 0u;
         /// Armed for the decode pass: the SceneManager whose draws are shown, and
         /// the camera whose auto aspect is held off for the pass (the decode's
         /// target is the list, not a picture — F7).
@@ -6158,7 +6158,7 @@ struct ReflectParams {
     float restBrickOrigin[GatherRestInputs::kCascades][4] = {};
     float restBrickDims[GatherRestInputs::kCascades][4] = {};
     /// THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6; rq_reflect.comp's screen, screen2): [0] = 1 the screen trace runs,
-    /// [1] = 1 the screen alone (reflectSources Screen), [2] its steps, [3] its phase rule; screen2: the march's length
+    /// [1] unused (the screen-alone arm deleted with the mode, PHOTON-7-9A), [2] its steps, [3] its phase rule; screen2: the march's length
     /// and thickness, the far copies' query from / to (0 = none).
     float screen[4] = {};
     float screen2[4] = {};
@@ -6424,6 +6424,7 @@ constexpr VkDescriptorType kReflectTypes[kReflectBindings] = {
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 60 ...2
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,               // 61 ...3
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                // 62 the refinement word (PHOTON-7 8B, B2's hand-over)
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,       // 63 the composed scene, frame t-1 (PHOTON-7-9A stage 2)
     };
 static_assert(kReflectTypes[kReflectIdBinding] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
               "the id image is sampled (the writer binds it as a sampler)");
@@ -6610,7 +6611,6 @@ bool RayQueryTier::ensureReflectImages(ReflectView &rv, unsigned w, unsigned h, 
     retireImage(rv.refine);
     rv.imagesReady = false;
     rv.havePrev = false;
-    rv.historyFrames = 0;
     rv.w = w; rv.h = h;
     rv.layers = layers;
     // The second image, THE STATE TEXEL (PHOTON-7 stage 6, L8; jah_reflect_state.glsl): the surface's distance (the
@@ -6725,6 +6725,7 @@ void RayQueryTier::forgetReflect(const ReflectPassListener *key) {
 }
 
 void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) const {
+    st.reflectShapeRefusals = mReflectShapeRefusals;   // (the tier's, every view)
     for (const auto &kv : mReflects) {
         if (kv.second.sceneId != scene->historyId()) continue;   // (the one identity, never an address)
         st.reflect = true;
@@ -6757,7 +6758,6 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         // THE REST (R1, G6)
         const ReflectView &rv = kv.second;
         st.reflectRestFrames = rv.restFrames;
-        st.reflectSources = rv.sources;
         st.reflectHeld = rv.held;
         st.reflectRests = rv.restSession;
         st.reflectRestMoverFrames = rv.restListCrossings;
@@ -6774,16 +6774,12 @@ void RayQueryTier::reflectStatsInto(const OgreScene *scene, RayQueryStatus &st) 
         if (const auto h = mHits.find(kv.first); h != mHits.end()) {
             st.reflectNeeRays += h->second.neeRays;
             st.reflectNeeHits += h->second.neeHits;
-            // THE REST'S BOUND (PHOTON-7 stage 11, 11-1c): the samples the texels converging at rest frame 2N still owe,
-            // over the tail's rays a frame (the rest's count / kReflectRestTailDivisor), past 2N, plus the stop's frames
+            // THE REST'S SAMPLE LAW (PHOTON-7 stage 11, 11-1c; the final read's M1): the largest need at rest frame 2N and
+            // the largest v at a stop after it, this rest's (RayQueryStatus::reflectRestStopVMax has the law)
             const uint32_t tag = h->second.boundTag;
             if (rv.restFrames > 0u && tag && (tag >> 20u) == (rv.restSession & 0xFFFu)) {
-                const unsigned long long tail =
-                    std::max<unsigned long long>(rv.restRayCount / kReflectRestTailDivisor, 1ull);
-                st.reflectRestBoundOwed = h->second.boundOwed;
                 st.reflectRestNeedMax = h->second.boundNeedMax;
-                st.reflectRestBound = int(2u * rv.restN + unsigned((h->second.boundOwed + tail - 1ull) / tail) +
-                                          kReflectStopFrames);
+                st.reflectRestStopVMax = h->second.stopVMax;
             }
         }
     }
@@ -6882,14 +6878,31 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     // THE SCREEN TRACE'S PICTURE (PHOTON-7 stage 6, the one estimator's first source): this view's previous picture,
     // the depth it was drawn at and the object motion — declared only where the chain carries its SCREEN SOURCES
-    // (ChainDesc::screenSources: reflectSources Both or Screen, a mono view), and asked only of such a chain (Ogre logs
+    // (ChainDesc::screenSources: none on a ray chain since PHOTON-7-9A), and asked only of such a chain (Ogre logs
     // every getDefinedTexture miss). All three present and the picture the view's size, or the screen trace is off this
     // frame and the rays answer alone.
     const ChainDesc chainD = view->chainDesc();
+    // THE COMPOSED SCENE (63; ChainDesc::composedTexture): frame t-1's linear composite (after the AO apply and the
+    // distortion: the displayed pixel), kept across frames on a ray chain (OgreChain.cpp) and read before this frame's
+    // first writer clears it - the rest's stop share at the displayed pixel (rq_reflect_filter.comp). A texture of another
+    // size or shape this frame (a resize) is declined, and so is a LETTERBOXED chain's (reflectComposedRead: its prologue
+    // fills the target with the bars and the background before the filter reads it): the stand-in, the reflection term
+    // alone.
+    Ogre::TextureGpu *composedTex = nullptr;
+    if (reflectComposedRead(chainD.letterbox)) {
+        try {
+            composedTex = node->getDefinedTexture(Ogre::IdString(chainD.composedTexture()));
+        } catch (Ogre::Exception &) { composedTex = nullptr; }
+    }
+    // THE SCREEN TRACE'S INPUTS (the hybrid: the screen first, then the rays - PHOTON-7-9A's one shape): the previous
+    // picture IN PLACE (ChainDesc::screenTraceSource: the last linear stage before the camera-side passes, kept across
+    // frames - no copy; the same texture as the composed scene where neither AO nor distortion runs), the depth it was
+    // drawn at and the object motion - a mono chain's (ChainDesc::screenSources: a stereo chain's copies are not per
+    // layer, and its rays answer alone).
     Ogre::TextureGpu *prevColourTex = nullptr, *prevDepthTex = nullptr, *velocityTex = nullptr;
     if (chainD.screenSources() && !view->stereo()) {
         try {
-            prevColourTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrev"));
+            prevColourTex = node->getDefinedTexture(Ogre::IdString(chainD.screenTraceSource()));
             prevDepthTex = node->getDefinedTexture(Ogre::IdString("jahSsrPrevDepth"));
             velocityTex = node->getDefinedTexture(Ogre::IdString("jahSsrVelocity"));
         } catch (Ogre::Exception &) { prevColourTex = prevDepthTex = velocityTex = nullptr; }
@@ -6922,7 +6935,28 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // A STEREO VIEW'S TEXTURES ARE LAYERED, one eye per layer (LAYERED-STEREO-1):
     // fullW is one eye's, the trace is per layer, and the dispatch's z is the eye.
     const unsigned eyeLayers = ssrTex->getNumSlices();
-    if (stereo != (eyeLayers == 2u)) return;   // a chain that is not the view's shape yet
+    // THE SHAPE (ReflectChainRules.h): OgreView::setStereo rebuilds the chain at the view's shape inside the call, so a
+    // recording that finds another shape is a DEFECT - refused, counted (RayQueryStatus::reflectShapeRefusals) and the
+    // frame's error naming the view, never a silent frame with no reflection (w = 0 everywhere: the bound cube's open
+    // share; PHOTON-7-9A, the lead's ruling (A) on cube site (6b)).
+    // (the arm reflect.shapeMismatch: a STEREO view's recording reads the other shape - the counter's negative control)
+    const bool shapeWrong = !reflectChainMatchesStereo(stereo, eyeLayers);
+    const bool shapeForced = !shapeWrong && stereo && arm(ArmId::ReflectShapeMismatch, false);
+    if (shapeWrong || shapeForced) {
+        ++mReflectShapeRefusals;
+        // the forced refusal names its arm and leaves the genuine refusal's one log line unspent (the reader's audit)
+        const std::string why = shapeForced
+            ? "reflection refused: view '" + view->name() + "' - reflect.shapeMismatch forced (the counter's negative control)"
+            : "reflection refused: view '" + view->name() + "' is " + (stereo ? "stereo" : "mono") +
+                  " but its chain's images hold " + std::to_string(eyeLayers) +
+                  " layer(s) - a chain not rebuilt at the view's shape (a defect)";
+        if (shapeWrong && !mReflectShapeLogged) {
+            mReflectShapeLogged = true;
+            Ogre::LogManager::getSingleton().logMessage("R5 " + why + " (logged once; counted)");
+        }
+        view->noteFrameFault(why);
+        return;
+    }
 
     // ---- THE HIT SET (the tier's one collection, hitSetOf): the cascades the hits are shaded from (route A,
     // innermost first), the one environment, the surface cache the hits read first, the geometric normal's rows, the
@@ -7106,14 +7140,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // heuristic; the arm "reflect.nee" 0 = the BRDF-only estimator (the acceptance's reference)
     pp.knobs[3] = arm(ArmId::ReflectNee, true) ? 1.0f : 0.0f;
     // THE ONE ESTIMATOR'S SOURCES (PHOTON-7 stage 6): the screen trace (its march: the chain's length, thickness, steps
-    // and phase rule - the raster march's own numbers, PostFxDesc::ssr*), the screen alone, and the FAR COPIES' query
+    // and phase rule - the raster march's own numbers, PostFxDesc::ssr*) and the FAR COPIES' query
     // for an escape (from the near length less the far copies' widest hand-over gap to the far plane: the gather's
     // continuation, OgreScreenProbeGather.cpp).
     pp.screen[0] = screenTrace ? 1.0f : 0.0f;
-    pp.screen[1] = screenTrace && chainD.reflectSources == ReflectSources::Screen ? 1.0f : 0.0f;
-    rv.sources = int(!screenTrace ? ReflectSources::Rays
-                                  : chainD.reflectSources == ReflectSources::Screen ? ReflectSources::Screen
-                                                                                   : ReflectSources::Both);
     pp.screen[2] = chainD.ssrSteps > 0 ? float(std::min(std::max(chainD.ssrSteps, 8), 128))
                                        : (chainD.ssr >= 2 ? 96.0f : 48.0f);
     pp.screen[3] = float(chainD.ssrMarchPhase);
@@ -7148,7 +7178,16 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     pp.denoiser[1] = exposureTex ? 1.0f : 0.0f;
     // THE LOBE DRAW'S SEED OFFSET (the measuring arm reflect.seedOffset: 0 shipped).
     pp.denoiser[2] = float(std::lround(armValue(ArmId::ReflectSeedOffset)));
-    pp.denoiser[3] = arm(ArmId::ReflectFlatHits, false) ? 1.0f : 0.0f;   // the measuring arm reflect.flatHits
+    pp.denoiser[3] = 0.0f;
+    // THE TEST ARM reflect.screenOff (rtreflect.mirror_blend's reference): the screen gives no answer, the hits as shipped.
+    if (arm(ArmId::ReflectScreenOff, false)) pp.screen[0] = 0.0f;
+    if (arm(ArmId::ReflectFlatHits, false)) {   // the measuring arm reflect.flatHits
+        pp.denoiser[3] = 1.0f;
+        // ...AND THE SCREEN GIVES NO ANSWER (PHOTON-7-9A, the lead's ruling (A)): the screen half answers from the
+        // previous picture - a cache - so under the arm the ray and the denoiser run alone, the caches out: the stereo
+        // chain's route (no screen sources in stereo). The product's frames never set the arm.
+        pp.screen[0] = 0.0f;
+    }
     // THE GI FREEZE (M1's measuring arm): the reflection keeps its histories under 1; under 2 (THE WORLD HELD) the caches
     // and the gather are held and the reflection runs live - its own estimator measured alone.
     pp.rest[0] = std::lround(armValue(ArmId::GiFreeze)) == 1 ? 1.0f : 0.0f;
@@ -7163,12 +7202,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // view that has just BECOME stereo (or stopped being) is the same case: its
     // history's two halves were one picture, or its one picture is now two.
     // ...AND A CAMERA CUT (PHOTON-2 round 2, N3: isCameraCut, the gather's rule - Lumen's): the histories restart - the
-    // images cleared this frame (a distance of zero is "no history here") and the view's age back to 0 (the young
-    // view's fade-in) - instead of ghosting through what the reprojection's tests happened to accept.
+    // images cleared this frame (a distance of zero is "no history here") - instead of ghosting through what the
+    // reprojection's tests happened to accept. Every pixel is then a NEW pixel answered by this frame's sample at full
+    // weight (PAN-SMEAR-1's rule) - no young-view fade toward the bound environment cube (PHOTON-7-9A: deleted; it was
+    // the sky's capture inside a sealed room, ~180,000 px of a glass room's panes blue-grey for 6-7 frames after every
+    // cut, spikes/photon-7-9a/cut/).
     if (rv.havePrev && rv.prevStereo == stereo &&
         isCameraCut(rv.prev[0].camPos, rv.prev[0].rayRight, rv.prev[0].rayDown, rv.prev[0].fwd, eyeB[0].camPos,
                     eyeB[0].rayRight, eyeB[0].rayDown, eyeB[0].fwd)) {
-        rv.havePrev = false;   // the branch below withholds the previous basis and zeroes the age
+        rv.havePrev = false;   // the branch below withholds the previous basis
         rv.needsClear = true;
         ++rv.cameraCuts;
     }
@@ -7186,12 +7228,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     } else {
         memset(pp.prevFwd, 0, sizeof(pp.prevFwd));
         memset(pp.prevFwd2, 0, sizeof(pp.prevFwd2));
-        rv.historyFrames = 0;
     }
-    // THE VIEW'S AGE, in frames of unbroken history (rq_reflect.comp's
-    // `stereo.y`; 0 on a first frame, a resize, a scene bind and a change of
-    // stereo shape, exactly where the previous basis is withheld above).
-    pp.stereo[1] = float(rv.historyFrames);
+    // (stereo.y and screen.y stay zero - pp{} - and unread: the view's age fed the filter's young-view fade, deleted by
+    // PHOTON-7-9A with the age itself; a rest's "one frame of history" is `sameEye` below, which needs havePrev.)
     // knobs2.x: THE REST (PHOTON-2 1e), set below once every parameter is known; a lamp's step, a cloud or a
     // re-injection is the temporal pass' clamp's (the radiance-key cap is deleted with its key, PHOTON-2 1b).
     pp.knobs2[0] = 0.0f;
@@ -7345,8 +7384,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     }
     // The eye basis BIT for bit (a tracked head is never at rest: stereo never rests, as the gather's), the
     // reflection's rest key (reflectRestKey: never a move), and every parameter of the pass but the ones a still frame
-    // changes by construction (the frame index, the previous basis, the view's age, the rest frame itself, the moved
-    // instances' boxes). A Hits photon view keeps tracing (it is the trace's picture).
+    // changes by construction (the frame index, the previous basis, the rest frame itself, the moved instances'
+    // boxes). A Hits photon view RESTS like the shipped view (PHOTON-7-9A, the lead's ruling: a viewing aid
+    // never changes the estimator's state): a texel that stopped paints kPhotonRest - no ray shaded it this frame.
     HitView *restHits = nullptr;
     {
         auto hit = mHits.find(key);
@@ -7360,7 +7400,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         // tables, the sun legs, the id pass's image, the alpha table, the origin's terms, the fog, the metal route, the
         // clouds, the rest's own arms, the screen trace's and the denoiser's. NOT the eye (`sameEye` compares its basis
         // bit for bit), nor what a still frame changes by construction: the frame index (knobs.z), the rest frame
-        // (knobs2.x), the view's age (stereo.y), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
+        // (knobs2.x), the previous basis, the changed-region list's block (restLists, the masks), the recent-move flag
         // (motion.w: a move, which breaks per texel) and the list's capacity (hitList.x: it grows in place).
         unsigned long long paramsKey = 1469598103934665603ull;
         const auto foldBytes = [&paramsKey](const void *d, size_t n) {
@@ -7377,7 +7417,8 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         foldF(pp.knobs[0]); foldF(pp.knobs[1]); foldF(pp.knobs[3]);
         foldF(pp.knobs2[1]); foldF(pp.knobs2[3]);
         fold4(pp.viewAxisX); fold4(pp.viewAxisY); fold4(pp.viewAxisZ);
-        foldF(pp.stereo[0]); foldF(pp.stereo[2]); foldF(pp.stereo[3]);
+        foldF(pp.stereo[0]); foldF(pp.stereo[3]);   // (NOT stereo.z: the Hits overlay's write, an instrument - it changes
+                                                     // no picture, and switching the view broke the rest: PHOTON-7-9A)
         {
             // THE HIT SET'S UNIFORMS, all but the list's capacity (as before: the list grows under a rest) - and NOT the
             // DEVICE ADDRESSES (DETERMINISM-1, C4: the alpha and hit tables' in `tables`, the tier counters' in
@@ -7405,9 +7446,9 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         const unsigned long long restKey = reflectRestKey(scene, sa);
         const bool sameEye = rv.havePrev && rv.prevStereo == stereo &&
                              std::memcmp(&rv.prev[0], &eyeB[0], sizeof(EyeBasisF)) == 0;
-        const bool still = !stereo && !photon && sameEye && rv.restKnown && restKey == rv.restKey &&
-                           paramsKey == rv.restParams && rv.historyFrames >= 1u;
-        rv.restableLast = !stereo && !photon;
+        const bool still = !stereo && sameEye && rv.restKnown && restKey == rv.restKey &&
+                           paramsKey == rv.restParams;
+        rv.restableLast = !stereo;
         rv.recordedFrame = frameNow();
         rv.recordedDraw = rv.scene ? rv.scene->drawSerial() : 0u;
         const bool wasResting = rv.restFrames > 0u;
@@ -7476,7 +7517,6 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                     ? ((rv.restSession & 0xFFFu) << 20u) | (rv.restFrames & 0xFFFFFu)
                                     : 0u;
     }
-    if (rv.historyFrames < 4096u) ++rv.historyFrames;   // saturates: "warm" is all it says
     // THE REST'S COMPACT PATH (kReflectCompactTexels): at rest in place, a mono view, a traced frame, no reference arm -
     // the tile pass lists this frame's converging texels in the half it flips to, and the compact pass takes them when
     // last frame's list (the other half) fit.
@@ -7670,6 +7710,17 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     if (!refineImg.imageView) { bail("the refinement word's binding is null"); return; }
     w[kReflectRefineBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     w[kReflectRefineBinding].pImageInfo = &refineImg;
+    // THE COMPOSED SCENE (63): every eye's layer, or the flat array stand-in (its luma 0: the reflection term alone)
+    if (composedTex && (composedTex->getWidth() != fullW || composedTex->getHeight() != fullH ||
+                        composedTex->getNumSlices() != eyeLayers))
+        composedTex = nullptr;
+    VkDescriptorImageInfo composedImg{};
+    composedImg.sampler = mPointSampler;
+    composedImg.imageView = composedTex ? layerView(composedTex, false) : mDummyFlatArrayView;
+    composedImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (!composedImg.imageView) { bail("the composed scene's binding is null"); return; }
+    w[kReflectComposedBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[kReflectComposedBinding].pImageInfo = &composedImg;
     // THE REST'S COMPACT LIST (52): a half a trace grid (every texel the tile pass can list - it can never overflow),
     // re-made when the trace size changes. 8 bytes a trace texel: 4.15 MB at a 960 x 540 trace.
     {
@@ -7788,6 +7839,11 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                          Ogre::ResourceAccess::Read, computeStage);
         if (exposureTex)
             solver.resolveTransition(trans, exposureTex, Ogre::ResourceLayout::Texture,
+                                     Ogre::ResourceAccess::Read, computeStage);
+        // (THE COMPOSED SCENE, frame t-1's: the frame's first writer - the screen decode or the opaque pass - comes after
+        // the filter and takes it back to a target)
+        if (composedTex)
+            solver.resolveTransition(trans, composedTex, Ogre::ResourceLayout::Texture,
                                      Ogre::ResourceAccess::Read, computeStage);
         // THE HIT SET (the one order: hitSetTransitions), and the rest's brick masks
         hitSetTransitions(solver, trans, hs);
@@ -9223,7 +9279,7 @@ void RayQueryTier::finishReflect(const ReflectPassListener *key) {
         vkCmdDispatch(cmd, (rv.fullW + 7u) / 8u, (rv.fullH + 7u) / 8u, rv.layers);   // z = the eye
     }
     readReflectHistory(rv, cmd);
-    // THE REST BOUND's WORDS (M1): the temporal pass's atomics on words 8-9 are done (every reflection dispatch of the
+    // THE REST'S SAMPLE LAW's WORDS (M1): the temporal pass's atomics on words 8-9 are done (every reflection dispatch of the
     // frame is recorded above) - their copy, into the slot the composite's copy filled, ordered after them and before
     // the host's read. THE PICK (M2): the trace's and the temporal pass's shader writes into the host-visible pick buffer
     // made visible to the host (no barrier carried SHADER_WRITE to HOST before: the frame barrier's scope ends at
@@ -12409,7 +12465,7 @@ void RayQueryTier::readHitCounters(HitView &hv) {
             hv.restBatching = w[4];
             hv.restActiveTag = pd.restTag;
             if (w[9] > 0u && pd.restTag != 0u) {
-                hv.boundOwed = w[8];
+                hv.stopVMax = w[8];
                 hv.boundNeedMax = w[9];
                 hv.boundTag = pd.restTag;
             }
@@ -12445,6 +12501,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     hv.sceneId = scene->historyId();
     // (a stereo view's width() is its eye PAIR's: both eyes append to this one list)
     hv.eyes = view->stereo() ? 2u : 1u;
+    hv.photonTerm = view->chainPhotonTerm();
     hv.eyeWidth = view->width() / hv.eyes;
     hv.eyeHeight = view->height();
     readHitCounters(hv);
@@ -12773,6 +12830,7 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
         RayQueryStatus::HitListView v;
         v.eyes = hv.eyes;
+        v.photonTerm = hv.photonTerm;
         v.eyeWidth = hv.eyeWidth;
         v.eyeHeight = hv.eyeHeight;
         v.firstCapacity = hv.firstCapacity;

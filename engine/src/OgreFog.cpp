@@ -413,8 +413,11 @@ bool FogHlmsListener::lampRaysOn(const Ogre::SceneManager *sm) {
     return b && b->lampRaysOn;
 }
 // PHOTON-VIEW-1 — the view's isolation, pass-scoped like the gather's registration.
-void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode) {
-    if (SceneBinds *b = bindsOf(sm)) b->photonIsolation = mode <= 0 ? 0 : mode;
+void FogHlmsListener::setPhotonIsolation(const Ogre::SceneManager *sm, int mode, bool term) {
+    if (SceneBinds *b = bindsOf(sm)) {
+        b->photonIsolation = mode <= 0 ? 0 : mode;
+        b->photonTerm = b->photonIsolation > 0 && term;
+    }
 }
 FogHlmsListener::ProbeGatherBind FogHlmsListener::probeGather(const Ogre::SceneManager *sm) {
     const SceneBinds *b = bindsOf(sm);
@@ -694,8 +697,12 @@ void FogHlmsListener::preparePassHash(const Ogre::CompositorShadowNode *shadowNo
     // Diffuse or Reflections, and set only for the length of the one pass that
     // shades the picture: one empty() test per colour pass otherwise, and every
     // generated shader is the one it was.
-    if (rec && rec->photonIsolation > 0)
+    if (rec && rec->photonIsolation > 0) {
         hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_view", Ogre::int32(rec->photonIsolation));
+        // ...WRITTEN BESIDE THE RADIANCE (ChainDesc::photonTerm, PHOTON-7-9A): the pass's target holds the term
+        // attachment, so the piece declares that output and leaves the picture's own colour the scene's light.
+        if (rec->photonTerm) hlms->_setProperty(Ogre::Hlms::kNoTid, "jah_photon_term", 1);
+    }
     // THE OPAQUE PASSES' DOOR (PHOTON-7 7-1, L4): what this colour pass binds of Photon - the world caches (the
     // volumes' own preparation above) and the SCREEN products, by the names photonScreenProducts() lists: the
     // gather's diffuse and its rough specular (7-3), the reflection (HlmsPbs's SSR texture: the prepass's reflection,
