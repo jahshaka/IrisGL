@@ -1594,8 +1594,10 @@ void warmCasterPassJobs(OgreScene *scene, Ogre::RenderSystem *rs, const Ogre::Ca
     LightPyramid lp;
     const float kWarmDilation[2] = { 3.0f + float(kReceiverTileTexels), 3.0f + float(kReceiverTileTexels) };
     JAH_TRY {
-        // THE RECTANGLE'S PYRAMID BUILD (Jahshaka/HzbBuildRect: one permutation for every map since it no longer keys
-        // on the textures' sizes): the view's pyramid from the view's depth at a zero corner.
+        // THE RECTANGLE'S PYRAMID BUILD (Jahshaka/HzbBuildRect: ONE permutation for every map and every view - its job
+        // sets "inform_shader_of_texture_size" false, so neither its textures' sizes nor its group counts are in its
+        // properties; the dispatch takes the job's own counts; source.compute_size_keys holds it, COLD-BOOT-1 stage 2):
+        // the view's pyramid from the view's depth at a zero corner.
         lp.origin = vao->createUavBuffer(1u, 16u, 0, nullptr, false);
         const uint32_t corner[4] = { 0u, 0u, 0u, 0u };
         lp.origin->upload(corner, 0, 1u);

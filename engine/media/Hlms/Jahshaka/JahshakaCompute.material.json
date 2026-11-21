@@ -6,6 +6,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [4, 1, 1],
 			"source" : "JahVoxelReaderParity_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahVoxelSample_piece_all.any", "JahVoxelMarch_piece_all.any", "JahVoxelRay_piece_all.any", "JahVoxelParity_piece_all.any"],
 			"uav_units" : 2,
 			"properties" :
@@ -102,6 +103,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahEnvironmentCones_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahEnvironment_piece_all.any"],
 			"textures" : [ {} ],
 			"uav_units" : 2
@@ -112,6 +114,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahSkinCache_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahGeomRows_piece_all.any"],
 			"uav_units" : 3
 		},
@@ -121,6 +124,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahCullTest_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
 			"uav_units" : 7
@@ -131,6 +135,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahCullCompact_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 4
 		},
@@ -139,6 +144,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahCullDraws_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any"],
 			"uav_units" : 6
 		},
@@ -147,6 +153,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahCullCut_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahClusterCut.glsl", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
 			"uav_units" : 14
@@ -156,6 +163,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahCullCutLate_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any", "JahHzbTest.glsl"],
 			"textures" : [ {} ],
 			"uav_units" : 10,
@@ -167,6 +175,7 @@
 			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahAtomDensityCount_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"textures" : [ {}, {}, {} ],
 			"uav_units" : 3
@@ -177,6 +186,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahAtomDensityClear_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 1
 		},
@@ -185,6 +195,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahAtomDensityDrawn_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 9
 		},
@@ -194,6 +205,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahAtomDensityResolve_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
 			"uav_units" : 2
 		},
@@ -202,6 +214,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahCullEmit_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahGeomRows_piece_all.any"],
 			"uav_units" : 9
 		},
@@ -210,6 +223,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahVoxelGather_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any"],
 			"uav_units" : 10,
 			"properties" : { "gather_write" : 0 }
@@ -220,6 +234,7 @@
 			"threads_per_group" : [1, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahVoxelGatherScan_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 3
 		},
@@ -228,6 +243,7 @@
 		{
 			"threads_per_group" : [64, 1, 1],
 			"source" : "JahVoxelGather_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "JahLevelRule_piece_cs.any"],
 			"uav_units" : 10,
 			"properties" : { "gather_write" : 1 }
@@ -452,6 +468,7 @@
 			"threads_per_group" : [16, 16, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahHzbBuild_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all", "UavCrossPlatform_piece_all"],
 			"inform_shader_of_texture_data_change" : false,
 			"textures" : [ {} ],
@@ -472,6 +489,7 @@
 			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahReceiverGrid_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"inform_shader_of_texture_data_change" : false,
 			"textures" : [ {} ],
@@ -484,6 +502,7 @@
 			"threads_per_group" : [64, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahReceiverGrid_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 3,
 			"properties" : { "jah_receiver_mode" : 1 }
@@ -494,6 +513,7 @@
 			"threads_per_group" : [8, 8, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahReceiverGrid_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 2,
 			"properties" : { "jah_receiver_mode" : 2 },
@@ -522,6 +542,7 @@
 			"threads_per_group" : [256, 1, 1],
 			"thread_groups" : [1, 1, 1],
 			"source" : "JahAlphaMaskPyramid_cs",
+			"inform_shader_of_texture_size" : false,
 			"pieces" : ["CrossPlatformSettings_piece_all"],
 			"uav_units" : 1,
 			"params" :

@@ -347,6 +347,7 @@
             "thread_groups" : [1, 1, 1],
 
             "source" : "AabbCalcultor_cs",
+            "inform_shader_of_texture_size" : false,
             "pieces" : ["CrossPlatformSettings_piece_all", "Matrix_piece_all", "JahGeomRows_piece_all.any", "AabbCalcultor_piece_cs.any"],
 
             "uav_units" : 2,
