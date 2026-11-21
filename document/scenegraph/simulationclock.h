@@ -117,8 +117,8 @@ public:
     uint64_t lifetimeSteps() const { return mLifetimeSteps; }
     /// Steps the LAST advance() bought.
     int frameSteps() const { return mFrameSteps; }
-    /// Simulated seconds the last advance() bought — what a host hands the
-    /// renderer's frame delta so the engine-side simulation stays on the grid.
+    /// Simulated seconds the last advance() bought (scene.clock()'s report). Never
+    /// a renderer's time: a reader of steps takes a StepCursor (below).
     double frameSeconds() const { return double(mFrameSteps) * kStepSeconds; }
     /// The fraction of a step the accumulator is carrying, in [0, 1). For a
     /// future render-side interpolation between grid states; unread today.

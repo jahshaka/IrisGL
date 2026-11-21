@@ -4491,7 +4491,7 @@ public:
     /// frame is past it by more than the dynamic buffer multiplier (OgreSky.cpp).
     bool skyReadDue(unsigned long long issued) const;
     /// Once per drawn frame (OgreEngine, beside pollSkyShRead): advances the
-    /// layer's own clock by the frame delta the host pushed, writes the scroll
+    /// layer's own clock by the scene's time this frame (ONE-FRAME-1), writes the scroll
     /// into the layer, the disc and the ground shadow, and runs the capture
     /// cadence while the layer scrolls.
     void updateCloudLayer();
@@ -4703,7 +4703,6 @@ public:
     float shaderTime() const override;
     double sceneSeconds() const override { return mClock.sceneSeconds(); }
     double frameSceneSeconds() const override { return mClock.dt; }
-    double particleSeconds() const override;
     unsigned long long newestStep() const override { return mClock.newest; }
     /// ATOM stage 1: the scene-wide LOD dial (OgreMesh.cpp).
     void  setLodBias(float bias) override;
@@ -6393,7 +6392,7 @@ private:
     Ogre::TextureGpu  *mCloudField = nullptr;   // 2048^2 R16F optical depth, one 64 km tile
     Ogre::Camera      *mCloudBakeCamera = nullptr;
     bool     mCloudFieldPending = false;
-    /// The layer's own clock: the sum of the frame deltas of the frames this
+    /// The layer's own clock: the sum of the scene times of the frames this
     /// scene was drawn in (the engine has no wall clock).
     double   mCloudClock = 0.0;
     float    mCloudScroll[2] = { 0.0f, 0.0f };

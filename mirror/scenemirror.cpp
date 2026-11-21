@@ -7665,11 +7665,10 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
                                  : (mAnyShadowCaster ? mMaxShadowResolution : 0u);
         scene.shadows = shadows;
     }
-        // The particle clock is NOT pushed from here any more: the HOST pushes
-        // the document's simulated seconds x particleTimeScale as the engine's
-        // frame delta every frame (EngineSceneViewport::syncFrame,
-        // EnginePlayerScene::step — ENGINEERING_DEBT_SPEC A4.2), the one clock
-        // physics and animation advance on too.
+        // The particle clock is the scene's part (ONE-FRAME-1): the document
+        // clock's lifetime steps and particleTimeScale, stamped below; the
+        // engine runs the particles of the frame that draws this scene for
+        // the steps it moved, the one clock physics and animation advance on too.
     {
         // world.refreshShadows(): one re-render of every cached shadow map per
         // bump, the giRefreshSerial shape exactly (a serial, not a bool: two

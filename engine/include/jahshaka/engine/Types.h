@@ -1106,8 +1106,8 @@ struct CloudLayerDesc {
     /// on the ground (1 = all of it).
     float     shadow = 1.0f;
     /// Wind, world metres per second of SCENE time along x and z. The scroll is
-    /// the engine's own fixed clock (the frame deltas the host pushes), so a
-    /// paused scene holds still and a scripted frame is reproducible.
+    /// the scene's own time (its document's steps, ONE-FRAME-1), so a paused
+    /// scene holds still and a scripted frame is reproducible.
     float     wind[2] = { 0.0f, 0.0f };
     /// An optional weather map (its red channel scales the coverage over one
     /// tile of the layer); 0 = none. Sampled as data, never sRGB-decoded.
@@ -1172,7 +1172,7 @@ struct CloudStatus {
     unsigned changeCaptures = 0;
     unsigned scrollCaptures = 0;
     /// Frames the layer's clock advanced (one per drawn frame with wind and a
-    /// non-zero frame delta, never more).
+    /// non-zero scene time, never more).
     unsigned clockTicks = 0;
     /// Frames between two scroll captures (0 = no scroll captures: still wind).
     unsigned capturePeriodFrames = 0;
@@ -1932,8 +1932,7 @@ enum class ShadowFilter { Hard, Soft, VerySoft };
 ///
 /// Scene::setShadowSettings takes the resolved per-scene answer and applies it
 /// to the global state, dropping a push that asks for what is already in
-/// force. The last scene to push a value owns it, exactly as before — the same
-/// contract the fixed simulation clock documents (ENGINEERING_DEBT_SPEC A4.2): the host pushes the simulated seconds as the engine frame delta.
+/// force. The last scene to push a value owns it, exactly as before.
 struct ShadowDesc {
     /// false = "this scene has no opinion about the filter": whatever is in
     /// force stays. That is a scene with no shadow-casting light and no pinned

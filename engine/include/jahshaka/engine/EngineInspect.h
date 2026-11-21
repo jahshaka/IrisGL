@@ -153,12 +153,10 @@ public:
     /// teleport may not change for a still world (the same TOOL path).
     virtual bool rayNearAddresses(std::vector<unsigned long long> &addresses) const = 0;
     virtual int giUpdateBudget() const = 0;   ///< GiParams::updateBudget as the scene took it (0 = GI paused)
-    /// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): its time so far (the steps its frames advanced x the period), the
-    /// last frame's (what every reader of the scene took), and the time the last frame handed its particles (the
-    /// fork's ParticleSystemManager2 override: the frame's x particleTimeScale).
+    /// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): its time so far (the steps its frames advanced x the period) and the
+    /// last frame's (what every reader of the scene took).
     virtual double sceneSeconds() const = 0;
     virtual double frameSceneSeconds() const = 0;
-    virtual double particleSeconds() const = 0;
     /// ...and the newest grid state its parts carried (the presentation's hi; its document's lifetime serial).
     virtual unsigned long long newestStep() const = 0;
 };

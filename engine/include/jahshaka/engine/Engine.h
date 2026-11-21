@@ -1983,7 +1983,7 @@ class Engine {
 public:
     // ---- THE HOST'S OWN RECORD (ENGINE-UPGRADE-U3 stage 2, F5) ---------------------------------------------------
     // What the host itself set — never a read of the engine's state, which U3 moves to its own thread: the monitor
-    // level it asked for, the ray-tracing switch, the frame delta it last submitted, the views the engine made for
+    // level it asked for, the ray-tracing switch, the views the engine made for
     // it and whether one of them (or a VR session, whose loop IS its heartbeat) has anything to draw.
     MonitorLevel frameMonitor() const { return mHostMonitorLevel; }
     bool rayTracing() const { return mHostRayTracing; }

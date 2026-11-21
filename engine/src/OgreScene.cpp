@@ -582,11 +582,6 @@ void OgreScene::endFrameParticleTime() {
             pm->setTimeSinceLast(Ogre::Real(0));
 }
 
-double OgreScene::particleSeconds() const {
-    Ogre::ParticleSystemManager2 *pm = mSceneMgr ? mSceneMgr->getParticleSystemManager2() : nullptr;
-    return pm ? double(pm->getTimeSinceLastOverride()) : -1.0;
-}
-
 // ---- THE TWO GRID STATES, INTERPOLATED (ENGINE-UPGRADE-U3 stage 5) -----------------------------------------------------
 void OgreScene::noteInterpolated(Node &rec, NodeId id, unsigned long long step) {
     if (step != mInterpStep) {
