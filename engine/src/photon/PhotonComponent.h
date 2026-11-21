@@ -596,9 +596,13 @@ public:
         unsigned long long brickReadings = 0u;
         /// NONDET-1's DETECTOR (gi.foreignDetect): the readings judged, the largest words (codes), the first over the bar
         float foreignDirectMax = 0.0f, foreignBounceMax = 0.0f;
+        unsigned foreignDirectMaxBrick = 0u, foreignBounceMaxBrick = 0u;
         unsigned long long foreignReadings = 0u, foreignFirstFrame = 0u, foreignFirstSkipped = 0u;
-        unsigned foreignFirstBrick = 0u, foreignFirstWord = 0u;
+        unsigned foreignFirstBrick = 0u, foreignFirstWord = 0u, foreignFirstCount = 0u;
         float foreignFirstCodes = 0.0f;
+        unsigned long long signReadings = 0u, signFirstFrame = 0u;
+        unsigned signFirstBrick = 0u, signFirstCount = 0u;
+        float signFirstCodes = 0.0f;
         unsigned long long scrollFrames = 0;   ///< frames spent building scrolls' chunks
         float step() const { return stepCells * (halfSize * 2.0f / float(resolution)); }
         float cell() const { return halfSize * 2.0f / float(resolution); }

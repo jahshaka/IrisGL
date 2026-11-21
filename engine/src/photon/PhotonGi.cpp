@@ -1136,6 +1136,14 @@ GiStatus PhotonComponent::giStatus() const {
             cs.foreignFirstWord = c.foreignFirstWord;
             cs.foreignFirstCodes = c.foreignFirstCodes;
             cs.foreignFirstSkipped = c.foreignFirstSkipped;
+            cs.foreignDirectMaxBrick = c.foreignDirectMaxBrick;
+            cs.foreignBounceMaxBrick = c.foreignBounceMaxBrick;
+            cs.foreignFirstCount = c.foreignFirstCount;
+            cs.signReadings = c.signReadings;
+            cs.signFirstFrame = c.signFirstFrame;
+            cs.signFirstBrick = c.signFirstBrick;
+            cs.signFirstCodes = c.signFirstCodes;
+            cs.signFirstCount = c.signFirstCount;
             cs.commitInjectCells = c.commitInjectCells;
             cs.commitCounted     = c.commitCounted;
             cs.deltaMarched      = c.deltaMarched;
@@ -4179,21 +4187,41 @@ void PhotonComponent::harvestBrickMasks() {
         while (c.lighting->takeBrickReading(words, origin, dims, &readingFrame)) {
             ++c.brickReadings;
             if (mForeignArmedFrame && readingFrame >= mForeignArmedFrame) {
+                // per reading: each word's largest brick (its index) and the bricks over the bar; word 0's over 100 codes
+                // (THE SIGN BAR, READ-9: D is affine in the lamp with non-negative terms, so a relative change over 100 %
+                // needs an old and a new term of OPPOSITE signs - a value no input of the injection makes)
                 ++c.foreignReadings;
+                float most[2] = { -1.0f, -1.0f };
+                unsigned mostBrick[2] = { 0u, 0u }, over[2] = { 0u, 0u }, signOver = 0u;
                 for (size_t i = 0; i + 1u < words.size(); i += 2u) {
                     for (unsigned w = 0u; w < 2u; ++w) {
                         float f;
                         std::memcpy(&f, &words[i + w], sizeof f);
-                        const float codes = f / 0.01f;   // (a non-finite word reads over any bar)
-                        float &most = w ? c.foreignBounceMax : c.foreignDirectMax;
-                        if (!(codes <= most)) most = codes;
-                        if (!c.foreignFirstFrame && !(codes <= float(foreignBar))) {
-                            c.foreignFirstFrame = readingFrame;
-                            c.foreignFirstBrick = unsigned(i / 2u);
-                            c.foreignFirstWord = w;
-                            c.foreignFirstCodes = codes;
-                            c.foreignFirstSkipped = c.lighting->getBrickReadingsSkipped();
-                        }
+                        float codes = f / 0.01f;
+                        if (!(codes == codes) || codes > 1e30f) codes = 1e30f;   // (a non-finite word reads over any bar)
+                        if (codes > most[w]) { most[w] = codes; mostBrick[w] = unsigned(i / 2u); }
+                        if (codes > float(foreignBar)) ++over[w];
+                        if (w == 0u && codes > 100.0f) ++signOver;
+                    }
+                }
+                if (most[0] > c.foreignDirectMax) { c.foreignDirectMax = most[0]; c.foreignDirectMaxBrick = mostBrick[0]; }
+                if (most[1] > c.foreignBounceMax) { c.foreignBounceMax = most[1]; c.foreignBounceMaxBrick = mostBrick[1]; }
+                if (!c.foreignFirstFrame && (over[0] || over[1])) {
+                    const unsigned w = over[0] ? 0u : 1u;   // (word 0 named first when both cross in one reading)
+                    c.foreignFirstFrame = readingFrame;
+                    c.foreignFirstWord = w;
+                    c.foreignFirstBrick = mostBrick[w];
+                    c.foreignFirstCodes = most[w];
+                    c.foreignFirstCount = over[w];
+                    c.foreignFirstSkipped = c.lighting->getBrickReadingsSkipped();
+                }
+                if (signOver) {
+                    ++c.signReadings;
+                    if (!c.signFirstFrame) {
+                        c.signFirstFrame = readingFrame;
+                        c.signFirstBrick = mostBrick[0];
+                        c.signFirstCodes = most[0];
+                        c.signFirstCount = signOver;
                     }
                 }
             }

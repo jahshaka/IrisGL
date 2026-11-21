@@ -5125,13 +5125,20 @@ struct GiStatus {
         /// NONDET-1's DETECTOR (the measuring arm gi.foreignDetect = N codes; 0 = off, every field 0): over the landed
         /// readings of the frames since the arm came on, the largest word 0 (the injection's relative change of a brick's
         /// direct term) and word 1 (the bounce's of its total), in codes (1 % relative), and the FIRST reading over N - its
-        /// light frame (0 = none), brick, word (0 direct, 1 bounce), value, and the cascade's skipped readings by then.
+        /// light frame (0 = none), word (0 direct, 1 bounce; 0 when both cross), its LARGEST brick in that reading, its value,
+        /// the bricks over N in it, and the cascade's skipped readings by then; each word's largest over the record with
+        /// its brick; and THE SIGN BAR (word 0 over 100 codes: an old and a new direct term of opposite signs, READ-9):
+        /// the readings that held one, and the first - its frame, largest brick, value and the bricks over 100.
         /// A word is written by the pass that CHANGES the store: a value written into the direct term by anything else
         /// shows only when the next injection of that voxel reads it as its old term.
         float foreignDirectMax = 0.0f, foreignBounceMax = 0.0f;
+        unsigned foreignDirectMaxBrick = 0, foreignBounceMaxBrick = 0;
         unsigned long long foreignReadings = 0, foreignFirstFrame = 0, foreignFirstSkipped = 0;
-        unsigned foreignFirstBrick = 0, foreignFirstWord = 0;
+        unsigned foreignFirstBrick = 0, foreignFirstWord = 0, foreignFirstCount = 0;
         float foreignFirstCodes = 0.0f;
+        unsigned long long signReadings = 0, signFirstFrame = 0;
+        unsigned signFirstBrick = 0, signFirstCount = 0;
+        float signFirstCodes = 0.0f;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera
