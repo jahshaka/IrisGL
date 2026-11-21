@@ -8994,6 +8994,8 @@ void PhotonComponent::teardownVct() {
     // across would mark every cascade of the NEXT chain pending on its first
     // frame.
     clearCascadeDirty();   // the list, the union's state and its members (decision 18.1)
+    // ...NOR A MOVER'S REGION (NONDET-1 1a): a box listed before the teardown is in the table the next build voxelises.
+    mMoverVoxelOpen.clear();
     // ...AND NO RELIGHT OR FEEDBACK (PHOTON-7 stage 4): the next chain's build injects every cascade whole, which
     // activates every brick of it.
     mGiRelightAllOwed = false;

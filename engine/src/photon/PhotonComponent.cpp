@@ -393,7 +393,10 @@ void PhotonComponent::listMover(const Ogre::Aabb &swept, bool casts, bool voxel)
     // A MOVER IS GI GEOMETRY (PHOTON-7 stage 8A): its swept box - where it was in the store and where it is in the table
     // the next frame's writer point reads - is that frame's region rebuild. At the cap the boxes merge (the smallest
     // growth of the margin, as the list's own), never drop: a mover left out would leave its ghost in the store.
-    if (voxel) {
+    // ...OWED ONLY TO A CHAIN THAT EXISTS (NONDET-1 1a): with none (GI off, or before its first build) there is no store
+    // to rebuild and the next chain voxelises the table as it is - a box kept would be served as a region rebuild in
+    // that chain's first frame (a mover removed with GI off: OgreScene::removeItemSlot lists its last box).
+    if (voxel && !mVctCascades.empty()) {
         constexpr size_t kMoverVoxelCap = 64u;
         if (mMoverVoxelOpen.size() < kMoverVoxelCap) {
             mMoverVoxelOpen.push_back(swept);
