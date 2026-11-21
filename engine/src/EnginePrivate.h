@@ -6946,8 +6946,14 @@ private:
     /// the sky's capture, ours to destroy once it is read.
     Ogre::TextureGpu *mIblSourceTex = nullptr;
     bool              mIblPending = false;   // convolve into mReflPendingTex
-    /// One-shot ibl_specular workspace; kept null between runs.
     Ogre::Camera *mIblCamera = nullptr;
+    /// THE DEFERRED CONVOLUTION's WORKSPACE (COLD-BOOT-1): null between convolutions; KEPT while a convolution waits for
+    /// a permutation on the background compiler - its ibl_specular pass's job clones are what the requests are keyed on,
+    /// and a clone destroyed cancels its request (fork HlmsCompute::destroyComputeJob -> cancelKey), so a workspace made
+    /// and removed per try never completes one. Its one owner is this scene; its exits: releaseIblWorkspace.
+    Ogre::CompositorWorkspace *mIblWorkspace = nullptr;
+    /// Removes the kept convolution workspace (a result, a failure, its source or target going: destroyPendingReflection).
+    void releaseIblWorkspace();
     bool mRefractionsActive = false;   // see setRefractionsActive
     /// THE LAMP-MAP CACHE'S MEMORY (collectShadowCacheFrame). Per caster: its
     /// last seen world box, Item, pose epoch and render channels; per lamp: its

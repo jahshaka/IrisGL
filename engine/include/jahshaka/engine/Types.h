@@ -9570,6 +9570,10 @@ struct PublishedFrame {
     /// sheet's clear-sky ambient's reads issued as a ticket and taken at their due frame (a drag, the cloud scroll's
     /// captures) rather than read in the capture's own frame. 0 = every sky light this scene took landed synchronously.
     unsigned             skyShDeferredReads = 0;
+    /// THE SPECULAR CONVOLUTION's DEFERRED TRIES over the scene's life (COLD-BOOT-1): a try of an asynchronous scene that
+    /// met a permutation still on the background compiler and was retried the next frame on its kept workspace. 0 = every
+    /// convolution was a result at its first try (its permutations built, or the frame owed the whole picture).
+    unsigned long long   iblConvolutionDeferrals = 0;
     unsigned             cloudClearDeferredReads = 0;
     CloudStatus          clouds;
     AtmosphereStatus     atmosphereStatus;

@@ -875,7 +875,18 @@ void OgreScene::reapRetiredReflections(bool force) {
     }
 }
 
+void OgreScene::releaseIblWorkspace() {
+    if (!mIblWorkspace) return;
+    Ogre::CompositorWorkspace *ws = mIblWorkspace;
+    mIblWorkspace = nullptr;
+    try { mRoot->getCompositorManager2()->removeWorkspace(ws); } catch (...) {}
+}
+
 void OgreScene::destroyPendingReflection() {
+    // THE KEPT CONVOLUTION GOES FIRST: its externals are the two textures below. This is every exit of a pending set -
+    // a newer sky request superseding it (buildReflectionCubemapFrom), the sky going (destroyReflection), the scene's
+    // destroy (destroySky -> destroyReflection).
+    releaseIblWorkspace();
     mIblPending = false;
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     if (mIblSourceTex) {
@@ -1732,19 +1743,26 @@ void OgreScene::convolvePendingIbl() {
             return;
         }
         if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
-        Ogre::CompositorChannelVec externals;
-        externals.push_back(mIblSourceTex);
-        externals.push_back(target);
-        ws = cm->addWorkspace(mSceneMgr, externals, mIblCamera,
-                              Ogre::IdString(kIblWorkspace), false);
-        monitor::watchWorkspace(ws);   // a one-shot workspace: its passes are monitor rows too
+        // A RETRY RE-RUNS THE KEPT WORKSPACE (mIblWorkspace): the same pass, the same job clones, so the requests a
+        // deferred try made are the ones that land. Made here for a pending set's first try only; its externals are
+        // this set's source and target, and every exit of the set removes it first (destroyPendingReflection).
+        if (!mIblWorkspace) {
+            Ogre::CompositorChannelVec externals;
+            externals.push_back(mIblSourceTex);
+            externals.push_back(target);
+            mIblWorkspace = cm->addWorkspace(mSceneMgr, externals, mIblCamera, Ogre::IdString(kIblWorkspace), false);
+            monitor::watchWorkspace(mIblWorkspace);   // a convolution's workspace: its passes are monitor rows too
+        }
+        ws = mIblWorkspace;
         // AN ASYNCHRONOUS SCENE NEVER COMPILES ITS CONVOLUTION IN THE FRAME (ASYNC-SHADERS-1).
         // The IBL integration is a compute permutation per mip and source format; a capture
         // that lands after an open's window (a sky texture still streaming) met one not built
         // yet and compiled it on the UI thread — shader.sample_opens_quiet, red under load.
         // Under the fork's deferred dispatch a missing permutation goes to the background
         // compiler and its mip is skipped; the convolution is then not a result: the previous
-        // reflection stays bound, the source is kept and the convolution is retried next frame.
+        // reflection stays bound, the source AND THE WORKSPACE are kept and the convolution is
+        // retried next frame. WHERE: the ONE async-shader rule (compilesInBackground) - a frame
+        // that owes the whole picture convolves in the frame, as every other consumer does.
         Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
         const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;
         struct Deferral {
@@ -1752,7 +1770,7 @@ void OgreScene::convolvePendingIbl() {
             bool prev = false;
             ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
         } deferral;
-        if (hc && mAsyncShaders) {
+        if (hc && compilesInBackground()) {
             deferral.hc = hc;
             deferral.prev = hc->getDeferredDispatch();
             hc->setDeferredDispatch(true);
@@ -1760,13 +1778,13 @@ void OgreScene::convolvePendingIbl() {
         ws->_beginUpdate(false);
         ws->_update();
         ws->_endUpdate(false);
-        cm->removeWorkspace(ws);
         if (hc && hc->getNumDeferredDispatches() != deferredBefore) {
             ++mIblDeferrals;
-            mIblPending = true;      // retried next frame; landEnvironmentIfComplete waits
+            mIblPending = true;      // retried next frame on the kept workspace; landEnvironmentIfComplete waits
             freeSource.self = nullptr;
             return;
         }
+        releaseIblWorkspace();   // A RESULT: the convolution wrote every mip
         // THE CONVOLUTION LEFT IT A UAV, AND EVERY DATABLOCK WILL SAMPLE IT
         // (ENVPROBE-LAYOUT-1): `CompositorPassIblSpecular::analyzeBarriers`
         // resolves the output to `ResourceLayout::Uav` and this workspace has
@@ -1784,7 +1802,7 @@ void OgreScene::convolvePendingIbl() {
     // a UAV): say so loudly and fall back to the box mip chain this engine used
     // before, rather than silently shipping a cubemap nothing ever wrote to.
     Ogre::LogManager::getSingleton().logMessage("Jahshaka: sky IBL specular failed: " + mError);
-    if (ws) { try { cm->removeWorkspace(ws); } catch (...) {} }
+    if (ws) releaseIblWorkspace();   // A FAILURE: the kept workspace goes with it
     JAH_TRY {
         mIblSourceTex->copyTo(target, target->getEmptyBox(0), 0,
                               mIblSourceTex->getEmptyBox(0), 0);
