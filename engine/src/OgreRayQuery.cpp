@@ -6570,25 +6570,48 @@ bool RayQueryTier::makeReflectPipelineNow(std::string &err) {
     cpi.stage.module = mReflectModule;
     cpi.stage.pName = "main";
     cpi.layout = mReflectPipeLayout;
-    if (createComputePipeline(cpi, &mReflectPipeline, "reflect") !=
-        VK_SUCCESS) {
-        err = "rayquery/reflect: vkCreateComputePipelines failed";
-        return false;
-    }
     // THE COMPACT PASS (kReflectCompactTexels): the same shader with its specialisation constant 0 (kCompactPass) true.
-    {
-        const VkBool32 compactOn = VK_TRUE;
-        VkSpecializationMapEntry entry{};
-        entry.constantID = 0u;
-        entry.offset = 0u;
-        entry.size = sizeof(VkBool32);
-        VkSpecializationInfo spec{};
-        spec.mapEntryCount = 1u;
-        spec.pMapEntries = &entry;
-        spec.dataSize = sizeof(VkBool32);
-        spec.pData = &compactOn;
-        VkComputePipelineCreateInfo ccpi = cpi;
-        ccpi.stage.pSpecializationInfo = &spec;
+    const VkBool32 compactOn = VK_TRUE;
+    VkSpecializationMapEntry entry{};
+    entry.constantID = 0u;
+    entry.offset = 0u;
+    entry.size = sizeof(VkBool32);
+    VkSpecializationInfo spec{};
+    spec.mapEntryCount = 1u;
+    spec.pMapEntries = &entry;
+    spec.dataSize = sizeof(VkBool32);
+    spec.pData = &compactOn;
+    VkComputePipelineCreateInfo ccpi = cpi;
+    ccpi.stage.pSpecializationInfo = &spec;
+    // MEASURING ARM (COLD-BOOT-1 stage 4's first commit, reverted by the next): on a worker, the two long driver
+    // compiles side by side - the compact pass on a second thread of its own (its notes its own, appended after the
+    // join, in the serial order), the main pass here. Does the driver overlap them (wall ~50 s, each CPU/wall ~1) or
+    // serialise them (wall ~100 s)? Read by the LD_PRELOAD probe (spikes/cold-boot-1/S4arm).
+    if (tAheadNotes) {
+        std::vector<RayAheadNote> compactNotes;
+        VkResult compactR = VK_ERROR_INITIALIZATION_FAILED;
+        std::thread compact([this, &ccpi, &compactNotes, &compactR]() {
+            lowerBuilderPriority();
+            tAheadNotes = &compactNotes;
+            compactR = createComputePipeline(ccpi, &mReflectCompactPipeline, "reflect-compact");
+            tAheadNotes = nullptr;
+        });
+        const VkResult mainR = createComputePipeline(cpi, &mReflectPipeline, "reflect");
+        compact.join();
+        tAheadNotes->insert(tAheadNotes->end(), compactNotes.begin(), compactNotes.end());
+        if (mainR != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateComputePipelines failed";
+            return false;
+        }
+        if (compactR != VK_SUCCESS) {
+            err = "rayquery/reflect: the compact pass's vkCreateComputePipelines failed";
+            return false;
+        }
+    } else {
+        if (createComputePipeline(cpi, &mReflectPipeline, "reflect") != VK_SUCCESS) {
+            err = "rayquery/reflect: vkCreateComputePipelines failed";
+            return false;
+        }
         if (createComputePipeline(ccpi, &mReflectCompactPipeline, "reflect-compact") != VK_SUCCESS) {
             err = "rayquery/reflect: the compact pass's vkCreateComputePipelines failed";
             return false;
