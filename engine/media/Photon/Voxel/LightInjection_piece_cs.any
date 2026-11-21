@@ -12,10 +12,172 @@
 	#define JAH_VOX_SAMPLE_X( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
-	#define JAH_VOX_SAMPLE_COVP( c, u, l ) OGRE_SampleLevel( chainCovP[c], voxelAlbedoSampler, u, l )
-	#define JAH_VOX_SAMPLE_COVN( c, u, l ) OGRE_SampleLevel( chainCovN[c], voxelAlbedoSampler, u, l )
-	#define JAH_VOX_SAMPLE_POSP( c, u, l ) OGRE_SampleLevel( chainPosP[c], voxelAlbedoSampler, u, l )
-	#define JAH_VOX_SAMPLE_POSN( c, u, l ) OGRE_SampleLevel( chainPosN[c], voxelAlbedoSampler, u, l )
+	// THE CHAIN'S VOLUMES BY A CONSTANT INDEX (NONDET-1 F1; jah_inject_visibility.glsl's ladders say why): the reader's
+	// samples and the cleared voxels' reference read cascade c through literal indices, at most eight.
+	INLINE float4 jahInjSampleCovP( uint c, float3 u, float l )
+	{
+#if JAH_INJ_CHAIN > 7
+		if( c == 7u )
+			return OGRE_SampleLevel( chainCovP[7], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 6
+		if( c == 6u )
+			return OGRE_SampleLevel( chainCovP[6], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 5
+		if( c == 5u )
+			return OGRE_SampleLevel( chainCovP[5], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 4
+		if( c == 4u )
+			return OGRE_SampleLevel( chainCovP[4], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 3
+		if( c == 3u )
+			return OGRE_SampleLevel( chainCovP[3], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 2
+		if( c == 2u )
+			return OGRE_SampleLevel( chainCovP[2], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 1
+		if( c == 1u )
+			return OGRE_SampleLevel( chainCovP[1], voxelAlbedoSampler, u, l );
+#endif
+		return OGRE_SampleLevel( chainCovP[0], voxelAlbedoSampler, u, l );
+	}
+	INLINE float4 jahInjSampleCovN( uint c, float3 u, float l )
+	{
+#if JAH_INJ_CHAIN > 7
+		if( c == 7u )
+			return OGRE_SampleLevel( chainCovN[7], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 6
+		if( c == 6u )
+			return OGRE_SampleLevel( chainCovN[6], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 5
+		if( c == 5u )
+			return OGRE_SampleLevel( chainCovN[5], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 4
+		if( c == 4u )
+			return OGRE_SampleLevel( chainCovN[4], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 3
+		if( c == 3u )
+			return OGRE_SampleLevel( chainCovN[3], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 2
+		if( c == 2u )
+			return OGRE_SampleLevel( chainCovN[2], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 1
+		if( c == 1u )
+			return OGRE_SampleLevel( chainCovN[1], voxelAlbedoSampler, u, l );
+#endif
+		return OGRE_SampleLevel( chainCovN[0], voxelAlbedoSampler, u, l );
+	}
+	INLINE float4 jahInjSamplePosP( uint c, float3 u, float l )
+	{
+#if JAH_INJ_CHAIN > 7
+		if( c == 7u )
+			return OGRE_SampleLevel( chainPosP[7], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 6
+		if( c == 6u )
+			return OGRE_SampleLevel( chainPosP[6], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 5
+		if( c == 5u )
+			return OGRE_SampleLevel( chainPosP[5], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 4
+		if( c == 4u )
+			return OGRE_SampleLevel( chainPosP[4], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 3
+		if( c == 3u )
+			return OGRE_SampleLevel( chainPosP[3], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 2
+		if( c == 2u )
+			return OGRE_SampleLevel( chainPosP[2], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 1
+		if( c == 1u )
+			return OGRE_SampleLevel( chainPosP[1], voxelAlbedoSampler, u, l );
+#endif
+		return OGRE_SampleLevel( chainPosP[0], voxelAlbedoSampler, u, l );
+	}
+	INLINE float4 jahInjSamplePosN( uint c, float3 u, float l )
+	{
+#if JAH_INJ_CHAIN > 7
+		if( c == 7u )
+			return OGRE_SampleLevel( chainPosN[7], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 6
+		if( c == 6u )
+			return OGRE_SampleLevel( chainPosN[6], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 5
+		if( c == 5u )
+			return OGRE_SampleLevel( chainPosN[5], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 4
+		if( c == 4u )
+			return OGRE_SampleLevel( chainPosN[4], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 3
+		if( c == 3u )
+			return OGRE_SampleLevel( chainPosN[3], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 2
+		if( c == 2u )
+			return OGRE_SampleLevel( chainPosN[2], voxelAlbedoSampler, u, l );
+#endif
+#if JAH_INJ_CHAIN > 1
+		if( c == 1u )
+			return OGRE_SampleLevel( chainPosN[1], voxelAlbedoSampler, u, l );
+#endif
+		return OGRE_SampleLevel( chainPosN[0], voxelAlbedoSampler, u, l );
+	}
+	INLINE float4 jahInjHalfDirect( uint c, int3 t )
+	{
+#if JAH_INJ_CHAIN > 7
+		if( c == 7u )
+			return OGRE_Load3D( chainHalfDirect[7], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 6
+		if( c == 6u )
+			return OGRE_Load3D( chainHalfDirect[6], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 5
+		if( c == 5u )
+			return OGRE_Load3D( chainHalfDirect[5], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 4
+		if( c == 4u )
+			return OGRE_Load3D( chainHalfDirect[4], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 3
+		if( c == 3u )
+			return OGRE_Load3D( chainHalfDirect[3], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 2
+		if( c == 2u )
+			return OGRE_Load3D( chainHalfDirect[2], t, 0 );
+#endif
+#if JAH_INJ_CHAIN > 1
+		if( c == 1u )
+			return OGRE_Load3D( chainHalfDirect[1], t, 0 );
+#endif
+		return OGRE_Load3D( chainHalfDirect[0], t, 0 );
+	}
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) jahInjSampleCovP( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) jahInjSampleCovN( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) jahInjSamplePosP( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) jahInjSamplePosN( uint( c ), u, l )
 	#define JAH_VOX_INVRES( c ) p_invVoxelResolution
 	@insertpiece( JahVoxelSample )
 
@@ -210,15 +372,15 @@
 	// own faces' normal, its own exact march from its own faces (VOXEL-R13 stage 1: where they lie
 	// across the axis too); the half store holds it at level 0 and the directional level 0 is
 	// composited from it; every level-0 reader reads the half facing it (VOXEL-R13 stage 2).
-	const float3 covP0 = OGRE_Load3D( chainCovP[p_chainSelf], voxelId, 0 ).xyz;
-	const float3 covN0 = OGRE_Load3D( chainCovN[p_chainSelf], voxelId, 0 ).xyz;
+	const float3 covP0 = jahInjCovP( p_chainSelf, ivec3( voxelId ) ).xyz;
+	const float3 covN0 = jahInjCovN( p_chainSelf, ivec3( voxelId ) ).xyz;
 	// JUNCTION-NORMAL-1: THE EMISSIVE PER HALF-AXIS - each half emits what its own faces emit, the area
 	// mean E times the half's factor f = u / ( 1 - u ) (VoxelMerge_piece_cs.any: u on 1022 steps, f = 1
 	// exactly at code 511 - a voxel that is all emitter keeps E on every half it faces, bit for bit).
 	const float3 emitU[2] = { floor( OGRE_Load3D( voxelEmitPTex, voxelId, 0 ).xyz * 1023.0f + 0.5f ) / 1022.0f,
 							  floor( OGRE_Load3D( voxelEmitNTex, voxelId, 0 ).xyz * 1023.0f + 0.5f ) / 1022.0f };
-	const float3 posP0 = OGRE_Load3D( chainPosP[p_chainSelf], voxelId, 0 ).xyz;
-	const float3 posN0 = OGRE_Load3D( chainPosN[p_chainSelf], voxelId, 0 ).xyz;
+	const float3 posP0 = jahInjPosP( p_chainSelf, ivec3( voxelId ) ).xyz;
+	const float3 posN0 = jahInjPosN( p_chainSelf, ivec3( voxelId ) ).xyz;
 	// VOXEL-R13 stage 1: EACH HALF FROM ITS OWN FACES (jah_voxel_halves.glsl) - its march starts where they lie (along
 	// its axis their surface position, across it their centroid) and its cosine takes their mean normal
 	float4 jahHalfSide[3];
@@ -484,7 +646,7 @@
 			jahDirChange = max( jahDirChange, jahBrickChange( hdOld.xyz, hdNew.xyz ) );
 			float4 ref = hdOld;
 			if( jahCleared )
-				ref = jahRefW > 0 ? OGRE_Load3D( chainHalfDirect[jahNext], jahHalfTexel( jahRefCell, h, a, jahRefW ), 0 )
+				ref = jahRefW > 0 ? jahInjHalfDirect( jahNext, jahHalfTexel( jahRefCell, h, a, jahRefW ) )
 								  : float4( 0.0f, 0.0f, 0.0f, 0.0f );
 			jahAbsDir3 = max( jahAbsDir3, abs( hdNew.xyz - ref.xyz ) );
 		}
