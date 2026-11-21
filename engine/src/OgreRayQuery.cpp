@@ -6889,11 +6889,15 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
     // THE COMPOSED SCENE (63; ChainDesc::composedTexture): frame t-1's linear composite (after the AO apply and the
     // distortion: the displayed pixel), kept across frames on a ray chain (OgreChain.cpp) and read before this frame's
     // first writer clears it - the rest's stop share at the displayed pixel (rq_reflect_filter.comp). A texture of another
-    // size or shape this frame (a resize) is declined: the stand-in, the reflection term alone.
+    // size or shape this frame (a resize) is declined, and so is a LETTERBOXED chain's (reflectComposedRead: its prologue
+    // fills the target with the bars and the background before the filter reads it): the stand-in, the reflection term
+    // alone.
     Ogre::TextureGpu *composedTex = nullptr;
-    try {
-        composedTex = node->getDefinedTexture(Ogre::IdString(chainD.composedTexture()));
-    } catch (Ogre::Exception &) { composedTex = nullptr; }
+    if (reflectComposedRead(chainD.letterbox)) {
+        try {
+            composedTex = node->getDefinedTexture(Ogre::IdString(chainD.composedTexture()));
+        } catch (Ogre::Exception &) { composedTex = nullptr; }
+    }
     // THE SCREEN TRACE'S INPUTS (the hybrid: the screen first, then the rays - PHOTON-7-9A's one shape): the previous
     // picture IN PLACE (ChainDesc::screenTraceSource: the last linear stage before the camera-side passes, kept across
     // frames - no copy; the same texture as the composed scene where neither AO nor distortion runs), the depth it was

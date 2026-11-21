@@ -38,6 +38,13 @@ constexpr ReflectChainImage reflectComposedImage(bool ssao, bool distortion, boo
                              : refractions ? ReflectChainImage::RefractOut : ReflectChainImage::Rt0;
 }
 
+/// ...AND WHETHER THE STOP MAY READ IT (the final read's M3): the composed picture is frame t-1's displayed pixel only if
+/// nothing writes the scene target before the reflection's filter reads it (photon_resolve, OgreChain.cpp). A LETTERBOXED
+/// chain's prologue does (addLetterboxPrologue: the bars cleared, the inset filled with the background - no region clear
+/// exists on this backend), so there the read would be the background, which LOOSENS the stop on every pixel darker than
+/// it. A letterboxed chain declines the read: the stop judges the reflection term alone - stricter, never looser.
+constexpr bool reflectComposedRead(bool letterbox) { return !letterbox; }
+
 /// THE STEREO SHAPE: a stereo view's target is two layers (one eye each, at one origin), a mono view's one -
 /// OgreView::setStereo makes the target so and rebuilds the chain on it inside the call, before any frame records.
 constexpr unsigned stereoTargetLayers(bool stereo) { return stereo ? 2u : 1u; }
