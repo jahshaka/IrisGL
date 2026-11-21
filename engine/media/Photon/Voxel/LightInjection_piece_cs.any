@@ -13,7 +13,7 @@
 	#define JAH_VOX_SAMPLE_Y( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	#define JAH_VOX_SAMPLE_Z( c, u, l ) float4( 0.0f, 0.0f, 0.0f, 0.0f )
 	// THE CHAIN'S VOLUMES BY A CONSTANT INDEX (NONDET-1 F1; jah_inject_visibility.glsl's ladders say why): the reader's
-	// samples and the cleared voxels' reference read cascade c through literal indices, at most eight.
+	// samples read cascade c through literal indices, at most eight (the cleared voxels' reference: JahInjectionHalfDirect).
 	INLINE float4 jahInjSampleCovP( uint c, float3 u, float l )
 	{
 #if JAH_INJ_CHAIN > 7
@@ -530,8 +530,9 @@
 						// 0, shipped: the one march to its centre above.
 						if( isLtc && p_areaStrata > 0u )
 						{
-							// (bounded at the tiers' largest n, GiQualityFacts::cardAreaStrata = 8: NONDET-1 H1)
-							const uint an = min( p_areaStrata, 8u );
+							// (bounded at the arm's own maximum, 32: the kArms row gi.voxelAreaStrata, OgreFrameMonitor.cpp,
+							// registered 0..32; k indexes no array - its strata and hashes only. NONDET-1 H1, corrected)
+							const uint an = min( p_areaStrata, 32u );
 							const float3 c0 = lights[lightIdx].points[0].xyz;
 							const float3 eu = lights[lightIdx].points[1].xyz - c0;
 							const float3 ev = lights[lightIdx].points[3].xyz - c0;

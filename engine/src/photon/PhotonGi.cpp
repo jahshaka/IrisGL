@@ -4198,7 +4198,7 @@ void PhotonComponent::harvestBrickMasks() {
                         float f;
                         std::memcpy(&f, &words[i + w], sizeof f);
                         float codes = f / 0.01f;
-                        if (!(codes == codes) || codes > 1e30f) codes = 1e30f;   // (a non-finite word reads over any bar)
+                        if (!std::isfinite(codes) || codes > 1e30f) codes = 1e30f;   // (a non-finite word reads over any bar)
                         if (codes > most[w]) { most[w] = codes; mostBrick[w] = unsigned(i / 2u); }
                         if (codes > float(foreignBar)) ++over[w];
                         if (w == 0u && codes > 100.0f) ++signOver;
