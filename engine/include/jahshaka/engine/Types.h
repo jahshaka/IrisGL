@@ -3385,6 +3385,18 @@ inline float giCascadeCell(const GiParams::GiCascadeDesc &c)
 // c2 16 -> 15; every outermost cascade and every pinned step unchanged.
 inline constexpr float kGiNearFieldRadiusFraction = 0.45f;
 
+/// THE RESOLUTION A CASCADE IS BUILT AT (NONDET-1 D1): a pinned row's (cascadeSet) clamped to 16..256 and ROUNDED UP
+/// to a multiple of 8. Every voxel pass runs in whole groups with no bound check: the bounce and the brick copy in
+/// 8^3 bricks, the injection in 4^3 groups. jahHalfTexel (jah_voxel_halves.glsl) maps a cell at x >= W into the next
+/// half's block of the half store, in bounds, so a cell past the edge overwrote another half's direct term and total.
+/// The direction volumes' y and z are h >> 1, so an odd resolution also dropped the last row. Up, never down: a
+/// cascade is never coarser than its row asked for. Every tier row is already a multiple of 8.
+inline int giCascadeResolution(int requested)
+{
+    const int clamped = requested < 16 ? 16 : (requested > 256 ? 256 : requested);
+    return (clamped + 7) / 8 * 8;
+}
+
 /// The near-field radius this cascade is REQUIRED to guarantee, in metres.
 inline float giNearFieldRadius(const GiParams::GiCascadeDesc &c)
 {

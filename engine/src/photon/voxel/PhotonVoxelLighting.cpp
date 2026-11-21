@@ -486,6 +486,16 @@ namespace Ogre
         const uint32 width = albedoVox->getWidth();
         const uint32 height = albedoVox->getHeight();
         const uint32 depth = albedoVox->getDepth();
+        // EVERY AXIS A MULTIPLE OF 8 (NONDET-1 D1; giCascadeResolution, Types.h): the passes run whole 8^3 bricks and
+        // 4^3 groups with no bound check, and a cell past the edge lands in the next half's block of the half store.
+        if( width % 8u || height % 8u || depth % 8u )
+        {
+            OGRE_EXCEPT( Exception::ERR_INVALIDPARAMS,
+                         "a voxel volume of " + StringConverter::toString( width ) + "x" +
+                             StringConverter::toString( height ) + "x" + StringConverter::toString( depth ) +
+                             ": every axis must be a multiple of 8 (whole bricks)",
+                         "PhotonVoxelLighting::createTextures" );
+        }
 
         const uint32 widthAniso = std::max( 1u, width );
         const uint32 heightAniso = std::max( 1u, height >> 1u );

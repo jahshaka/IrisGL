@@ -4801,7 +4801,7 @@ std::vector<GiParams::GiCascadeDesc> PhotonComponent::resolveCascadeTable() cons
         // meaning of "0 = the tier decides".
         if (d.halfSize <= 0.0f || d.resolution <= 0) { table.clear(); break; }
         GiParams::GiCascadeDesc e = d;
-        e.resolution = std::min(std::max(d.resolution, 16), 256);
+        e.resolution = giCascadeResolution(d.resolution);   // 16..256, a multiple of 8 (Types.h: the passes' whole bricks)
         // A PINNED STEP IS VALIDATED LIKE A DERIVED ONE (audit B10). The clamp
         // below was applied only where the engine derived the step, so a table
         // could ask for a step of a tenth of a cell (a re-centre every frame,
