@@ -1449,10 +1449,12 @@ void main()
 			meanLobe = mix( mix( prevLobe, restAnswer, blend ), restAnswer, restHandover );
 		}
 		// (ROUGH-LOBE-HISTORY-1's MEASURING ARM, 2: what the clamp at zero cuts - pixels, the largest cut in codes x 16)
-		if( p.hits.w > 1.5 && prevCount > 0u && finite3( meanLobe ) && any( lessThan( meanLobe, vec3( 0.0 ) ) ) )
+		if( p.hits.w > 1.5 && prevCount > 0u && finite3( meanLobe ) &&
+			( p.hits.w > 2.5 || any( lessThan( meanLobe, vec3( 0.0 ) ) ) ) )
 		{
 			atomicAdd( gatherCounter.words[3], 1u );
-			const vec3 cut = dispCodes( max( -meanLobe, vec3( 0.0 ) ) );
+			// (3, the counters' negative control: every carried pixel, its mean's codes)
+			const vec3 cut = dispCodes( p.hits.w > 2.5 ? meanLobe : max( -meanLobe, vec3( 0.0 ) ) );
 			atomicMax( gatherCounter.words[2], uint( max( max( cut.x, cut.y ), cut.z ) * 16.0 + 0.999 ) );
 		}
 		meanLobe = finite3( meanLobe ) ? clamp( meanLobe, vec3( 0.0 ), vec3( kMaxRadiance ) ) : vec3( 0.0 );

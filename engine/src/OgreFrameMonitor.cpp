@@ -1407,10 +1407,11 @@ constexpr ArmDef kArms[] = {
     { ArmId::GatherRestOff, 0.0, 0.0, 1.0,
       "No rest mean (GatherTuning::restOff): a still view keeps running the history's EMA instead of "
       "handing over to the rest mean and holding - the door that measures the history at rest." },
-    { ArmId::GatherRoughCarry, 0.0, 0.0, 2.0,
+    { ArmId::GatherRoughCarry, 0.0, 0.0, 3.0,
       "ROUGH-LOBE-HISTORY-1's measuring arm (reverted after its one measurement): 1 = the rough lobe's history "
       "blended bare (no carry: the cost arm's B), 2 = carried, and the pixels whose carried mean the clamp at zero "
-      "cut counted (GatherStatus::starvedRough) with the largest cut in display codes x 16 (starvedDiffuse)." },
+      "cut counted (GatherStatus::starvedRough) with the largest cut in display codes x 16 (starvedDiffuse); 3 = the "
+      "counters' NEGATIVE CONTROL: every carried pixel counted, the largest carried mean in codes x 16." },
     { ArmId::GatherRestFrames, 0.0, 0.0, 4096.0,
       "The rest mean's length in frames (GatherTuning::restFrames): a still view averages this many "
       "rest frames before it holds. 0 = the settle. With gather.restSeed it builds a CONVERGED "
