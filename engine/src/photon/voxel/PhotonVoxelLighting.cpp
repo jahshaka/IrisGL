@@ -171,6 +171,49 @@ namespace Ogre
 
     unsigned long long PhotonVoxelLighting::numMipStepJobs() { return gMipStepJobs; }
 
+    namespace
+    {
+        /// THE SHARED JOBS' BLOCKS (the injection and the feedback are found by name: one job, one ShaderParams, for
+        /// every lighting of the process).
+        struct SharedParamBlocks
+        {
+            PhotonParamArray<uint32, 4u * PhotonCommitLight::kMaxInjectBoxes> injectBoxLo, injectBoxHi;
+            PhotonParamArray<float, 4u * 8u> chainOrigin, chainRes;   // (c_maxCascades below)
+            PhotonParamArray<uint32, 4u * PhotonFeedbackActivation::kMaxBoxes> fbBoxLo, fbBoxHi;
+        };
+        SharedParamBlocks *gSharedParamBlocks = nullptr;
+        HlmsManager *gSharedParamBlocksManager = nullptr;
+        SharedParamBlocks &sharedParamBlocks( HlmsManager *hlmsManager )
+        {
+            if( !gSharedParamBlocks )
+                gSharedParamBlocks = new SharedParamBlocks();
+            gSharedParamBlocksManager = hlmsManager;
+            return *gSharedParamBlocks;
+        }
+    }  // namespace
+
+    void PhotonVoxelLighting::releaseParamBlocks()
+    {
+        // NOTHING KEEPS A POINTER INTO A FREED BLOCK: the shared jobs' parameters that point at one are made inline (empty)
+        // first - they live until Root dies, and a forced updateParameters would read them.
+        if( gSharedParamBlocksManager && gSharedParamBlocksManager->getComputeHlms() )
+        {
+            HlmsCompute *hlmsCompute = gSharedParamBlocksManager->getComputeHlms();
+            if( HlmsComputeJob *inject = hlmsCompute->findComputeJobNoThrow( "VCT/LightInjection" ) )
+            {
+                ShaderParams &params = inject->getShaderParams( "default" );
+                for( const char *name : { "injectBoxLo", "injectBoxHi", "chainOrigin", "chainRes" } )
+                    if( ShaderParams::Param *p = params.findParameter( name ) )
+                        { const float none[1] = { 0.0f }; p->setManualValue( none, 0u ); }
+            }
+            if( HlmsComputeJob *feedback = hlmsCompute->findComputeJobNoThrow( "Photon/BrickFeedback" ) )
+                feedback->getShaderParams( "default" ).mParams.clear();   // (rebuilt whole by every dispatch)
+        }
+        delete gSharedParamBlocks;
+        gSharedParamBlocks = nullptr;
+        gSharedParamBlocksManager = nullptr;
+    }
+
     static const size_t c_maxCascades = 8u;
 
     // JAHSHAKA fork ae2ed529f+155a56bf8 (was 0080): THE FORMAT OF THE TOTAL VOLUME.
@@ -1107,8 +1150,8 @@ namespace Ogre
                 mLightVctBounceInject->setProperty( NumVctCascadesProp, numCascadesI32 );
         }
 
-        mBounceInvResMaxLod->setManualValue( &vctInvResMaxLod[0].x,
-                                             static_cast<uint32>( numCascades * 4u ) );
+        mBounceInvResMaxLodBlock.set( mBounceInvResMaxLod, &vctInvResMaxLod[0].x,
+                                      static_cast<uint32>( numCascades * 4u ) );   // (D2: > 4 cascades is > 16)
         if( !mExtraCascades.empty() )
         {
             mBounceFromPreviousProbeToNext->setManualValueEx(
@@ -1133,7 +1176,7 @@ namespace Ogre
                     sh[i * 4u + c] = mEnvSh[i * 3u + c];
                 sh[i * 4u + 3u] = 0.0f;
             }
-            mBounceEnvSh->setManualValue( sh, 36u );
+            mBounceEnvShBlock.set( mBounceEnvSh, sh, 36u );   // (D2: nine float4, past setManualValue's 16)
         }
         {
             const uint32 mark[4] = { 1u, mBrickDims[0], mBrickDims[1], 0u };
@@ -1365,8 +1408,11 @@ namespace Ogre
         pShift.name = "fbShift";
         pDims.setManualValue( dims, 4u );
         pFlags.setManualValue( flags, 4u );
-        pLo.setManualValue( boxLo, 4u * PhotonFeedbackActivation::kMaxBoxes );
-        pHi.setManualValue( boxHi, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        {   // (D2: sixteen boxes, past setManualValue's 16 values; the job is shared - its blocks are the process's)
+            SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+            blocks.fbBoxLo.set( &pLo, boxLo, 4u * PhotonFeedbackActivation::kMaxBoxes );
+            blocks.fbBoxHi.set( &pHi, boxHi, 4u * PhotonFeedbackActivation::kMaxBoxes );
+        }
         pSelf.setManualValue( self4, 4u );
         pSrc.setManualValue( src4, 4u );
         pSrcDims.setManualValue( srcDims, 4u );
@@ -1789,8 +1835,11 @@ namespace Ogre
             }
         }
         mInjectChainSelf->setManualValue( mChainIndex );
-        mInjectChainOrigin->setManualValue( chainOrigin, 4u * chainLength );
-        mInjectChainRes->setManualValue( chainRes, 4u * chainLength );
+        {   // (D2: a chain over 4 cascades is past setManualValue's 16 values; the job is shared)
+            SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+            blocks.chainOrigin.set( mInjectChainOrigin, chainOrigin, 4u * chainLength );
+            blocks.chainRes.set( mInjectChainRes, chainRes, 4u * chainLength );
+        }
 
         const bool delta = mCommit.on && mCommit.light.delta && mHalfDirect && mCommitCountBuf;
         bindInjectionUavs( delta );
@@ -1896,8 +1945,10 @@ namespace Ogre
                         lo[4u * b + uint32( a )] = mCommit.light.injectLo[b][a];
                         hi[4u * b + uint32( a )] = mCommit.light.injectHi[b][a];
                     }
-                mInjectBoxLo->setManualValue( lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
-                mInjectBoxHi->setManualValue( hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
+                // (D2: sixteen boxes, past setManualValue's 16 values; the job is shared - its blocks are the process's)
+                SharedParamBlocks &blocks = sharedParamBlocks( mVoxelizer->getHlmsManager() );
+                blocks.injectBoxLo.set( mInjectBoxLo, lo, 4u * PhotonCommitLight::kMaxInjectBoxes );
+                blocks.injectBoxHi.set( mInjectBoxHi, hi, 4u * PhotonCommitLight::kMaxInjectBoxes );
             }
             for( uint32 b = 0u; b < std::max( boxes, 1u ); ++b )
             {

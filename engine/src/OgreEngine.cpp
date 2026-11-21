@@ -4101,6 +4101,8 @@ void OgreEngine::teardown() {
     // chain having given its own back above.
     try { Ogre::PhotonVoxelScroll::releasePool(); } catch (...) {}
     try { Ogre::PhotonVoxelLighting::releaseMipStepPool(); } catch (...) {}
+    // ...and the shared jobs' long parameter arrays (NONDET-1 D2, PhotonParamArray), their parameters made inline first.
+    try { Ogre::PhotonVoxelLighting::releaseParamBlocks(); } catch (...) {}
     if (mRoot && mInRecordFaultAttached) mRoot->removeFrameListener(mInRecordFault.get());
     mInRecordFaultAttached = false;
     if (mRoot && mSplitPublishAttached) mRoot->removeFrameListener(mSplitPublish.get());

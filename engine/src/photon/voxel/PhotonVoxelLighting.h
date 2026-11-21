@@ -41,6 +41,7 @@ THE SOFTWARE.
 #include <vector>
 
 #include "SceneLightList.h"
+#include "photon/voxel/PhotonParamArray.h"
 
 #include "OgreHeaderPrefix.h"
 
@@ -395,6 +396,9 @@ namespace Ogre
         ShaderParams::Param *mBounceFromPreviousProbeToNext;  ///< Used when cascades > 1
         ShaderParams::Param *mBounceEnvMips;      ///< Jahshaka (PHOTON-ENV-1): w the cube's mips (xyz the pad)
         ShaderParams::Param *mBounceEnvSh;        ///< Jahshaka (PHOTON-ENV-1): nine float4 (radiance)
+        /// THE BOUNCE'S LONG ARRAYS' VALUES (NONDET-1 D2, PhotonParamArray): the local parameters point here.
+        PhotonParamArray<float, 4u * 8u> mBounceInvResMaxLodBlock;
+        PhotonParamArray<float, 36u>     mBounceEnvShBlock;
         ShaderParams        *mBounceShaderParams;
 
         ResourceTransitionArray mResourceTransitions;
@@ -538,6 +542,8 @@ namespace Ogre
         /// array (vct_light_budget) hold kLightSlots lights in every cascade.
         /// Destroys the pooled anisotropic mip-step jobs (BUGS-6 stage 3) - the engine's teardown.
         static void releaseMipStepPool();
+        /// Frees the shared jobs' parameter blocks (NONDET-1 D2, PhotonParamArray) - the engine's teardown, before Root.
+        static void releaseParamBlocks();
         /// Mip-step jobs ever cloned, process-wide (a pooled one is cloned once per kind).
         static unsigned long long numMipStepJobs();
 
