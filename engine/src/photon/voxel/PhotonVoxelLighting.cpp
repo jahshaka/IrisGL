@@ -917,7 +917,8 @@ namespace Ogre
         /// THE FEEDBACK'S BRICK LIST ON A DIRECTIONAL-LEVEL JOB (PHOTON-7 stage 4): `list` binds it after the job's
         /// `textureUavs` image UAVs and sizes the dispatch from `args` (one group a listed brick: the arguments' words
         /// 4..6); null puts the job back as every other caller dispatches it (the jobs are shared). Each piece is
-        /// change-guarded: setNumUavUnits and setProperty void the PSO hash whatever they are told.
+        /// change-guarded: setNumUavUnits voids the PSO hash on every call for a job that informs its shader of
+        /// texture data (these do: Voxelizer.material.json), setProperty only on a change of value.
         void setBrickListMode( HlmsComputeJob *job, UavBufferPacked *list, UavBufferPacked *args, uint8 textureUavs )
         {
             const int32 on = list ? 1 : 0;
@@ -1463,7 +1464,7 @@ namespace Ogre
     bool PhotonVoxelLighting::takeFeedbackReading( PhotonFeedbackReading &out, uint64 frame )
     {
         // TAKEN AT A FIXED LAG, NEVER "WHEN IT LANDED" (gi.walk L1/L2, PHOTON-7 stage 4): the host DECIDES on a reading
-        // (a cascade still owes passes; the chain's rest re-integrates the field and moves the lighting serial), and a
+        // (a cascade still owes passes; the chain's rest is counted and moves the lighting serial), and a
         // reading polled for landing arrives 1 to 4 frames after its frame depending on the GPU's pace - so the rest fell
         // on a different frame in another process. A reading is taken exactly when the HOST'S frame is past its own by the
         // dynamic buffer multiplier (PHOTON-7 stage 4's read R2: the engine's frame, never the VaoManager's count, which a

@@ -4606,7 +4606,9 @@ bool PhotonComponent::rebuildVct() {
     // ALWAYS from scratch - the arm's SHAPE (resolution, cascades, probe grid) is
     // decided here. (The reason this used to give - a voxeliser holding raw Item*
     // and a per-voxeliser material cache - is gone: the feed is the GPU scene and
-    // the chain shares one store, refreshed in place and evicted on a death.)
+    // the chain shares one store, refreshed in place and evicted on a death. That
+    // store dies with the chain in the teardown below and the build makes a new one;
+    // only a cascade's own rebuild, rebuildCascade, keeps it.)
     teardownVct();
 
     size_t itemCount = 0;
@@ -4907,7 +4909,8 @@ void PhotonComponent::harvestCommitCounts() {
 
 size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
     // A FROM-SCRATCH CHAIN RE-READS EVERY MATERIAL (the VCT lifecycle's own rule):
-    // the store outlives rebuilds, so the refresh is owed and every GI slot is queued.
+    // its store is a new one (teardownVct destroyed the last chain's), so every GI slot
+    // is queued for conversion and the refresh is owed.
     mVctMaterialRefreshOwed = true;
     queueAllGiMaterials();
     const std::vector<GiParams::GiCascadeDesc> table = resolveCascadeTable();
