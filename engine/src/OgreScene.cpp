@@ -576,6 +576,12 @@ void OgreScene::beginFrameClock(bool drawn) {
             pm->setTimeSinceLast(Ogre::Real(mClock.particleDt));
 }
 
+void OgreScene::endFrameParticleTime() {
+    if (mSceneMgr)
+        if (Ogre::ParticleSystemManager2 *pm = mSceneMgr->getParticleSystemManager2())
+            pm->setTimeSinceLast(Ogre::Real(0));
+}
+
 double OgreScene::particleSeconds() const {
     Ogre::ParticleSystemManager2 *pm = mSceneMgr ? mSceneMgr->getParticleSystemManager2() : nullptr;
     return pm ? double(pm->getTimeSinceLastOverride()) : -1.0;

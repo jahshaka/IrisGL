@@ -1477,6 +1477,9 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                     if (monitor::live()) st.reset(new monitor::Stage("engine.sceneGraph"));
                     for (OgreScene *s : updated) s->sceneManager()->updateSceneGraph();
                     if (blankUpdated) blankUpdated->updateSceneGraph();
+                    // THE PARTICLES' TIME WAS THIS UPDATE's (ONE-FRAME-1, the stage-1 audit's worth-a-look 2): any further
+                    // update before the next frame (a pose resolve, Engine::updateScene; the sky export) advances them 0.
+                    for (auto &q : mScenes) q->endFrameParticleTime();
                 }
                 // THE PLAN, WHERE THE BOXES ARE CURRENT (ENGINE-UPGRADE-U4 stage 3, decision 8). updateSceneGraph has
                 // just made every drawn scene's world AABBs this frame's (Ogre's workers, SoA), so the GI scheduler's

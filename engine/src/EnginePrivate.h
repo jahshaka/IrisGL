@@ -4299,6 +4299,9 @@ public:
     /// owed steps consumed, bounded, and the particles' time handed to the scene manager's PFX2 (the fork's
     /// setTimeSinceLast); an undrawn scene keeps its steps and is handed 0.
     void beginFrameClock(bool drawn);
+    /// ...and after the frame's own scene-graph update: the particles' time set to 0, so any FURTHER update of the scene
+    /// before the next frame (a pose resolve, Engine::updateScene; the sky's equirect export) advances them nothing.
+    void endFrameParticleTime();
     /// The serial a node record of this frame is stamped with (the newest grid state).
     unsigned long long clockSerial() const { return mClock.newest; }
     std::vector<NodeId> mInterpNodes;   ///< the newest step's nodes (each once)
