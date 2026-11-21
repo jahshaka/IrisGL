@@ -1458,6 +1458,7 @@ void ScreenProbeGather::statsInto(const detail::OgreScene *scene, unsigned long 
         out.held = out.held && o.restableLast && everyCellHeldOf(o, restN);
         const unsigned n = settleFramesOf(o.historyFramesLast);
         out.settleFrames = std::max(out.settleFrames, n);
+        out.historyFrames = std::max(out.historyFrames, o.historyFramesLast);
         out.restFrames = std::min(out.restFrames, rest);
         out.cellsReached = std::max(out.cellsReached, o.cellsReached);
         out.cellsHeld = std::max(out.cellsHeld, o.cellsHeld);

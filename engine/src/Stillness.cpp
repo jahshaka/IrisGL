@@ -1059,6 +1059,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
+        f.historyFrames = g.historyFrames;
         // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
         // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
         // the gather's any more)
@@ -1195,6 +1196,7 @@ bool StillnessRun::frameDone(std::string &err)
         f.restFrames = g.restFrames;
         f.sinceRestart = g.sinceRestart;
         f.settleFrames = g.settleFrames;
+        f.historyFrames = g.historyFrames;
         // (THE HOLD's REASON is the gather's own record of this frame: an input reached a cell - filled at the window's
         // end, applyGatherRest; PHOTON-7 stage 8B, B1 - the rest key, the inputs-busy and the readers' hold owed are not
         // the gather's any more)
@@ -1470,7 +1472,7 @@ std::string StillnessReport::tsv() const
       << "\tclass_px\tclass_restart\tstep_px\tslow_stage\thold_key\tfoliage_rule"
       << "\trefl_rest_frames\trefl_held\trefl_rest_active\trefl_rest_movers\tcuts\trefl_cuts\tgpu_rows"
       << "\tperiod_ms\tread_ms\tgpu_span_ms\tgpu_idle_ms\tgpu_unattr_ms\tgpu_passes_ms\tgpu_rows_ms\trefl_rest_capped"
-      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\thandover_m\n";
+      << "\tifd_grant\tifd_spent\tifd_owed_restarts\tifd_owed_refines\tifd_owed_integrations\tstore_owed\tifd_marked\tifd_read_unheld\tifd_follows\tifd_restart_depth\tifd_mark_lag\tcards_admitted\tcards_arrival_mark\tcards_frame\tcards_demand_every\tcards_demand_lag\tcards_budget_texels\tcards_indirect_texels\tcards_page_size\tcards_settle_frames\tcards_roots\tcards_round\tcards_decisions\tcards_window_drains\tcards_indirect_relit\tcards_relights\tcards_captures\tcards_visible\tcards_subquantum\tcards_unmeasured\tcards_move_codes\tgather_held\tcards_reports_dropped\tcards_change\tcards_first_reflect\tcards_first_gather\tcards_newest_reflect\tcards_newest_gather\tcards_open_lag\thandover_m\thistory_frames\n";
     for (const StillnessWindow &w : windows)
         for (int part = 0; part < 2; ++part)
         for (const StillnessFrame &f : part == 0 ? w.trail : w.frames) {
@@ -1504,7 +1506,8 @@ std::string StillnessReport::tsv() const
               << "\t" << f.cardsCaptures << "\t" << f.cardsVisible << "\t" << f.cardsSubQuantum << "\t" << f.cardsUnmeasured
               << "\t" << f.cardsMoveCodes << "\t" << (f.gatherHeld ? 1 : 0) << "\t" << f.cardsReportsDropped
               << "\t" << f.cardsChange << "\t" << f.cardsFirst[0] << "\t" << f.cardsFirst[1] << "\t" << f.cardsNewest[0]
-              << "\t" << f.cardsNewest[1] << "\t" << f.cardsOpenLag << "\t" << f.handoverM << "\n";
+              << "\t" << f.cardsNewest[1] << "\t" << f.cardsOpenLag << "\t" << f.handoverM << "\t" << f.historyFrames
+              << "\n";
         }
     return o.str();
 }

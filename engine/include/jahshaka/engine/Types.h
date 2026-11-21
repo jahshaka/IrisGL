@@ -3884,6 +3884,10 @@ struct GatherStatus {
     unsigned restFrames = 0u;
     unsigned sinceRestart = 0u;
     unsigned settleFrames = 0u;
+    /// THE HISTORY's FLOOR h itself (ROUGH-LOBE-HISTORY-1): the pixel history is a true mean for h frames, then an EMA
+    /// at 1/h - the shipped kHistoryFrames, or the A/B arm gather.historyFrames (GatherTuning::historyFrames) - the
+    /// latest views' largest, as settleFrames is (settleFrames = settleFramesOf(historyFrames)). 0 = no view gathered.
+    unsigned historyFrames = 0u;
     bool settled = true;
     /// THE HOLD ITSELF: EVERY CELL of every latest view of the scene holds (PHOTON-7 stage 8B, B1: the rest is per
     /// screen cell - a cell an input reached resumes, every other cell keeps its rest picture; the view's rest clock

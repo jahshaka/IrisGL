@@ -163,6 +163,8 @@ struct StillnessFrame {
     /// The gather's rest (GatherStatus): consecutive rest frames, frames since its last restart, the settle N,
     /// and whether the view HELD this frame (restFrames > settleFrames: nothing dispatched).
     unsigned           restFrames = 0, sinceRestart = 0, settleFrames = 0;
+    /// ...and the history's floor h the settle is derived from (GatherStatus::historyFrames: the EMA's 1/h once full)
+    unsigned           historyFrames = 0;
     /// B3 (PHOTON-7 stage 8B): the longest hand-over a held cell began this frame, in frames - a hold's completion
     /// includes it (the picture walks at a code a frame)
     unsigned           handoverM = 0;
