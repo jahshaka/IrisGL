@@ -399,6 +399,7 @@ namespace Ogre
         /// THE BOUNCE'S LONG ARRAYS' VALUES (NONDET-1 D2, PhotonParamArray): the local parameters point here.
         PhotonParamArray<float, 4u * 8u> mBounceInvResMaxLodBlock;
         PhotonParamArray<float, 36u>     mBounceEnvShBlock;
+        PhotonParamArray<float, 7u * 2u * 4u> mBounceFromPreviousProbeToNextBlock;   ///< (cascades - 1) x 2 float4, at 8
         ShaderParams        *mBounceShaderParams;
 
         ResourceTransitionArray mResourceTransitions;

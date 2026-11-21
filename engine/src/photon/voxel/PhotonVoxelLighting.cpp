@@ -1164,8 +1164,10 @@ namespace Ogre
                                       static_cast<uint32>( numCascades * 4u ) );   // (D2: > 4 cascades is > 16)
         if( !mExtraCascades.empty() )
         {
-            mBounceFromPreviousProbeToNext->setManualValueEx(
-                &fromPreviousProbeToNext[0]->x, static_cast<uint32>( ( numCascades - 1u ) * 2u * 4u ) );
+            // (NONDET-1 H5: the values in the lighting's own block - setManualValueEx keeps the pointer, and this
+            // function's stack array died at its return while the parameter still named it)
+            mBounceFromPreviousProbeToNextBlock.set( mBounceFromPreviousProbeToNext, &fromPreviousProbeToNext[0]->x,
+                                                     static_cast<uint32>( ( numCascades - 1u ) * 2u * 4u ) );
         }
         else
         {
