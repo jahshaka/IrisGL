@@ -786,15 +786,58 @@ vec3 probeLobeBrute( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW
 	return wacc > 0.0 ? acc / wacc : diffuse;
 }
 
-/// THIS FRAME'S LOBE where it is read (the gate open, the diffuse not owning it), the diffuse E/pi elsewhere.
-vec3 roughLobeNow( vec3 N, vec3 V, float roughness, uint tapIdx[5], float tapW[5], int nTap, float floorW, vec3 diffuse )
+/// THE VIEW DIRECTION AT A WORLD POINT, from one eye: the ray back to a perspective eye, -fwd for an orthographic one.
+vec3 toEyeOf( JahEye e, vec3 world )
 {
+	return e.perspective < 0.5 ? -e.fwd : normalize( e.camPos - world );
+}
+/// Whether an eye's view direction at a point CAN differ between two of its cameras: exactly the bits toEyeOf reads - the
+/// position for a perspective eye, the forward for an orthographic one. A camera that only turned gives the same V at the
+/// point, so the lobe's change there is exactly zero by physics, and the carry's delta is the literal +0.0.
+bool eyeViewMoved( JahEye a, JahEye b )
+{
+	if( floatBitsToUint( a.perspective ) != floatBitsToUint( b.perspective ) )
+		return true;
+	return a.perspective < 0.5 ? any( notEqual( floatBitsToUint( a.fwd ), floatBitsToUint( b.fwd ) ) )
+							   : any( notEqual( floatBitsToUint( a.camPos ), floatBitsToUint( b.camPos ) ) );
+}
+
+/// THIS FRAME'S LOBE where it is read (the gate open, the diffuse not owning it), the diffuse E/pi elsewhere - AND, with
+/// `carry` (a pixel with a history whose eye's view moved), THE LOBE's CHANGE SINCE THE HISTORY's VIEW (ROUGH-LOBE-HISTORY-1):
+///     delta = lobe( V ) - lobe( Vprev ),
+/// both evaluated on THIS frame's taps - the history's own estimand, its fallback and its clamp included - so the history is
+/// carried to the current view before it is blended (the same quantity: no clamp, no switch, no history rejected; on a walk
+/// the bare blend lagged the view by ( N - 1 ) times the lobe's change a frame - the rough reflection's trail). Without
+/// `carry` delta is the literal +0.0 and Vprev is not evaluated: at rest the eye's bits are equal and the identity
+/// lobe( V ) - lobe( V ) = 0 holds by construction, not by the compiler evaluating two bodies alike. A LOOP OF TWO, Vprev
+/// FIRST and V LAST (so gLobeFellBack is V's - the rough rest's carrier reads it), each evaluator keeping its one call site
+/// (one call site for a heavy function); the gate reads the roughness alone (never the view), once. The update's law:
+/// RoughLobeCarry.h, engine.rough_lobe_transport.
+vec3 roughLobeNow( vec3 N, vec3 V, vec3 Vprev, bool carry, float roughness, uint tapIdx[5], float tapW[5], int nTap,
+				   float floorW, vec3 diffuse, out vec3 delta )
+{
+	delta = vec3( 0.0 );
 	gLobeFellBack = true;
 	if( !( roughGate( roughness ) > 0.0 ) || roughToDiffuse( roughness ) >= 1.0 )
 		return diffuse;
-	const vec3 lobe = p.roughLevels.w > 1.5 ? probeLobeBrute( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse )
-											: probeLobe( N, V, roughness, tapIdx, tapW, nTap, floorW, diffuse );
-	return clamp( lobe, vec3( 0.0 ), vec3( kMaxRadiance ) );
+	vec3 atPrev = diffuse;
+	vec3 now = diffuse;
+	for( int k = 0; k < 2; ++k )
+	{
+		if( k == 0 && !carry )
+			continue;
+		gLobeFellBack = true;   // (each evaluation's own: an evaluator that returns early leaves it so)
+		const vec3 v = k == 0 ? Vprev : V;
+		const vec3 lobe = clamp( p.roughLevels.w > 1.5 ? probeLobeBrute( N, v, roughness, tapIdx, tapW, nTap, floorW, diffuse )
+													   : probeLobe( N, v, roughness, tapIdx, tapW, nTap, floorW, diffuse ),
+								 vec3( 0.0 ), vec3( kMaxRadiance ) );
+		if( k == 0 )
+			atPrev = lobe;
+		else
+			now = lobe;
+	}
+	delta = carry ? now - atPrev : vec3( 0.0 );
+	return now;
 }
 /// THE ROUGH SPECULAR'S TEXEL: rgb the lobe (this frame's, or its mean) handed over to the diffuse, w the gate.
 vec4 roughTexel( vec3 lobe, vec3 diffuse, float roughness )
@@ -939,7 +982,7 @@ void main()
 		uint wasCount;
 		// Lumen's test (jah_probe_history.glsl): the jitter is the pixel's and the view's frame's (the rounding's
 		// own PCG, its own salt), the facing the eye's.
-		const vec3 toEye = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
+		const vec3 toEye = toEyeOf( thisEye, pixelWorld );
 		const float NoV = dot( pixelNormal, toEye );
 		if( jahHistoryAt( pixelWorld, pixelFoliage, NoV, roundingDither( ivec2( lx, pix.y ), 3u ), eye, texel,
 						  wasCount, histAt ) )
@@ -1176,7 +1219,7 @@ void main()
 		imageStore( skyVis, at, vec4( gSkyNow ) );
 	// THE FIELD, COMPOSED (7-2): the eye's direction for its sample point's bias
 	const bool composeField = p.fieldWin.w > 0.5;
-	const vec3 toEyeField = thisEye.perspective < 0.5 ? -thisEye.fwd : normalize( thisEye.camPos - pixelWorld );
+	const vec3 toEyeField = toEyeOf( thisEye, pixelWorld );
 	// THE ROUGH SPECULAR (7-3): the pixel's perceptual roughness (the G-buffer's alpha, decoded as the reflection
 	// decodes it); a young pixel's diffuse read the wide neighbourhood - its lobe reads the bilinear taps
 	const float roughness =
@@ -1199,9 +1242,10 @@ void main()
 						   1.0 );
 		imageStore( probeIrradiance, at, jahRoundHalf( answer ) );
 		const vec3 diffuseNow = answer.xyz * answer.w;
+		vec3 noCarry;   // (no history here: nothing is carried)
 		imageStore( roughSpec, at,
-					jahRoundHalf( roughTexel( roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor,
-											  diffuseNow ),
+					jahRoundHalf( roughTexel( roughLobeNow( pixelNormal, toEyeField, toEyeField, false, roughness, tapIdx, tapW, nTap,
+											  weightFloor, diffuseNow, noCarry ),
 								diffuseNow, roughness ) ) );
 		return;
 	}
@@ -1371,12 +1415,21 @@ void main()
 				lobeFallback = r.xyz * r.w;
 			}
 		}
-		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, roughness, tapIdx, tapW, nTap, weightFloor, lobeFallback );
+		// THE HISTORY CARRIED TO THIS VIEW (ROUGH-LOBE-HISTORY-1): the history was blended in this EYE's previous view, so
+		// the lobe's change since then (both views on this frame's taps, roughLobeNow) is added where the history is read -
+		// every reader below (the blend, the rest's answer) takes the carried value; the sum is left unclamped before the
+		// mix (the one clamp is the mean's, below). Evaluated only with a history and only where this eye's view moved: at
+		// rest the camera is a byte copy and the change is the literal +0.0.
+		const JahEye before = jahEyeBefore( eye );
+		vec3 lobeDelta;
+		const vec3 lobe = roughLobeNow( pixelNormal, toEyeField, toEyeOf( before, pixelWorld ),
+										prevCount > 0u && eyeViewMoved( thisEye, before ), roughness, tapIdx, tapW, nTap,
+										weightFloor, lobeFallback, lobeDelta );
 		// (a lobe that fell back to a diffuse with no rest sample is no sample: the rough rest takes none this frame)
 		const bool lobeTakes = restTakes && !( gLobeFellBack && fallbackNone );
 		bool roughStarved = false;
 		const vec3 prevLobe =
-			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) : vec3( 0.0 );
+			prevCount > 0u ? unpackRgbShared( imageLoad( roughHistoryPrev, ivec3( histAt, eye ) ).x ) + lobeDelta : vec3( 0.0 );
 		vec3 meanLobe = mix( prevLobe, lobe, blend );
 		if( restK >= 1.0 )
 		{
