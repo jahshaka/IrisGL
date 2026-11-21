@@ -1402,6 +1402,8 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
         r.pathPixelsDiffering.assign(n + 1, 0u);
         r.pathMeanCodes.assign(n + 1, 0.0);
         r.pathP99Codes.assign(n + 1, 0u);
+        r.pathPixels.assign(n + 1, 0u);
+        r.pathOverCodes.assign(n + 1, std::vector<unsigned>(StillnessReport::kPathTailCodes, 0u));
         if (a.lastPicture.width == b.lastPicture.width && a.lastPicture.height == b.lastPicture.height) {
             std::vector<std::vector<unsigned>> hist(n + 1, std::vector<unsigned>(256, 0u));
             for (size_t i = 0; i < size_t(a.lastPicture.width) * a.lastPicture.height; ++i) {
@@ -1420,6 +1422,12 @@ bool StillnessRun::finish(StillnessReport &out, std::string &err)
                 unsigned long long total = 0, sum = 0;
                 for (unsigned v = 0; v < 256; ++v) { total += hist[k][v]; sum += (unsigned long long)v * hist[k][v]; }
                 if (!total) continue;
+                r.pathPixels[k] = unsigned(total);
+                for (unsigned t = 1; t <= StillnessReport::kPathTailCodes; ++t) {
+                    unsigned long long over = 0;
+                    for (unsigned v = t + 1u; v < 256; ++v) over += hist[k][v];
+                    r.pathOverCodes[k][t - 1u] = unsigned(over);
+                }
                 r.pathMeanCodes[k] = double(sum) / double(total);
                 unsigned long long acc = 0;
                 for (unsigned v = 0; v < 256; ++v) {
@@ -1543,6 +1551,11 @@ std::string StillnessReport::summary() const
             std::snprintf(b, sizeof(b), " %s=%.3f/%u/%u,%u", names[k].c_str(), pathMeanCodes[k], pathP99Codes[k],
                           pathMaxCodes[k], pathPixelsDiffering[k]);
             o << b;
+        }
+        o << " | pixels N and over 1.." << StillnessReport::kPathTailCodes << " codes:";
+        for (size_t k = 0; k < names.size() && k < pathPixels.size() && k < pathOverCodes.size(); ++k) {
+            o << " " << names[k] << "=" << pathPixels[k] << ":";
+            for (unsigned t = 0; t < pathOverCodes[k].size(); ++t) o << (t ? "," : "") << pathOverCodes[k][t];
         }
         o << " | field origin equal " << pathFieldEqual;
         o << " | cascade direct/total/placement equal:";
