@@ -2692,8 +2692,14 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             inset(handlesOut, p);
         }
         // THE PHOTON VIEW'S TERM (ChainDesc::photonTerm): cleared TRANSPARENT every frame, so a pixel no term shader
-        // wrote (the sky, a material outside the PBS family) shows the scene's picture in the composite (alpha 0), as
-        // the in-place view did; stored for that composite. (The screen decode in front takes this clear: below.)
+        // wrote shows the scene's picture in the composite (alpha 0); stored for that composite. (The screen decode in
+        // front takes this clear: below.) A DRAW THAT DECLARES NO TERM OUTPUT keeps the clear - the sky's and the fog's
+        // quads, the cloud sheet, the sun disc, a VR eye's hidden-area mesh, every Unlit draw (the grid, an Unlit
+        // material), a PBS draw without normals - GUARANTEED by the Vulkan specification's Fragment Output Interface
+        // (Vulkan-Docs chapters/interfaces.adoc): "If a color attachment at a given Location does not have an output
+        // variable declared, the values must not be modified." ("Poison" there concerns only the components a DECLARED
+        // output leaves unwritten; the term piece writes all four.) PHOTON-7-9A's final read took it for undefined -
+        // false: the fork change made on that premise is reverted (35d14dd00, dc8f32307).
         if (desc.photonTerm) {
             const size_t ti = (desc.ssao && !prepass) ? 2u : 1u;
             p->mClearColour[ti] = Ogre::ColourValue(0.0f, 0.0f, 0.0f, 0.0f);
