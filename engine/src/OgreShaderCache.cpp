@@ -1043,10 +1043,8 @@ void ShaderCache::load(Ogre::Root *root) {
 }
 
 // THE COMPUTE LAYER's READ (COLD-BOOT-1 stage 3). The file's checksum was verified with the others; here its records
-// are parsed (a record whose source does not hash to its program key is rejected: readComputeLayer) and the STALE ones
-// dropped - a record one of whose files (its template, a piece) the staged media no longer holds with the same content
-// (pruneStaleRecords: "a changed source drops exactly its entries"). The rest wait for prewarmCompute. A file that is no
-// compute layer is dropped alone, the other layers stand.
+// are parsed (a record whose source does not hash to its program key is rejected: readComputeLayer) and kept for
+// prewarmCompute, which drops the STALE ones. A file that is no compute layer is dropped alone, the other layers stand.
 void ShaderCache::loadCompute(const std::vector<char> &bytes) {
     ComputeLayerRead read = readComputeLayer(bytes.data(), bytes.size());
     if (!read.ok) {
@@ -1054,6 +1052,21 @@ void ShaderCache::loadCompute(const std::vector<char> &bytes) {
         if (mWriter) ::unlink(path("compute.bin").c_str());
         return;
     }
+    mComputeRecordsRejected = read.rejected;
+    mComputeRecordsLoaded = unsigned(read.records.size());
+    mComputeLoaded = std::move(read.records);
+    if (mComputeRecordsRejected)
+        logLine("compute.bin: " + std::to_string(mComputeRecordsRejected) + " record(s) rejected (source and program "
+                "key disagree)");
+}
+
+// THE STALE PRUNE RUNS HERE, NOT AT LOAD (SHADER-SYSTEM-1 stage 3F, the start preflight's F1): a record is stale when
+// one of its files (its template, a piece) the staged media no longer holds with the same content (pruneStaleRecords:
+// "a changed source drops exactly its entries"), and the files are found through the resource groups - which hold the
+// compute media only from registerCommonMaterials on, after the load (OgreEngine.cpp). Pruned at load, every record
+// was stale. The engine calls this after the folders are registered and the async compiler runs.
+void ShaderCache::prewarmCompute() {
+    if (mComputeLoaded.empty()) return;
     // Each file hashed once, from where the engine reads it (its resource groups: the compute jobs' own lookup).
     std::map<std::string, std::pair<bool, ComputeKey128>> memo;
     auto current = [&memo](const std::string &name, ComputeKey128 &out) {
@@ -1073,17 +1086,11 @@ void ShaderCache::loadCompute(const std::vector<char> &bytes) {
         out = it->second.second;
         return it->second.first;
     };
-    mComputeRecordsStale = pruneStaleRecords(read.records, current);
-    mComputeRecordsRejected = read.rejected;
-    mComputeRecordsLoaded = unsigned(read.records.size());
-    mComputeLoaded = std::move(read.records);
-    if (mComputeRecordsRejected || mComputeRecordsStale)
-        logLine("compute.bin: " + std::to_string(mComputeRecordsRejected) + " record(s) rejected (source and program "
-                "key disagree), " + std::to_string(mComputeRecordsStale) + " stale (a file they read changed)");
-}
-
-void ShaderCache::prewarmCompute() {
-    if (!mComputeStore || mComputeLoaded.empty()) return;
+    mComputeRecordsStale = pruneStaleRecords(mComputeLoaded, current);
+    mComputeRecordsLoaded = unsigned(mComputeLoaded.size());
+    logLine("compute.bin: " + std::to_string(mComputeRecordsLoaded) + " record(s) kept, " +
+            std::to_string(mComputeRecordsStale) + " stale (a file they read changed)");
+    if (!mComputeStore) return;
     mComputeStore->prewarm(std::move(mComputeLoaded));
     mComputeLoaded.clear();
     // What the store now holds came from the disk (less the stale): no dirt of its own until a new record is filed.

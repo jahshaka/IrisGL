@@ -3322,8 +3322,10 @@ public:
     /// (ComputeRecord.h). `store` is the fork's HlmsCompute behind the engine's adapter; null = no compute store (the
     /// layer's file is then read and carried forward untouched, never written). Render thread.
     void setComputeStore(ComputeCodeStore *store) { mComputeStore = store; }
-    /// The records load() read and kept, handed to the store - filed, and their code compiled on the async compiler.
-    /// Call once the async compiler runs (OgreEngine, after startAsyncShaders); a no-op with no store or no records.
+    /// The records load() read, the STALE ones pruned (their files are found through the resource groups, so this runs
+    /// after the compute media's folders are registered: SHADER-SYSTEM-1 F1), the rest handed to the store - filed, and
+    /// their code compiled on the async compiler. Call once the folders are registered and the async compiler runs
+    /// (OgreEngine, after registerCommonMaterials and startAsyncShaders); a no-op with no records.
     void prewarmCompute();
 
     ShaderCacheStats stats(Ogre::Root *root) const;
@@ -3457,7 +3459,7 @@ private:
     unsigned                       mComputeRecordsLoaded = 0, mComputeRecordsRejected = 0, mComputeRecordsStale = 0;
     std::atomic<std::uint64_t>     mSavedAtComputeGeneration { 0 };
     bool                           mForceCompute = false;   ///< clear(): the next save writes the store's records back
-    /// load()'s half for compute.bin: parse, reject, prune the stale, keep the rest for prewarmCompute.
+    /// load()'s half for compute.bin: parse, reject, keep the rest for prewarmCompute (which prunes the stale).
     void loadCompute(const std::vector<char> &bytes);
     void composeFingerprint();
     /// The current key (hex) of the layer `name` belongs to; empty for a file
