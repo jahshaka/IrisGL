@@ -321,6 +321,7 @@ namespace Ogre
         {
             AsyncTicketPtr ticket;
             Vector3 origin = Vector3::ZERO;
+            uint64 frame = 0u;   ///< the light frame whose mask it holds (NONDET-1's detector)
         };
         BrickReading mBrickReadings[kBrickReadingSlots];
         uint32 mBrickNextIssue = 0u, mBrickNextTake = 0u;
@@ -643,7 +644,7 @@ namespace Ogre
         void regenerateDirectional() { generateAnisotropicMips(); }
         /** THE BRICK MASK'S OLDEST LANDED READING (PHOTON-7 stage 3), taken: `words` two per brick (x fastest over `dims`),
             `origin` the box corner the update ran at. False while none has landed. */
-        bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] );
+        bool takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3], uint64 *frame = nullptr );
         uint32 getNumBricks() const { return mBrickDims[0] * mBrickDims[1] * mBrickDims[2]; }
         /// Frames that wrote a mask, and those whose reading was skipped (every slot in flight).
         uint64 getBrickUpdates() const { return mBrickUpdates; }

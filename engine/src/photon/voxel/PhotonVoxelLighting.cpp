@@ -2120,10 +2120,12 @@ namespace Ogre
         }
         r.ticket = mBrickBuffer->readRequest( 0u, mBrickZeros.size(), /*accurateTracking=*/false );
         r.origin = mVoxelizer->getVoxelOrigin();
+        r.frame = mLightFrame;
         mBrickNextIssue = ( mBrickNextIssue + 1u ) % kBrickReadingSlots;
     }
     //-------------------------------------------------------------------------
-    bool PhotonVoxelLighting::takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3] )
+    bool PhotonVoxelLighting::takeBrickReading( std::vector<uint32> &words, Vector3 &origin, uint32 dims[3],
+                                                uint64 *frame )
     {
         BrickReading &r = mBrickReadings[mBrickNextTake];
         if( !r.ticket.get() || !r.ticket->queryIsTransferDone() )
@@ -2133,6 +2135,8 @@ namespace Ogre
         r.ticket->unmap();
         r.ticket.reset();
         origin = r.origin;
+        if( frame )
+            *frame = r.frame;
         for( int a = 0; a < 3; ++a )
             dims[a] = mBrickDims[a];
         mBrickNextTake = ( mBrickNextTake + 1u ) % kBrickReadingSlots;

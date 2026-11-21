@@ -1128,6 +1128,14 @@ GiStatus PhotonComponent::giStatus() const {
             cs.brickUpdates = c.lighting ? c.lighting->getBrickUpdates() : 0ull;
             cs.brickReadings = c.brickReadings;
             cs.brickReadingsSkipped = c.lighting ? c.lighting->getBrickReadingsSkipped() : 0ull;
+            cs.foreignDirectMax = c.foreignDirectMax;   // NONDET-1's detector (gi.foreignDetect)
+            cs.foreignBounceMax = c.foreignBounceMax;
+            cs.foreignReadings = c.foreignReadings;
+            cs.foreignFirstFrame = c.foreignFirstFrame;
+            cs.foreignFirstBrick = c.foreignFirstBrick;
+            cs.foreignFirstWord = c.foreignFirstWord;
+            cs.foreignFirstCodes = c.foreignFirstCodes;
+            cs.foreignFirstSkipped = c.foreignFirstSkipped;
             cs.commitInjectCells = c.commitInjectCells;
             cs.commitCounted     = c.commitCounted;
             cs.deltaMarched      = c.deltaMarched;
@@ -4159,12 +4167,36 @@ void PhotonComponent::harvest() {
 // reading's counts are the status's: a brick is ACTIVE when a word reads one code or more (a relative change of 1 %).
 void PhotonComponent::harvestBrickMasks() {
     std::vector<Ogre::uint32> words;
+    // NONDET-1's DETECTOR (gi.foreignDetect = N codes): the readings of the frames since the arm came on
+    const double foreignBar = mEngine ? mEngine->armRegistry().value(ArmId::GiForeignDetect) : 0.0;
+    if (foreignBar <= 0.0) mForeignArmedFrame = 0u;
+    else if (!mForeignArmedFrame) mForeignArmedFrame = giWriterFrame();
     for (VctCascade &c : mVctCascades) {
         if (!c.lighting) continue;
         Ogre::Vector3 origin;
         Ogre::uint32 dims[3];
-        while (c.lighting->takeBrickReading(words, origin, dims)) {
+        Ogre::uint64 readingFrame = 0u;
+        while (c.lighting->takeBrickReading(words, origin, dims, &readingFrame)) {
             ++c.brickReadings;
+            if (mForeignArmedFrame && readingFrame >= mForeignArmedFrame) {
+                ++c.foreignReadings;
+                for (size_t i = 0; i + 1u < words.size(); i += 2u) {
+                    for (unsigned w = 0u; w < 2u; ++w) {
+                        float f;
+                        std::memcpy(&f, &words[i + w], sizeof f);
+                        const float codes = f / 0.01f;   // (a non-finite word reads over any bar)
+                        float &most = w ? c.foreignBounceMax : c.foreignDirectMax;
+                        if (!(codes <= most)) most = codes;
+                        if (!c.foreignFirstFrame && !(codes <= float(foreignBar))) {
+                            c.foreignFirstFrame = readingFrame;
+                            c.foreignFirstBrick = unsigned(i / 2u);
+                            c.foreignFirstWord = w;
+                            c.foreignFirstCodes = codes;
+                            c.foreignFirstSkipped = c.lighting->getBrickReadingsSkipped();
+                        }
+                    }
+                }
+            }
             if (c.brickUnion.size() != words.size() || c.brickOrigin != origin || c.brickDims[0] != dims[0] ||
                 c.brickDims[1] != dims[1] || c.brickDims[2] != dims[2]) {
                 c.brickUnion.assign(words.size(), 0u);

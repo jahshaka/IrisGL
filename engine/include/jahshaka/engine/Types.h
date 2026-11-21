@@ -5122,6 +5122,16 @@ struct GiStatus {
         unsigned bricks = 0;
         unsigned bricksDirectLast = 0, bricksBounceLast = 0, bricksActiveLast = 0;
         unsigned long long brickUpdates = 0, brickReadings = 0, brickReadingsSkipped = 0;
+        /// NONDET-1's DETECTOR (the measuring arm gi.foreignDetect = N codes; 0 = off, every field 0): over the landed
+        /// readings of the frames since the arm came on, the largest word 0 (the injection's relative change of a brick's
+        /// direct term) and word 1 (the bounce's of its total), in codes (1 % relative), and the FIRST reading over N - its
+        /// light frame (0 = none), brick, word (0 direct, 1 bounce), value, and the cascade's skipped readings by then.
+        /// A word is written by the pass that CHANGES the store: a value written into the direct term by anything else
+        /// shows only when the next injection of that voxel reads it as its old term.
+        float foreignDirectMax = 0.0f, foreignBounceMax = 0.0f;
+        unsigned long long foreignReadings = 0, foreignFirstFrame = 0, foreignFirstSkipped = 0;
+        unsigned foreignFirstBrick = 0, foreignFirstWord = 0;
+        float foreignFirstCodes = 0.0f;
     };
     /// The live cascade chain, innermost first — the voxels of every Vct and
     /// VctPccHybrid scene. Empty while GI is off or the chain waits for a camera
