@@ -1863,6 +1863,8 @@ private:
         /// eye's target (stamped at every prepare), the list the newest read-back frame held and the list the FIRST
         /// read-back frame held (the creation size; never rewritten).
         unsigned eyes = 1u, eyeWidth = 0u, eyeHeight = 0u;
+        /// The view's BUILT chain carries the Photon term view's attachment (OgreView::chainPhotonTerm, PHOTON-7-9A M4).
+        bool photonTerm = false;
         uint32_t readCapacity = 0u, firstCapacity = 0u;
         /// The largest demand of a retired frame that overflowed its list, not yet taken (takeHitOverflow).
         unsigned long long overflowDemand = 0ull;
@@ -12499,6 +12501,7 @@ bool RayQueryTier::prepareHitList(const ReflectPassListener *key, OgreView *view
     hv.sceneId = scene->historyId();
     // (a stereo view's width() is its eye PAIR's: both eyes append to this one list)
     hv.eyes = view->stereo() ? 2u : 1u;
+    hv.photonTerm = view->chainPhotonTerm();
     hv.eyeWidth = view->width() / hv.eyes;
     hv.eyeHeight = view->height();
     readHitCounters(hv);
@@ -12827,6 +12830,7 @@ void RayQueryTier::hitStatsInto(const OgreScene *scene, RayQueryStatus &st) cons
         st.hitCapacity = std::max<unsigned long long>(st.hitCapacity, hv.capacity);
         RayQueryStatus::HitListView v;
         v.eyes = hv.eyes;
+        v.photonTerm = hv.photonTerm;
         v.eyeWidth = hv.eyeWidth;
         v.eyeHeight = hv.eyeHeight;
         v.firstCapacity = hv.firstCapacity;

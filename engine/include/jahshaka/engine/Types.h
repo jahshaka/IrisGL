@@ -5663,9 +5663,12 @@ struct RayQueryStatus {
     /// to its ONE list), `eyeWidth` x `eyeHeight` (one eye's target), `firstCapacity` (the list the view's FIRST
     /// read-back frame held: its creation size, kHitListCreateShare x eyeWidth x eyeHeight x eyes rounded up to whole
     /// rows), and the newest read-back frame's `capacity` (THAT frame's list - its records and drops were counted
-    /// against it, so a reading after a growth names the grown list), `records` and `dropped`.
+    /// against it, so a reading after a growth names the grown list), `records` and `dropped`; `photonTerm` = the view's
+    /// BUILT chain carries the Photon term view's attachment and composite (ChainDesc::photonTerm: a term view on a post
+    /// chain of either eye shape, PHOTON-7-9A M4).
     struct HitListView {
         unsigned eyes = 1u;
+        bool photonTerm = false;
         unsigned eyeWidth = 0u, eyeHeight = 0u;
         unsigned long long firstCapacity = 0ull;
         unsigned long long capacity = 0ull;
