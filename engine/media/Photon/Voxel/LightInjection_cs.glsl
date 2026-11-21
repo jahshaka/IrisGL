@@ -184,6 +184,7 @@ vulkan( }; )
 // Jahshaka (PHOTON-VOXEL-5; the VOXEL-4 audit's F3): THE ONE READER'S RULES for the shadow
 // march - after the parameters, which its functions read.
 @insertpiece( JahInjectionReader )
+@insertpiece( JahInjectionHalfDirect )
 
 // THE BRICK MASK'S CHANGE (PHOTON-7 stage 3; its twin is LightVctBounceInject_cs.glsl's): how far a voxel's light moved, per
 // channel, relative to the larger of its old and new value - one code is 1 % (the reflection rest's rule) - over the float

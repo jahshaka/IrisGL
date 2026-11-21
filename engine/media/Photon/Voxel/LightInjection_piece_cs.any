@@ -142,6 +142,29 @@
 #endif
 		return OGRE_SampleLevel( chainPosN[0], voxelAlbedoSampler, u, l );
 	}
+	#define JAH_VOX_SAMPLE_COVP( c, u, l ) jahInjSampleCovP( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_COVN( c, u, l ) jahInjSampleCovN( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_POSP( c, u, l ) jahInjSamplePosP( uint( c ), u, l )
+	#define JAH_VOX_SAMPLE_POSN( c, u, l ) jahInjSamplePosN( uint( c ), u, l )
+	#define JAH_VOX_INVRES( c ) p_invVoxelResolution
+	@insertpiece( JahVoxelSample )
+
+	/// The PCG integer hash (jah_probe_params.glsl's jahPcg): the area strata's jitter (gi.voxelAreaStrata, below).
+	INLINE uint jahInjectPcg( uint v )
+	{
+		const uint st = v * 747796405u + 2891336453u;
+		const uint wd = ( ( st >> ( ( st >> 28u ) + 4u ) ) ^ st ) * 277803737u;
+		return ( wd >> 22u ) ^ wd;
+	}
+
+	// THE SHADOW MARCH ITSELF: one text with every other reader of the voxels' lamp visibility (jah_inject_visibility.glsl)
+	@insertpiece( JahInjectVisibility )
+@end
+
+@piece( JahInjectionHalfDirect )
+	// THE CLEARED VOXELS' REFERENCE, cascade c's half store direct terms by a literal index (NONDET-1 F1): the injection's
+	// own (chainHalfDirect is its binding alone), so never in the shared reader above - JahScreenAreaVis inserts that one
+	// and declares no chainHalfDirect (a compile failure there when it was, gi.screen_bind and mirror.document_to_engine)
 	INLINE float4 jahInjHalfDirect( uint c, int3 t )
 	{
 #if JAH_INJ_CHAIN > 7
@@ -174,23 +197,6 @@
 #endif
 		return OGRE_Load3D( chainHalfDirect[0], t, 0 );
 	}
-	#define JAH_VOX_SAMPLE_COVP( c, u, l ) jahInjSampleCovP( uint( c ), u, l )
-	#define JAH_VOX_SAMPLE_COVN( c, u, l ) jahInjSampleCovN( uint( c ), u, l )
-	#define JAH_VOX_SAMPLE_POSP( c, u, l ) jahInjSamplePosP( uint( c ), u, l )
-	#define JAH_VOX_SAMPLE_POSN( c, u, l ) jahInjSamplePosN( uint( c ), u, l )
-	#define JAH_VOX_INVRES( c ) p_invVoxelResolution
-	@insertpiece( JahVoxelSample )
-
-	/// The PCG integer hash (jah_probe_params.glsl's jahPcg): the area strata's jitter (gi.voxelAreaStrata, below).
-	INLINE uint jahInjectPcg( uint v )
-	{
-		const uint st = v * 747796405u + 2891336453u;
-		const uint wd = ( ( st >> ( ( st >> 28u ) + 4u ) ) ^ st ) * 277803737u;
-		return ( wd >> 22u ) ^ wd;
-	}
-
-	// THE SHADOW MARCH ITSELF: one text with every other reader of the voxels' lamp visibility (jah_inject_visibility.glsl)
-	@insertpiece( JahInjectVisibility )
 @end
 
 @piece( HeaderCS )
