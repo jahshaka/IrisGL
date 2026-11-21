@@ -17,4 +17,13 @@ namespace jahshaka { namespace engine {
 /// against the live device.
 void markProcessExit();
 
+/// THE PROCESS'S END, AT THE ENGINE'S DEATH (COLD-BOOT-1, the fixtures' exit; spikes/exit-race/VERIFY.md). The exit-only
+/// teardown calls `hook` right after its log line ("process exit - Root ... left to the OS"), on the destroying thread:
+/// the point from which nothing may run but the process's end. A caller that cannot _Exit from that frame (a test harness
+/// whose main returns its status) registers its final exit handler THERE, so exit() runs it before any handler or
+/// static destructor registered earlier. Null (the default) = no hook. One process-wide pointer, set before the engine
+/// dies; never called by a real destroy.
+using ProcessExitHook = void (*)();
+void setProcessExitHook(ProcessExitHook hook);
+
 }}  // namespace jahshaka::engine

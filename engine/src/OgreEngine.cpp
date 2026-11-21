@@ -66,6 +66,8 @@ OgreEngine *gLiveEngine = nullptr;
 /// reachable (a leak checker reads it as live, which it is, until the process's _Exit).
 std::atomic<bool> gProcessExit{false};
 Ogre::Root *gKeptRoot = nullptr;
+/// setProcessExitHook's (ProcessExit.h): called right after the exit-only teardown's log line.
+std::atomic<ProcessExitHook> gProcessExitHook{nullptr};
 
 /// "Lowest latency vsync" — MAILBOX rather than FIFO — is encoded by Ogre in
 /// the SIGN BIT of the vsync interval (VulkanWindowSwapChainBased::setVSync
@@ -4170,6 +4172,8 @@ void OgreEngine::teardown() {
                     "Engine: process exit - Root, the Vulkan device and instance left to the OS (no vkDestroyDevice)");
         } catch (...) {}
         gKeptRoot = mRoot;
+        // THE PROCESS ENDS FROM HERE (setProcessExitHook): its caller registers the final handler now.
+        if (ProcessExitHook hook = gProcessExitHook.load(std::memory_order_acquire)) hook();
     } else {
         delete mRoot;
     }
@@ -4746,6 +4750,7 @@ ValidationStatus OgreEngine::validation() const {
 }  // namespace detail
 
 void markProcessExit() { detail::gProcessExit.store(true, std::memory_order_release); }
+void setProcessExitHook(ProcessExitHook hook) { detail::gProcessExitHook.store(hook, std::memory_order_release); }
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
 unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }
 
