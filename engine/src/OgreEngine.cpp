@@ -4445,6 +4445,9 @@ void OgreEngine::ensureHlms() {
     if (!pixels) return;   // the rest is rendering-only — see the top of this function
     registerCommonMaterials();
     startAsyncShaders();
+    // THE COMPUTE LAYER's RECORDS (COLD-BOOT-1 stage 3): read by mShaderCache.load above, their code compiled HERE, on
+    // the async compiler that now runs - off every frame, the gate's settle waiting on its published pending count.
+    mShaderCache.prewarmCompute();
     // THE STAGED MEDIA IS THIS BUILD'S, OR THE ENGINE STOPS HERE (FORWARD-ONLY-1
     // D2) — before the blue noise, the overlay and the shadow node, and
     // STICKILY: every later ensureHlms re-reports the same error rather than

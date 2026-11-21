@@ -31,6 +31,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ComputeRecord.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreTextureCache.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreLogBridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreOverlayHud.cpp
@@ -795,7 +796,8 @@ set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADE
 # THE C++ THAT WRITES THE HLMS LAYER's BYTES (JAHSHAKA_SHADER_CACHE_CODE_ID): the container alone. A source of ours that
 # puts shader SOURCE text into an Hlms entry other than through properties and pieces is listed here too
 # (source.shader_cache_key reds an unlisted one).
-set(JAHSHAKA_SHADER_CACHE_CODE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp)
+set(JAHSHAKA_SHADER_CACHE_CODE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
+                                       ${CMAKE_CURRENT_SOURCE_DIR}/src/ComputeRecord.cpp)
 string(REPLACE ";" "|" _cache_id_inputs_arg "${JAHSHAKA_SHADER_CACHE_CODE_SOURCES}")
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(_build_id_header "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/jahshaka_engine_build_id.h")

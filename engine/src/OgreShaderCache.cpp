@@ -51,6 +51,8 @@
 #include <unistd.h>
 #include <execinfo.h>
 #include <algorithm>
+#include <map>
+#include <OgreResourceGroupManager.h>
 
 #include "core/threadbudget.h"   // the boot apply's width (THREADING-1)
 
@@ -78,11 +80,12 @@ std::string shortKey(const std::string &hex) { return hex.substr(0, 16); }
 /// (SPEED-CPU, perf audit CS-1): the manifest names each file's layer key.
 constexpr int kCacheFormat = 2;
 
-/// The three layers, by file name: each is kept or dropped on its own key.
-enum class Layer { Pipeline, Microcode, Hlms, Unknown };
+/// The four layers, by file name: each is kept or dropped on its own key.
+enum class Layer { Pipeline, Microcode, Hlms, Compute, Unknown };
 Layer layerOf(const std::string &name) {
     if (name == "pipeline.cache") return Layer::Pipeline;
     if (name == "microcode.cache") return Layer::Microcode;
+    if (name == "compute.bin") return Layer::Compute;
     if (name.compare(0, 5, "hlms.") == 0) return Layer::Hlms;
     return Layer::Unknown;
 }
@@ -489,6 +492,12 @@ void ShaderCache::configure(const std::string &dir, const std::string &seedDir, 
 #endif
       << "|hashbits=" << OGRE_HASH_BITS << build;
     mLayerKey[2] = h.str();
+    // THE COMPUTE LAYER (COLD-BOOT-1 stage 3; the lead's rulings P2-P3): its key is the PRODUCER only - this container's
+    // code (it writes the records' bytes), the fork (its compile path and the RootLayout bytes a record stores), the
+    // SPIR-V compiler and the build type, plus the render system (load()) - never the media: each RECORD carries its
+    // own content (its input key, its files' hashes; ComputeRecord.h), so a changed source drops exactly its records.
+    mLayerKey[3] = format + "|code=" + JAHSHAKA_SHADER_CACHE_CODE_ID + "|ogre=" + JAHSHAKA_OGRE_FORK_COMMIT +
+                   "|glslang=" + JAH_GLSLANG_VERSION_TERM + build;
     // The GPU terms are appended by load(): mDeviceProperties does not exist
     // until the render system has a device, and configure() runs earlier.
     composeFingerprint();
@@ -496,7 +505,7 @@ void ShaderCache::configure(const std::string &dir, const std::string &seedDir, 
 
 void ShaderCache::composeFingerprint() {
     mFingerprint = "pipeline{" + mLayerKey[0] + "}microcode{" + mLayerKey[1] + "}hlms{" +
-                   mLayerKey[2] + "}";
+                   mLayerKey[2] + "}compute{" + mLayerKey[3] + "}";
 }
 
 std::string ShaderCache::layerKeyFor(const std::string &name) const {
@@ -504,6 +513,7 @@ std::string ShaderCache::layerKeyFor(const std::string &name) const {
     case Layer::Pipeline:  return hexOf(mLayerKey[0]);
     case Layer::Microcode: return hexOf(mLayerKey[1]);
     case Layer::Hlms:      return hexOf(mLayerKey[2]);
+    case Layer::Compute:   return hexOf(mLayerKey[3]);
     case Layer::Unknown:   break;
     }
     return std::string();
@@ -733,6 +743,8 @@ bool ShaderCache::clear() {
     mPipelineReason = "absent";
     mHlmsLoaded = 0;
     mMicrocodeAtLoad = 0;
+    mComputeRecordsLoaded = mComputeRecordsRejected = mComputeRecordsStale = 0;
+    mForceCompute = true;   // the store still holds its records: the next save writes them back
     // The next save must WRITE, even though nothing has compiled since the last
     // one — the files it would have skipped as "already on disk" are gone.
     //
@@ -861,6 +873,7 @@ void ShaderCache::load(Ogre::Root *root) {
         mLayerKey[0] += g.str();
         mLayerKey[1] += "|rs=" + rs->getName();
         mLayerKey[2] += g.str();
+        mLayerKey[3] += "|rs=" + rs->getName();
         composeFingerprint();
     }
 
@@ -872,7 +885,8 @@ void ShaderCache::load(Ogre::Root *root) {
     // names the cache's key beside this build's. (#126's "stale cache" was refuted: each layer is dropped on its own key;
     // the line makes that visible in the log a measurement is read from.)
     logLine(mDir + ": this build's layer keys pipeline=" + shortKey(layerKeyFor("pipeline.cache")) +
-            " microcode=" + shortKey(layerKeyFor("microcode.cache")) + " hlms=" + shortKey(layerKeyFor("hlms.1.bin")));
+            " microcode=" + shortKey(layerKeyFor("microcode.cache")) + " hlms=" + shortKey(layerKeyFor("hlms.1.bin")) +
+            " compute=" + shortKey(layerKeyFor("compute.bin")));
 
     // MICROCODE SAVING MUST BE ENABLED BEFORE THE LOAD. GpuProgramManager's own
     // header says so, and the canonical wiring does it in this order
@@ -900,7 +914,7 @@ void ShaderCache::load(Ogre::Root *root) {
     // Read and VERIFY everything before handing a single byte to Ogre. If any
     // file is short, corrupt or missing, the whole generation goes: a cache that
     // is half-valid is exactly the state the microcode loader cannot survive.
-    std::vector<char> pipeline, microcode;
+    std::vector<char> pipeline, microcode, compute;
     std::vector<std::pair<int, std::vector<char>>> hlms;
     for (const Entry &e : files) {
         std::vector<char> bytes;
@@ -912,6 +926,7 @@ void ShaderCache::load(Ogre::Root *root) {
         }
         if      (e.name == "pipeline.cache")  pipeline.swap(bytes);
         else if (e.name == "microcode.cache") microcode.swap(bytes);
+        else if (e.name == "compute.bin")     compute.swap(bytes);
         else if (e.name.compare(0, 5, "hlms.") == 0) {
             const int type = std::atoi(e.name.c_str() + 5);
             hlms.emplace_back(type, std::move(bytes));
@@ -1020,9 +1035,59 @@ void ShaderCache::load(Ogre::Root *root) {
         if (!seeded) loadSeed();
         return;
     }
+    if (!compute.empty()) loadCompute(compute);
     logLine("loaded: pipeline=" + std::string(mPipelineLoaded ? "yes" : "no") +
             " microcode=" + std::to_string(mMicrocodeAtLoad) + " entries" +
-            " hlms=" + std::to_string(mHlmsLoaded) + " seed=" + mSeedState);
+            " hlms=" + std::to_string(mHlmsLoaded) + " compute=" + std::to_string(mComputeRecordsLoaded) + " records" +
+            " seed=" + mSeedState);
+}
+
+// THE COMPUTE LAYER's READ (COLD-BOOT-1 stage 3). The file's checksum was verified with the others; here its records
+// are parsed (a record whose source does not hash to its program key is rejected: readComputeLayer) and the STALE ones
+// dropped - a record one of whose files (its template, a piece) the staged media no longer holds with the same content
+// (pruneStaleRecords: "a changed source drops exactly its entries"). The rest wait for prewarmCompute. A file that is no
+// compute layer is dropped alone, the other layers stand.
+void ShaderCache::loadCompute(const std::vector<char> &bytes) {
+    ComputeLayerRead read = readComputeLayer(bytes.data(), bytes.size());
+    if (!read.ok) {
+        logLine("compute.bin: not a compute layer - dropped, the other layers stand");
+        if (mWriter) ::unlink(path("compute.bin").c_str());
+        return;
+    }
+    // Each file hashed once, from where the engine reads it (its resource groups: the compute jobs' own lookup).
+    std::map<std::string, std::pair<bool, ComputeKey128>> memo;
+    auto current = [&memo](const std::string &name, ComputeKey128 &out) {
+        auto it = memo.find(name);
+        if (it == memo.end()) {
+            std::pair<bool, ComputeKey128> v{ false, ComputeKey128{ { 0u, 0u } } };
+            try {
+                // HlmsCompute's own lookup (OgreHlmsCompute.cpp compileShader / requestAsync): the default group,
+                // searching the others. A file found nowhere is asked first, never thrown for (an Ogre exception is
+                // an engine error line): the record that read it is stale.
+                Ogre::ResourceGroupManager &rgm = Ogre::ResourceGroupManager::getSingleton();
+                if (rgm.resourceExistsInAnyGroup(name))
+                    if (Ogre::DataStreamPtr s = rgm.openResource(name)) v = { true, computeFileHash(s->getAsString()) };
+            } catch (const Ogre::Exception &) {}
+            it = memo.emplace(name, v).first;
+        }
+        out = it->second.second;
+        return it->second.first;
+    };
+    mComputeRecordsStale = pruneStaleRecords(read.records, current);
+    mComputeRecordsRejected = read.rejected;
+    mComputeRecordsLoaded = unsigned(read.records.size());
+    mComputeLoaded = std::move(read.records);
+    if (mComputeRecordsRejected || mComputeRecordsStale)
+        logLine("compute.bin: " + std::to_string(mComputeRecordsRejected) + " record(s) rejected (source and program "
+                "key disagree), " + std::to_string(mComputeRecordsStale) + " stale (a file they read changed)");
+}
+
+void ShaderCache::prewarmCompute() {
+    if (!mComputeStore || mComputeLoaded.empty()) return;
+    mComputeStore->prewarm(std::move(mComputeLoaded));
+    mComputeLoaded.clear();
+    // What the store now holds came from the disk (less the stale): no dirt of its own until a new record is filed.
+    mSavedAtComputeGeneration.store(mComputeStore->generation());
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,15 +1117,19 @@ bool ShaderCache::dirty(Ogre::Root *root) const {
     // (PIPELINE-CACHE-1 fix round): no Hlms flag sees it, and a warm-Hlms run
     // that first builds one (a cut-out mask, a velocity job) compiles nothing.
     const bool newEnginePipelines = sEnginePipelines.load() != mSavedAtEnginePipelines.load();
+    // A COMPUTE RECORD FILED since the last write is dirt of its own (COLD-BOOT-1 stage 3; the lead's ruling P6): a
+    // record whose code came from the code cache compiled nothing, so no counter above sees it.
+    const bool newCompute = mComputeStore && mComputeStore->generation() != mSavedAtComputeGeneration.load();
     if (mCounter && mSavedAtCompileCount == mCounter->compiled.load() + mCounter->fromCache.load()
-        && mLastSavedUnixMs != 0 && !newEnginePipelines)
+        && mLastSavedUnixMs != 0 && !newEnginePipelines && !newCompute)
         return false;
-    if (newEnginePipelines) return true;
+    if (newEnginePipelines || newCompute) return true;
     if (Ogre::GpuProgramManager::getSingletonPtr() &&
         Ogre::GpuProgramManager::getSingleton().isCacheDirty())
         return true;
     Ogre::HlmsManager *hm = root->getHlmsManager();
     if (!hm) return false;
+    // (HLMS_COMPUTE, 9, lies past HLMS_MAX, 8: none of this file's Hlms loops reach it - the compute layer above is its.)
     for (int i = Ogre::HLMS_LOW_LEVEL + 1; i < Ogre::HLMS_MAX; ++i)
         if (Ogre::Hlms *h = hm->getHlms(static_cast<Ogre::HlmsTypes>(i)))
             if (h->isShaderCodeCacheDirty()) return true;
@@ -1205,10 +1274,21 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         job->compileCount = mExpectedShaders;
     }
     job->enginePipelines = sEnginePipelines.load();
+    // THE COMPUTE RECORDS, when the store filed any since the last write: pointers to immutable records, so the render
+    // thread copies no source here; the writer serializes them.
+    if (mComputeStore) {
+        const std::uint64_t gen = mComputeStore->generation();
+        if (gen != mSavedAtComputeGeneration.load() || mForceCompute) {
+            mComputeStore->snapshot(job->compute);
+            job->computeDirty = true;
+            job->computeGeneration = gen;
+            mForceCompute = false;
+        }
+    }
     const double tailMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tailStart).count();
     mCopyWorstMs = std::max(mCopyWorstMs, stepMs + tailMs);
     mCopyWorstEverMs = std::max(mCopyWorstEverMs, stepMs + tailMs);
-    const size_t layers = job->hlms.size() + (job->microcodeDirty ? 1u : 0u) + 1u;
+    const size_t layers = job->hlms.size() + (job->microcodeDirty ? 1u : 0u) + (job->computeDirty ? 1u : 0u) + 1u;
     mCopyInProgress = false;
     logLine("copied " + std::to_string(layers) + " layer(s) on the render thread in " + std::to_string(mCopyMessages) +
             " message(s), the longest " + fmtMs(mCopyWorstMs) + " ms (this one " + fmtMs(stepMs + tailMs) +
@@ -1264,6 +1344,11 @@ bool ShaderCache::runWrite(PendingWrite &job) {
         // documented as fragile if called too close to PSO creation, which is why a save only ever runs on a
         // settled burst or on shutdown, never on a timer during a compile storm (§4.4).
         if (job.rs) serialize("pipeline.cache", [&](Ogre::DataStreamPtr &s) { job.rs->savePipelineCache(s); });
+        if (job.computeDirty) {
+            std::vector<char> bytes = writeComputeLayer(job.compute);
+            job.names.push_back("compute.bin");
+            job.blobs.push_back(std::move(bytes));
+        }
     } catch (const Ogre::Exception &e) {
         logLine(std::string("serializing failed (") + e.getDescription() + ") — nothing written");
         return false;
@@ -1310,6 +1395,7 @@ bool ShaderCache::runWrite(PendingWrite &job) {
     mLastSavedUnixMs.store(nowUnixMs());
     mSavedAtCompileCount.store(job.compileCount);
     mSavedAtEnginePipelines.store(job.enginePipelines);
+    if (job.computeDirty) mSavedAtComputeGeneration.store(job.computeGeneration);
 
     // Size cap: wipe the generation rather than evict (§4.3 rule 6).
     unsigned n = 0;
@@ -1450,6 +1536,9 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.seedDir = mSeedDir;
     s.seedState = mSeedState;
     s.seedEntries = mSeedEntries;
+    s.computeRecordsLoaded = mComputeRecordsLoaded;
+    s.computeRecordsRejected = mComputeRecordsRejected;
+    s.computeRecordsStale = mComputeRecordsStale;
     s.compiledThisRun = mCounter ? mCounter->compiled.load() : 0u;
     s.loadedThisRun   = mCounter ? mCounter->fromCache.load() : 0u;
     s.expectedShaders = mExpectedShaders;

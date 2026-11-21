@@ -33,6 +33,7 @@
 #include "GpuVoxelGather.h"
 #include "SceneLightList.h"
 #include "RenderThread.h"   // the render loop the frame belongs to (ENGINE-UPGRADE-U3)
+#include "ComputeRecord.h"   // the compute layer's records (COLD-BOOT-1 stage 3)
 
 #include <cmath>
 #include <OgreRoot.h>
@@ -3309,6 +3310,13 @@ public:
     /// job) reaches the disk even when no Hlms shader compiled that run. Any
     /// thread; process-wide (one device, one VkPipelineCache).
     static void noteEnginePipeline(double ms, const char *name);
+    /// THE COMPUTE LAYER (COLD-BOOT-1 stage 3): compute.bin, the fourth layer, holds the fork's compute-code records
+    /// (ComputeRecord.h). `store` is the fork's HlmsCompute behind the engine's adapter; null = no compute store (the
+    /// layer's file is then read and carried forward untouched, never written). Render thread.
+    void setComputeStore(ComputeCodeStore *store) { mComputeStore = store; }
+    /// The records load() read and kept, handed to the store - filed, and their code compiled on the async compiler.
+    /// Call once the async compiler runs (OgreEngine, after startAsyncShaders); a no-op with no store or no records.
+    void prewarmCompute();
 
     ShaderCacheStats stats(Ogre::Root *root) const;
     void progress(unsigned &compiled, unsigned &fromCache, unsigned &expected) const;
@@ -3357,6 +3365,10 @@ private:
         std::vector<std::vector<char>> blobs;
         unsigned                       compileCount = 0;
         unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
+        /// The compute layer's records (shared, immutable) and the store's generation they are, when it moved.
+        std::vector<ComputeRecordPtr>  compute;
+        bool                           computeDirty = false;
+        std::uint64_t                  computeGeneration = 0;
     };
     /// THE CHUNK (stage 4): shader-code entries copied per message. MEASURED, Debug: 27-51 us an entry on a quiet box
     /// (the drag row's shape: 27 pbs entries 0.73-1.41 ms, 44 of type 4 1.53 ms) and 42-105 us under a sibling lane's
@@ -3427,9 +3439,18 @@ private:
     unsigned    mSeedEntries = 0;
     unsigned long long mMaxBytes = 256ull * 1024ull * 1024ull;   ///< EngineConfig::shaderCacheMaxBytes
     /// ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1): pipeline, microcode,
-    /// Hlms — see configure(). `mFingerprint` is the three composed, for the
+    /// Hlms, compute (COLD-BOOT-1) — see configure(). `mFingerprint` is the four composed, for the
     /// status readout only.
-    std::string mLayerKey[3];
+    std::string mLayerKey[4];
+    /// THE COMPUTE LAYER: the store, the records load() kept for prewarmCompute, what the load did, and the store's
+    /// generation the last successful write made true (the writer publishes it; dirty() compares).
+    ComputeCodeStore              *mComputeStore = nullptr;
+    std::vector<ComputeCodeRecord> mComputeLoaded;
+    unsigned                       mComputeRecordsLoaded = 0, mComputeRecordsRejected = 0, mComputeRecordsStale = 0;
+    std::atomic<std::uint64_t>     mSavedAtComputeGeneration { 0 };
+    bool                           mForceCompute = false;   ///< clear(): the next save writes the store's records back
+    /// load()'s half for compute.bin: parse, reject, prune the stale, keep the rest for prewarmCompute.
+    void loadCompute(const std::vector<char> &bytes);
     void composeFingerprint();
     /// The current key (hex) of the layer `name` belongs to; empty for a file
     /// that is no layer of ours.

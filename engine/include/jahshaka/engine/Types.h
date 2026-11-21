@@ -7290,6 +7290,24 @@ struct AsyncShaderStats {
     /// whose shader does not compile never dispatches and the picture is merely wrong: 0 on a sound build - the
     /// engine selftest's verdict (URGENT #83: a piece left out of the light injection's list killed the job silently).
     unsigned long long compileErrors = 0;
+    /// WHAT A FRAME BUILT, AND WHAT THE COMPILERS COST (COLD-BOOT-1 stage 3; the lead's ruling 8: counters in the published
+    /// status, never log scrapes). Running totals for the process, fed by the fork (its HlmsCompute and its Vulkan render
+    /// system), 0 until it feeds them:
+    ///   computeParsedInFrame - compute permutations whose TEMPLATE PARSE ran inside a frame (a compute record's hit
+    ///                          skips it: a warm launch's frames read 0);
+    ///   computePsoInFrame    - compute pipelines built inside a frame, any path (a parse, a record's hit, a clone);
+    ///   glslangMs            - the time in glslang (source to SPIR-V), every thread summed, and its count;
+    ///   graphicsPsoMs / computePsoMs - the time in the driver's pipeline creation (vkCreateGraphicsPipelines /
+    ///                          vkCreateComputePipelines through Ogre), every thread summed, and their counts.
+    /// (The stage-1 table these replace: spikes/cold-boot-1/S1b, read there by an LD_PRELOAD probe.)
+    unsigned long long computeParsedInFrame = 0;
+    unsigned long long computePsoInFrame = 0;
+    unsigned long long glslangCompiles = 0;
+    double             glslangMs = 0.0;
+    unsigned long long graphicsPsos = 0;
+    double             graphicsPsoMs = 0.0;
+    unsigned long long computePsos = 0;
+    double             computePsoMs = 0.0;
 };
 
 /// What the persistent shader cache did this run, and what is on disk
@@ -7341,6 +7359,12 @@ struct ShaderCacheStats {
     std::string seedState = "off";
     unsigned    seedEntries = 0;            ///< entries the seed's map held, when "loaded"
     unsigned hlmsCachesLoaded = 0;          ///< Hlms disk caches applied (0..2: PBS, Unlit)
+    /// THE COMPUTE LAYER (compute.bin, COLD-BOOT-1 stage 3): the records the load kept (their code compiled off the frame
+    /// once the async compiler runs), those REJECTED (the stored source does not hash to its program key: another
+    /// compiler's, or damaged) and those dropped STALE (a file they read - the template, a piece - changed).
+    unsigned computeRecordsLoaded = 0;
+    unsigned computeRecordsRejected = 0;
+    unsigned computeRecordsStale = 0;
 
     // ---- shader accounting for THIS process ----
     /// Shaders the compiler actually built this run (GLSL -> SPIR-V).
