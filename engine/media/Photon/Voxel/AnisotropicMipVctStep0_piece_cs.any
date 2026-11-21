@@ -41,6 +41,9 @@
 	// under the feedback's brick list, one group a listed brick - its texels of this level (a texel covers
 	// 2^p_regionOrigin.w cells; a texel wider than a brick is written by each brick under it, the same value).
 	@property( jah_brick_list )
+		// THE LIST'S LAW (NONDET-1 D, R8-1): the group's row inside the list's buffer (its texel inside the level, below)
+		if( gl_WorkGroupID.y >= uint( jahFbList.length() ) )
+			return;
 		const uint jahFbPacked = jahFbList[gl_WorkGroupID.y];
 		const uint3 jahFbBrick = uint3( jahFbPacked & 1023u, ( jahFbPacked >> 10u ) & 1023u, jahFbPacked >> 20u );
 		const uint jahFbSide = max( 8u >> p_regionOrigin.w, 1u );
@@ -50,6 +53,12 @@
 	@else
 		const uint3 jahTexel = gl_GlobalInvocationID.xyz + p_regionOrigin.xyz;
 	@end
+	// THE LEVEL'S LAW (NONDET-1 D, R8-1): the texel inside the level it writes (one half's width, the image's height and
+	// depth) - a listed brick past the volume writes nothing
+	const int3 jahLevelSize = imageSize( outLightHigherMip0 );
+	if( jahTexel.x >= uint( p_higherMipHalfWidth ) || jahTexel.y >= uint( jahLevelSize.y ) ||
+		jahTexel.z >= uint( jahLevelSize.z ) )
+		return;
 	int3 iSourceUvw = int3( jahTexel << 1u );
 
 	// (the half store's halves are (radiance x k, k) - each child's bounce part per half is the stored light minus the

@@ -217,13 +217,19 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 
 void main()
 {
+	// THE LIST'S LAW (NONDET-1 D, R8-1): the group's row inside the list's buffer and the scratch's rows (6144 words a
+	// slot), its brick inside the cascade's bricks (its resolution over 8) - the whole group returns, before any subgroup op
+	if( gl_WorkGroupID.y >= uint( jahFbList.length() ) || ( gl_WorkGroupID.y + 1u ) * 6144u > uint( jahSideGather.length() ) )
+		return;
 	const uint packed = jahFbList[gl_WorkGroupID.y];
 	const uvec3 brick = uvec3( packed & 1023u, ( packed >> 10u ) & 1023u, packed >> 20u );
+	const int cc = int( p.cascade.x );
+	if( any( greaterThanEqual( brick, uvec3( textureSize( voxelCovP[cc], 0 ) ) / 8u ) ) )
+		return;
 	const uint sub = gl_WorkGroupID.x;
 	const uvec3 cell = brick * 8u + uvec3( sub & 1u, ( sub >> 1u ) & 1u, sub >> 2u ) * 4u + gl_LocalInvocationID.xyz;
 	const uvec3 inBrick = cell - brick * 8u;
 	const uint base = ( gl_WorkGroupID.y * 512u + inBrick.x + 8u * inBrick.y + 64u * inBrick.z ) * 12u;
-	const int cc = int( p.cascade.x );
 	uint c[9] = uint[9]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	// VOXEL-R13 stage 1: EACH HALF GATHERS FROM ITS OWN FACES (jah_voxel_halves.glsl) - along its axis where they lie (its
 	// surface position), across it where their centroid lies, along their own mean normal: a half of a cell holding a
