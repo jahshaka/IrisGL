@@ -1693,6 +1693,7 @@ namespace Ogre
         }
         else
         {
+            if( mLightBounce )   // (NONDET-1 H6: guarded only by getAllowMultipleBounces() before)
                 textureManager->destroyTexture( mLightBounce );
             mLightBounce = 0;
             for( uint8 i = 0u; i < 3u; ++i )
