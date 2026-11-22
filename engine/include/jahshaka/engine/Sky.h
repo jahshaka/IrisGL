@@ -118,6 +118,9 @@ struct AtmosphereStatus {
     unsigned multiScatterBuilds = 0;
     unsigned skyViewBuilds = 0;
     unsigned aerialBuilds = 0;
+    /// Table rebuilds DEFERRED (SHADER-SYSTEM-1 7a): an asynchronous scene's table job met its permutation still
+    /// building in the background; the rebuild was retried the next frame and the sky's capture waited for it.
+    unsigned deferredUpdates = 0;
     /// The sun at the top of the air, in the renderer's units (what the LUTs'
     /// unit-illuminance radiance is multiplied by, times skyBrightness).
     float    topIlluminance[3] = { 0.0f, 0.0f, 0.0f };

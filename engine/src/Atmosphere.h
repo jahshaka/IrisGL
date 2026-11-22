@@ -123,8 +123,14 @@ public:
 
     /// INSIDE A FRAME (a command buffer exists), before the sky capture: the
     /// dirty tables are rebuilt, the const buffer uploaded, the quad's
-    /// constants pushed. A no-op on a still frame.
-    void update();
+    /// constants pushed. A no-op on a still frame. FALSE when a table's job was
+    /// DEFERRED (the caller's HlmsCompute deferral, SHADER-SYSTEM-1 7a: its
+    /// permutation builds in the background): every job was still dispatched or
+    /// requested (the permutations build at once, in parallel), the dirty flags
+    /// stand and nothing is handed over - the next call rebuilds the tables whole.
+    bool update();
+    /// A table update deferred and not yet rebuilt (update's false, until a true).
+    bool tablesPending() const { return mTablesPending; }
 
     /// The transmittance from radius `rKm` along the zenith cosine `mu` to the
     /// top of the air — the table's integral, on the CPU (the sun's tint).
@@ -225,6 +231,7 @@ private:
     bool mDirtyTrans = true;    ///< the transmittance (the species and the planet, NOT the albedo)
     bool mDirtyTables = true;   ///< multiple scattering (+ both below)
     bool mDirtySun = true;      ///< the sky view + the aerial volume
+    bool mTablesPending = false;   ///< update's last table rebuild was deferred (tablesPending)
     bool mDirtyBuffer = true;
     bool mDirtyQuad = true;
     AtmosphereStatus mStatus;

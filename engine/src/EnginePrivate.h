@@ -4457,7 +4457,10 @@ public:
     JahAtmosphere *mAtmosphere = nullptr;
     /// Once a frame, inside it, before the sky capture (OgreEngine::
     /// renderOneFrame): the component's dirty tables, its buffer, its quad.
-    void updateAtmosphere();
+    /// `deferrable` (the capture's call alone): an asynchronous scene's table jobs
+    /// run under the deferred dispatch, as its convolution does (compilesInBackground);
+    /// false when a table is still owed (JahAtmosphere::tablesPending).
+    bool updateAtmosphere(bool deferrable = false);
     /// The scene's driving camera's world height (the GI driver's rule), once a
     /// frame: the atmosphere's observer altitude, banded (Atmosphere.h).
     void noteAtmosphereObserver(float cameraY);

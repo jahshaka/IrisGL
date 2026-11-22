@@ -686,11 +686,27 @@ Ogre::TextureGpu *OgreScene::noAirVolume() {
     return mNoAirVolume;
 }
 
-void OgreScene::updateAtmosphere() {
-    if (!mAtmosphere) return;
+bool OgreScene::updateAtmosphere(bool deferrable) {
+    if (!mAtmosphere) return true;
+    bool built = true;
     JAH_TRY {
-        mAtmosphere->update();
-    } JAH_CATCH(mError, );
+        // THE TABLES NEVER COMPILE IN THE FRAME OF AN ASYNCHRONOUS SCENE (SHADER-SYSTEM-1 7a; the convolution's rule,
+        // convolvePendingIbl): under the fork's deferred dispatch a permutation still missing goes to the background
+        // compiler and its job is skipped; the tables are then owed and retried the next frame (the capture waits).
+        Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+        struct Deferral {
+            Ogre::HlmsCompute *hc = nullptr;
+            bool prev = false;
+            ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
+        } deferral;
+        if (deferrable && hc && compilesInBackground()) {
+            deferral.hc = hc;
+            deferral.prev = hc->getDeferredDispatch();
+            hc->setDeferredDispatch(true);
+        }
+        built = mAtmosphere->update();
+    } JAH_CATCH(mError, true);
+    return built;
 }
 
 // ONE COMPONENT, TWO CUSTOMERS (the atmosphere as the sky, and the fog under
@@ -1053,8 +1069,10 @@ Ogre::TextureGpu *OgreScene::renderSkyCaptureCube(const char *prefix, Ogre::uint
 void OgreScene::applyPendingSkyCapture() {
     // THE ATMOSPHERE'S TABLES FIRST (SKY-ATMOSPHERE-1): the sky quad the
     // capture photographs reads them, and a dial or a sun that moved this frame
-    // rebuilds them here, inside the frame. A no-op on a still frame.
-    updateAtmosphere();
+    // rebuilds them here, inside the frame. A no-op on a still frame. TABLES STILL OWED (an asynchronous scene's job
+    // deferred, SHADER-SYSTEM-1 7a): nothing here photographs them - the capture stays requested, the previous
+    // environment bound (environmentPending), and the next frame retries.
+    if (!updateAtmosphere(true)) return;
     // THE CLOUD FIELD FIRST (CLOUDS-2D-1): it is a render pass too, and a
     // change that re-bakes it also re-captures — the capture must photograph
     // the new field, not the old one.

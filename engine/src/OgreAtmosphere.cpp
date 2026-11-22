@@ -524,13 +524,17 @@ void JahAtmosphere::pushQuadConstants() {
     ps->setNamedConstant("atmoSkyE", Ogre::Vector4(e.x, e.y, e.z, 0.0f));
 }
 
-void JahAtmosphere::update() {
+bool JahAtmosphere::update() {
     // The tables only while the air is the sky: a fog-only registration (the
     // World fog under another sky) reads none of them, and the flags wait.
     const bool trans = mDirtyTrans;
     const bool tables = mDirtyTables || trans;
     const bool sun = mDirtySun || tables;
+    bool built = true;
     if (mAirOn && (tables || sun)) {
+        Ogre::HlmsManager *hm = mRoot->getHlmsManager();
+        Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
+        const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;
         if (trans) {
             if (runJob("Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u))
                 ++mStatus.transmittanceBuilds;
@@ -543,12 +547,23 @@ void JahAtmosphere::update() {
             ++mStatus.skyViewBuilds;
         if (runJob("Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u))
             ++mStatus.aerialBuilds;
-        handOver();
-        mDirtyTrans = mDirtyTables = mDirtySun = false;
+        // A DEFERRED JOB (SHADER-SYSTEM-1 7a): the tables are not a result - a later job read an input not written
+        // this time. The flags stand and the next call runs every job again; nothing is handed to the samplers.
+        built = !hc || hc->getNumDeferredDispatches() == deferredBefore;
+        if (built) {
+            handOver();
+            mDirtyTrans = mDirtyTables = mDirtySun = false;
+        } else {
+            ++mStatus.deferredUpdates;
+        }
+        mTablesPending = !built;
+    } else {
+        mTablesPending = false;   // (the air went off: no reader is owed the tables)
     }
     if (mDirtyBuffer) { uploadSettings(); mDirtyBuffer = false; }
     if (mDirtyQuad) { pushQuadConstants(); mDirtyQuad = false; }
     if (mDirtyFogQuad) { pushFogQuadConstants(); mDirtyFogQuad = false; }
+    return built;
 }
 
 AtmosphereStatus JahAtmosphere::status() const {
