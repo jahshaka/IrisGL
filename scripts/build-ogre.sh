@@ -17,8 +17,26 @@
 #        libglu1-mesa-dev libfreetype-dev zlib1g-dev libvulkan-dev
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="${OGRE_SOURCE:-$REPO_ROOT/thirdparty/ogre-next}"
+# THE TREE's ONE SPELLING (CODING_RULES §4; URGENT #208, a RECURRENCE): every path below comes from where this script
+# sits, and `pwd` keeps the spelling it was CALLED by - run from /mnt/work/... (the target of the ~/Developer link) it
+# configured the Ogre build and its install prefix under that spelling (SHADER-SYSTEM-1, ATOM-TESTS-BACK-1). So it
+# re-spells a path under the link's target to the link's own spelling and says so - the same link as Studio's
+# cmake/OneSpelling.cmake and new-lane-worktree.sh: JAH_ONE_SPELLING_LINK, else $HOME/Developer; `none` = no check; a box
+# where the link is a real directory has one spelling and nothing changes. It CANONICALISES rather than refuses (the
+# configure refuses: cmake cannot re-spell its own source dir; this script chooses its paths, so a refusal would only
+# make the caller type the command again). Row: tooling.build_ogre_spelling (Studio tests/hygiene).
+one_spelling() {   # <path>: its spelling through the link when it lies under the link's target, else itself
+    local p=$1 link="${JAH_ONE_SPELLING_LINK:-$HOME/Developer}" tgt
+    if [ "$link" != none ] && [ -L "$link" ]; then
+        tgt=$(readlink -f "$link")
+        case "$p/" in "$link"/*) ;; "$tgt"/*) p="$link${p#"$tgt"}" ;; esac
+    fi
+    printf '%s\n' "$p"
+}
+_called="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(one_spelling "$_called")"
+[ "$REPO_ROOT" = "$_called" ] || echo "build-ogre.sh: called as $_called - building under the tree's one spelling $REPO_ROOT (CODING_RULES §4)"
+SRC="$(one_spelling "${OGRE_SOURCE:-$REPO_ROOT/thirdparty/ogre-next}")"
 # PER-TREE INSTALL (owner decree 2026-09-06: "we should not have a shared
 # engine"). The install lives beside its source inside THIS tree, so every
 # checkout and every worktree is self-contained: no cross-lane mutation of a
@@ -27,7 +45,7 @@ SRC="${OGRE_SOURCE:-$REPO_ROOT/thirdparty/ogre-next}"
 # on this class of machine — the old shared install's rationale (expensive
 # builds) is dead. OGRE_PREFIX still overrides for special layouts (the macOS
 # workspace keeps its own convention until its docs migrate).
-PREFIX="${OGRE_PREFIX:-$REPO_ROOT/thirdparty/ogre-next-install}"
+PREFIX="$(one_spelling "${OGRE_PREFIX:-$REPO_ROOT/thirdparty/ogre-next-install}")"
 if [ "$(uname -s)" = "Darwin" ]; then
     JOBS="${JOBS:-$(sysctl -n hw.ncpu)}"
     # macOS: Vulkan via MoltenVK (LunarG SDK — source its setup-env.sh first).
