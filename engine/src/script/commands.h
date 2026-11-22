@@ -71,7 +71,7 @@ public:
 };
 
 /// An engine object the engine owns, held by a handle that never owns it (the engine destroys it).
-template <class T> std::shared_ptr<void> unowned(T *p) { return std::shared_ptr<void>(static_cast<void *>(p), [](void *) {}); }
+template <class T> std::shared_ptr<T> unowned(T *p) { return std::shared_ptr<T>(p, [](T *) {}); }
 /// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
 constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material",
                      *kPicture = "picture";

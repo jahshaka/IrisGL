@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -207,17 +208,17 @@ public:
     Value refuse(std::string message);
     Status status() const { return mStatus; }
     const std::string &message() const { return mMessage; }
-    /// THE HANDLES (Registry): a new held object's handle; a new handle naming the engine's own 32-bit id `id` (the
-    /// call FAILS, null, when `id` does not fit); the object a checked held handle names; the id a checked id handle
-    /// carries.
-    Value hold(const std::string &kind, std::shared_ptr<void> object, bool scoped = false);
+    /// THE HANDLES (Registry): a new held object's handle (the call FAILS, null, by name: a kind bound to another C++
+    /// type, a full table); a new handle naming the engine's own 32-bit id `id` (the call FAILS, null, when `id` does
+    /// not fit); the T a checked held handle names - null when its kind holds another C++ type; the id a checked id
+    /// handle carries.
+    template <class T> Value hold(const std::string &kind, std::shared_ptr<T> object, bool scoped = false);
     Value name(const std::string &kind, unsigned long long id);
-    template <class T> T *object(const Value &h) const { return static_cast<T *>(heldObject(h)); }
+    template <class T> T *object(const Value &h) const;
     static unsigned idOf(const Value &h) { return unsigned(std::uint64_t(h.asInt()) & 0xffffffffull); }
     Registry &registry() { return mRegistry; }
 
 private:
-    void *heldObject(const Value &h) const;
     const CommandInfo &mInfo;
     Value::Array mArgs;
     Registry &mRegistry;
@@ -272,16 +273,23 @@ public:
     std::vector<std::string> validate() const { return mFaults; }
 
     /// A held object's new handle; `scoped`: released by releaseScoped - NOT at a run's end: a held object lives across
-    /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call).
-    std::int64_t hold(const std::string &kind, std::shared_ptr<void> object, bool scoped = false);
+    /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call). A HELD KIND IS BOUND
+    /// TO ONE C++ TYPE (SCRIPT-IN-ENGINE-1 2b): its first hold binds it to T, and holding another type under it answers
+    /// 0 with `why` (a scene handle can never name something that is not a Scene). 0 also when the table is full.
+    template <class T>
+    std::int64_t hold(const std::string &kind, std::shared_ptr<T> object, bool scoped = false, std::string *why = nullptr)
+    {
+        return holdAs(kind, typeid(T), std::shared_ptr<void>(std::move(object)), scoped, why);
+    }
     /// A handle of the NAMED kind `kind` carrying `id` (< 2^32; the caller has checked it).
     std::int64_t name(const std::string &kind, std::uint32_t id);
     /// Releases a held handle: false when it names no live held object of this registry.
     bool release(std::int64_t handle);
     /// Releases every scoped handle: the caller's at ITS end (jahengine, at its script's end). Host::run never calls it.
     void releaseScoped();
-    /// The object of a live held handle; null otherwise.
-    void *object(std::int64_t handle) const;
+    /// The T of a live held handle - read through its kind's bound type: null when the handle is not live, or its kind
+    /// holds another C++ type than T.
+    template <class T> T *object(std::int64_t handle) const { return static_cast<T *>(objectAs(handle, typeid(T))); }
     /// True when `h` is a live handle of this registry of kind `kind`; else false with `why` (naming `where`).
     bool checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const;
     /// THE EXISTENCE CHECK of a NAMED kind (its family's: the engine asked whether the id is its scene's now), run at
@@ -299,13 +307,25 @@ private:
     std::string mLastError;
     struct Held { unsigned kind = 0; std::shared_ptr<void> object; bool scoped = false; };
     unsigned kindIndex(const std::string &kind);   // interned, 1..255 (0: the 256th kind, refused)
+    std::int64_t holdAs(const std::string &kind, const std::type_info &type, std::shared_ptr<void> object, bool scoped,
+                        std::string *why);
+    void *objectAs(std::int64_t handle, const std::type_info &type) const;
     bool judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const;
     std::uint64_t mSerial = 0;
     std::vector<std::string> mKinds;   // index - 1
     std::vector<bool> mKindHeld;       // index - 1: a held kind (a table slot) or a named one (the engine's id)
+    std::vector<const std::type_info *> mKindType;   // index - 1: the C++ type a held kind is bound to (null: none yet)
     std::vector<HandleCheck> mChecks;  // index - 1
     std::vector<Held> mHeld;           // slot - 1
 };
+
+template <class T> Value Call::hold(const std::string &kind, std::shared_ptr<T> object, bool scoped)
+{
+    std::string why;
+    const std::int64_t h = mRegistry.hold(kind, std::move(object), scoped, &why);
+    return h ? Value(h) : fail(why);
+}
+template <class T> T *Call::object(const Value &h) const { return mRegistry.object<T>(h.asInt()); }
 
 /// THE HOST — one per process (the process makes it; every Engine registers its commands into its registry, so a
 /// process whose engine failed to start still has a host that can say why). It runs a script on the CALLING thread and

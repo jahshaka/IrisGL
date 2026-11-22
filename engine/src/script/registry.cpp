@@ -224,14 +224,26 @@ unsigned Registry::kindIndex(const std::string &kind)
     if (mKinds.size() >= kKindMask) return 0;
     mKinds.push_back(kind);
     mKindHeld.push_back(false);
+    mKindType.push_back(nullptr);
     mChecks.emplace_back();
     return unsigned(mKinds.size());
 }
 
-std::int64_t Registry::hold(const std::string &kind, std::shared_ptr<void> object, bool scoped)
+std::int64_t Registry::holdAs(const std::string &kind, const std::type_info &type, std::shared_ptr<void> object,
+                              bool scoped, std::string *why)
 {
     const unsigned k = kindIndex(kind);
-    if (!k || !object || mHeld.size() >= kValueMask) return 0;
+    const auto refuse = [why](std::string text) {
+        if (why) *why = std::move(text);
+        return std::int64_t(0);
+    };
+    if (!k) return refuse("no handle kind is left for '" + kind + "' (255 at most)");
+    if (!object) return refuse("the " + kind + " is no object (a null pointer cannot be held)");
+    if (mKindType[k - 1] && *mKindType[k - 1] != type)
+        return refuse("the " + kind + " kind is bound to another C++ type (one kind, one type: a " + kind +
+                      " handle names only what its first hold named)");
+    if (mHeld.size() >= kValueMask) return refuse("the " + kind + " could not be given a handle (the host's table is full)");
+    mKindType[k - 1] = &type;
     mKindHeld[k - 1] = true;
     mHeld.push_back(Held{k, std::move(object), scoped});
     return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(mHeld.size()));
@@ -261,12 +273,14 @@ void Registry::releaseScoped()
         if (h.scoped) h.object.reset();
 }
 
-void *Registry::object(std::int64_t h) const
+void *Registry::objectAs(std::int64_t h, const std::type_info &type) const
 {
     const std::uint64_t u = std::uint64_t(h), slot = u & kValueMask;
     if (h <= 0 || (u >> kOwnerShift) != mSerial || !slot || slot > mHeld.size()) return nullptr;
     const Held &held = mHeld[slot - 1];
-    return held.kind == unsigned(u >> kKindShift & kKindMask) ? held.object.get() : nullptr;
+    if (held.kind != unsigned(u >> kKindShift & kKindMask)) return nullptr;
+    const std::type_info *bound = mKindType[held.kind - 1];
+    return bound && *bound == type ? held.object.get() : nullptr;   // (read only as the type its kind is bound to)
 }
 
 bool Registry::checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const
@@ -335,12 +349,6 @@ bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, st
     return true;
 }
 
-Value Call::hold(const std::string &kind, std::shared_ptr<void> object, bool scoped)
-{
-    const std::int64_t h = mRegistry.hold(kind, std::move(object), scoped);
-    return h ? Value(h) : fail("the " + kind + " could not be given a handle (the host's table is full)");
-}
-
 Value Call::name(const std::string &kind, unsigned long long id)
 {
     if (!id || id > kValueMask) return fail("the " + kind + " id " + std::to_string(id) + " does not fit a handle's 32 bits");
@@ -348,7 +356,6 @@ Value Call::name(const std::string &kind, unsigned long long id)
     return h ? Value(h) : fail("no handle kind is left for '" + kind + "' (255 at most)");
 }
 
-void *Call::heldObject(const Value &h) const { return mRegistry.object(h.asInt()); }
 
 namespace {
 

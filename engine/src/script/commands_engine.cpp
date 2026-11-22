@@ -126,7 +126,8 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
             const Scene *s = c.info().signature.params.empty() || c.info().signature.params[0].handle != kScene
                                  ? nullptr : c.object<Scene>(c[0]);
             if (!s) {
-                why = std::string("a ") + kind + " is named with its scene: this command's first target is no scene";
+                why = std::string("a ") + kind + " is named with its scene: this command's first target names no engine "
+                      "scene";
                 return false;
             }
             const Scene::Presence p = ask(*s, id);
