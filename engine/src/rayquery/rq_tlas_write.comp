@@ -104,6 +104,13 @@ void writeInstance( uint at, uint slot, uint mask, uvec2 address )
 	outInstances[at] = o;
 }
 
+// AN INSTANCE WITH NO BOTTOM-LEVEL STRUCTURE IS NEVER EMITTED ACTIVE: its place holds the all-zero instance - reference
+// 0, mask 0, everything 0. A reference of 0 is the Vulkan spec's INACTIVE instance (the section "Inactive Primitives and
+// Instances": it cannot be hit and bounds nothing), and VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-12281 allows it
+// in so many words: each reference "must be 0 or a value obtained from vkGetAccelerationStructureDeviceAddressKHR for
+// a valid bottom level acceleration structure". (GPU-assisted validation 1.4.341 calls 0x0 "an invalid acceleration
+// structure reference" while quoting that text: a false positive - GATHER-HANG-1 stage 2.) An UPDATE build must not
+// flip an instance between active and inactive: the tier refits only an identical set (OgreRayQuery.cpp, sameSet).
 void writeInactive( uint at )
 {
 	AsInstance o;
