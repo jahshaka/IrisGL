@@ -220,6 +220,9 @@ public:
     /// The call by name: the arguments checked against the signature (the laws above), then the command run (an
     /// exception it throws: Failed, "<name>: threw: <what>").
     Result call(const std::string &name, const Value::Array &args);
+    /// The same call by the command's INDEX (its place in commands(), fixed at registration): a language binding
+    /// resolves each command ONCE and calls it by index - no lookup by name a call.
+    Result callAt(std::size_t index, const Value::Array &args);
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
     /// One line per add() refused: a command that lacks a name, a doc, a function or a name on any parameter or
@@ -323,8 +326,10 @@ public:
     /// A judgement the verdict runs before it counts (a declaration no frame asserted is a failed law(), by name).
     void atVerdict(std::function<void()> judge);
 
-    /// The language binding's two doors: a command call by name (through the executor) and a console line.
+    /// The language binding's doors: a command call by name or by its registry index (through the executor) and a
+    /// console line.
     Result call(const std::string &name, const Value::Array &args);
+    Result callAt(std::size_t index, const Value::Array &args);
     void print(const std::string &line);
 
 private:

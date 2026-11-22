@@ -3,8 +3,10 @@
 // used on the host's thread only.
 //
 // EVERY COMMAND IS A FUNCTION of its namespace's object: `engine.scene.create` is the function `create` of `engine.scene`,
-// installed before each run from the registry (commands registered since the last run included); a name nothing
-// registered throws naming itself (the namespace is a Proxy). A call
+// made ONCE (at the first run after its registration) and bound to the command's REGISTRY INDEX - a call looks nothing up
+// by name. A NAMESPACE is an object of the binding's own class: its commands and sub-namespaces are its ordinary own
+// properties (the engine's fast path), and a name it does not hold reaches the class's C hook, which throws naming it
+// ("engine.scene.creat is not a command") - no JS Proxy trap on any call (SCRIPT-IN-ENGINE-1 S9: the call's cost). A call
 // converts its arguments to script::Value, calls Host::call (the registry's strict check, then the command), and answers:
 // Ok -> the value; Refused -> the declared return's falsy value (host.lastError() says why); Failed -> a thrown Error
 // carrying the message, which the script may catch (its stack names the script's line).
@@ -20,6 +22,7 @@
 #include "quickjs.h"
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -192,20 +195,21 @@ public:
         JS_SetPropertyStr(mCtx, console, "log", JS_NewCFunction(mCtx, &JavaScript::log, "log", 1));
         JS_SetPropertyStr(mCtx, global, "console", console);
         JS_FreeValue(mCtx, global);
-        static const char kStrict[] =
-            "(function (target, path) {\n"
-            "  return new Proxy(target, { get(o, k) {\n"
-            "    if (typeof k === 'symbol' || k in o) return o[k];\n"
-            "    throw new Error(path + '.' + k + ' is not a command');\n"
-            "  } });\n"
-            "})";
-        mStrict = JS_Eval(mCtx, kStrict, sizeof(kStrict) - 1, "<host>", JS_EVAL_TYPE_GLOBAL);
+        // THE NAMESPACE CLASS: one id a process, the class a runtime
+        static JSClassID namespaceClass = 0;
+        JS_NewClassID(mRt, &namespaceClass);
+        mNamespaceClass = namespaceClass;
+        static JSClassExoticMethods exotic = {};
+        exotic.get_property = &JavaScript::missing;
+        JSClassDef def = {};
+        def.class_name = "Commands";
+        def.exotic = &exotic;
+        JS_NewClass(mRt, mNamespaceClass, &def);
     }
     ~JavaScript() override
     {
         clearRejections();
         for (auto &s : mSpaces) JS_FreeValue(mCtx, s.second);
-        JS_FreeValue(mCtx, mStrict);
         JS_FreeContext(mCtx);
         JS_FreeRuntime(mRt);
     }
@@ -243,54 +247,80 @@ public:
     }
 
 private:
-    /// Every registered command as a function of its namespace's object (a re-install replaces the same functions). A
-    /// namespace is seen by the script through a Proxy that FAILS on a name nothing registered (the strict host: an
-    /// unregistered command throws naming itself, never JS's bare "not a function").
+    /// Every command registered since the last install as a function of its namespace's object, bound to its
+    /// registry index (made once: the registry only grows).
     void install()
     {
-        for (const CommandInfo *c : mHost.registry().commands()) {
+        const std::vector<const CommandInfo *> commands = mHost.registry().commands();
+        for (; mInstalled < commands.size(); ++mInstalled) {
+            const CommandInfo *c = commands[mInstalled];
             const size_t dot = c->name.rfind('.');
             if (dot == std::string::npos) continue;   // a command is always under a root
-            JSValue name = JS_NewStringLen(mCtx, c->name.data(), c->name.size());
+            JSValue index = JS_NewInt32(mCtx, int32_t(mInstalled));
             JSValue fn = JS_NewCFunctionData2(mCtx, &JavaScript::command, c->name.c_str() + dot + 1,
-                                              int(c->signature.params.size()), 0, 1, &name);
-            JS_FreeValue(mCtx, name);   // (the function holds its own reference)
-            JS_SetPropertyStr(mCtx, space(c->name.substr(0, dot)), c->name.c_str() + dot + 1, fn);
+                                              int(c->signature.params.size()), 0, 1, &index);
+            JS_DefinePropertyValueStr(mCtx, space(c->name.substr(0, dot)), c->name.c_str() + dot + 1, fn,
+                                      JS_PROP_ENUMERABLE);
         }
     }
 
-    /// The target object of the namespace `path` ("engine.scene"), made (with its Proxy in its parent) the first time.
+    /// The object of the namespace `path` ("engine.scene"), made (an own property of its parent) the first time.
     JSValueConst space(const std::string &path)
     {
         for (const auto &s : mSpaces)
-            if (s.first == path) return s.second;
+            if (s.first->path == path) return s.second;
         const size_t dot = path.rfind('.');
         JSValue parent = dot == std::string::npos ? JS_GetGlobalObject(mCtx) : JS_DupValue(mCtx, space(path.substr(0, dot)));
-        JSValue target = JS_NewObject(mCtx);
-        JSValue pathValue = JS_NewStringLen(mCtx, path.data(), path.size());
-        JSValue args[2] = {target, pathValue};
-        JSValue proxy = JS_Call(mCtx, mStrict, JS_UNDEFINED, 2, args);
-        JS_FreeValue(mCtx, pathValue);
-        JS_SetPropertyStr(mCtx, parent, path.c_str() + (dot == std::string::npos ? 0 : dot + 1), proxy);
+        JSValue plain = JS_NewObject(mCtx);
+        JSValue objectProto = JS_GetPrototype(mCtx, plain);   // Object.prototype: toString, ... read through `missing`
+        JSValue object = JS_NewObjectProtoClass(mCtx, objectProto, mNamespaceClass);
+        JS_FreeValue(mCtx, objectProto);
+        JS_FreeValue(mCtx, plain);
+        auto named = std::make_unique<Namespace>();
+        named->path = path;
+        JS_SetOpaque(object, named.get());
+        JS_DefinePropertyValueStr(mCtx, parent, path.c_str() + (dot == std::string::npos ? 0 : dot + 1),
+                                  JS_DupValue(mCtx, object), JS_PROP_ENUMERABLE);
         JS_FreeValue(mCtx, parent);
-        mSpaces.emplace_back(path, target);
-        return target;
+        mSpaces.emplace_back(std::move(named), object);
+        return object;
+    }
+
+    /// A NAME THE NAMESPACE DOES NOT HOLD (its own properties are found first: this runs only for a miss): a symbol,
+    /// or a name the prototype answers (toString, ...), reads through to it; any other name FAILS naming itself.
+    static JSValue missing(JSContext *ctx, JSValueConst obj, JSAtom atom, JSValueConst)
+    {
+        JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
+        JSValue key = JS_AtomToValue(ctx, atom);
+        JSValue proto = JS_GetPrototype(ctx, obj);
+        if (JS_IsSymbol(key) || (JS_IsObject(proto) && JS_HasProperty(ctx, proto, atom) > 0)) {
+            JS_FreeValue(ctx, key);
+            JSValue v = JS_IsObject(proto) ? JS_GetProperty(ctx, proto, atom) : JS_UNDEFINED;
+            JS_FreeValue(ctx, proto);
+            return v;
+        }
+        JS_FreeValue(ctx, proto);
+        const Namespace *n = static_cast<const Namespace *>(JS_GetOpaque(obj, self->mNamespaceClass));
+        const std::string name = toUtf8(ctx, key);
+        JS_FreeValue(ctx, key);
+        return JS_ThrowPlainError(ctx, "%s.%s is not a command", n ? n->path.c_str() : "?", name.c_str());
     }
 
     static JSValue command(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv, int, JSValueConst *data)
     {
         JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
-        const std::string name = toUtf8(ctx, data[0]);
+        const std::size_t index = std::size_t(JS_VALUE_GET_INT(data[0]));
         while (argc > 0 && JS_IsUndefined(argv[argc - 1])) --argc;   // a trailing undefined is an absent argument
         Value::Array args;
         for (int i = 0; i < argc; ++i) {
             Value a;
             std::string why;
             if (!fromJs(ctx, argv[i], a, why, 0))
-                return JS_ThrowTypeError(ctx, "%s: argument %d: %s", name.c_str(), i + 1, why.c_str());
+                return JS_ThrowTypeError(ctx, "%s: argument %d: %s", self->mHost.registry().commands()[index]->name.c_str(),
+                                         i + 1, why.c_str());
             args.push_back(std::move(a));
         }
-        const Result r = self->mHost.call(name, args);
+        const Result r = self->mHost.callAt(index, args);
         if (r.status == Status::Failed) return JS_ThrowPlainError(ctx, "%s", r.message.c_str());
         return toJs(ctx, r.value);
     }
@@ -337,8 +367,10 @@ private:
     Host &mHost;
     JSRuntime *mRt = nullptr;
     JSContext *mCtx = nullptr;
-    JSValue mStrict = JS_UNDEFINED;                             // the namespaces' Proxy maker
-    std::vector<std::pair<std::string, JSValue>> mSpaces;      // each namespace's target object, by path
+    struct Namespace { std::string path; };
+    JSClassID mNamespaceClass = 0;
+    std::vector<std::pair<std::unique_ptr<Namespace>, JSValue>> mSpaces;   // each namespace's object, by path
+    std::size_t mInstalled = 0;                                            // the commands made so far
     std::vector<std::pair<JSValue, std::string>> mRejections;  // rejected, no handler yet: the promise, its reason
 };
 

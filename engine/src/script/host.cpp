@@ -100,6 +100,14 @@ Result Host::call(const std::string &name, const Value::Array &args)
     return r;
 }
 
+Result Host::callAt(std::size_t index, const Value::Array &args)
+{
+    if (!mExecutor) return mRegistry.callAt(index, args);
+    Result r;
+    mExecutor([&] { r = mRegistry.callAt(index, args); });
+    return r;
+}
+
 void Host::print(const std::string &line)
 {
     if (mConsole) {

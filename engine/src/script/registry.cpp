@@ -570,15 +570,24 @@ std::vector<const CommandInfo *> Registry::commands() const
 
 Result Registry::call(const std::string &name, const Value::Array &args)
 {
+    for (std::size_t i = 0; i < mEntries.size(); ++i)
+        if (mEntries[i].info.name == name) return callAt(i, args);
     Result r;
-    const Entry *entry = nullptr;
-    for (const Entry &e : mEntries)
-        if (e.info.name == name) entry = &e;
-    if (!entry) {
+    r.status = Status::Failed;
+    r.message = name + " is not a command";
+    return r;
+}
+
+Result Registry::callAt(std::size_t index, const Value::Array &args)
+{
+    Result r;
+    if (index >= mEntries.size()) {
         r.status = Status::Failed;
-        r.message = name + " is not a command";
+        r.message = "command " + std::to_string(index) + " is not a command";
         return r;
     }
+    const Entry *entry = &mEntries[index];
+    const std::string &name = entry->info.name;
     const std::vector<Param> &params = entry->info.signature.params;
     if (args.size() > params.size()) {
         r.status = Status::Failed;
