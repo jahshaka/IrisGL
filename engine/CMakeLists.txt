@@ -825,7 +825,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ogre_head_inpu
 # and writes the value into a generated header; `copy_if_different` inside the
 # script keeps an unchanged value from cascading a rebuild.
 file(GLOB JAHSHAKA_ENGINE_BUILD_ID_HEADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/*.h)
-list(FILTER JAHSHAKA_ENGINE_BUILD_ID_HEADERS EXCLUDE REGEX "/(EngineInspect|Stillness|ProcessExit)\\.h$")
+# Script.h, ScriptJson.h: the script host's public headers stay OUT of the id like its sources (above: a command edit never
+# re-keys the caches; source.script_build_id B1 holds both)
+list(FILTER JAHSHAKA_ENGINE_BUILD_ID_HEADERS EXCLUDE REGEX "/(EngineInspect|Stillness|ProcessExit|Script|ScriptJson)\\.h$")
 list(SORT JAHSHAKA_ENGINE_BUILD_ID_HEADERS)
 # (the script host's sources are NOT inputs: JAHSHAKA_ENGINE_SCRIPT_SOURCES above says why; source.script_build_id)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
