@@ -5,8 +5,16 @@
 # tests/hygiene/no_qt_below.py holds it: no Qt include directory, define or generator on its compile lines, no Qt symbol
 # in its archive, no include outside core/ and the standard library.
 add_library(IrisCore STATIC
+    files.cpp
+    files.h
     geometry/plane.cpp
     geometry/plane.h
+    guid.cpp
+    guid.h
+    math/scalar.h
+    signal.h
+    text.cpp
+    text.h
 )
 target_compile_features(IrisCore PUBLIC cxx_std_17)
 set_target_properties(IrisCore PROPERTIES POSITION_INDEPENDENT_CODE ON AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
