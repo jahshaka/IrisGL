@@ -7911,7 +7911,7 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
         composedTex = nullptr;
     VkDescriptorImageInfo composedImg{};
     composedImg.sampler = mPointSampler;
-    composedImg.imageView = composedTex ? layerView(composedTex, false) : mDummyFlatArrayView;
+    composedImg.imageView = composedTex ? textureView(composedTex, RayViewKind::LayerSampled) : mDummyFlatArrayView;
     composedImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     if (!composedImg.imageView) { bail("the composed scene's binding is null"); return; }
     w[kReflectComposedBinding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
