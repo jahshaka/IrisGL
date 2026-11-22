@@ -61,6 +61,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "core/threadbudget.h"   // the ray builders' tier (COLD-BOOT-1 stage 4)
+#include "RayAheadDoor.h"
 #include "RayBuilderSlots.h"
 #include "ReadbackDecode.h"
 #include "ReflectChainRules.h"
@@ -3035,10 +3036,14 @@ bool RayQueryTier::launchAhead(AheadId id) {
 bool RayQueryTier::aheadReady(AheadId id, const OgreScene *scene) {
     Ahead &a = mAhead[id];
     launchAhead(id);
-    if (!a.started || a.joined) return true;
-    // IN FLIGHT: the scene's ONE async-shader rule decides - not this frame where it compiles in the background,
-    // the frame waits for it everywhere else
-    if ((!a.done.load(std::memory_order_acquire) || aheadHeld(id)) && scene && scene->compilesInBackground()) {
+    // THE DOOR (RayAheadDoor.h; SHADER-SYSTEM-1 stage 7, call 3): a build still running in a scene whose compute is on
+    // the background compiler is refused AT ANY PACE - never joined on the render thread (a cold driver compile is
+    // ~100 s: a frozen window, a frozen headset); a synchronous scene joins it, on purpose (its frames are counted)
+    const rayahead::Door door =
+        rayahead::door(a.started && !a.joined, !a.done.load(std::memory_order_acquire) || aheadHeld(id),
+                       scene && scene->computeOnService(), scene && scene->framePace() == FramePace::Complete);
+    if (door == rayahead::Door::Run) return true;
+    if (door == rayahead::Door::NotThisFrame) {
         // ...AND A CONSUMER REFUSED STILL OWES ITS TERM (COLD-BOOT-1 item 3; every consumer: SHADER-SYSTEM-1 stage 7): its
         // scene noted until the build lands
         if (std::find(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()) == a.refusedBy.end())
