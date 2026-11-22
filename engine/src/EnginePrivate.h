@@ -4447,7 +4447,7 @@ public:
     /// Once a frame, inside it, before the sky capture (OgreEngine::
     /// renderOneFrame): the component's dirty tables, its buffer, its quad.
     /// `deferrable` (the capture's call alone): an asynchronous scene's table jobs
-    /// run under the deferred dispatch, as its convolution does (compilesInBackground);
+    /// run under the deferred dispatch, as its convolution does (computeOnService);
     /// false when a table is still owed (JahAtmosphere::tablesPending).
     bool updateAtmosphere(bool deferrable = false);
     /// The scene's driving camera's world height (the GI driver's rule), once a
@@ -5117,19 +5117,13 @@ public:
     /// follow it (ASYNC-SHADERS-1).
     void setAsyncShaders(bool on) { mAsyncShaders = on; }
     bool asyncShaders() const { return mAsyncShaders; }
-    /// THE ONE ASYNC-SHADER RULE (ASYNC-SHADERS-1; PHOTON-7 stage 2's read D3; ORPHAN-REDS-1 for the ray pipelines): a
-    /// compile this scene's frames need may land a frame LATER - its consumer taking its own "not this frame" path - only
-    /// in a scene whose views compile in the background (View::setAsyncShaders), on a frame that does not owe the whole
-    /// picture (FramePace::Complete), with the background compiler running. Everywhere else (the selftest, every
-    /// fixture, scripts, screenshots) the frame waits for the compile, so when it lands is a function of the frames,
-    /// never of a compile's wall time. Read by the delta commit's shader (PhotonComponent::commitShaderAsync) and the
-    /// ray tier's pipelines (RayQueryTier::aheadReady). The pace is read through the fork's one place
-    /// (Ogre::HlmsCompute::jahMayDefer, set at the frame head): a COMPUTE site never asks this - it asks
-    /// computeOnService and the fork decides (source.compute_pace_one_place).
-    bool compilesInBackground() const;
-    /// Does this scene's compute go through the background compiler (its views compile in the background and the
-    /// service runs)? A compute site puts its dispatch under the fork's deferral when this is true; whether THIS frame
-    /// may put it off is the fork's answer (requestAsync, dispatch: SHADER-SYSTEM-1 7a R2 (c)).
+    /// THE ASYNC-SHADER RULE (ASYNC-SHADERS-1; SHADER-SYSTEM-1 7a R2 (c) and stage 7): does this scene's work go through
+    /// the background compiler (its views compile in the background - View::setAsyncShaders - and the service runs)?
+    /// Everywhere else (the selftest, every fixture, scripts) the frame waits for the compile, so when it lands is a
+    /// function of the frames, never of a compile's wall time. Its two readers: a COMPUTE site puts its dispatch under
+    /// the fork's deferral when this is true, and whether THIS frame may put it off is the fork's answer by the pace
+    /// (requestAsync, dispatch; the pace reaches the fork once, at the frame head: source.compute_pace_one_place); a RAY
+    /// pipeline build still running is refused at ANY pace in such a scene, never joined (RayAheadDoor.h).
     bool computeOnService() const;
     bool cardMoverFrame(CardMoverFrame &out) { return mPhoton.cardMoverFrame(out); }
     bool traceCardMovers(const CardMoverTrace &job);

@@ -980,10 +980,10 @@ private:
     /// meshbake.archive_bakes red at the cap for five days; the dump: spikes/orphan-reds-1/item1-dump/). Now a build
     /// starts where its consumer is certain to run: the reflection's when a drawn view's chain carries the ray
     /// reflection (OgreEngine::updateRayQuery, before the frame's passes - the same point of frame 1 the open used),
-    /// every build at its consumer's first call (aheadReady). A build in flight at a consumer is the scene's ONE
-    /// async-shader rule's (OgreScene::compilesInBackground): where the scene compiles in the background the consumer
-    /// takes its own "not this frame" path and the build counts as pending (asyncShaderStats; waitForAsyncShaders joins
-    /// it); everywhere else the consumer joins it in the frame, so the frames are what they were.
+    /// every build at its consumer's first call (aheadReady). A build in flight at a consumer is the door's
+    /// (RayAheadDoor.h): where the scene's work is on the background compiler (OgreScene::computeOnService) the consumer
+    /// takes its own "not this frame" path at ANY pace and the build counts as pending (asyncShaderStats;
+    /// waitForAsyncShaders joins it); a synchronous scene's consumer joins it in the frame, so its frames are counted.
     /// (COLD-BOOT-1 stage 4) kAheadGather: the screen-probe gather's twelve pipelines (its trace and its integrate the two
     /// heavy ones, 13.4 s cold in the render thread's frame before - spikes/cold-boot-1/S1b) on a worker like the rest.
     enum AheadId { kAheadReflect, kAheadCardGather, kAheadCardMovers, kAheadVoxelSides, kAheadGlassEscape, kAheadGather,
@@ -1053,8 +1053,8 @@ public:
     bool abandonAhead();
 private:
     /// THE CONSUMER's DOOR (ORPHAN-REDS-1): its build started if it was not; true = joined (or never startable - the
-    /// make*Pipeline's own build now): read the setup; false = in flight in a scene that compiles in the background
-    /// (the ONE rule, OgreScene::compilesInBackground): the consumer's own "not this frame" path.
+    /// make*Pipeline's own build now): read the setup; false = in flight in a scene on the background compiler, at any
+    /// pace (RayAheadDoor.h): the consumer's own "not this frame" path.
     bool aheadReady(AheadId id, const OgreScene *scene);
     /// make*Pipeline's front door: the ahead build's answer once joined, else the build now (marked taken: a worker
     /// never builds it again).

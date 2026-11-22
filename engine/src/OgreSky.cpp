@@ -1804,7 +1804,7 @@ void OgreScene::convolvePendingIbl() {
         // Under the fork's deferred dispatch a missing permutation goes to the background
         // compiler and its mip is skipped; the convolution is then not a result: the previous
         // reflection stays bound, the source AND THE WORKSPACE are kept and the convolution is
-        // retried next frame. WHERE: the ONE async-shader rule (compilesInBackground) - a frame
+        // retried next frame. WHERE: the async-shader rule (computeOnService, the fork by the pace) - a frame
         // that owes the whole picture convolves in the frame, as every other consumer does: its dispatches join the
         // requests made above.
         const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;

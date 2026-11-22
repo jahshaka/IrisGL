@@ -65,9 +65,6 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
 // from the call on; its manager is made by the create message on the engine's side, and bound now.
 bool OgreScene::hostPosts() const { return mEngine && mEngine->hostPosts(); }
 
-bool OgreScene::compilesInBackground() const {
-    return computeOnService() && Ogre::HlmsCompute::jahMayDefer();
-}
 bool OgreScene::computeOnService() const {
     if (!mAsyncShaders || !mRoot) return false;
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
