@@ -34,38 +34,37 @@ void registerSceneCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
     const PbrParams pbr;
-    r.add({"engine.scene.create", {{arg("name", Kind::String)}, Kind::Int},
+    r.add({"engine.scene.create", {{arg("name", Kind::String)}, Kind::Int, kScene},
            "A new scene, empty; answers -> scene handle."},
           [k](Call &c) -> Value {
               Engine *e = k.engine(c);
               if (!e) return Value();
               Scene *s = e->createScene(c[0].asString());
               if (!s) return c.refuse(e->lastError());
-              k.st->scenes.push_back(s);
-              return Value(k.st->scenes.size());
+              return c.hold(kScene, unowned(s));
           });
     r.add({"engine.scene.setAmbient",
-           {{target("scene", Kind::Int), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
+           {{target(handle("scene", kScene)), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
            "The scene's hemisphere ambient, {upper, lower}: the upper and the lower colour (linear RGB)."},
           [k](Call &c) -> Value {
               if (Scene *s = k.scene(c, c[0])) s->setAmbient(toColour(c[1]["upper"]), toColour(c[1]["lower"]));
               return Value();
           });
-    r.add({"engine.mesh.unitCube", {{target("scene", Kind::Int)}, Kind::Int},
+    r.add({"engine.mesh.unitCube", {{target(handle("scene", kScene))}, Kind::Int, kMesh},
            "A unit cube mesh in the scene (24 vertices, positions and per-face normals, no uvs); answers -> mesh id."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               if (!s) return Value();
               const MeshId id = s->createMesh(unitCube());
               if (!id) return c.refuse(k.st->engine->lastError());
-              return Value(id);
+              return c.name(kMesh, id);
           });
     r.add({"engine.material.createPbr",
-           {{target("scene", Kind::Int),
+           {{target(handle("scene", kScene)),
              object("params", {numbers("albedo", 3, rgb(pbr.albedo)), arg("metalness", Kind::Number, Value(double(pbr.metalness))),
                                arg("roughness", Kind::Number, Value(double(pbr.roughness))),
                                numbers("emissive", 3, rgb(pbr.emissive))})},
-            Kind::Int},
+            Kind::Int, kMaterial},
            "A PBR material in the scene: albedo and emissive (linear RGB), metalness and perceptual roughness (0..1); "
            "every other parameter at its default. Answers -> material id."},
           [k](Call &c) -> Value {
@@ -78,7 +77,7 @@ void registerSceneCommands(Host &host, const Commands &k)
               p.emissive = toColour(c[1]["emissive"]);
               const MaterialId id = s->createPbrMaterial(p);
               if (!id) return c.refuse(k.st->engine->lastError());
-              return Value(id);
+              return c.name(kMaterial, id);
           });
 }
 

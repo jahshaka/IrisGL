@@ -5279,6 +5279,9 @@ public:
     bool rayNearAddresses(std::vector<unsigned long long> &addresses) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
     unsigned vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) const override;
+    Presence nodePresence(NodeId id) const override;
+    Presence meshPresence(MeshId id) const override;
+    Presence materialPresence(MaterialId id) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;

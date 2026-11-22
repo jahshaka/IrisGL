@@ -1316,6 +1316,16 @@ public:
     virtual unsigned    vrHandBoneNodes(unsigned hand, NodeId *out,
                                         unsigned count) const = 0;
 
+    /// DOES THIS SCENE HOLD IT NOW (SCRIPT-IN-ENGINE-1: the script host's handle check - a dead or foreign id FAILS by
+    /// name before a command runs): a node, a mesh or a material by its id. The engine's own lookups (the ones
+    /// setNodeTransform and attachMesh make), no copy. A LOCKSTEP read: while a render thread owns the engine
+    /// (EngineConfig::hostRecords) the maps are the render side's and the read is UNANSWERED - the host's door there is
+    /// the published record or a request, not served until the editor is a script client (P3).
+    enum class Presence { Absent, Present, Unanswered };
+    virtual Presence    nodePresence(NodeId) const = 0;
+    virtual Presence    meshPresence(MeshId) const = 0;
+    virtual Presence    materialPresence(MaterialId) const = 0;
+
     /// WHERE A NODE IS RIGHT NOW, in WORLD space, as the graph holds it.
     ///
     /// The read half of setNodeTransform, for the things a host cannot compute

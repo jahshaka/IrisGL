@@ -2,6 +2,7 @@
 // only — no script language is known here (source.script_neutral).
 #include "jahshaka/engine/Script.h"
 
+#include <atomic>
 #include <cmath>
 #include <exception>
 
@@ -131,6 +132,148 @@ Param objects(std::string name, std::vector<Param> fields)
     return p;
 }
 
+Param handle(std::string name, std::string kind)
+{
+    Param p = arg(std::move(name), Kind::Int);
+    p.handle = std::move(kind);
+    return p;
+}
+
+namespace {
+// THE HANDLE'S BITS (Script.h, THE HANDLES): owner 12 | kind 8 | value 32 - 52 bits, exact in a script's number
+constexpr int kOwnerShift = 40, kKindShift = 32;
+constexpr std::uint64_t kValueMask = 0xffffffffull, kKindMask = 0xffull, kOwnerMask = 0xfffull;
+}
+
+Registry::Registry()
+{
+    static std::atomic<std::uint64_t> next{0};
+    mSerial = next.fetch_add(1, std::memory_order_relaxed) % kOwnerMask + 1;   // 1..4095
+}
+
+unsigned Registry::kindIndex(const std::string &kind)
+{
+    for (size_t i = 0; i < mKinds.size(); ++i)
+        if (mKinds[i] == kind) return unsigned(i + 1);
+    if (mKinds.size() >= kKindMask) return 0;
+    mKinds.push_back(kind);
+    mKindHeld.push_back(false);
+    mChecks.emplace_back();
+    return unsigned(mKinds.size());
+}
+
+std::int64_t Registry::hold(const std::string &kind, std::shared_ptr<void> object, bool scoped)
+{
+    const unsigned k = kindIndex(kind);
+    if (!k || !object || mHeld.size() >= kValueMask) return 0;
+    mKindHeld[k - 1] = true;
+    mHeld.push_back(Held{k, std::move(object), scoped});
+    return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(mHeld.size()));
+}
+
+std::int64_t Registry::name(const std::string &kind, std::uint32_t id)
+{
+    const unsigned k = kindIndex(kind);
+    if (!k) return 0;
+    return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(id));
+}
+
+bool Registry::release(std::int64_t h)
+{
+    const std::uint64_t u = std::uint64_t(h);
+    const unsigned k = unsigned(u >> kKindShift & kKindMask);
+    if (h <= 0 || (u >> kOwnerShift) != mSerial || !k || k > mKinds.size() || !mKindHeld[k - 1]) return false;
+    const std::uint64_t slot = u & kValueMask;
+    if (!slot || slot > mHeld.size() || mHeld[slot - 1].kind != k || !mHeld[slot - 1].object) return false;
+    mHeld[slot - 1].object.reset();
+    return true;
+}
+
+void Registry::releaseScoped()
+{
+    for (Held &h : mHeld)
+        if (h.scoped) h.object.reset();
+}
+
+void *Registry::object(std::int64_t h) const
+{
+    const std::uint64_t u = std::uint64_t(h), slot = u & kValueMask;
+    if (h <= 0 || (u >> kOwnerShift) != mSerial || !slot || slot > mHeld.size()) return nullptr;
+    const Held &held = mHeld[slot - 1];
+    return held.kind == unsigned(u >> kKindShift & kKindMask) ? held.object.get() : nullptr;
+}
+
+bool Registry::checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const
+{
+    const std::uint64_t u = std::uint64_t(h);
+    const unsigned k = unsigned(u >> kKindShift & kKindMask);
+    if (h <= 0 || (u >> kOwnerShift) != mSerial || !k || k > mKinds.size()) {
+        why = where + ": " + std::to_string(h) + " is no " + kind + " handle of this host (a plain number, or another "
+              "host's or engine's handle)";
+        return false;
+    }
+    if (mKinds[k - 1] != kind) {
+        why = where + ": " + std::to_string(h) + " is a " + mKinds[k - 1] + " handle, not a " + kind + " handle";
+        return false;
+    }
+    if (mKindHeld[k - 1]) {
+        const std::uint64_t slot = u & kValueMask;
+        if (!slot || slot > mHeld.size() || mHeld[slot - 1].kind != k) {
+            why = where + ": " + std::to_string(h) + " is no " + kind + " handle of this host";
+            return false;
+        }
+        if (!mHeld[slot - 1].object) {
+            why = where + ": the " + kind + " handle " + std::to_string(h) + " is stale (its " + kind + " was released)";
+            return false;
+        }
+    }
+    return true;
+}
+
+void Registry::checkKind(const std::string &kind, HandleCheck check)
+{
+    const unsigned k = kindIndex(kind);
+    if (k) mChecks[k - 1] = std::move(check);
+}
+
+bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const
+{
+    if (!p.handle.empty() && v.kind() == Kind::Int) {
+        const unsigned k = unsigned(std::uint64_t(v.asInt()) >> kKindShift & kKindMask);
+        if (k && k <= mChecks.size() && mChecks[k - 1] &&
+            !mChecks[k - 1](call, std::uint32_t(std::uint64_t(v.asInt()) & kValueMask), why)) {
+            why = p.name + ": " + why;
+            return false;
+        }
+        return true;
+    }
+    if (p.kind == Kind::Object && v.kind() == Kind::Object) {
+        for (const Param &f : p.fields)
+            if (!judgeHandles(call, f, v[f.name], why)) return false;
+    } else if (p.kind == Kind::Array && p.element == Kind::Object && v.kind() == Kind::Array) {
+        Param e = p;
+        e.kind = Kind::Object;
+        for (const Value &x : v.asArray())
+            if (!judgeHandles(call, e, x, why)) return false;
+    }
+    return true;
+}
+
+Value Call::hold(const std::string &kind, std::shared_ptr<void> object, bool scoped)
+{
+    const std::int64_t h = mRegistry.hold(kind, std::move(object), scoped);
+    return h ? Value(h) : fail("the " + kind + " could not be given a handle (the host's table is full)");
+}
+
+Value Call::name(const std::string &kind, unsigned long long id)
+{
+    if (!id || id > kValueMask) return fail("the " + kind + " id " + std::to_string(id) + " does not fit a handle's 32 bits");
+    const std::int64_t h = mRegistry.name(kind, std::uint32_t(id));
+    return h ? Value(h) : fail("no handle kind is left for '" + kind + "' (255 at most)");
+}
+
+void *Call::heldObject(const Value &h) const { return mRegistry.object(h.asInt()); }
+
 namespace {
 
 std::string paramText(const Param &p)
@@ -139,6 +282,8 @@ std::string paramText(const Param &p)
     if (p.kind == Kind::Array) {
         t += p.element == Kind::Object ? "object" : kindName(p.element);
         t += p.count ? "[" + std::to_string(p.count) + "]" : "[]";
+    } else if (!p.handle.empty()) {
+        t += p.handle + " handle";
     } else {
         t += kindName(p.kind);
     }
@@ -152,20 +297,25 @@ std::string paramText(const Param &p)
 }
 
 /// THE ARGUMENT CHECK: `in` against `p`, the checked value into `out`; false with `why` (naming `where`) on a mistake.
-bool conform(const Param &p, const Value &in, const std::string &where, Value &out, std::string &why);
+bool conform(const Registry &reg, const Param &p, const Value &in, const std::string &where, Value &out,
+             std::string &why);
 
-bool conformKind(Kind kind, const Param &p, const Value &in, const std::string &where, Value &out, std::string &why)
+bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in, const std::string &where, Value &out,
+                 std::string &why)
 {
     const Kind k = in.kind();
     switch (kind) {
     case Kind::Int:
-        if (k == Kind::Int) { out = in; return true; }
+        if (k == Kind::Int) {
+            out = in;
+            return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
+        }
         if (k == Kind::Number) {
             const double d = in.asNumber();
             // 2^63 is exact in a double: [-2^63, 2^63) is every int64
             if (std::trunc(d) == d && d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
                 out = Value(static_cast<std::int64_t>(d));
-                return true;
+                return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
             }
             why = where + " must be an integer (" + std::to_string(d) + " is not; it is never truncated)";
             return false;
@@ -188,7 +338,7 @@ bool conformKind(Kind kind, const Param &p, const Value &in, const std::string &
         checked.reserve(a.size());
         for (size_t i = 0; i < a.size(); ++i) {
             Value v;
-            if (!conformKind(e.kind, e, a[i], where + "[" + std::to_string(i) + "]", v, why)) return false;
+            if (!conformKind(reg, e.kind, e, a[i], where + "[" + std::to_string(i) + "]", v, why)) return false;
             checked.push_back(std::move(v));
         }
         out = Value(std::move(checked));
@@ -208,7 +358,7 @@ bool conformKind(Kind kind, const Param &p, const Value &in, const std::string &
         Value::Object checked;
         for (const Param &f : p.fields) {
             Value v;
-            if (!conform(f, in[f.name], where + "." + f.name, v, why)) return false;
+            if (!conform(reg, f, in[f.name], where + "." + f.name, v, why)) return false;
             checked.emplace_back(f.name, std::move(v));
         }
         out = Value(std::move(checked));
@@ -223,16 +373,17 @@ bool conformKind(Kind kind, const Param &p, const Value &in, const std::string &
     return false;
 }
 
-bool conform(const Param &p, const Value &in, const std::string &where, Value &out, std::string &why)
+bool conform(const Registry &reg, const Param &p, const Value &in, const std::string &where, Value &out,
+             std::string &why)
 {
     if (in.isNull()) {
         if (!p.fallback) {
             why = where + " is required";
             return false;
         }
-        return conformKind(p.kind, p, *p.fallback, where, out, why);   // a default is checked too: an object's fills
+        return conformKind(reg, p.kind, p, *p.fallback, where, out, why);   // a default is checked too: an object's fills
     }
-    return conformKind(p.kind, p, in, where, out, why);
+    return conformKind(reg, p.kind, p, in, where, out, why);
 }
 
 Value falsy(Kind k)
@@ -259,7 +410,8 @@ std::string signatureText(const CommandInfo &c)
 {
     std::string t = c.name + "(";
     for (size_t i = 0; i < c.signature.params.size(); ++i) t += (i ? ", " : "") + paramText(c.signature.params[i]);
-    return t + ") -> " + kindName(c.signature.returns);
+    return t + ") -> " + (c.signature.returnsHandle.empty() ? std::string(kindName(c.signature.returns))
+                                                           : c.signature.returnsHandle + " handle");
 }
 
 Value Call::fail(std::string message)
@@ -338,14 +490,23 @@ Result Registry::call(const std::string &name, const Value::Array &args)
     for (size_t i = 0; i < params.size(); ++i) {
         Value v;
         std::string why;
-        if (!conform(params[i], i < args.size() ? args[i] : Value(), params[i].name, v, why)) {
+        if (!conform(*this, params[i], i < args.size() ? args[i] : Value(), params[i].name, v, why)) {
             r.status = Status::Failed;
             r.message = name + ": " + why;
             return r;
         }
         checked.push_back(std::move(v));
     }
-    Call call(entry->info, std::move(checked));
+    Call call(entry->info, std::move(checked), *this);
+    // THE EXISTENCE CHECKS of the named kinds (checkKind): every handle argument, before the command runs
+    for (size_t i = 0; i < params.size(); ++i) {
+        std::string why;
+        if (!judgeHandles(call, params[i], call[i], why)) {
+            r.status = Status::Failed;
+            r.message = name + ": " + why;
+            return r;
+        }
+    }
     try {
         r.value = entry->fn(call);
         r.status = call.status();

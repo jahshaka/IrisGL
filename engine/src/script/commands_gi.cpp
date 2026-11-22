@@ -10,7 +10,7 @@ void registerGiCommands(Host &host, const Commands &k)
     static const char *const kModes[] = {"off", "vct", "vctPccHybrid"};
     static const char *const kQualities[] = {"low", "medium", "high", "epic"};
     r.add({"engine.gi.set",
-           {{target("scene", Kind::Int),
+           {{target(handle("scene", kScene)),
              object("params", {arg("mode", Kind::String), arg("quality", Kind::String, Value(kQualities[int(gi.quality)])),
                                arg("bounces", Kind::Bool, Value(gi.bounces)),
                                objects("cascades", {arg("halfSize", Kind::Number), arg("resolution", Kind::Int),

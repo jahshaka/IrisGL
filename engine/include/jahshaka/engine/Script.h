@@ -103,6 +103,9 @@ struct Param {
     unsigned count = 0;
     /// A TARGET: what the command acts on (a positional parameter; the shape rule above).
     bool target = false;
+    /// A HANDLE (Kind::Int): the kind of object it must name ("scene", "node", "mesh"); empty = a plain number. The
+    /// registry checks the handle's owner and kind at the call (Registry, THE HANDLES).
+    std::string handle;
 };
 /// A required parameter; one with its default.
 Param arg(std::string name, Kind kind);
@@ -117,10 +120,14 @@ Param numbers(std::string name, unsigned count, Value fallback);
 Param object(std::string name, std::vector<Param> fields);
 Param object(std::string name, std::vector<Param> fields, Value fallback);
 Param objects(std::string name, std::vector<Param> fields);
+/// A required handle of `kind` (target(handle(...)) when it is what the command acts on).
+Param handle(std::string name, std::string kind);
 
 struct Signature {
     std::vector<Param> params;
     Kind returns = Kind::Null;
+    /// The kind of handle the command answers ("-> scene handle"); empty = none.
+    std::string returnsHandle;
 };
 
 struct CommandInfo {
@@ -133,10 +140,13 @@ std::string signatureText(const CommandInfo &);
 
 enum class Status { Ok, Failed, Refused };
 
+class Registry;
+
 /// One call in progress: its checked arguments and its outcome.
 class Call {
 public:
-    Call(const CommandInfo &info, Value::Array args) : mInfo(info), mArgs(std::move(args)) {}
+    Call(const CommandInfo &info, Value::Array args, Registry &registry)
+        : mInfo(info), mArgs(std::move(args)), mRegistry(registry) {}
     const CommandInfo &info() const { return mInfo; }
     /// The i-th argument, checked, its default filled.
     const Value &operator[](std::size_t i) const { return mArgs[i]; }
@@ -146,10 +156,20 @@ public:
     Value refuse(std::string message);
     Status status() const { return mStatus; }
     const std::string &message() const { return mMessage; }
+    /// THE HANDLES (Registry): a new held object's handle; a new handle naming the engine's own 32-bit id `id` (the
+    /// call FAILS, null, when `id` does not fit); the object a checked held handle names; the id a checked id handle
+    /// carries.
+    Value hold(const std::string &kind, std::shared_ptr<void> object, bool scoped = false);
+    Value name(const std::string &kind, unsigned long long id);
+    template <class T> T *object(const Value &h) const { return static_cast<T *>(heldObject(h)); }
+    static unsigned idOf(const Value &h) { return unsigned(std::uint64_t(h.asInt()) & 0xffffffffull); }
+    Registry &registry() { return mRegistry; }
 
 private:
+    void *heldObject(const Value &h) const;
     const CommandInfo &mInfo;
     Value::Array mArgs;
+    Registry &mRegistry;
     Status mStatus = Status::Ok;
     std::string mMessage;
 };
@@ -165,8 +185,17 @@ struct Result {
 /// breaks validate's rules, or a second command of one name, is never added - add() answers false AND keeps the fault,
 /// and a Host whose registry holds a fault refuses every run by name (a refusal can never be ignored); a C++ exception
 /// a command throws is caught at the call and is a Failed call naming it (it never unwinds through a language's C).
+///
+/// THE HANDLES (the final read's W1; the lead's S1): a handle is ONE script number of 52 bits - its OWNER (the
+/// registry's process-wide serial, 12 bits) << 40 | its KIND (interned by the registry, 8 bits) << 32 | its VALUE (32
+/// bits). A HELD kind (scene, view, picture: objects the host holds) has a slot of the registry's table as its value -
+/// released, the handle is STALE; a NAMED kind (node, mesh, material: the engine's own ids) has the engine's id as its
+/// value and no table (existence is its family's own record). A parameter declared handle(name, kind) is checked at
+/// the call, before the command runs: a number that is no handle of this registry (another host's or engine's), a
+/// handle of another kind and a stale one each FAIL by name. No allocation and no table lookup for a named kind.
 class Registry {
 public:
+    Registry();
     /// False (nothing added, the fault kept: validate()) when the name is already registered or the command breaks
     /// validate's rules.
     bool add(CommandInfo info, CommandFn fn);
@@ -182,11 +211,37 @@ public:
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
 
+    /// A held object's new handle; `scoped`: released at the end of the run that made it (releaseScoped).
+    std::int64_t hold(const std::string &kind, std::shared_ptr<void> object, bool scoped = false);
+    /// A handle of the NAMED kind `kind` carrying `id` (< 2^32; the caller has checked it).
+    std::int64_t name(const std::string &kind, std::uint32_t id);
+    /// Releases a held handle: false when it names no live held object of this registry.
+    bool release(std::int64_t handle);
+    /// Releases every scoped handle (Host::run calls it at a run's end).
+    void releaseScoped();
+    /// The object of a live held handle; null otherwise.
+    void *object(std::int64_t handle) const;
+    /// True when `h` is a live handle of this registry of kind `kind`; else false with `why` (naming `where`).
+    bool checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const;
+    /// THE EXISTENCE CHECK of a NAMED kind (its family's: the engine asked whether the id is its scene's now), run at
+    /// every call on every argument declared a handle of `kind`, after the arguments are checked and before the
+    /// command: false with `why` FAILS the call by name. No check = the kind's ids are taken as they come.
+    using HandleCheck = std::function<bool(const Call &call, std::uint32_t id, std::string &why)>;
+    void checkKind(const std::string &kind, HandleCheck check);
+
 private:
     struct Entry { CommandInfo info; CommandFn fn; };
     std::vector<Entry> mEntries;
     std::vector<std::string> mFaults;
     std::string mLastError;
+    struct Held { unsigned kind = 0; std::shared_ptr<void> object; bool scoped = false; };
+    unsigned kindIndex(const std::string &kind);   // interned, 1..255 (0: the 256th kind, refused)
+    bool judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const;
+    std::uint64_t mSerial = 0;
+    std::vector<std::string> mKinds;   // index - 1
+    std::vector<bool> mKindHeld;       // index - 1: a held kind (a table slot) or a named one (the engine's id)
+    std::vector<HandleCheck> mChecks;  // index - 1
+    std::vector<Held> mHeld;           // slot - 1
 };
 
 /// THE HOST — one per process (the process makes it; every Engine registers its commands into its registry, so a

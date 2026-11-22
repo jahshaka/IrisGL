@@ -116,6 +116,33 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     registerGiCommands(host, k);
     registerFrameCommands(host, k);
     registerPictureCommands(host, k);
+    // THE EXISTENCE OF THE ENGINE's OWN IDS (THE HANDLES, Script.h; the lead's S1): a node, mesh or material handle names
+    // the engine's id, and the ENGINE is asked (Scene::nodePresence...) whether its scene - the command's first target -
+    // holds it now: a dead or foreign id FAILS by name before the command runs (Scene::setNodeTransform would ignore
+    // it). In the render thread's mode the read is unanswered and the call FAILS saying so (the editor client's door, P3).
+    const auto presence = [](const char *kind, Scene::Presence (*ask)(const Scene &, std::uint32_t)) {
+        return [kind, ask](const Call &c, std::uint32_t id, std::string &why) {
+            const Scene *s = c.info().signature.params.empty() || c.info().signature.params[0].handle != kScene
+                                 ? nullptr : c.object<Scene>(c[0]);
+            if (!s) {
+                why = std::string("a ") + kind + " is named with its scene: this command's first target is no scene";
+                return false;
+            }
+            const Scene::Presence p = ask(*s, id);
+            if (p == Scene::Presence::Present) return true;
+            why = p == Scene::Presence::Absent
+                      ? std::string(kind) + " " + std::to_string(id) + " is not a " + kind + " of scene '" + s->name() +
+                            "' (another scene's, or destroyed)"
+                      : std::string("the ") + kind + " cannot be checked: a render thread owns the engine (its "
+                        "existence read is unanswered there)";
+            return false;
+        };
+    };
+    host.registry().checkKind(kNode, presence(kNode, [](const Scene &s, std::uint32_t id) { return s.nodePresence(id); }));
+    host.registry().checkKind(kMesh, presence(kMesh, [](const Scene &s, std::uint32_t id) { return s.meshPresence(id); }));
+    host.registry().checkKind(kMaterial, presence(kMaterial, [](const Scene &s, std::uint32_t id) {
+                                  return s.materialPresence(id);
+                              }));
 }
 
 }}}  // namespace jahshaka::engine::script

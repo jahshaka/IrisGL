@@ -26,8 +26,6 @@ struct EngineState {
     Engine *engine = nullptr;
     std::string bootError;
     bool testDoors = false;
-    std::vector<Scene *> scenes;   // handle - 1
-    std::vector<View *> views;     // handle - 1
     std::vector<DeclaredRoutes> declared;
 };
 
@@ -54,26 +52,10 @@ public:
         if (!st->engine) c.fail("the engine did not start: " + st->bootError);
         return st->engine;
     }
-    Scene *scene(Call &c, const Value &h) const
-    {
-        if (!engine(c)) return nullptr;
-        const std::int64_t i = h.asInt();
-        if (i < 1 || i > std::int64_t(st->scenes.size()) || !st->scenes[size_t(i - 1)]) {
-            c.fail("no scene has the handle " + std::to_string(i));
-            return nullptr;
-        }
-        return st->scenes[size_t(i - 1)];
-    }
-    View *view(Call &c, const Value &h) const
-    {
-        if (!engine(c)) return nullptr;
-        const std::int64_t i = h.asInt();
-        if (i < 1 || i > std::int64_t(st->views.size()) || !st->views[size_t(i - 1)]) {
-            c.fail("no view has the handle " + std::to_string(i));
-            return nullptr;
-        }
-        return st->views[size_t(i - 1)];
-    }
+    /// The scene / view a checked handle names (the registry checked its kind and that it is live), or null when
+    /// the engine is absent (the call FAILED saying why).
+    Scene *scene(Call &c, const Value &h) const { return engine(c) ? c.object<Scene>(h) : nullptr; }
+    View *view(Call &c, const Value &h) const { return engine(c) ? c.object<View>(h) : nullptr; }
     /// One lockstep frame: the harness's grid step (commands_engine.cpp says why), then the frame; then EVERY PENDING
     /// ROUTE DECLARATION JUDGED on it (RouteDeclaration.h: held or broken, each a law of the host's verdict; a product
     /// not live yet waits). False, the call FAILED naming the first broken declaration, when one broke.
@@ -81,6 +63,11 @@ public:
 
     std::shared_ptr<EngineState> st;
 };
+
+/// An engine object the engine owns, held by a handle that never owns it (the engine destroys it).
+template <class T> std::shared_ptr<void> unowned(T *p) { return std::shared_ptr<void>(static_cast<void *>(p), [](void *) {}); }
+/// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
+constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material";
 
 /// Each family's commands (commands_<family>.cpp), registered by registerEngineCommands (commands_engine.cpp).
 void registerSceneCommands(Host &host, const Commands &k);

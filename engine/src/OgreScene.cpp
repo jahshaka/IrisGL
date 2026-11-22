@@ -1352,6 +1352,23 @@ unsigned OgreScene::vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) 
 // which is the whole reason this is not `node->getPosition()`: the caller is
 // asking about the picture, and the scene manager's own walk happens later in
 // the frame.
+// THE EXISTENCE READS (Engine.h, Scene::nodePresence): the lookups the scene's own calls make, read in lockstep only.
+Scene::Presence OgreScene::nodePresence(NodeId id) const {
+    JAH_SYNC_GETTER("Scene::nodePresence");
+    if (hostPosts()) return Presence::Unanswered;
+    return id && mNodeById.get(id) ? Presence::Present : Presence::Absent;
+}
+Scene::Presence OgreScene::meshPresence(MeshId id) const {
+    JAH_SYNC_GETTER("Scene::meshPresence");
+    if (hostPosts()) return Presence::Unanswered;
+    return mMeshes.count(id) ? Presence::Present : Presence::Absent;
+}
+Scene::Presence OgreScene::materialPresence(MaterialId id) const {
+    JAH_SYNC_GETTER("Scene::materialPresence");
+    if (hostPosts()) return Presence::Unanswered;
+    return mMaterials.count(id) ? Presence::Present : Presence::Absent;
+}
+
 bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
     JAH_SYNC_GETTER("Scene::nodeWorldPose");
     Ogre::SceneNode *n = node(id);
