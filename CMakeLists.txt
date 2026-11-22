@@ -217,10 +217,33 @@ add_subdirectory_with_folder("Dependencies/MeshOptimizer" thirdparty/meshoptimiz
 set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # quickjs-ng (SCRIPT-IN-ENGINE-1; MIT, its LICENSE at the submodule's root; pinned at tag v0.18.0): the JavaScript engine
 # of the ENGINE's script host, linked PRIVATE into JahshakaEngine and named in ONE engine file (src/script/js_quickjs.cpp,
-# source.script_neutral). Vendored, never edited: its own CMake as it ships, EXCLUDE_FROM_ALL so only the library its
+# source.script_neutral). Vendored, never edited (its patches ride as a stack, below): its own CMake as it ships, EXCLUDE_FROM_ALL so only the library its
 # link needs is built (none of its tools, tests or examples), and STATIC (BUILD_SHARED_LIBS off around it, PIC for the
 # shared libraries that link the engine). Its option(BUILD_SHARED_LIBS) honours the variable only under CMP0077 NEW (its
 # own minimum, 3.10, leaves it unset, and the cache holds BUILD_SHARED_LIBS=ON): the default is set for its directory.
+# ITS PATCH STACK (MCP-ON-HOST-1; thirdparty/quickjs-ng-patches/README.md): the same applier as assimp's and Bullet's,
+# HERE before the tree is added - a fresh clone cannot build an unpatched JS engine; idempotent; a patch that neither
+# applies nor reverse-applies is a hard error; the patch files and the script are configure inputs (assimp's reason).
+execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/quickjs-ng
+            -DPATCHES=${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/quickjs-ng-patches
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake
+    RESULT_VARIABLE _qjs_patch_result
+    OUTPUT_VARIABLE _qjs_patch_output
+    ERROR_VARIABLE  _qjs_patch_output)
+string(REGEX REPLACE "(^|\n)-- " "\\1" _qjs_patch_output "${_qjs_patch_output}")
+string(STRIP "${_qjs_patch_output}" _qjs_patch_output)
+if(_qjs_patch_output)
+    message(STATUS "${_qjs_patch_output}")
+endif()
+if(NOT _qjs_patch_result EQUAL 0)
+    message(FATAL_ERROR "quickjs-ng patches could not be applied - see above")
+endif()
+file(GLOB _qjs_patch_files CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/quickjs-ng-patches/*.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_qjs_patch_files}
+             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ApplyVendorPatches.cmake")
 set(_jah_shared_libs ${BUILD_SHARED_LIBS})
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
