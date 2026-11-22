@@ -284,6 +284,8 @@ Host *Session::host(bool engine)
         Host::Options o;
         o.freshRealmPerRun = true;
         o.completionBounds = kCompletionBounds;
+        o.memoryLimit = kHeapLimit;
+        o.outsideClient = true;
         mEngine = mDoors.makeHost(o, true);
         mDocs.reset();
         mEngine->setConsole([this](const std::string &line) {

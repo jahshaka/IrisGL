@@ -8,7 +8,8 @@
 // THE HOSTS (L11): the session asks `makeHost` for a DOCUMENTATION-ONLY host first (server/discover, tools/list and
 // api_docs need no engine); the FIRST tools/call of call, read, run_script or picture asks it for the ONE engine host
 // (the engine boots there), and the docs host is destroyed. No handle exists before that host. The engine host runs a
-// FRESH realm per run_script and answers its completion value within kCompletionBounds.
+// FRESH realm per run_script, answers its completion value within kCompletionBounds, holds its script heap to
+// kHeapLimit and serves an OUTSIDE client (Host::Options::outsideClient: what is engine-wide, engine.arm, is refused).
 //
 // Requests are served strictly in order, one at a time. A cancel of the running request stops it at its next keep-going
 // poll (Host::keepGoing) and NOTHING more is written for its id; a cancel of a queued one drops it unanswered; stdin's
@@ -42,6 +43,12 @@ constexpr std::size_t kLineCap = 3 * kBytesBase64;                          // 4
 ///  - elements 16,384: a 128 x 128 table - an array past it is far past the client's cut;
 ///  - depth 32: the reply's envelope adds its own levels (kEnvelopeLevels) under the codec's 64.
 constexpr script::ValueBounds kCompletionBounds{16384, 32, std::size_t(256) << 10};
+/// THE MCP HOST's HEAP LIMIT (Host::Options::memoryLimit - STATED, never the derived 2 x callBounds.bytes + 16 MiB =
+/// 1168 MiB a local host takes): 32 MiB, about 2.5x the largest script working set measured (the full 65,536-transform
+/// setTransforms batch built as JS numbers, 12.6 MiB, beside the interpreter's 0.11 MiB: 2b's D1b measure). It also
+/// bounds the one cost no cancel reaches - the vendored Proxy own-key duplicate check, ~0.041 s x (limit in MiB)^2
+/// (Script.h): ~42 s here against ~15 h at 1168 MiB - until that check is patched.
+constexpr std::size_t kHeapLimit = std::size_t(32) << 20;
 /// What one call's console capture keeps (the `console` array of call / read / run_script): the rest goes to stderr
 /// only, the array ending in a line that says how many were left out.
 constexpr std::size_t kConsoleCap = std::size_t(128) << 10;
