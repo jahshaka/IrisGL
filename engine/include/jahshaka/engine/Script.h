@@ -288,6 +288,8 @@ public:
     /// parameter or member, declares an array with neither a count nor a maximum, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
+    /// True when validate() would name a fault - the host's check before every run and every call (no copy).
+    bool faulted() const { return !mFaults.empty(); }
 
     /// A HELD KIND IS BOUND TO ONE C++ TYPE (SCRIPT-IN-ENGINE-1 2b): a kind whose type is known at registration is
     /// bound THERE (registerEngineCommands binds scene, view and picture), so no hold - whoever makes it, in whatever
@@ -460,7 +462,8 @@ public:
     void atVerdict(std::function<void()> judge);
 
     /// The callers' doors: a command call by name (positional arguments, or named: callNamed), by its registry index,
-    /// and a console line.
+    /// and a console line. A host whose registry holds a fault serves NO call (as it runs no script): each FAILS with
+    /// run's words, naming every fault.
     Result call(const std::string &name, const Value::Array &args);
     Result callNamed(const std::string &name, Value::Object args);
     Result callAt(std::size_t index, Value::Array args);
