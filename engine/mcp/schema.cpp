@@ -1,4 +1,4 @@
-// THE SIGNATURE AS A SCHEMA (MCP-ON-HOST-1 stage 1): mcp/schema.h says the form. From the signature's fields alone.
+// THE SIGNATURE AS A SCHEMA (MCP-ON-HOST-1 stage 1): mcp/include/mcp/schema.h says the form. From the signature's fields alone.
 #include "mcp/schema.h"
 
 #include "jahshaka/engine/ScriptJson.h"
