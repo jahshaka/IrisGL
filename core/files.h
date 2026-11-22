@@ -11,7 +11,7 @@
 // THE FLUSH IS A POLICY (FSYNC-2, 2026-09-17: fsync waits for the whole filesystem's journal, measured 220-1153 ms a call
 // while anything else wrote to the device), answered per writer by what a LOST or TORN copy costs:
 //   Durability::Flush    the bytes ARE the artifact and nothing re-derives them (a CAS object, store.json, a baked map,
-//                        a cache entry): fsync before the rename, always.
+//                        a cache entry): fsync before the rename, always - and a failed fsync fails the write (no rename).
 //   Durability::Derived  a PROJECTION of durable state, re-written by a function call (the CAS sidecar): the atomic
 //                        rename, no wait - a torn JSON does not parse and every reader skips what does not parse.
 //
@@ -49,14 +49,16 @@ IRIS_CORE_API std::optional<std::string> readAll(const std::filesystem::path &p)
 IRIS_CORE_API bool makeDirs(const std::filesystem::path &dir);
 
 /// The staged write's three steps, for a writer that streams into its temp itself (the CAS copy, an archive's or a video's
-/// partial): a unique sibling temp path for `target`; the flush of a written file to the device (no-op off POSIX: the
-/// rename's ordering only); the atomic replace of `to` by `from` - on failure `from` is removed and `error` says why.
+/// partial): a unique sibling temp path for `target`; the flush of a written file to the device - false when the file cannot
+/// be opened or the flush FAILED, and then the bytes must not be published (true off POSIX: the rename's ordering only); the
+/// atomic replace of `to` by `from` - on failure `from` is removed and `error` says why.
 IRIS_CORE_API std::filesystem::path stagingTempPath(const std::filesystem::path &target);
-IRIS_CORE_API void fsyncPath(const std::filesystem::path &p);
+IRIS_CORE_API bool fsyncPath(const std::filesystem::path &p);
 IRIS_CORE_API bool atomicRename(const std::filesystem::path &from, const std::filesystem::path &to, std::string *error = nullptr);
 
 /// `bytes` written to `target` through a staged temp (its directory made first): the old file stays whole until the
-/// rename replaces it. False with `error` said when anything failed - the target is then untouched and no temp is left.
+/// rename replaces it. False with `error` said when anything failed - a Flush write whose fsync failed included - the target
+/// is then untouched and no temp is left.
 IRIS_CORE_API bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability = Durability::Flush,
                  std::string *error = nullptr);
 

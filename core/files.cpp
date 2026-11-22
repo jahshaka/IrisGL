@@ -76,16 +76,17 @@ std::filesystem::path stagingTempPath(const std::filesystem::path &target)
     return tmp;
 }
 
-void fsyncPath(const std::filesystem::path &p)
+bool fsyncPath(const std::filesystem::path &p)
 {
 #if defined(IRIS_FILES_POSIX)
     const int fd = ::open(p.c_str(), O_RDONLY);
-    if (fd >= 0) {
-        ::fsync(fd);
-        ::close(fd);
-    }
+    if (fd < 0) return false;
+    const bool flushed = ::fsync(fd) == 0;
+    ::close(fd);
+    return flushed;
 #else
     (void)p;
+    return true;
 #endif
 }
 
@@ -123,7 +124,12 @@ bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Du
             return false;
         }
     }
-    if (durability == Durability::Flush) fsyncPath(tmp);
+    // A FLUSH THAT FAILED IS NO FLUSH: the bytes may not be on the device, so they are not published (the old file stands).
+    if (durability == Durability::Flush && !fsyncPath(tmp)) {
+        std::filesystem::remove(tmp, ignored);
+        if (error) *error = "cannot flush " + utf8(target) + " to its device (fsync failed): the old file stands";
+        return false;
+    }
     return atomicRename(tmp, target, error);
 }
 
