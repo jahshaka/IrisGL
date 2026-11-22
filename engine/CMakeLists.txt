@@ -119,6 +119,8 @@ set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/host.cpp
+    # the value in JSON (MCP-ON-HOST-1; include/jahshaka/engine/ScriptJson.h): std only, moved whole by NOQT-CORE-1
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/LanguageTable.inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/RouteDeclaration.h
