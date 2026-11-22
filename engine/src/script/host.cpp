@@ -100,11 +100,11 @@ Result Host::call(const std::string &name, const Value::Array &args)
     return r;
 }
 
-Result Host::callAt(std::size_t index, const Value::Array &args)
+Result Host::callAt(std::size_t index, Value::Array args)
 {
-    if (!mExecutor) return mRegistry.callAt(index, args);
+    if (!mExecutor) return mRegistry.callAt(index, std::move(args));
     Result r;
-    mExecutor([&] { r = mRegistry.callAt(index, args); });
+    mExecutor([&] { r = mRegistry.callAt(index, std::move(args)); });
     return r;
 }
 

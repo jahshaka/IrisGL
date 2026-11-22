@@ -78,6 +78,9 @@ public:
     const Array        &asArray() const { return std::get<Array>(mV); }
     const Object       &asObject() const { return std::get<Object>(mV); }
     const Bytes        &asBytes() const { return std::get<Bytes>(mV); }
+    /// The same, to change or move from (the registry consumes the arguments it checks: S9).
+    Array              &asArray() { return std::get<Array>(mV); }
+    Object             &asObject() { return std::get<Object>(mV); }
     /// An object's member by name: null when this is not an object or has no such member.
     const Value *find(const std::string &name) const;
     /// The same, a null Value when absent.
@@ -221,8 +224,9 @@ public:
     /// exception it throws: Failed, "<name>: threw: <what>").
     Result call(const std::string &name, const Value::Array &args);
     /// The same call by the command's INDEX (its place in commands(), fixed at registration): a language binding
-    /// resolves each command ONCE and calls it by index - no lookup by name a call.
-    Result callAt(std::size_t index, const Value::Array &args);
+    /// resolves each command ONCE and calls it by index - no lookup by name a call - and hands its arguments over (the
+    /// check moves them into the call, it copies nothing it can move).
+    Result callAt(std::size_t index, Value::Array args);
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
     /// One line per add() refused: a command that lacks a name, a doc, a function or a name on any parameter or
@@ -329,7 +333,7 @@ public:
     /// The language binding's doors: a command call by name or by its registry index (through the executor) and a
     /// console line.
     Result call(const std::string &name, const Value::Array &args);
-    Result callAt(std::size_t index, const Value::Array &args);
+    Result callAt(std::size_t index, Value::Array args);
     void print(const std::string &line);
 
 private:

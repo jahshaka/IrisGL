@@ -392,17 +392,18 @@ std::string paramText(const Param &p)
 }
 
 /// THE ARGUMENT CHECK: `in` against `p`, the checked value into `out`; false with `why` (naming `where`) on a mistake.
-bool conform(const Registry &reg, const Param &p, const Value &in, const Where &where, Value &out, std::string &why);
+/// `in` is CONSUMED (moved into `out` wherever it already conforms: S9 - the registry copies nothing it can move).
+bool conform(const Registry &reg, const Param &p, Value &in, const Where &where, Value &out, std::string &why);
 
 /// `in` as `kind` - p.kind, or an array's element kind with the array's own declarations (its range, its members).
-bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in, const Where &where, Value &out,
+bool conformKind(const Registry &reg, Kind kind, const Param &p, Value &in, const Where &where, Value &out,
                  std::string &why)
 {
     const Kind k = in.kind();
     switch (kind) {
     case Kind::Int:
         if (k == Kind::Int) {
-            out = in;
+            out = std::move(in);
         } else if (k == Kind::Number) {
             const double d = in.asNumber();
             // an integral number is an integer only while a script's number is exact: |d| <= 2^53 (above it, a
@@ -441,30 +442,28 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
                 return false;
             }
         }
-        out = in;
+        out = std::move(in);
         return true;
     case Kind::Array: {
         if (k != Kind::Array || kind != p.kind) break;   // (no array of arrays is declared)
-        const Value::Array &a = in.asArray();
+        Value::Array &a = in.asArray();
         if (p.count && a.size() != p.count) {
             why = whereText(where) + " must hold " + std::to_string(p.count) + " elements (it holds " +
                   std::to_string(a.size()) + ")";
             return false;
         }
-        Value::Array checked;
-        checked.reserve(a.size());
-        for (size_t i = 0; i < a.size(); ++i) {
+        for (size_t i = 0; i < a.size(); ++i) {   // each element checked IN PLACE: the array is moved, never rebuilt
             Value v;
             const Where element{&where, nullptr, long(i)};
             if (!conformKind(reg, p.element, p, a[i], element, v, why)) return false;   // the element kind, p's declarations
-            checked.push_back(std::move(v));
+            a[i] = std::move(v);
         }
-        out = Value(std::move(checked));
+        out = std::move(in);
         return true;
     }
     case Kind::Object: {
         if (k != Kind::Object) break;
-        const Value::Object &o = in.asObject();
+        Value::Object &o = in.asObject();
         for (const Value::Member &m : o) {
             bool known = false;
             for (const Param &f : p.fields) known = known || f.name == m.first;
@@ -476,16 +475,19 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
         Value::Object checked;
         checked.reserve(p.fields.size());
         for (const Param &f : p.fields) {
-            Value v;
+            Value v, absent;
+            Value *given = &absent;
+            for (Value::Member &m : o)
+                if (m.first == f.name) given = &m.second;
             const Where member{&where, &f.name, -1};
-            if (!conform(reg, f, in[f.name], member, v, why)) return false;
+            if (!conform(reg, f, *given, member, v, why)) return false;   // (the member moved into the checked object)
             checked.emplace_back(f.name, std::move(v));
         }
         out = Value(std::move(checked));
         return true;
     }
     default:
-        if (k == kind) { out = in; return true; }
+        if (k == kind) { out = std::move(in); return true; }
         break;
     }
     why = whereText(where) + " must be " + (kind == Kind::Array ? std::string("an array") : std::string(kindName(kind))) +
@@ -493,16 +495,32 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
     return false;
 }
 
-bool conform(const Registry &reg, const Param &p, const Value &in, const Where &where, Value &out, std::string &why)
+bool conform(const Registry &reg, const Param &p, Value &in, const Where &where, Value &out, std::string &why)
 {
     if (in.isNull()) {
         if (!p.fallback) {
             why = whereText(where) + " is required";
             return false;
         }
-        return conformKind(reg, p.kind, p, *p.fallback, where, out, why);   // a default is checked too: an object's fills
+        out = *p.fallback;   // a default was checked ONCE, at registration (settleDefaults: an object's filled there)
+        return true;
     }
     return conformKind(reg, p.kind, p, in, where, out, why);
+}
+
+/// THE DEFAULTS CHECKED ONCE (S9): each parameter's and member's default conformed at registration - an object default
+/// filled with its members' - so a call copies a checked default and checks nothing again. False, `why`, when a
+/// default does not conform to its own parameter (a registration fault).
+bool settleDefaults(const Registry &reg, Param &p, std::string &why)
+{
+    for (Param &f : p.fields)
+        if (!settleDefaults(reg, f, why)) return false;
+    if (!p.fallback || p.fallback->isNull()) return true;   // (a null default: the parameter's own null)
+    Value in = *p.fallback, out;
+    const Where where{nullptr, &p.name, -1};
+    if (!conformKind(reg, p.kind, p, in, where, out, why)) return false;
+    p.fallback = std::move(out);
+    return true;
 }
 
 Value falsy(Kind k)
@@ -564,6 +582,10 @@ bool Registry::add(CommandInfo info, CommandFn fn)
     if (named > 1)
         faults.push_back(info.name + ": " + std::to_string(named) + " positional parameters are not targets (one at "
                          "most: the rest are members of one options object)");
+    for (Param &p : info.signature.params) {
+        std::string why;
+        if (!settleDefaults(*this, p, why)) faults.push_back(info.name + ": a default does not conform: " + why);
+    }
     if (!faults.empty()) {
         mFaults.insert(mFaults.end(), faults.begin(), faults.end());
         return false;
@@ -596,7 +618,7 @@ Result Registry::call(const std::string &name, const Value::Array &args)
     return r;
 }
 
-Result Registry::callAt(std::size_t index, const Value::Array &args)
+Result Registry::callAt(std::size_t index, Value::Array args)
 {
     Result r;
     if (index >= mEntries.size()) {
@@ -619,7 +641,8 @@ Result Registry::callAt(std::size_t index, const Value::Array &args)
         Value v;
         std::string why;
         const Where where{nullptr, &params[i].name, -1};
-        if (!conform(*this, params[i], i < args.size() ? args[i] : Value(), where, v, why)) {
+        Value absent;
+        if (!conform(*this, params[i], i < args.size() ? args[i] : absent, where, v, why)) {
             r.status = Status::Failed;
             r.message = name + ": " + why;
             return r;

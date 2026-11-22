@@ -312,6 +312,7 @@ private:
         const std::size_t index = std::size_t(JS_VALUE_GET_INT(data[0]));
         while (argc > 0 && JS_IsUndefined(argv[argc - 1])) --argc;   // a trailing undefined is an absent argument
         Value::Array args;
+        args.reserve(size_t(argc));
         for (int i = 0; i < argc; ++i) {
             Value a;
             std::string why;
@@ -320,7 +321,7 @@ private:
                                          i + 1, why.c_str());
             args.push_back(std::move(a));
         }
-        const Result r = self->mHost.callAt(index, args);
+        const Result r = self->mHost.callAt(index, std::move(args));
         if (r.status == Status::Failed) return JS_ThrowPlainError(ctx, "%s", r.message.c_str());
         return toJs(ctx, r.value);
     }
