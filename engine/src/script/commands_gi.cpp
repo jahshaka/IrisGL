@@ -63,7 +63,7 @@ void registerGiCommands(Host &host, const Commands &k)
                                     "whole table for the quality's)");
               }
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.settable(c, s)) return Value();
               const std::string mode = c[1]["mode"].asString(), quality = c[1]["quality"].asString();
               int m = 0, q = 0;   // (the signature declared the choices: the host refused any other)
               for (int i = 0; i < 3; ++i) if (mode == kModes[i]) m = i;

@@ -478,7 +478,12 @@ namespace script {
 /// calling thread created (its commands are called inline), and its judgements into the host's verdict (a route
 /// declaration no frame asserted). THE HOST DIES BEFORE `engine`: its end destroys what its commands made (THE
 /// OWNERSHIP LAW: the scenes and views, and the nodes, meshes and materials made in a scene its owner handed in); a
-/// host ending after its engine calls nothing and is a named fault (a debug build aborts). A null `engine` (it did not start) still registers them: each FAILS with "the engine
+/// host ending after its engine calls nothing and is a named fault (a debug build aborts). WHAT IS HANDED IN (held by
+/// the owner's Registry::hold, unowned): a SCENE's own objects and settings are READ-ONLY to the script - a command
+/// changes or destroys only a node, mesh or material its own host made there (a handle is computable: the made record
+/// is the authority), and the scene's settings (ambient, GI) not at all; the script may make its own objects in it. A
+/// VIEW is the script's to drive (bind a scene, place, post-fx, declare, read), never to destroy; its owner restores
+/// its own state when it takes the view back. (Not built: a scene handed in WRITABLE - the app's, when it comes.) A null `engine` (it did not start) still registers them: each FAILS with "the engine
 /// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open (jahengine --test-doors);
 /// without it engine.arm FAILS on one.
 void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);

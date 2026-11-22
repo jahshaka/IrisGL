@@ -62,7 +62,8 @@ void registerSceneCommands(Host &host, const Commands &k)
             {target(handle("scene", kScene)), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
            "The scene's hemisphere ambient, {upper, lower}: the upper and the lower colour (linear RGB)."},
           [k](Call &c) -> Value {
-              if (Scene *s = k.scene(c, c[0])) s->setAmbient(toColour(c[1]["upper"]), toColour(c[1]["lower"]));
+              Scene *s = k.scene(c, c[0]);
+              if (s && k.settable(c, s)) s->setAmbient(toColour(c[1]["upper"]), toColour(c[1]["lower"]));
               return Value();
           });
     r.add({"engine.mesh.unitCube", {Access::Changes, {target(handle("scene", kScene))}, Kind::Int, kMesh},
@@ -79,7 +80,7 @@ void registerSceneCommands(Host &host, const Commands &k)
            "Destroys a mesh of the scene; its handle names nothing after (a node still drawing it stops)."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.mine(c, s, MadeKind::Mesh, Call::idOf(c[1]), "destroy")) return Value();
               if (!s->destroyMesh(MeshId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
               forgetMade(*k.st, s, MadeKind::Mesh, Call::idOf(c[1]));
               return Value(true);
@@ -110,7 +111,7 @@ void registerSceneCommands(Host &host, const Commands &k)
            "Destroys a material of the scene; its handle names nothing after."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.mine(c, s, MadeKind::Material, Call::idOf(c[1]), "destroy")) return Value();
               if (!s->destroyMaterial(MaterialId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
               forgetMade(*k.st, s, MadeKind::Material, Call::idOf(c[1]));
               return Value(true);

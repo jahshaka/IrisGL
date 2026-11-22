@@ -33,7 +33,10 @@
 // end), a node, mesh or material RECORDED by its scene and removed at the host's end (a scene the host's owner handed
 // in outlives the host; what a run made in it must not) - nodes first, then the meshes and materials they drew (trap
 // 1's order), then the views, then the scenes (the registry's reverse release). An object the host's OWNER handed in
-// (held unowned, by its owner's call) is never destroyed. THE HOST DIES BEFORE ITS ENGINE (registerEngineCommands'
+// (held unowned, by its owner's call) is never destroyed - and IN A HANDED-IN SCENE A SCRIPT CHANGES OR DESTROYS ONLY
+// WHAT ITS OWN HOST MADE (Commands::mine: the made record is the authority; the owner's nodes, meshes and materials are
+// read-only to it, and the scene's own settings too: Commands::settable); a handed-in VIEW is the script's to drive,
+// never to destroy. Every command that changes a node, mesh, material or a scene's settings asks them. THE HOST DIES BEFORE ITS ENGINE (registerEngineCommands'
 // contract): a host that ends after its engine is a named fault (stderr; it aborts a debug build) and calls nothing.
 #include "script/commands.h"
 
@@ -88,19 +91,42 @@ std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v)
     });
 }
 
-void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id) { st.made.push_back(MadeId{scene, kind, id}); }
+void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id) { st.made[scene].insert(madeKey(kind, id)); }
 
-void forgetMade(EngineState &st, const Scene *scene, MadeKind kind, std::uint32_t id)
+void forgetMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id)
 {
-    st.made.erase(std::remove_if(st.made.begin(), st.made.end(),
-                                 [&](const MadeId &m) { return m.scene == scene && m.kind == kind && m.id == id; }),
-                  st.made.end());
+    const auto it = st.made.find(scene);
+    if (it == st.made.end()) return;
+    it->second.erase(madeKey(kind, id));
+    if (it->second.empty()) st.made.erase(it);
 }
 
-void forgetScene(EngineState &st, const Scene *scene)
+void forgetScene(EngineState &st, Scene *scene) { st.made.erase(scene); }
+
+namespace {
+bool ownedBy(const EngineState &st, const Scene *s)
 {
-    st.made.erase(std::remove_if(st.made.begin(), st.made.end(), [&](const MadeId &m) { return m.scene == scene; }),
-                  st.made.end());
+    return std::any_of(st.ownedScenes.begin(), st.ownedScenes.end(),
+                       [s](const EngineState::OwnedScene &o) { return o.scene == s; });
+}
+}  // namespace
+
+bool Commands::mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const
+{
+    if (ownedBy(*st, s)) return true;
+    const auto it = st->made.find(s);
+    if (it != st->made.end() && it->second.count(madeKey(kind, id))) return true;
+    static const char *const kWord[] = {"node", "mesh", "material"};
+    c.fail(std::string(kWord[int(kind)]) + " " + std::to_string(id) + " is not this host's to " + verb + ": the scene '" +
+           s->name() + "' was handed in by the host's owner, and this host did not make it");
+    return false;
+}
+
+bool Commands::settable(Call &c, const Scene *s) const
+{
+    if (ownedBy(*st, s)) return true;
+    c.fail("the scene '" + s->name() + "' was handed in by the host's owner: its settings are not this host's to change");
+    return false;
 }
 
 bool Commands::frame(Call &c) const
@@ -196,12 +222,14 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     host.registry().atEnd([st] {
         if (!engineLive(*st)) return;
         for (const MadeKind kind : {MadeKind::Node, MadeKind::Mesh, MadeKind::Material})
-            for (auto it = st->made.rbegin(); it != st->made.rend(); ++it) {
-                if (it->kind != kind) continue;
-                if (kind == MadeKind::Node) it->scene->removeNode(NodeId(it->id));
-                else if (kind == MadeKind::Mesh) it->scene->destroyMesh(MeshId(it->id));
-                else it->scene->destroyMaterial(MaterialId(it->id));
-            }
+            for (const auto &[scene, keys] : st->made)
+                for (auto it = keys.rbegin(); it != keys.rend(); ++it) {   // (the highest id first)
+                    if (MadeKind(*it >> 32) != kind) continue;
+                    const std::uint32_t id = std::uint32_t(*it);
+                    if (kind == MadeKind::Node) scene->removeNode(NodeId(id));
+                    else if (kind == MadeKind::Mesh) scene->destroyMesh(MeshId(id));
+                    else scene->destroyMaterial(MaterialId(id));
+                }
         st->made.clear();
     });
     const Commands k(st);

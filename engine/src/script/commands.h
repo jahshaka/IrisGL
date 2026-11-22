@@ -7,7 +7,9 @@
 #include "jahshaka/engine/Script.h"
 #include "script/RouteDeclaration.h"
 
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,14 +23,11 @@ struct DeclaredRoutes {
     int frames = 0;
 };
 
-/// AN ENGINE OBJECT A COMMAND MADE by the engine's own id (a node, mesh or material) in `scene`: removed at the host's
-/// end (THE OWNERSHIP LAW: a scene the host's owner handed in outlives the host, and what a run made in it must not).
+/// AN ENGINE OBJECT A COMMAND MADE by the engine's own id (a node, mesh or material): removed at the host's end (THE
+/// OWNERSHIP LAW: a scene the host's owner handed in outlives the host, and what a run made in it must not), and the
+/// authority of what this host may change or destroy in a scene it does not own. Its key in a scene: kind << 32 | id.
 enum class MadeKind { Node, Mesh, Material };
-struct MadeId {
-    Scene *scene = nullptr;
-    MadeKind kind = MadeKind::Node;
-    std::uint32_t id = 0;
-};
+inline std::uint64_t madeKey(MadeKind kind, std::uint32_t id) { return std::uint64_t(kind) << 32 | id; }
 
 struct EngineState {
     Host *host = nullptr;
@@ -38,10 +37,10 @@ struct EngineState {
     std::vector<DeclaredRoutes> declared;
     std::size_t pictureBytes = 0;      // the live pictures' bytes (commands_picture.cpp: THE CAP)
     std::size_t pictureBytesCap = 0;   // the cap: the host's option (Host::Options::pictureBytesCap)
-    /// THE OWNERSHIP LAW (2b; commands_engine.cpp says it): the ids the commands made, in order; the scenes and views
-    /// the commands made (owned: destroyed at their release or the host's end - every other held one was handed in);
-    /// and whether the host's end found its engine gone (then nothing calls into it).
-    std::vector<MadeId> made;
+    /// THE OWNERSHIP LAW (2b; commands_engine.cpp says it): the ids the commands made, by scene (madeKey); the scenes
+    /// and views the commands made (owned: destroyed at their release or the host's end - every other held one was
+    /// handed in); and whether the host's end found its engine gone (then nothing calls into it).
+    std::map<Scene *, std::set<std::uint64_t>> made;
     /// A scene a command made, and its clock: the serial of the grid steps this host stamped (THE FRAME's PUBLIC DOOR,
     /// Commands::frame: +1 a frame, the scene's one clock writer).
     struct OwnedScene {
@@ -89,6 +88,12 @@ public:
     /// the call FAILED by name, past the live pictures' cap; roomForPicture: the cap's check alone (before a copy).
     Value holdPicture(Call &c, Image img) const;
     bool roomForPicture(Call &c, std::size_t bytes) const;
+    /// THE OWNERSHIP LAW AT A CHANGE (2b's final read L-a; the lead's ruling): a command that CHANGES or DESTROYS a
+    /// node, mesh or material (`verb`: "change" / "destroy") may act on every one of a scene this host made, and in a
+    /// scene its owner handed in ONLY on one this host made there - else the call FAILS by name, false. settable: a
+    /// command that changes a SCENE's own settings acts only on a scene this host made (a handed-in one FAILS).
+    bool mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const;
+    bool settable(Call &c, const Scene *s) const;
 
     std::shared_ptr<EngineState> st;
 };
@@ -100,8 +105,8 @@ std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v)
 /// The made id of `kind` recorded (made) or forgotten (destroyed by its command); forgetScene: every one of a scene
 /// (destroyed with it).
 void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
-void forgetMade(EngineState &st, const Scene *scene, MadeKind kind, std::uint32_t id);
-void forgetScene(EngineState &st, const Scene *scene);
+void forgetMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
+void forgetScene(EngineState &st, Scene *scene);
 /// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
 constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material",
                      *kPicture = "picture";

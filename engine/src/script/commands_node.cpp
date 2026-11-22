@@ -21,7 +21,7 @@ void registerNodeCommands(Host &host, const Commands &k)
            "nothing after."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "destroy")) return Value();
               if (!s->removeNode(NodeId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
               forgetMade(*k.st, s, MadeKind::Node, Call::idOf(c[1]));
               return Value(true);
@@ -33,7 +33,7 @@ void registerNodeCommands(Host &host, const Commands &k)
            "Draws {mesh: mesh id, material: material id} at the node."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "change")) return Value();
               if (!s->attachMesh(NodeId(Call::idOf(c[1])), MeshId(Call::idOf(c[2]["mesh"])),
                                  MaterialId(Call::idOf(c[2]["material"]))))
                   return c.refuse(k.st->engine->lastError());
@@ -49,7 +49,7 @@ void registerNodeCommands(Host &host, const Commands &k)
            "identity's."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
-              if (!s) return Value();
+              if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "change")) return Value();
               const Value::Array &q = c[2]["rotation"].asArray();
               s->setNodeTransform(NodeId(Call::idOf(c[1])), toVec3(c[2]["position"]),
                                   Quat(float(q[0].asNumber()), float(q[1].asNumber()), float(q[2].asNumber()),
@@ -83,6 +83,8 @@ void registerNodeCommands(Host &host, const Commands &k)
                                     " nodes");
               Scene *s = k.scene(c, c[0]);
               if (!s) return Value();
+              for (const Value &n : nodes)   // (every node before any moves)
+                  if (!k.mine(c, s, MadeKind::Node, Call::idOf(n), "change")) return Value();
               const auto at = [](const Value &v, std::size_t i) { return float(v.asArray()[i].asNumber()); };
               for (std::size_t i = 0; i < nodes.size(); ++i)
                   s->setNodeTransform(NodeId(Call::idOf(nodes[i])),
