@@ -4,7 +4,6 @@
 #include "HlmsAtom.h"
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -1323,15 +1322,6 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
-        // GIZMO-ORDER-1 MEASURING ARM (reverted by its own commit): the on-top items' VAO sort fields.
-        if (renderQueueFor(tit->second) == kOverlayRenderQueue)
-            for (size_t si = 0; si < n.item->getNumSubItems(); ++si) {
-                const Ogre::VertexArrayObject *vao = n.item->getSubItem(si)->getVaos(Ogre::VpNormal)[0];
-                std::fprintf(stderr, "GIZMO-ARM engine node=%llu mesh=%u mat=%u sub=%zu rqid=%u vaoName=%u\n",
-                             (unsigned long long)id, unsigned(meshId), unsigned(matId), si,
-                             unsigned(vao->getRenderQueueId()), unsigned(vao->getVaoName()));
-                std::fflush(stderr);
-            }
         n.node->attachObject(n.item);
         // A NODE THAT IS HIDDEN STAYS HIDDEN when it is given geometry:
         // SceneNode::setVisible only walks the objects attached AT THE TIME, so
