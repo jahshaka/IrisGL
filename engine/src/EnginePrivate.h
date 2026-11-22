@@ -3229,7 +3229,9 @@ TextureCache &textureCache();
 //      ToCache(true) then microcode -> Hlms disk caches. Placed inside
 //      ensureHlms() after both registerHlms calls and before any shader can
 //      compile, mirroring Samples/2.0/Common/src/GraphicsSystem.cpp:626-692.
-//   6. Size cap with a generation reset — the microcode map never evicts.
+//   6. A size cap held by EVICTION: a save whose layers would pass it drops whole
+//      entries, least recently used first, never this launch's (EntryUses.h);
+//      age alone drops nothing. A wipe only backs it up.
 //   7. A load failure is never fatal. Log, clear, continue cold.
 //   8. THE SEED (COLD-BOOT-1 S1) is a read-only fallback for the microcode layer
 //      alone: read when the directory has no valid microcode layer, in that
@@ -3361,9 +3363,9 @@ public:
 private:
     /// `key` is the hex of the file's LAYER key when it was written (CS-1).
     struct Entry { std::string name; unsigned long long bytes = 0; std::string hash; std::string key; };
-    /// One dispatched save: the serialized layers, waiting for the writer
-    /// thread. `blobs` is parallel to `names`; `compileCount` is the counter
-    /// reading this write makes true once it lands.
+    /// One dispatched save: the layers' copies, waiting for the writer
+    /// thread; `compileCount` is the counter reading this write makes true
+    /// once it lands.
     struct PendingWrite {
         /// THE COPIES, serialized on the writer (stage 4): each dirty Hlms' disk-cache object BY REFERENCE (the
         /// ShaderCache's own, mCopy — the render thread appends to them only while no write is in flight, the
@@ -3372,18 +3374,15 @@ private:
         std::vector<std::pair<std::string, Ogre::HlmsDiskCache *>> hlms;
         bool                                    microcodeDirty = false;
         Ogre::GpuProgramManager::MicrocodeMap   microcode;
-        /// THE STAMPS (F10): the launch, the table read at load, and what each layer used this launch - the microcode
-        /// map's used keys and the compute records' (every save carries every layer: the writer stamps them all and
-        /// rewrites a layer that is dirty or loses an entry). `hlmsDirty` is parallel to `hlms`.
+        /// THE STAMPS (F10): the launch, the table the last write left, and what each layer used this launch - the
+        /// microcode map's used keys and the compute records' (every job carries every layer: the writer stamps them all
+        /// and rewrites a layer that is dirty or loses an entry to the size cap). `hlmsDirty` is parallel to `hlms`.
         std::uint32_t                           launch = 0;
         UseTable                                uses;
         Ogre::GpuProgramManager::HashSet        microcodeUsed;
         std::vector<ComputeKey128>              computeUsed;
         std::vector<bool>                       hlmsDirty;
-        Ogre::RenderSystem                     *rs = nullptr;
-        /// ...and the bytes the writer makes of them, before the atomic writes.
-        std::vector<std::string>       names;
-        std::vector<std::vector<char>> blobs;
+        Ogre::RenderSystem                     *rs = nullptr;   ///< null: no pipeline blob (no dirty layer, a lost device)
         unsigned                       compileCount = 0;
         unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
         /// The compute layer's records (shared, immutable) and the store's generation they are, when it moved.
@@ -3402,6 +3401,7 @@ private:
     std::unique_ptr<Ogre::HlmsDiskCache> mCopy[Ogre::HLMS_MAX];   ///< one per Hlms type, alive across saves
     unsigned     mCopyMask = 0u;          ///< the Hlms types this save copies
     unsigned     mCopyDirtyMask = 0u;     ///< ...of which dirty (F10: the others are copied to stamp their recipes)
+    bool         mCopyLayersDirty = false;   ///< this save's job has a dirty layer (false: the stamps' own job)
     bool         mCopyInProgress = false;
     bool         mStepMark = false;
     Ogre::Root  *mCopyRoot = nullptr;
@@ -3434,10 +3434,10 @@ private:
     bool  readManifest(std::vector<Entry> &filesOut, bool adopt = true) const;
     /// The same parser on ANY directory's manifest (the seed's), adopting nothing.
     static bool readManifestAt(const std::string &dir, std::vector<Entry> &filesOut, long long *saved,
-                               unsigned *shaders, std::uint32_t *launch = nullptr);
+                               unsigned *shaders);
     /// `shaders` is passed rather than read from mExpectedShaders: the writer
     /// thread calls this, and the member belongs to the caller's thread.
-    bool  writeManifest(const std::vector<Entry> &files, unsigned shaders, std::uint32_t launch) const;
+    bool  writeManifest(const std::vector<Entry> &files, unsigned shaders) const;
     /// Reads `name`, checks it against the manifest entry, and returns the bytes.
     /// Empty on any mismatch — the caller then wipes.
     bool  readVerified(const Entry &e, std::vector<char> &out) const;
@@ -3475,14 +3475,15 @@ private:
     unsigned                       mComputeRecordsLoaded = 0, mComputeRecordsRejected = 0, mComputeRecordsStale = 0;
     std::atomic<std::uint64_t>     mSavedAtComputeGeneration { 0 };
     bool                           mForceCompute = false;   ///< clear(): the next save writes the store's records back
-    /// THE LAST-USED STAMPS (SHADER-SYSTEM-1 F10; EntryUses.h): this launch's number (the manifest's last + 1), the
-    /// table load() read (empty when the sidecar was missing or damaged: nothing is pruned, it is rebuilt), and whether a
-    /// write of this launch has stamped it yet (dirty() asks once a launch).
+    /// THE LAST-USED STAMPS (SHADER-SYSTEM-1 F10; EntryUses.h): this launch's number (the sidecar's last + 1), the
+    /// table the last write left (load()'s read, empty when the sidecar was missing or damaged: every entry is stamped
+    /// with this launch and it is rebuilt; the writer replaces it after each sidecar write - no write is in flight when
+    /// saveStep reads it), and the stamps' signal at the last job (kNoUsesJob: none yet this launch - saveStep).
+    static constexpr std::uint64_t kNoUsesJob = ~std::uint64_t(0);
     std::uint32_t                  mLaunch = 1u;
     UseTable                       mUses;
     std::string                    mUsesState = "absent";
-    std::atomic<bool>              mUsesWritten { false };
-    std::atomic<unsigned>          mEntriesPruned { 0u };   ///< the last write's dropped entries, every layer
+    std::uint64_t                  mUsesSignalAt = kNoUsesJob;
     /// load()'s half for compute.bin: parse, reject, keep the rest for prewarmCompute (which prunes the stale).
     void loadCompute(const std::vector<char> &bytes);
     void composeFingerprint();

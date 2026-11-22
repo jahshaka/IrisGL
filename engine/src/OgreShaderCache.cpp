@@ -11,8 +11,8 @@
 //    GENERATED source (OgreVulkanProgram.cpp:169-172) and template-hashes the
 //    Hlms cache (OgreHlms.cpp:418-449, which walks our Hlms/Jahshaka library
 //    folder too). A second source of truth would be a second bug farm.
-//  * evict. The microcode map only grows; the size cap wipes the whole
-//    generation instead of maintaining an LRU we would have to get right.
+//  * drop by age. An entry leaves only when a save would pass the size cap,
+//    the least recently used first (EntryUses.h; runWrite).
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
 #include "ShaderCacheKeys.h"
@@ -53,6 +53,7 @@
 #include <execinfo.h>
 #include <algorithm>
 #include <map>
+#include <set>
 #include <OgreResourceGroupManager.h>
 
 #include "core/threadbudget.h"   // the boot apply's width (THREADING-1)
@@ -103,12 +104,13 @@ Layer layerOf(const std::string &name) {
 #define JAH_GLSLANG_VERSION_TERM std::string("unknown")
 #endif
 
-// Directory size cap (§4.3 rule 6): EngineConfig::shaderCacheMaxBytes, held in mMaxBytes. On exceed we
-// wipe and re-warm rather than evict: the microcode map has no eviction upstream, and an LRU we maintain
-// ourselves is a correctness risk for derived data.
+// The size cap (§4.3 rule 6): EngineConfig::shaderCacheMaxBytes, held in mMaxBytes, against the bytes of the layers a
+// save's manifest names. Over it the save EVICTS whole entries, least recently used first (runWrite); a wipe only backs
+// that up.
 
 constexpr const char *kManifest = "cache-manifest.txt";
-/// The entries' last-used stamps (F10, EntryUses.h): a file of ours beside the layers, self-checked, never in the manifest.
+/// The entries' last-used stamps and the launch counter (EntryUses.h): a file of ours beside the layers, self-checked,
+/// never in the manifest (a launch that only moved a stamp writes this file alone).
 constexpr const char *kEntryUses = "entry-uses.bin";
 constexpr const char *kLockFile = "cache.lock";
 
@@ -436,24 +438,21 @@ void ShaderCache::applyLayerKeys() {
 }
 
 // THE LAST-USED STAMPS (SHADER-SYSTEM-1 F10; EntryUses.h says why).
-bool keepByUse(const UseTable &previous, UseTable &next, const UseKey &key, bool used, std::uint32_t launch) {
-    std::uint32_t stamp = launch;
-    if (!used) {
-        const auto it = previous.find(key);
-        if (it != previous.end() && it->second <= launch) stamp = it->second;
-    }
-    if (launch - stamp >= kUnusedLaunches) return false;
-    next[key] = stamp;
-    return true;
+std::uint32_t stampByUse(const UseTable &previous, const UseKey &key, bool used, std::uint32_t launch) {
+    if (used) return launch;
+    const auto it = previous.find(key);
+    return it != previous.end() && it->second <= launch ? it->second : launch;
 }
 
 namespace {
-constexpr char kUsesMagic[8] = { 'J', 'A', 'H', 'U', 'S', 'E', 'S', '1' };
+/// "JAHUSES2": the launch counter rides the table (the final read's ruling). A "JAHUSES1" table is not read.
+constexpr char kUsesMagic[8] = { 'J', 'A', 'H', 'U', 'S', 'E', 'S', '2' };
 }  // namespace
 
-std::vector<char> writeUseTable(const UseTable &table) {
+std::vector<char> writeUseTable(const UseTable &table, std::uint32_t launch) {
     std::vector<char> v(kUsesMagic, kUsesMagic + sizeof kUsesMagic);
     auto raw = [&v](const void *p, size_t n) { v.insert(v.end(), (const char *)p, (const char *)p + n); };
+    raw(&launch, sizeof launch);
     const std::uint64_t count = table.size();
     raw(&count, sizeof count);
     for (const auto &e : table) {
@@ -468,12 +467,15 @@ std::vector<char> writeUseTable(const UseTable &table) {
     return v;
 }
 
-bool readUseTable(const char *data, std::size_t size, UseTable &out) {
+bool readUseTable(const char *data, std::size_t size, UseTable &out, std::uint32_t &launch) {
     out.clear();
-    constexpr std::size_t kEntry = 1 + 8 + 8 + 4, kHead = sizeof kUsesMagic + 8, kSum = 16;
+    launch = 0u;
+    constexpr std::size_t kEntry = 1 + 8 + 8 + 4, kHead = sizeof kUsesMagic + 4 + 8, kSum = 16;
     if (size < kHead + kSum || std::memcmp(data, kUsesMagic, sizeof kUsesMagic) != 0) return false;
     std::uint64_t count = 0;
-    std::memcpy(&count, data + sizeof kUsesMagic, sizeof count);
+    std::uint32_t written = 0;
+    std::memcpy(&written, data + sizeof kUsesMagic, sizeof written);
+    std::memcpy(&count, data + sizeof kUsesMagic + 4, sizeof count);
     if (count > (size - kHead - kSum) / kEntry || kHead + count * kEntry + kSum != size) return false;
     std::uint64_t sum[2] = { 0u, 0u }, stored[2] = { 0u, 0u };
     Ogre::MurmurHash3_x64_128(data, int(size - kSum), Ogre::IdString::Seed, sum);
@@ -489,6 +491,7 @@ bool readUseTable(const char *data, std::size_t size, UseTable &out) {
         std::memcpy(&stamp, p + 17, 4);
         out[k] = stamp;
     }
+    launch = written;
     return true;
 }
 
@@ -642,26 +645,22 @@ void ShaderCache::releaseLock() {
 bool ShaderCache::readManifest(std::vector<Entry> &filesOut, bool adopt) const {
     long long saved = 0;
     unsigned shaders = 0;
-    std::uint32_t launch = 0;
-    if (!readManifestAt(mDir, filesOut, &saved, &shaders, &launch)) return false;
+    if (!readManifestAt(mDir, filesOut, &saved, &shaders)) return false;
     if (adopt) {
         const_cast<ShaderCache *>(this)->mLastSavedUnixMs = saved;
         const_cast<ShaderCache *>(this)->mExpectedShaders = shaders;
-        // THE LAUNCH COUNT (F10): this launch is the last saved one's next.
-        const_cast<ShaderCache *>(this)->mLaunch = launch + 1u;
     }
     return true;
 }
 
 bool ShaderCache::readManifestAt(const std::string &dir, std::vector<Entry> &filesOut, long long *savedOut,
-                                 unsigned *shadersOut, std::uint32_t *launchOut) {
+                                 unsigned *shadersOut) {
     std::ifstream f(dir + "/" + kManifest);
     if (!f) return false;
     std::string line;
     bool header = false;
     long long saved = 0;
     unsigned shaders = 0;
-    std::uint32_t launch = 0;
     while (std::getline(f, line)) {
         std::istringstream ls(line);
         std::string tag;
@@ -669,7 +668,6 @@ bool ShaderCache::readManifestAt(const std::string &dir, std::vector<Entry> &fil
         if (tag == "jahshaka-shader-cache") { int v = -1; ls >> v; header = (v == kCacheFormat); }
         else if (tag == "saved")    ls >> saved;
         else if (tag == "shaders")  ls >> shaders;
-        else if (tag == "launch")   ls >> launch;
         else if (tag == "file") {
             Entry e{};
             ls >> e.name >> e.bytes >> e.hash >> e.key;
@@ -684,16 +682,14 @@ bool ShaderCache::readManifestAt(const std::string &dir, std::vector<Entry> &fil
     if (!header) return false;
     if (savedOut) *savedOut = saved;
     if (shadersOut) *shadersOut = shaders;
-    if (launchOut) *launchOut = launch;
     return true;
 }
 
-bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shaders, std::uint32_t launch) const {
+bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shaders) const {
     std::ostringstream o;
     o << "jahshaka-shader-cache " << kCacheFormat << "\n"
       << "saved " << nowUnixMs() << "\n"
-      << "shaders " << shaders << "\n"
-      << "launch " << launch << "\n";
+      << "shaders " << shaders << "\n";
     for (const Entry &e : files)
         o << "file " << e.name << " " << e.bytes << " " << e.hash << " " << e.key << "\n";
     const std::string s = o.str();
@@ -773,8 +769,8 @@ bool ShaderCache::clear() {
     mHlmsLoaded = 0;
     mMicrocodeAtLoad = 0;
     mComputeRecordsLoaded = mComputeRecordsRejected = mComputeRecordsStale = 0;
-    mUses.clear();   // (F10) the stamps went with the files: the next write rebuilds them, pruning nothing
-    mUsesWritten.store(false);
+    mUses.clear();   // (F10) the stamps went with the files: the next write rebuilds them, evicting nothing
+    mUsesSignalAt = kNoUsesJob;
     mForceCompute = true;   // the store still holds its records: the next save writes them back
     // The next save must WRITE, even though nothing has compiled since the last
     // one — the files it would have skipped as "already on disk" are gone.
@@ -917,21 +913,23 @@ void ShaderCache::load(Ogre::Root *root) {
     if (!mkpath(mDir)) { logLine("cannot create " + mDir + " — cache disabled"); mEnabled = false; return; }
     acquireLock();
 
-    // THE LAST-USED STAMPS (F10): read whole and checked, or none at all - a missing or damaged table prunes nothing
-    // this launch and is rebuilt by its first write.
+    // THE LAST-USED STAMPS AND THE LAUNCH COUNTER (EntryUses.h): read whole and checked, or none at all - a missing,
+    // damaged or older table stamps every entry with this launch (nothing is evictable) and is rebuilt by its first write.
     {
         mUses.clear();
-        mUsesWritten.store(false);
+        mUsesSignalAt = kNoUsesJob;
+        std::uint32_t written = 0u;
         std::vector<char> bytes;
         if (!readWholeFile(path(kEntryUses), bytes)) mUsesState = "absent";
-        else if (readUseTable(bytes.data(), bytes.size(), mUses)) mUsesState = "loaded";
+        else if (readUseTable(bytes.data(), bytes.size(), mUses, written)) mUsesState = "loaded";
         else {
             mUses.clear();
             mUsesState = "damaged";
-            logLine(std::string(kEntryUses) + ": damaged - nothing is pruned this launch; the table is rebuilt");
+            logLine(std::string(kEntryUses) + ": damaged or of an older format - not read; every entry counts as used "
+                    "this launch and the table is rebuilt");
         }
+        mLaunch = written + 1u;
     }
-    mLaunch = 1u;   // readManifest adopts the saved launch's next
 
     // WHICH KEYS THIS RUN READS AT (URGENT #126, HARNESS-4): one line per boot naming the directory and this build's
     // three layer keys, so every app, lab and fixture log says which shaders it measured; a dropped layer's line below
@@ -1178,9 +1176,7 @@ void ShaderCache::noteEnginePipeline(double ms, const char *name) {
 
 bool ShaderCache::dirty(Ogre::Root *root) const {
     if (!mEnabled || !mWriter || !root) return false;
-    // THE STAMPS ARE WRITTEN ONCE A LAUNCH (F10): what this launch used is stamped even when nothing compiled - else an
-    // entry used every launch would age as if unused between two launches that compiled something.
-    if (!mUsesWritten.load()) return true;
+    // (The entries' stamps are no layer's dirt: saveStep writes them by their own signal, the sidecar alone.)
     // Nothing has compiled since the last successful write. Ogre's own dirty
     // flags do NOT settle after a save (saveMicrocodeCache early-returns on a
     // clean cache but never clears the flag), so without this the clean-quit
@@ -1254,7 +1250,19 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
             return false;
         }
         if (!mWriter && !acquireLock()) return false;   // read-only run: not an error
-        if (!mForceSave && !dirty(root)) return true;    // nothing new — a no-op, not a failure
+        // THE STAMPS' OWN SIGNAL (the final read's ruling: they are no layer's dirt): what can mark an entry used - a
+        // shader compiled or served from the microcode map, a pipeline created (a found recipe's draw, a compute job's
+        // first dispatch), a compute record filed. A job runs when a layer is dirty, at a launch's first save, or when
+        // the signal moved since the last job; a job with no dirty layer writes the sidecar alone, and only when a stamp
+        // moved (runWrite).
+        const Ogre::RenderSystem::JahCompileCosts costs = Ogre::RenderSystem::getJahCompileCosts();
+        const std::uint64_t usesSignal = (mCounter ? std::uint64_t(mCounter->compiled.load()) + mCounter->fromCache.load()
+                                                   : 0u) +
+                                         costs.graphicsPsos + costs.computePsos + sEnginePipelines.load() +
+                                         (mComputeStore ? mComputeStore->generation() : 0u);
+        mCopyLayersDirty = mForceSave || dirty(root);
+        if (!mCopyLayersDirty && usesSignal == mUsesSignalAt) return true;   // nothing new — a no-op, not a failure
+        mUsesSignalAt = usesSignal;
         mForceSave = false;
         // The DIRECTORY may not exist: app.clearShaderCache() removes it whole (the host's half deletes
         // recursively), and the clean-quit save that follows has to be able to write the session's shaders back
@@ -1263,14 +1271,13 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         if (!mkpath(mDir)) { logLine("cannot recreate " + mDir + " — nothing saved"); return false; }
         mCopyMask = 0u;
         mCopyDirtyMask = 0u;
-        // (F10) The launch's first write copies EVERY Hlms: its recipes' use flags are stamped (the writer rewrites a
-        // layer only if it is dirty or loses a recipe).
-        const bool stampAll = !mUsesWritten.load();
+        // (F10) Every job copies EVERY Hlms (incrementally: only what is new since the last copy, and the use flags):
+        // its recipes are stamped and may be evicted; the writer rewrites a layer only if it is dirty or loses a recipe.
         if (hm)
             for (int i = Ogre::HLMS_LOW_LEVEL + 1; i < Ogre::HLMS_MAX; ++i)
                 if (Ogre::Hlms *h = hm->getHlms(static_cast<Ogre::HlmsTypes>(i))) {
-                    if (h->isShaderCodeCacheDirty()) mCopyDirtyMask |= 1u << unsigned(i);
-                    if (stampAll || h->isShaderCodeCacheDirty()) mCopyMask |= 1u << unsigned(i);
+                    if (mCopyLayersDirty && h->isShaderCodeCacheDirty()) mCopyDirtyMask |= 1u << unsigned(i);
+                    mCopyMask |= 1u << unsigned(i);
                 }
         mCopyInProgress = true;
         mCopyRoot = root;
@@ -1327,18 +1334,18 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
             job->hlms.emplace_back("hlms." + std::to_string(i) + ".bin", mCopy[i].get());
             job->hlmsDirty.push_back((mCopyDirtyMask & (1u << unsigned(i))) != 0u);
         }
-    // THE MICROCODE MAP, every write (F10): a snapshot of shared pointers and its used keys, in one lock; written when
-    // dirty or when the writer drops an entry no launch used for kUnusedLaunches.
+    // THE MICROCODE MAP, every job (F10): a snapshot of shared pointers and its used keys, in one lock; written when
+    // dirty or when the writer evicts an entry. (A job with no dirty layer - the stamps' own - rewrites no layer.)
     Ogre::GpuProgramManager &gpm = Ogre::GpuProgramManager::getSingleton();
     gpm.copyMicrocodeCache(job->microcode, job->microcodeUsed);
-    job->microcodeDirty = gpm.isCacheDirty();
+    job->microcodeDirty = mCopyLayersDirty && gpm.isCacheDirty();
     job->launch = mLaunch;
-    job->uses = mUses;
+    job->uses = mUses;   // the table the last write left (the writer updates it; no write is in flight here)
     // A LOST DEVICE IS NOT READ (the read's item 5): after the engine latched a loss, the writer serializes the CPU
     // copies only — no vkGetPipelineCacheData against a dead device. (Its destruction is not reachable while the
     // writer runs: the fork never recreates a lost device and no forced election exists — validateDevice(true) has
     // no caller — and the teardown joins the writer before the render system goes; finishWrites, OgreEngine.cpp.)
-    job->rs = mDeviceGone ? nullptr : rs;
+    job->rs = mDeviceGone || !mCopyLayersDirty ? nullptr : rs;
     // THE SPLASH DENOMINATOR, and it is LAST-RUN, not all-time (audit F6).
     // shaderbuildgate.h:26-29 promises "the run that wrote the cache recorded
     // how many shaders it needed", and std::max broke that promise in one
@@ -1409,6 +1416,10 @@ bool ShaderCache::runWrite(PendingWrite &job) {
     // are about to produce). The render thread is not touching the copies (the skip law) and the pipeline cache
     // needs no external synchronisation (vk.xml); the microcode is a snapshot of immutable blobs.
     const auto serializeStart = std::chrono::steady_clock::now();
+    // The manifest this write replaces: its files are carried forward, and an unchanged pipeline blob is not rewritten.
+    std::vector<Entry> previous;
+    readManifest(previous, /*adopt*/ false);   // the writer thread: never publish
+    std::map<std::string, std::vector<char>> out;   // the files this write rewrites, by name
     auto serialize = [&](const std::string &name, const std::function<void(Ogre::DataStreamPtr &)> &writer) {
         // Named for the file these bytes END UP IN (F11): a log line from inside Ogre's writer names something
         // that exists.
@@ -1417,98 +1428,156 @@ bool ShaderCache::runWrite(PendingWrite &job) {
         writer(s);
         s->close();
         std::vector<char> bytes = mem->take();
-        if (bytes.empty()) return;
-        job.names.push_back(name);
-        job.blobs.push_back(std::move(bytes));
+        if (!bytes.empty()) out[name] = std::move(bytes);
     };
-    // THE LAST-USED STAMPS (F10, EntryUses.h): every entry of every layer the job carries is stamped (used this launch,
-    // or kept at its stamp) into `next`; an entry no launch used for kUnusedLaunches is dropped, and a layer that drops
-    // one is rewritten whether or not it is dirty. `next` is the table written.
+    // THE STAMPS (EntryUses.h): every entry of every layer the job carries, used this launch or kept at its last use,
+    // into `next` (the table written); `held` names each (layer, stamp) that holds an entry - the eviction's index.
     UseTable next;
-    unsigned pruned = 0;
+    std::set<std::pair<std::uint8_t, std::uint32_t>> held;
+    auto stamp = [&](const UseKey &k, bool used) {
+        const std::uint32_t s = stampByUse(job.uses, k, used, job.launch);
+        next[k] = s;
+        held.insert({ k.layer, s });
+    };
+    auto hlmsLayer = [&](size_t i) { return std::uint8_t(kUsesHlmsBase + std::atoi(job.hlms[i].first.c_str() + 5)); };
+    for (size_t i = 0; i < job.hlms.size(); ++i) {
+        const std::uint8_t layer = hlmsLayer(i);
+        job.hlms[i].second->jahEntries(
+            [&](const Ogre::uint64 key[2], bool used) { stamp(UseKey{ layer, key[0], key[1] }, used); });
+    }
+    for (const auto &e : job.microcode)
+        stamp(UseKey{ kUsesMicrocode, e.first.hashVal[0], e.first.hashVal[1] }, job.microcodeUsed.count(e.first) != 0);
+    std::sort(job.computeUsed.begin(), job.computeUsed.end());
+    for (const ComputeRecordPtr &r : job.compute)
+        stamp(UseKey{ kUsesCompute, r->inputKey[0], r->inputKey[1] },
+              std::binary_search(job.computeUsed.begin(), job.computeUsed.end(), r->inputKey));
+
+    // A LAYER's BYTES, keeping the entries last used AFTER launch `below` (0 keeps every one: a stamp is >= 1).
+    auto kept = [&](const UseKey &k, std::uint32_t below) {
+        const auto it = next.find(k);
+        return it == next.end() || it->second > below;
+    };
+    auto writeHlms = [&](size_t i, std::uint32_t below) {
+        const std::uint8_t layer = hlmsLayer(i);
+        serialize(job.hlms[i].first, [&](Ogre::DataStreamPtr &s) {
+            job.hlms[i].second->saveTo(
+                s, [&](const Ogre::uint64 key[2], bool) { return kept(UseKey{ layer, key[0], key[1] }, below); });
+        });
+    };
+    auto writeMicrocode = [&](std::uint32_t below) {
+        Ogre::GpuProgramManager::MicrocodeMap map;
+        for (const auto &e : job.microcode)
+            if (kept(UseKey{ kUsesMicrocode, e.first.hashVal[0], e.first.hashVal[1] }, below)) map.insert(e);
+        serialize("microcode.cache", [&](Ogre::DataStreamPtr &s) { Ogre::GpuProgramManager::saveMicrocodeCache(s, map); });
+    };
+    auto writeCompute = [&](std::uint32_t below) {
+        std::vector<ComputeRecordPtr> records;
+        for (const ComputeRecordPtr &r : job.compute)
+            if (kept(UseKey{ kUsesCompute, r->inputKey[0], r->inputKey[1] }, below)) records.push_back(r);
+        out["compute.bin"] = writeComputeLayer(records);
+    };
+    // A file of the manifest this write carries forward: not rewritten, its layer's key current, still on disk.
+    auto carried = [&](const Entry &p) {
+        struct stat st {};
+        return !out.count(p.name) && p.key == layerKeyFor(p.name) && ::stat(path(p.name).c_str(), &st) == 0;
+    };
+    // THE TOTAL THE SIZE CAP IS HELD AGAINST: the bytes of the layers the manifest will name, rewritten or carried.
+    auto total = [&]() {
+        unsigned long long t = 0;
+        for (const auto &o : out) t += o.second.size();
+        for (const Entry &p : previous)
+            if (carried(p)) t += p.bytes;
+        return t;
+    };
+    std::uint32_t below = 0u;
     try {
-        for (size_t i = 0; i < job.hlms.size(); ++i) {
-            auto &h = job.hlms[i];
-            const std::uint8_t layer = std::uint8_t(kUsesHlmsBase + std::atoi(h.first.c_str() + 5));
-            std::vector<UseKey> drop;
-            h.second->jahEntries([&](const Ogre::uint64 key[2], bool used) {
-                const UseKey k{ layer, key[0], key[1] };
-                if (!keepByUse(job.uses, next, k, used, job.launch)) drop.push_back(k);
-            });
-            pruned += unsigned(drop.size());
-            if (!job.hlmsDirty[i] && drop.empty()) continue;   // unchanged: its file is carried forward
-            std::sort(drop.begin(), drop.end());
-            serialize(h.first, [&](Ogre::DataStreamPtr &s) {
-                h.second->saveTo(s, [&](const Ogre::uint64 key[2], bool) {
-                    return !std::binary_search(drop.begin(), drop.end(), UseKey{ layer, key[0], key[1] });
-                });
-            });
+        for (size_t i = 0; i < job.hlms.size(); ++i)
+            if (job.hlmsDirty[i]) writeHlms(i, 0u);
+        if (job.microcodeDirty) writeMicrocode(0u);
+        // The pipeline blob has no dirty flag: a job with a dirty layer serializes it, and it is rewritten only when its
+        // bytes moved (a warm launch's pipelines are the driver cache's own hits: the same bytes, measured at
+        // FE/ctl c -> c2). vkGetPipelineCacheData is documented as fragile if called too close to PSO creation, which is
+        // why a save only ever runs on a settled burst or on shutdown, never on a timer during a compile storm (§4.4).
+        if (job.rs) {
+            serialize("pipeline.cache", [&](Ogre::DataStreamPtr &s) { job.rs->savePipelineCache(s); });
+            const auto it = out.find("pipeline.cache");
+            if (it != out.end())
+                for (const Entry &p : previous)
+                    if (p.name == it->first && p.key == layerKeyFor(p.name) && p.bytes == it->second.size() &&
+                        p.hash == hex128(it->second.data(), it->second.size())) {
+                        out.erase(it);
+                        break;
+                    }
         }
-        {
-            unsigned droppedHere = 0;
-            for (auto it = job.microcode.begin(); it != job.microcode.end();) {
-                const UseKey k{ kUsesMicrocode, it->first.hashVal[0], it->first.hashVal[1] };
-                if (keepByUse(job.uses, next, k, job.microcodeUsed.count(it->first) != 0, job.launch)) ++it;
-                else { it = job.microcode.erase(it); ++droppedHere; }
+        if (job.computeDirty) writeCompute(0u);
+        // THE SIZE CAP (the final read's ruling): AGE ALONE NEVER DROPS AN ENTRY. Only when the layers would pass
+        // mMaxBytes are whole stamps evicted, the oldest first and never this launch's, each layer that held the stamp
+        // re-serialized, until the total is under the cap. pipeline.cache is not entry-evictable: it counts, it stays.
+        if (total() > mMaxBytes) {
+            std::set<std::uint32_t> older;
+            for (const auto &h : held)
+                if (h.second < job.launch) older.insert(h.second);
+            for (const std::uint32_t s : older) {
+                below = s;
+                for (size_t i = 0; i < job.hlms.size(); ++i)
+                    if (held.count({ hlmsLayer(i), s })) writeHlms(i, below);
+                if (held.count({ kUsesMicrocode, s })) writeMicrocode(below);
+                if (held.count({ kUsesCompute, s })) writeCompute(below);
+                if (total() <= mMaxBytes) break;
             }
-            pruned += droppedHere;
-            if (job.microcodeDirty || droppedHere)
-                serialize("microcode.cache", [&](Ogre::DataStreamPtr &s) {
-                    Ogre::GpuProgramManager::saveMicrocodeCache(s, job.microcode);
-                });
-        }
-        // No dirty flag exists for the pipeline blob and it is cheap; always rewritten. vkGetPipelineCacheData is
-        // documented as fragile if called too close to PSO creation, which is why a save only ever runs on a
-        // settled burst or on shutdown, never on a timer during a compile storm (§4.4).
-        if (job.rs) serialize("pipeline.cache", [&](Ogre::DataStreamPtr &s) { job.rs->savePipelineCache(s); });
-        if (job.computeHave) {
-            std::sort(job.computeUsed.begin(), job.computeUsed.end());
-            std::vector<ComputeRecordPtr> kept;
-            for (const ComputeRecordPtr &r : job.compute) {
-                const UseKey k{ kUsesCompute, r->inputKey[0], r->inputKey[1] };
-                const bool used = std::binary_search(job.computeUsed.begin(), job.computeUsed.end(), r->inputKey);
-                if (keepByUse(job.uses, next, k, used, job.launch)) kept.push_back(r);
-            }
-            const unsigned droppedHere = unsigned(job.compute.size() - kept.size());
-            pruned += droppedHere;
-            if (job.computeDirty || droppedHere) {
-                std::vector<char> bytes = writeComputeLayer(kept);
-                job.names.push_back("compute.bin");
-                job.blobs.push_back(std::move(bytes));
+            // THE BACKSTOP: only this launch's entries are left and the layers still pass the cap - wiped, the next
+            // launch re-warms. At the app's 256 MiB it needs pipeline.cache past ~218 MiB: measured at the feature end's
+            // control (FE/ctl/c-cache.txt) the layers are 55.6 MiB, of which pipeline.cache 18.3 MB and the others
+            // 40.1 MB - all of which one launch can use - so 268,435,456 - 40,056,641 = 228.4 MB, ~12.5x today's blob.
+            if (total() > mMaxBytes) {
+                std::string per;
+                for (const auto &o : out) per += " " + o.first + "=" + std::to_string(o.second.size());
+                for (const Entry &p : previous)
+                    if (carried(p)) per += " " + p.name + "=" + std::to_string(p.bytes);
+                logLine("WIPED BY THE SIZE CAP's BACKSTOP: this launch's own entries alone hold " + std::to_string(total()) +
+                        " bytes of layers, over the cap of " + std::to_string(mMaxBytes) + " (launch " +
+                        std::to_string(job.launch) + "; per layer:" + per + ") - the next launch re-warms it");
+                wipe();
+                mUses.clear();
+                return true;
             }
         }
     } catch (const Ogre::Exception &e) {
         logLine(std::string("serializing failed (") + e.getDescription() + ") — nothing written");
         return false;
     }
-    logLine("serialized " + std::to_string(job.names.size()) + " file(s) in " +
+    unsigned evicted = 0;
+    for (auto it = next.begin(); it != next.end();) {
+        if (it->second <= below) { it = next.erase(it); ++evicted; }
+        else ++it;
+    }
+    logLine("serialized " + std::to_string(out.size()) + " file(s) in " +
             fmtMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - serializeStart).count()) +
             " ms (off the render thread)");
     std::vector<Entry> files;
-    for (size_t i = 0; i < job.names.size(); ++i) {
-        const std::vector<char> &bytes = job.blobs[i];
-        if (bytes.empty()) continue;
-        if (!writeAtomic(mDir, job.names[i], bytes.data(), bytes.size())) {
-            logLine("could not write " + job.names[i]);
+    for (const auto &o : out) {
+        if (!writeAtomic(mDir, o.first, o.second.data(), o.second.size())) {
+            logLine("could not write " + o.first);
             continue;
         }
-        files.push_back({job.names[i], bytes.size(), hex128(bytes.data(), bytes.size()),
-                         layerKeyFor(job.names[i])});
+        files.push_back({ o.first, o.second.size(), hex128(o.second.data(), o.second.size()), layerKeyFor(o.first) });
     }
 
     // Files we did not rewrite this time are still valid IF THEIR LAYER'S KEY IS
     // CURRENT: carry those entries forward, or the next run would reject a
     // perfectly good file. One whose key moved is gone from the manifest and
     // from the disk (load() already removed it when this process could).
-    std::vector<Entry> previous;
-    readManifest(previous, /*adopt*/ false);   // the writer thread: never publish
+    // A WRITE THAT REWROTE NOTHING AND CARRIES EVERY FILE WRITES NO MANIFEST (the final read's ruling): a launch that
+    // compiled and evicted nothing leaves the cache's generation as it found it (fresh_home.sh promotes by it).
+    bool published = !files.empty();
     for (const Entry &p : previous) {
         const bool rewritten = std::any_of(files.begin(), files.end(),
                                            [&](const Entry &e) { return e.name == p.name; });
         if (rewritten) continue;
-        if (p.key != layerKeyFor(p.name)) { ::unlink(path(p.name).c_str()); continue; }
+        if (p.key != layerKeyFor(p.name)) { ::unlink(path(p.name).c_str()); published = true; continue; }
         struct stat st {};
         if (::stat(path(p.name).c_str(), &st) == 0) files.push_back(p);
+        else published = true;
     }
 
     // THE MANIFEST IS THE PUBLICATION. Every file above is already in place and
@@ -1516,31 +1585,29 @@ bool ShaderCache::runWrite(PendingWrite &job) {
     // previous generation. Failing here therefore leaves the cache exactly as
     // it was, which is why nothing below the write is allowed to run on a
     // false.
-    if (!writeManifest(files, job.compileCount, job.launch)) {
+    if (published && !writeManifest(files, job.compileCount)) {
         logLine("the manifest could not be written — the previous cache stands");
         return false;
     }
     // THE STAMPS, after the manifest (a crash between them leaves the previous table: an entry it lacks is stamped
-    // anew, never pruned). Self-checked, outside the manifest.
-    {
-        const std::vector<char> table = writeUseTable(next);
-        if (writeAtomic(mDir, kEntryUses, table.data(), table.size())) mUsesWritten.store(true);
+    // anew, never evicted), and only when one moved: the sidecar alone is a launch's whole write when it compiled and
+    // evicted nothing. Self-checked, outside the manifest, the launch counter in it.
+    if (next != job.uses) {
+        const std::vector<char> table = writeUseTable(next, job.launch);
+        if (writeAtomic(mDir, kEntryUses, table.data(), table.size())) mUses = next;
         else logLine(std::string("could not write ") + kEntryUses);
-        mEntriesPruned.store(pruned);
-        if (pruned)
-            logLine("dropped " + std::to_string(pruned) + " entr" + (pruned == 1 ? "y" : "ies") + " no launch used for " +
-                    std::to_string(kUnusedLaunches) + " launches (launch " + std::to_string(job.launch) + ")");
     }
-    mLastSavedUnixMs.store(nowUnixMs());
+    if (evicted)
+        logLine("the layers would pass the size cap of " + std::to_string(mMaxBytes) + " bytes: evicted " +
+                std::to_string(evicted) + " entr" + (evicted == 1 ? "y" : "ies") + " last used at or before launch " +
+                std::to_string(below) + " (this launch " + std::to_string(job.launch) + "), the layers now " +
+                std::to_string(total()) + " bytes");
+    if (published) mLastSavedUnixMs.store(nowUnixMs());
     mSavedAtCompileCount.store(job.compileCount);
     mSavedAtEnginePipelines.store(job.enginePipelines);
     if (job.computeDirty) mSavedAtComputeGeneration.store(job.computeGeneration);
-
-    // Size cap: wipe the generation rather than evict (§4.3 rule 6).
-    unsigned n = 0;
-    if (dirBytes(mDir, &n) > mMaxBytes) {
-        logLine("cache exceeded the size cap — wiped; the next launch re-warms it");
-        wipe();
+    if (!published) {
+        logLine("no layer changed - no layer and no manifest written");
         return true;
     }
     logLine("saved " + std::to_string(files.size()) + " files");
