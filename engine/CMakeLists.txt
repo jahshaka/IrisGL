@@ -158,6 +158,7 @@ set(JAHSHAKA_ENGINE_SCRIPT_SOURCES "${JAHSHAKA_ENGINE_SCRIPT_SOURCES}" PARENT_SC
 # (The S3 spike's find_library + FATAL_ERROR was audit C-6's macOS defect; this
 # is the correction.)
 set(JAH_RAY_QUERY_OK OFF)
+set(JAH_RAY_SPIRV_HEADERS "")   # the ray tier's generated SPIR-V (set below); empty when the tier compiles out
 if(UNIX AND NOT APPLE)
     # THE PLUGIN IS NOT A "lib" (both platforms). Ogre installs its render
     # systems UNPREFIXED — `RenderSystem_Vulkan.so` on Linux,
@@ -631,47 +632,51 @@ if(JAH_RAY_QUERY_OK)
             COMMENT "Compiling the Atom passes' masked ranges (${_src})"
             VERBATIM)
     endforeach()
-    add_custom_target(JahshakaRayQuerySpv
-                      DEPENDS "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_id_masked_vert_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_id_masked_frag_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_caster_masked_vert_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_caster_point_masked_frag_spv.h"
-                              "${JAH_RQ_GEN_DIR}/atom_caster_masked_frag_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_pyramid_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_clock_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_final_spv.h"
-                              "${JAH_RQ_GEN_DIR}/rq_probe_resume_ring_spv.h")
+    # THE RAY TIER's SPIR-V, ONE LIST (SHADER-SYSTEM-1 stage 6a): the target that orders the generated headers AND the
+    # engine's identity (JAHSHAKA_RAY_SPIRV_ID, irisgl/cmake/EngineBuildId.cmake) read it, so a changed ray shader moves
+    # the id the startup pass and the warm-up key on. A header generated here and left out of this list is in neither.
+    set(JAH_RAY_SPIRV_HEADERS
+        "${JAH_RQ_GEN_DIR}/atom_id_vert_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_id_frag_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_caster_vert_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_caster_point_frag_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_id_masked_vert_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_id_masked_frag_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_caster_masked_vert_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_caster_point_masked_frag_spv.h"
+        "${JAH_RQ_GEN_DIR}/atom_caster_masked_frag_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_rays_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_sun_contact_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_area_vis_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_area_vis_resolve_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_hit_composite_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_card_movers_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_card_gather_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_glass_escape_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_glass_escape_add_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_voxel_sides_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_tlas_write_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_reflect_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_reflect_filter_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_reflect_temporal_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_reflect_resolve_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_reflect_compose_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_motion_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_motion_skin_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_card_parity_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_share_law_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_card_law_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_place_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_place_select_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_gather_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_filter_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_integrate_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_resume_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_resume_pyramid_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_resume_clock_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_resume_final_spv.h"
+        "${JAH_RQ_GEN_DIR}/rq_probe_resume_ring_spv.h")
+    add_custom_target(JahshakaRayQuerySpv DEPENDS ${JAH_RAY_SPIRV_HEADERS})
     set(JAH_RQ_GEN_DIR "${JAH_RQ_GEN_DIR}" PARENT_SCOPE)
 endif()
 set(JAH_RAY_QUERY_OK "${JAH_RAY_QUERY_OK}" PARENT_SCOPE)
@@ -853,16 +858,18 @@ set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(_build_id_header "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/jahshaka_engine_build_id.h")
 file(MAKE_DIRECTORY "${JAHSHAKA_ENGINE_BUILD_ID_DIR}")
 string(REPLACE ";" "|" _build_id_inputs_arg "${_build_id_inputs}")
+string(REPLACE ";" "|" _ray_spirv_arg "${JAH_RAY_SPIRV_HEADERS}")
 add_custom_command(
     OUTPUT "${_build_id_header}"
     COMMAND ${CMAKE_COMMAND}
             "-DJAH_BUILD_ID_SOURCES=${_build_id_inputs_arg}"
             "-DJAH_BUILD_ID_CACHE_SOURCES=${_cache_id_inputs_arg}"
+            "-DJAH_RAY_SPIRV=${_ray_spirv_arg}"
             "-DJAH_COMPILE_PATH_LIST=${_compile_path_list}"
             "-DJAH_COMPILE_PATH_ROOT=${_compile_path_root}"
             "-DJAH_BUILD_ID_OUT=${_build_id_header}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
-    DEPENDS ${_build_id_inputs} ${_compile_path_files} "${_compile_path_list}"
+    DEPENDS ${_build_id_inputs} ${_compile_path_files} "${_compile_path_list}" ${JAH_RAY_SPIRV_HEADERS}
             "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
     COMMENT "Hashing the engine sources for the shader-cache fingerprint"
     VERBATIM)

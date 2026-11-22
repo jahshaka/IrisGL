@@ -29,9 +29,17 @@
 # layer) and _COMPUTE_ID (the compute layer's producer). They replace the fork's COMMIT in those keys: a fork commit that
 # changes no producer moves none of them.
 #
+# THE RAY SPIR-V's ID, JAHSHAKA_RAY_SPIRV_ID (SHADER-SYSTEM-1 stage 6a): the content hash of the ray tier's generated SPIR-V
+# headers (JAH_RAY_SPIRV: irisgl/engine/CMakeLists.txt's JAH_RAY_SPIRV_HEADERS, the same list the JahshakaRayQuerySpv
+# target builds), "none" when the tier compiles out. The `.comp` sources are no engine source: before this id a changed
+# ray shader moved no id the startup pass or the warm-up keys on, and the ray pipelines it changes are the driver's
+# (the pipeline layer, content-addressed by the driver), so nothing re-warmed them. The SPIR-V, not its sources: it is
+# what the binary carries (an include, a define or glslang moving it moves this id; a comment does not).
+#
 # Run with:
-#   cmake -DJAH_BUILD_ID_SOURCES=<|-list> -DJAH_BUILD_ID_CACHE_SOURCES=<|-list> -DJAH_COMPILE_PATH_LIST=<list file>
-#         -DJAH_COMPILE_PATH_ROOT=<the fork's checkout> -DJAH_BUILD_ID_OUT=<header> -P <this>
+#   cmake -DJAH_BUILD_ID_SOURCES=<|-list> -DJAH_BUILD_ID_CACHE_SOURCES=<|-list> -DJAH_RAY_SPIRV=<|-list, may be empty>
+#         -DJAH_COMPILE_PATH_LIST=<list file> -DJAH_COMPILE_PATH_ROOT=<the fork's checkout> -DJAH_BUILD_ID_OUT=<header>
+#         -P <this>
 #
 # Writes only when the value actually changes (via copy_if_different), so a
 # rebuild that touched nothing relevant does not cascade a recompile of every
@@ -59,6 +67,11 @@ if(NOT JAH_BUILD_ID_CACHE_SOURCES)
 endif()
 _jah_id_of("${JAH_BUILD_ID_SOURCES}" _id)
 _jah_id_of("${JAH_BUILD_ID_CACHE_SOURCES}" _cache_id)
+if(JAH_RAY_SPIRV)
+    _jah_id_of("${JAH_RAY_SPIRV}" _ray_spirv_id)
+else()
+    set(_ray_spirv_id "none")
+endif()
 
 # The list's groups, each hashed over its files' content in list order (a missing file hashes as "missing": the source
 # row reds on it).
@@ -94,6 +107,7 @@ file(WRITE "${_tmp}"
 #pragma once\n\
 #define JAHSHAKA_ENGINE_BUILD_ID \"${_id}\"\n\
 #define JAHSHAKA_SHADER_CACHE_CODE_ID \"${_cache_id}\"\n\
+#define JAHSHAKA_RAY_SPIRV_ID \"${_ray_spirv_id}\"\n\
 #define JAHSHAKA_COMPILE_PATH_MICROCODE_ID \"${_cp_id_microcode}\"\n\
 #define JAHSHAKA_COMPILE_PATH_PREPROCESSOR_ID \"${_cp_id_preprocessor}\"\n\
 #define JAHSHAKA_COMPILE_PATH_COMPUTE_ID \"${_cp_id_compute}\"\n")
