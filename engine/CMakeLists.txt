@@ -867,6 +867,8 @@ add_custom_command(
     COMMENT "Hashing the engine sources for the shader-cache fingerprint"
     VERBATIM)
 add_custom_target(JahshakaEngineBuildId DEPENDS "${_build_id_header}")
+# its file, for the build stamp's claims (Studio cmake/BuiltFrom.cmake: a claim built after the stamp is dropped)
+set_target_properties(JahshakaEngineBuildId PROPERTIES JAH_ARTEFACT "${_build_id_header}")
 # Exported so tests/engine's sanitised (ASan) copy of the same sources compiles
 # against the same generated header rather than a second, stale value.
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${JAHSHAKA_ENGINE_BUILD_ID_DIR}" PARENT_SCOPE)
@@ -1333,6 +1335,7 @@ add_custom_command(OUTPUT "${_hlms_stamp}"
     DEPENDS ${_hlms_inputs}
     COMMENT "Staging Ogre-Next Hlms templates into bin/media/Hlms")
 add_custom_target(JahshakaEngineMedia DEPENDS "${_hlms_stamp}")
+set_target_properties(JahshakaEngineMedia PROPERTIES JAH_ARTEFACT "${_hlms_stamp}")   # the stamp's claims (as above)
 
 add_dependencies(JahshakaEngine JahshakaEngineMedia)
 
