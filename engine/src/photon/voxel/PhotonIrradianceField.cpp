@@ -28,6 +28,7 @@ THE SOFTWARE.
 
 #include "photon/voxel/PhotonIrradianceField.h"
 #include "photon/PhotonDispatch.h"
+#include "CardReportLayout.h"
 
 #include "photon/voxel/PhotonIfdProbeVisualizer.h"
 #include "photon/voxel/PhotonVoxelLighting.h"
@@ -424,7 +425,9 @@ namespace Ogre
             mVarianceTicket.reset();
             mIntegrations = 0u;
             mWorkListBuffer = vaoManager->createUavBuffer( probes, sizeof( uint32 ), 0, zeros.data(), false );
-            mMarkReport = vaoManager->createUavBuffer( 1u + probes, sizeof( uint32 ), 0, zeros.data(), false );
+            // (the shader's report layout: the count, a listing a probe, its two frame words - CardReportLayout.h)
+            mMarkReport = vaoManager->createUavBuffer(
+                jahshaka::engine::detail::cardReportWords( uint32( probes ) ), sizeof( uint32 ), 0, zeros.data(), false );
             for( MarkTicket &t : mMarkTickets )
                 t.ticket.reset();
             mMarkTickets.assign( size_t( vaoManager->getDynamicBufferMultiplier() ) + 2u, MarkTicket() );

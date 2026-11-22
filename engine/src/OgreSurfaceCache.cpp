@@ -6,6 +6,7 @@
 #include "SurfaceCache.h"
 #include "AtomPass.h"
 #include "photon/PhotonDispatch.h"
+#include "CardReportLayout.h"
 
 #include <OgreCamera.h>
 #include <OgreItem.h>
@@ -62,6 +63,7 @@ namespace jahshaka {
 namespace engine {
 
 using detail::processUniqueName;
+using detail::cardReportWords;
 
 namespace {
 
@@ -3037,7 +3039,7 @@ bool SurfaceCache::ensureIndirectBuffers() {
     if (!mCardSlotState) mCardSlotState = zeroed(size_t(kCardSlots) * 4u, sizeof(Ogre::uint32));
     // (the report: its count, the listings, and THE FRAME'S TWO MOVE WORDS past them - the largest reported move in
     // codes and a non-finite move seen, the readers' threshold; the moves: a slot each and the relight's same two words)
-    if (!mCardReport) mCardReport = zeroed(3u + kReportCapacity, sizeof(Ogre::uint32));
+    if (!mCardReport) mCardReport = zeroed(cardReportWords(kReportCapacity), sizeof(Ogre::uint32));
     if (!mCardCluster) mCardCluster = zeroed(6u * kMaxCardClusters, sizeof(Ogre::uint32));
     if (!mCardMoves) mCardMoves = zeroed(size_t(kCardSlots) + 2u, sizeof(Ogre::uint32));
     return mCardBoxBuffer && mCardSlotState && mCardReport && mCardCluster && mCardMoves;
@@ -3158,7 +3160,7 @@ void SurfaceCache::flushReport() {
         listPendingRelits();
         return;
     }
-    r.ticket = mCardReport->readRequest(0u, 3u + kReportCapacity, /*accurateTracking=*/false);
+    r.ticket = mCardReport->readRequest(0u, cardReportWords(kReportCapacity), /*accurateTracking=*/false);
     r.frame = mReportPendingHost;
     r.cacheFrame = mReportPendingCache;
     r.carriesMoves = mMovesOwed;
