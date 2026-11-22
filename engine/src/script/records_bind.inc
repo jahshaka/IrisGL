@@ -1,0 +1,644 @@
+// THE STRUCTURED BINDINGS OF THE RECORD GUARD (records.h, JAH_RECORD_COUNT) - GENERATED, never edited by hand: one
+// overload a count, 1..128, each binding EXACTLY that many names (a record with another count does not compile), each
+// answering the address of every field of `t` in declaration order. Its body is the output of (from this directory):
+//   python3 -c "[print('template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, %d>)\n{\n    const auto &[%s] = t;\n    return std::array<const void *, %d>{{%s}};\n}' % (n, ', '.join('f%d' % i for i in range(n)), n, ', '.join('&f%d' % i for i in range(n)))) for n in range(1, 129)]" >> records_bind.inc
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 1>)
+{
+    const auto &[f0] = t;
+    return std::array<const void *, 1>{{&f0}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 2>)
+{
+    const auto &[f0, f1] = t;
+    return std::array<const void *, 2>{{&f0, &f1}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 3>)
+{
+    const auto &[f0, f1, f2] = t;
+    return std::array<const void *, 3>{{&f0, &f1, &f2}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 4>)
+{
+    const auto &[f0, f1, f2, f3] = t;
+    return std::array<const void *, 4>{{&f0, &f1, &f2, &f3}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 5>)
+{
+    const auto &[f0, f1, f2, f3, f4] = t;
+    return std::array<const void *, 5>{{&f0, &f1, &f2, &f3, &f4}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 6>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5] = t;
+    return std::array<const void *, 6>{{&f0, &f1, &f2, &f3, &f4, &f5}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 7>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6] = t;
+    return std::array<const void *, 7>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 8>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7] = t;
+    return std::array<const void *, 8>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 9>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8] = t;
+    return std::array<const void *, 9>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 10>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9] = t;
+    return std::array<const void *, 10>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 11>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10] = t;
+    return std::array<const void *, 11>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 12>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11] = t;
+    return std::array<const void *, 12>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 13>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12] = t;
+    return std::array<const void *, 13>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 14>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13] = t;
+    return std::array<const void *, 14>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 15>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14] = t;
+    return std::array<const void *, 15>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 16>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15] = t;
+    return std::array<const void *, 16>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 17>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16] = t;
+    return std::array<const void *, 17>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 18>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17] = t;
+    return std::array<const void *, 18>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 19>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18] = t;
+    return std::array<const void *, 19>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 20>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19] = t;
+    return std::array<const void *, 20>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 21>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20] = t;
+    return std::array<const void *, 21>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 22>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21] = t;
+    return std::array<const void *, 22>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 23>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22] = t;
+    return std::array<const void *, 23>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 24>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23] = t;
+    return std::array<const void *, 24>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 25>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24] = t;
+    return std::array<const void *, 25>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 26>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25] = t;
+    return std::array<const void *, 26>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 27>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26] = t;
+    return std::array<const void *, 27>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 28>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27] = t;
+    return std::array<const void *, 28>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 29>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28] = t;
+    return std::array<const void *, 29>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 30>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29] = t;
+    return std::array<const void *, 30>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 31>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30] = t;
+    return std::array<const void *, 31>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 32>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31] = t;
+    return std::array<const void *, 32>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 33>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32] = t;
+    return std::array<const void *, 33>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 34>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33] = t;
+    return std::array<const void *, 34>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 35>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34] = t;
+    return std::array<const void *, 35>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 36>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35] = t;
+    return std::array<const void *, 36>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 37>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36] = t;
+    return std::array<const void *, 37>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 38>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37] = t;
+    return std::array<const void *, 38>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 39>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38] = t;
+    return std::array<const void *, 39>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 40>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39] = t;
+    return std::array<const void *, 40>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 41>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40] = t;
+    return std::array<const void *, 41>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 42>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41] = t;
+    return std::array<const void *, 42>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 43>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42] = t;
+    return std::array<const void *, 43>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 44>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43] = t;
+    return std::array<const void *, 44>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 45>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44] = t;
+    return std::array<const void *, 45>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 46>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45] = t;
+    return std::array<const void *, 46>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 47>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46] = t;
+    return std::array<const void *, 47>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 48>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47] = t;
+    return std::array<const void *, 48>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 49>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48] = t;
+    return std::array<const void *, 49>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 50>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49] = t;
+    return std::array<const void *, 50>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 51>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50] = t;
+    return std::array<const void *, 51>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 52>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51] = t;
+    return std::array<const void *, 52>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 53>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52] = t;
+    return std::array<const void *, 53>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 54>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53] = t;
+    return std::array<const void *, 54>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 55>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54] = t;
+    return std::array<const void *, 55>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 56>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55] = t;
+    return std::array<const void *, 56>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 57>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56] = t;
+    return std::array<const void *, 57>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 58>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57] = t;
+    return std::array<const void *, 58>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 59>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58] = t;
+    return std::array<const void *, 59>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 60>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59] = t;
+    return std::array<const void *, 60>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 61>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60] = t;
+    return std::array<const void *, 61>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 62>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61] = t;
+    return std::array<const void *, 62>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 63>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62] = t;
+    return std::array<const void *, 63>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 64>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63] = t;
+    return std::array<const void *, 64>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 65>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64] = t;
+    return std::array<const void *, 65>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 66>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65] = t;
+    return std::array<const void *, 66>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 67>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66] = t;
+    return std::array<const void *, 67>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 68>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67] = t;
+    return std::array<const void *, 68>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 69>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68] = t;
+    return std::array<const void *, 69>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 70>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69] = t;
+    return std::array<const void *, 70>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 71>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70] = t;
+    return std::array<const void *, 71>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 72>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71] = t;
+    return std::array<const void *, 72>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 73>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72] = t;
+    return std::array<const void *, 73>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 74>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73] = t;
+    return std::array<const void *, 74>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 75>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74] = t;
+    return std::array<const void *, 75>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 76>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75] = t;
+    return std::array<const void *, 76>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 77>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76] = t;
+    return std::array<const void *, 77>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 78>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77] = t;
+    return std::array<const void *, 78>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 79>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78] = t;
+    return std::array<const void *, 79>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 80>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79] = t;
+    return std::array<const void *, 80>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 81>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80] = t;
+    return std::array<const void *, 81>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 82>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81] = t;
+    return std::array<const void *, 82>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 83>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82] = t;
+    return std::array<const void *, 83>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 84>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83] = t;
+    return std::array<const void *, 84>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 85>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84] = t;
+    return std::array<const void *, 85>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 86>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85] = t;
+    return std::array<const void *, 86>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 87>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86] = t;
+    return std::array<const void *, 87>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 88>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87] = t;
+    return std::array<const void *, 88>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 89>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88] = t;
+    return std::array<const void *, 89>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 90>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89] = t;
+    return std::array<const void *, 90>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 91>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90] = t;
+    return std::array<const void *, 91>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 92>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91] = t;
+    return std::array<const void *, 92>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 93>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92] = t;
+    return std::array<const void *, 93>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 94>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93] = t;
+    return std::array<const void *, 94>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 95>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94] = t;
+    return std::array<const void *, 95>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 96>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95] = t;
+    return std::array<const void *, 96>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 97>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96] = t;
+    return std::array<const void *, 97>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 98>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97] = t;
+    return std::array<const void *, 98>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 99>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98] = t;
+    return std::array<const void *, 99>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 100>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99] = t;
+    return std::array<const void *, 100>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 101>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100] = t;
+    return std::array<const void *, 101>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 102>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101] = t;
+    return std::array<const void *, 102>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 103>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102] = t;
+    return std::array<const void *, 103>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 104>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103] = t;
+    return std::array<const void *, 104>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 105>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104] = t;
+    return std::array<const void *, 105>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 106>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105] = t;
+    return std::array<const void *, 106>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 107>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106] = t;
+    return std::array<const void *, 107>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 108>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107] = t;
+    return std::array<const void *, 108>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 109>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108] = t;
+    return std::array<const void *, 109>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 110>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109] = t;
+    return std::array<const void *, 110>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 111>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110] = t;
+    return std::array<const void *, 111>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 112>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111] = t;
+    return std::array<const void *, 112>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 113>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112] = t;
+    return std::array<const void *, 113>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 114>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113] = t;
+    return std::array<const void *, 114>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 115>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114] = t;
+    return std::array<const void *, 115>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 116>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115] = t;
+    return std::array<const void *, 116>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 117>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116] = t;
+    return std::array<const void *, 117>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 118>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117] = t;
+    return std::array<const void *, 118>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 119>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118] = t;
+    return std::array<const void *, 119>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 120>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119] = t;
+    return std::array<const void *, 120>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 121>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120] = t;
+    return std::array<const void *, 121>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 122>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121] = t;
+    return std::array<const void *, 122>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 123>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122] = t;
+    return std::array<const void *, 123>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 124>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123] = t;
+    return std::array<const void *, 124>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122, &f123}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 125>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123, f124] = t;
+    return std::array<const void *, 125>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122, &f123, &f124}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 126>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123, f124, f125] = t;
+    return std::array<const void *, 126>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122, &f123, &f124, &f125}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 127>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123, f124, f125, f126] = t;
+    return std::array<const void *, 127>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122, &f123, &f124, &f125, &f126}};
+}
+template <class T> auto bindFields(const T &t, std::integral_constant<std::size_t, 128>)
+{
+    const auto &[f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123, f124, f125, f126, f127] = t;
+    return std::array<const void *, 128>{{&f0, &f1, &f2, &f3, &f4, &f5, &f6, &f7, &f8, &f9, &f10, &f11, &f12, &f13, &f14, &f15, &f16, &f17, &f18, &f19, &f20, &f21, &f22, &f23, &f24, &f25, &f26, &f27, &f28, &f29, &f30, &f31, &f32, &f33, &f34, &f35, &f36, &f37, &f38, &f39, &f40, &f41, &f42, &f43, &f44, &f45, &f46, &f47, &f48, &f49, &f50, &f51, &f52, &f53, &f54, &f55, &f56, &f57, &f58, &f59, &f60, &f61, &f62, &f63, &f64, &f65, &f66, &f67, &f68, &f69, &f70, &f71, &f72, &f73, &f74, &f75, &f76, &f77, &f78, &f79, &f80, &f81, &f82, &f83, &f84, &f85, &f86, &f87, &f88, &f89, &f90, &f91, &f92, &f93, &f94, &f95, &f96, &f97, &f98, &f99, &f100, &f101, &f102, &f103, &f104, &f105, &f106, &f107, &f108, &f109, &f110, &f111, &f112, &f113, &f114, &f115, &f116, &f117, &f118, &f119, &f120, &f121, &f122, &f123, &f124, &f125, &f126, &f127}};
+}

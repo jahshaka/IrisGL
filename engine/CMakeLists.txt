@@ -124,6 +124,9 @@ set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/LanguageTable.inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/RouteDeclaration.h
+    # ONE FIELD TABLE PER RECORD (2b b1): the machinery, and its structured bindings (generated: records_bind.inc says how)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_bind.inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/js_quickjs.cpp
     # the engine's commands, ONE FILE PER FAMILY over commands.h (commands_engine.cpp registers them)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands.h
