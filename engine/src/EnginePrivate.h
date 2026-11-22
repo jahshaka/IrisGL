@@ -78,6 +78,7 @@
 #include <OgreHlmsDiskCache.h>
 #include <OgreGpuProgramManager.h>
 #include <OgreHlmsListener.h>
+#include <OgreRenderQueue.h>
 #include <OgreHlmsPbs.h>
 #include <OgreHlmsUnlit.h>
 #include <OgreHlmsPbsDatablock.h>
@@ -2350,7 +2351,8 @@ private:
     X(ShaderServiceSlow, "shaders.serviceSlow") /* ms: every background compile is held that long before it runs (the fork's _jahServiceDelayMs; a test door, gi.complete_joins) */ \
     X(ShaderAsyncFail, "shaders.asyncFail") /* every object's own graphics permutation fails at its request (the fork's _jahFailRequests; a test door, gi.card_build_late) */ \
     X(TextureResidencyHold, "textures.residencyHold") /* every texture bind awaits its pixels while on (a test door, gi.card_build_late) */ \
-    X(FrameIncompleteHold, "frames.incompleteHold") /* every scene's drawn frame is noted INCOMPLETE while on, term bit 4 (a test door, gi.card_build_late.window) */
+    X(FrameIncompleteHold, "frames.incompleteHold") /* every scene's drawn frame is noted INCOMPLETE while on, term bit 4 (a test door, gi.card_build_late.window) */ \
+    X(AheadPassOff, "shaders.aheadPassOff") /* no ahead pass and no request-only hit decode while a ray route is pending: the measuring arm of P3 (a test door, gi.route_landing) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
@@ -3705,6 +3707,13 @@ public:
     /// shadercache.app). Made once beside the listener's registration, released before Root.
     static void createShadowTransmitNone(Ogre::TextureGpuManager *tm);
     static void releaseShadowTransmitNone(Ogre::TextureGpuManager *tm);
+    /// THE AHEAD PASS's STAND-INS (SHADER-SYSTEM-1 stage 7, P3): the gather's three textures as a pass will name
+    /// them after the gather lands (irradiance and rough specular RGBA16F, sky visibility R8; 1x1, ManualTexture,
+    /// never notifyDataIsReady). ONE SET FOR THE ENGINE, made with the engine's binds and released before Root: the
+    /// listener only NULL-TESTS a registration (preparePassHash, below), and the ahead pass is prepared BEFORE the
+    /// real one, whose PassBinds are the ones bound - so a stand-in is never bound or sampled.
+    static void createAheadStandIns(Ogre::TextureGpuManager *tm);
+    static void releaseAheadStandIns(Ogre::TextureGpuManager *tm);
     /// What a colour pass reads as the layer: the node's own (shadowTransmitLayer), else the stand-in; null without either.
     static Ogre::TextureGpu *shadowTransmitBound(const Ogre::CompositorShadowNode *node);
     /// ...and its nearest pane's depth: the node's atlasTD (shadowTransmitDepthLayer), else the same stand-in.
@@ -3833,6 +3842,11 @@ public:
     static bool lampRaysOn(const Ogre::SceneManager *sm);
     /// THE BLENDED PASS'S SKY VISIBILITY (PHOTON-7 10-4 R11; SceneBinds::fogSkyVis): pass-scoped, null to take it away.
     static void setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis);
+    /// THE AHEAD REGISTRATIONS (P3; SceneBinds::aheadGather / aheadFogSkyVis): the gather's consumer was refused for
+    /// this pass (its build or its landed set not ready), so the pass WOULD have registered the gather here - the
+    /// ahead pass (RouteAheadListener) prepares it with the stand-ins. Pass-scoped exactly as the real registrations.
+    static void setAheadGather(const Ogre::SceneManager *sm, bool on);
+    static void setAheadFogSkyVis(const Ogre::SceneManager *sm, bool on);
     /// THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4; SceneBinds::escapePass): pass-scoped, `on` false takes it away.
     static void setGlassEscape(const Ogre::SceneManager *sm, bool on, unsigned long long list, unsigned capacity);
     /// THE COLOUR PICK (BUGS-8; SceneBinds::pickRing): this frame's ring address (0: the arm off - no `jah_colour_pick`),
@@ -3963,6 +3977,10 @@ public:
         /// property `jah_colour_pick` follows it), the pixel (x | y << 16), the frame's slot and the engine frame
         unsigned long long pickRing = 0ull;
         unsigned pickPixel = 0u, pickSlot = 0u, pickFrame = 0u;
+        /// THE AHEAD REGISTRATIONS (P3, setAheadGather / setAheadFogSkyVis): pass-scoped like probeGather and
+        /// fogSkyVis, which they stand in for in the ahead pass only (RouteAheadListener); never read by the real pass.
+        bool aheadGather = false;
+        bool aheadFogSkyVis = false;
     };
     /// The record of the scene drawn through `sm`, or null (a manager no scene holds).
     static SceneBinds *bindsOf(const Ogre::SceneManager *sm);
@@ -3976,7 +3994,14 @@ public:
         b.escapePass = false;
         b.escapeList = 0ull;
         b.escapeCapacity = 0u;
+        b.aheadGather = false;
+        b.aheadFogSkyVis = false;
     }
+    /// THE AHEAD PASS's STATE (P3, RouteAheadListener): the record's gather and blended-pass sky visibility as they
+    /// will be after the gather lands - the stand-ins put in place for the ahead pass and taken away after it.
+    /// False = nothing to force (no ahead registration in this pass, or the real one is there).
+    static bool beginAheadPass(SceneBinds &b, ProbeGatherBind &savedGather, Ogre::TextureGpu *&savedSkyVis);
+    static void endAheadPass(SceneBinds &b, const ProbeGatherBind &savedGather, Ogre::TextureGpu *savedSkyVis);
 private:
     static const Ogre::HlmsSamplerblock *sCloudSampler;                // render thread only
     static Ogre::HlmsManager            *sSamplerMgr;                  // render thread only
@@ -3992,6 +4017,26 @@ private:
     static std::vector<const Ogre::CompositorShadowNode *> sAssignmentChanged;  // render thread only
 };
 extern FogHlmsListener gFogListener;
+
+/// THE AHEAD PASS's HOST HALF (SHADER-SYSTEM-1 stage 7, P3; the fork's Ogre::RenderQueue::AheadListener): set on a
+/// scene's render queue while its gather route is pending (OgreScene::noteRouteAheadWanted; unset at the next frame
+/// head with nothing pending, OgreScene::noteFrameCompleteness). For each colour pass whose record holds an ahead
+/// registration it puts the stand-ins in place (FogHlmsListener::beginAheadPass): the fork prepares that pass as it
+/// will be after the landing and asks the background compiler for every queued object's permutation and placeholder;
+/// the pass's count of objects not built yet goes to the scene (OgreScene::noteAheadPass), the gather's door's input.
+/// ONE PER ENGINE, NOTHING KEYED TO A CAMERA: the ahead hash is formed per PASS by the pass's own preparePassHash - a
+/// multiview pass forms one, the landed pass of both its eyes; a two-pass eye loop one per eye pass.
+class RouteAheadListener final : public Ogre::RenderQueue::AheadListener {
+public:
+    bool aheadPassBegin(Ogre::SceneManager *sm) override;
+    void aheadPassEnd(Ogre::SceneManager *sm) override;
+    void aheadPassRendered(Ogre::SceneManager *sm, size_t requested, size_t notReady) override;
+private:
+    FogHlmsListener::ProbeGatherBind mSavedGather;
+    Ogre::TextureGpu *mSavedSkyVis = nullptr;
+    bool mForced = false;
+};
+extern RouteAheadListener gRouteAhead;
 
 // ---------------------------------------------------------------------------
 // Planar reflections (PLANAR_REFLECTIONS_SPEC.md; impl in OgrePlanar.cpp).
@@ -6677,6 +6722,26 @@ public:
     /// scene, after noteDrawn and before its cards plan - of the frame just drawn (its views' placeholder draws and pending
     /// skips, the capture's apart), the card readers' builds and the textures as they stand.
     void noteFrameCompleteness();
+    /// THE ROUTES' LANDED SETS (SHADER-SYSTEM-1 stage 7, P3; the ray consumer's door, RayAheadDoor.h): a route (a bit per
+    /// RayQueryTier::AheadId) joins this scene's frames only when its pipeline AND the permutations its landed passes
+    /// draw are built. Noted during frame F, latched at F+1's head (noteFrameCompleteness), read by the doors of F+1.
+    /// A route's consumer refused this frame (its build in flight, or its set not built): the scene owes it (bit 2),
+    /// and its sets are measured this frame. `aheadPass`: the route changes this scene's colour passes (the gather),
+    /// so its render queue takes the ahead pass (gRouteAhead) from now until a frame head finds no route owed.
+    void noteRouteAheadWanted(unsigned routeBit, bool aheadPass);
+    /// The request-only hit decode's (beginHitDecode) objects not built yet, charged to the routes it served.
+    void noteRouteNotReady(unsigned routeBits, unsigned long long notReady);
+    /// The ahead pass's count (gRouteAhead): `notReady` of `requested` queued objects lack their landed permutation.
+    void noteAheadPass(size_t requested, size_t notReady);
+    /// The route's set was measured last frame and nothing in it was missing (`aheadPass`: its ahead passes too).
+    bool routeSetBuilt(unsigned routeBit, bool aheadPass) const;
+    /// The route's consumer ran in this scene (its door said Run): its set never gates it again.
+    bool routeLanded(unsigned routeBit) const { return (mRouteLanded & routeBit) != 0u; }
+    void noteRouteLanded(unsigned routeBit) { mRouteLanded |= routeBit; }
+    /// The measuring arm shaders.aheadPassOff (P3's control): no ahead pass, no request-only decode, no set gate.
+    bool aheadPassOff() const;
+    /// The ahead passes this scene's render queue prepared, ever (0 at rest: the fork's getNumAheadPasses).
+    unsigned long long aheadPassesPrepared() const;
     bool frameIncomplete() const { return mCompleteness.incomplete; }
     unsigned long long completionSerial() const { return mCompleteness.completionSerial; }
     unsigned long long incompleteFrames() const { return mCompleteness.incompleteFrames; }
@@ -7499,6 +7564,13 @@ private:
     bool mBoxesCurrent = false;
     uint32_t mDrawSerial = 0u;   ///< noteDrawn: the engine frames that drew this scene
     PublishedFrame::Completeness mCompleteness;   ///< noteFrameCompleteness
+    /// P3 (noteRouteAheadWanted ...): this frame's owed routes, their sets' missing bits and the ahead passes' missing
+    /// count; latched at the next frame's head; the routes landed here.
+    unsigned mRouteWanted = 0u, mRouteNotReady = 0u, mRouteAheadPassBits = 0u;
+    unsigned long long mAheadPassNotReady = 0ull;
+    unsigned mRouteWantedLast = 0u, mRouteNotReadyLast = 0u;
+    bool mAheadPassMissingLast = false;
+    unsigned mRouteLanded = 0u;
     unsigned long long mIncompleteDrawsSeen[2] = { 0ull, 0ull };   ///< the views' placeholders and skips at the last note
     unsigned long long mDispatchDeferralsSeen = 0ull;   ///< the scene's deferred compute dispatches at the last note
     struct GiPlanStash {

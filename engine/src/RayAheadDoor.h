@@ -23,11 +23,17 @@ enum class Door {
 /// counts it in flight); `onService`: the scene's compute is on the background compiler; `frameOwesPicture`: the frame's
 /// pace is Complete - NOT READ, and that is the law (before stage 7 a Complete frame joined: the editor's frames, and the
 /// startup gate's Complete tails, waited for a cold driver compile).
-inline Door door(bool pending, bool running, bool onService, bool frameOwesPicture)
+/// `setBuilt` (P3, the lead's ruling: A ROUTE JOINS A FRAME ONLY WHEN ITS PIPELINE AND ITS LANDED SET ARE BOTH BUILT): the
+/// permutations the route's landed passes draw (its ahead pass's and its hit shading's: OgreScene::routeSetBuilt) are all
+/// built - a FAILED one is final, never pending - or the route has landed in this scene already. In a scene on the service
+/// a route whose set is not built is refused like a build in flight, so its landing frame compiles nothing and skips
+/// nothing (before P3 the gather's landing cut the whole picture to black for 160+ frames:
+/// spikes/shader-system/ss7/b8-hold/RESULT.md). A synchronous scene never reads it: its pass compiles in its frame.
+inline Door door(bool pending, bool running, bool onService, bool frameOwesPicture, bool setBuilt)
 {
     (void)frameOwesPicture;
+    if (onService && ((pending && running) || !setBuilt)) return Door::NotThisFrame;
     if (!pending) return Door::Run;
-    if (running && onService) return Door::NotThisFrame;
     return Door::Join;
 }
 

@@ -922,6 +922,88 @@ void FogHlmsListener::releaseShadowTransmitNone(Ogre::TextureGpuManager *tm) {
     gShadowTransmitNone = nullptr;
 }
 
+// THE AHEAD PASS (SHADER-SYSTEM-1 stage 7, P3) ------------------------------------------------------------------------
+namespace {
+Ogre::TextureGpu *gAheadIrradiance = nullptr, *gAheadRoughSpec = nullptr, *gAheadSkyVis = nullptr;
+}   // namespace
+
+void FogHlmsListener::createAheadStandIns(Ogre::TextureGpuManager *tm) {
+    if (!tm || gAheadIrradiance) return;
+    const auto make = [tm](const char *name, Ogre::PixelFormatGpu pf) {
+        Ogre::TextureGpu *t = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard, Ogre::TextureFlags::ManualTexture,
+                                                Ogre::TextureTypes::Type2D);
+        t->setResolution(1u, 1u);
+        t->setPixelFormat(pf);
+        t->setNumMipmaps(1u);
+        // (a ManualTexture's _transitionTo notifies by itself: never notifyDataIsReady. Never bound, never sampled:
+        // its content is never written)
+        t->_transitionTo(Ogre::GpuResidency::Resident, (Ogre::uint8 *)0);
+        t->_setNextResidencyStatus(Ogre::GpuResidency::Resident);
+        return t;
+    };
+    gAheadIrradiance = make("JahAheadIrradiance", Ogre::PFG_RGBA16_FLOAT);
+    gAheadRoughSpec = make("JahAheadRoughSpec", Ogre::PFG_RGBA16_FLOAT);
+    gAheadSkyVis = make("JahAheadSkyVis", Ogre::PFG_R8_UNORM);
+}
+
+void FogHlmsListener::releaseAheadStandIns(Ogre::TextureGpuManager *tm) {
+    for (Ogre::TextureGpu **t : { &gAheadIrradiance, &gAheadRoughSpec, &gAheadSkyVis }) {
+        if (tm && *t) tm->destroyTexture(*t);
+        *t = nullptr;
+    }
+}
+
+void FogHlmsListener::setAheadGather(const Ogre::SceneManager *sm, bool on) {
+    if (SceneBinds *b = bindsOf(sm)) b->aheadGather = on;
+}
+void FogHlmsListener::setAheadFogSkyVis(const Ogre::SceneManager *sm, bool on) {
+    if (SceneBinds *b = bindsOf(sm)) b->aheadFogSkyVis = on;
+}
+
+bool FogHlmsListener::beginAheadPass(SceneBinds &b, ProbeGatherBind &savedGather, Ogre::TextureGpu *&savedSkyVis) {
+    savedGather = b.probeGather;
+    savedSkyVis = b.fogSkyVis;
+    if (!gAheadIrradiance) return false;
+    bool forced = false;
+    // (the real registration, when there, IS the landed state: nothing to stand in for)
+    if (b.aheadGather && !b.probeGather.irradiance) {
+        b.probeGather = ProbeGatherBind{ gAheadIrradiance, gAheadRoughSpec, nullptr, gAheadSkyVis };
+        forced = true;
+    }
+    if (b.aheadFogSkyVis && !b.fogSkyVis) {
+        b.fogSkyVis = gAheadSkyVis;
+        forced = true;
+    }
+    return forced;
+}
+
+void FogHlmsListener::endAheadPass(SceneBinds &b, const ProbeGatherBind &savedGather, Ogre::TextureGpu *savedSkyVis) {
+    b.probeGather = savedGather;
+    b.fogSkyVis = savedSkyVis;
+}
+
+RouteAheadListener gRouteAhead;
+
+bool RouteAheadListener::aheadPassBegin(Ogre::SceneManager *sm) {
+    mForced = false;
+    // (the measuring arm shaders.aheadPassOff: no ahead pass - its frame's hash is the same, its row's control)
+    OgreScene *scene = sm ? sceneOfManager(sm) : nullptr;
+    if (!scene || scene->aheadPassOff()) return false;
+    mForced = FogHlmsListener::beginAheadPass(scene->passRecord(), mSavedGather, mSavedSkyVis);
+    if (!mForced) FogHlmsListener::endAheadPass(scene->passRecord(), mSavedGather, mSavedSkyVis);
+    return mForced;
+}
+
+void RouteAheadListener::aheadPassEnd(Ogre::SceneManager *sm) {
+    OgreScene *scene = sm ? sceneOfManager(sm) : nullptr;
+    if (scene && mForced) FogHlmsListener::endAheadPass(scene->passRecord(), mSavedGather, mSavedSkyVis);
+    mForced = false;
+}
+
+void RouteAheadListener::aheadPassRendered(Ogre::SceneManager *sm, size_t requested, size_t notReady) {
+    if (OgreScene *scene = sm ? sceneOfManager(sm) : nullptr) scene->noteAheadPass(requested, notReady);
+}
+
 Ogre::TextureGpu *FogHlmsListener::shadowTransmitBound(const Ogre::CompositorShadowNode *node) {
     if (!node) return nullptr;
     Ogre::TextureGpu *t = shadowTransmitLayer(node);

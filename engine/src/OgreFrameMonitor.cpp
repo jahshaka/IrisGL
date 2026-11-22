@@ -1799,6 +1799,13 @@ constexpr ArmDef kArms[] = {
       "NO demand change, as an object entering the view under a sub-pixel turn while its permutation compiles. Read at "
       "each frame's completeness note. 0 = shipped.",
       true },
+    { ArmId::AheadPassOff, 0.0, 0.0, 1.0,
+      "THE MEASURING ARM OF P3 (SHADER-SYSTEM-1 stage 7, gi.route_landing): 1 = while a ray route is pending, no AHEAD "
+      "pass (the fork's RenderQueue::AheadListener answers false: the landed pass's permutations and placeholders are not "
+      "asked for ahead) and no REQUEST-ONLY hit decode, and a route's door does not wait for its landed set - the landing "
+      "as it was before P3 (the gather's cut to black: gi.route_landing.gather's red). That its pictures equal the off "
+      "frames' is OWED (no still picture to compare yet). 0 = shipped.",
+      true },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

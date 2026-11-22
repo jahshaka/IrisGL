@@ -1059,7 +1059,21 @@ private:
     /// THE CONSUMER's DOOR (ORPHAN-REDS-1): its build started if it was not; true = joined (or never startable - the
     /// make*Pipeline's own build now): read the setup; false = in flight in a scene on the background compiler, at any
     /// pace (RayAheadDoor.h): the consumer's own "not this frame" path.
-    bool aheadReady(AheadId id, const OgreScene *scene);
+    bool aheadReady(AheadId id, OgreScene *scene);
+    /// THE ROUTE's LANDED SET (P3; RayAheadDoor.h's setBuilt): built, or nothing to build - the route has landed in
+    /// `scene`, the scene is synchronous, or the route draws no new permutation (the cards, the voxel sides, the escape:
+    /// the escape's property follows the chain alone, bindGlassEscape). The gather: its ahead passes and its hit
+    /// shading; the reflection: its hit shading and the two card builds its card demand launched with it ((D)).
+    bool routeSetBuilt(AheadId id, const OgreScene *scene) const;
+    /// THE ROUTES OWED IN A VIEW THIS FRAME (P3): a bit per AheadId whose consumer refused `key`'s view this frame - its
+    /// ahead registrations (resolveRayJobs, the blended pass) and its request-only decode (beginHitDecode) follow it.
+    struct RoutesOwed { uint32_t frame = 0xFFFFFFFFu; unsigned bits = 0u; };
+    std::unordered_map<const ReflectPassListener *, RoutesOwed> mRoutesOwed;
+    void noteRouteOwed(const ReflectPassListener *key, AheadId id);
+public:
+    unsigned routesOwed(const ReflectPassListener *key) const;
+    static constexpr unsigned kGatherRouteBit = 1u << 5;   // (AheadId kAheadGather: asserted below)
+private:
     /// make*Pipeline's front door: the ahead build's answer once joined, else the build now (marked taken: a worker
     /// never builds it again).
     template <class F> bool aheadOr(AheadId id, std::string &err, F now) {
@@ -1847,8 +1861,11 @@ private:
         FogHlmsListener::ProbeGatherBind gather;
         bool sun = false;
         bool area = false;   // PHOTON-7 7-A: the area visibility's registration
+        bool aheadGather = false;   // P3: the gather's ahead registration
     };
     std::unordered_map<const ReflectPassListener *, SuspendedBindings> mSuspended;
+    /// P3: the manager each view's ahead gather registration was made on (releaseGatherBinding takes it away there)
+    std::unordered_map<const ReflectPassListener *, const Ogre::SceneManager *> mAheadGatherSm;
     VkDescriptorSetLayout mSunSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout      mSunPipeLayout = VK_NULL_HANDLE;
     VkPipeline            mSunPipeline = VK_NULL_HANDLE;
@@ -1991,6 +2008,11 @@ private:
         Ogre::SceneManager *armedSm = nullptr;
         Ogre::Camera *pinnedCam = nullptr;
         bool camAuto = false;
+        /// THE REQUEST-ONLY DECODE (P3 (H)): the routes this armed decode serves AHEAD (nothing traced, a route owed: the
+        /// list empty, its target unread - the pass is drawn only so its landed permutations are asked for), and the
+        /// scene queue's placeholder draws + pending skips when it was armed (endHitDecode charges the difference).
+        unsigned aheadRoutes = 0u;
+        unsigned long long aheadCountsAt = 0ull;
     };
     std::unordered_map<const ReflectPassListener *, HitView> mHits;
     bool prepareHitList(const ReflectPassListener *key, OgreView *view, Ogre::CompositorPass *pass,
@@ -3037,25 +3059,66 @@ bool RayQueryTier::launchAhead(AheadId id) {
     return true;
 }
 
-bool RayQueryTier::aheadReady(AheadId id, const OgreScene *scene) {
+bool RayQueryTier::aheadReady(AheadId id, OgreScene *scene) {
     Ahead &a = mAhead[id];
     launchAhead(id);
+    // (D) THE DEPENDENT LAUNCHES (P3): the reflection's card demand reads the cards' gather and their movers, so their
+    // builds start WITH it (they trailed it by 2-3 frames, launched by its first card read) and gate its landing
+    if (id == kAheadReflect) {
+        launchAhead(kAheadCardGather);
+        launchAhead(kAheadCardMovers);
+    }
     // THE DOOR (RayAheadDoor.h; SHADER-SYSTEM-1 stage 7, call 3): a build still running in a scene whose compute is on
     // the background compiler is refused AT ANY PACE - never joined on the render thread (a cold driver compile is
     // ~100 s: a frozen window, a frozen headset); a synchronous scene joins it, on purpose (its frames are counted)
+    const unsigned bit = 1u << unsigned(id);
     const rayahead::Door door =
         rayahead::door(a.started && !a.joined, !a.done.load(std::memory_order_acquire) || aheadHeld(id),
-                       scene && scene->computeOnService(), scene && scene->framePace() == FramePace::Complete);
-    if (door == rayahead::Door::Run) return true;
+                       scene && scene->computeOnService(), scene && scene->framePace() == FramePace::Complete,
+                       routeSetBuilt(id, scene));
     if (door == rayahead::Door::NotThisFrame) {
         // ...AND A CONSUMER REFUSED STILL OWES ITS TERM (COLD-BOOT-1 item 3; every consumer: SHADER-SYSTEM-1 stage 7): its
-        // scene noted until the build lands
-        if (std::find(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()) == a.refusedBy.end())
+        // scene noted until the build lands - and, refused for its LANDED SET (P3), until the set is built: the scene
+        // owes the route (bit 2) and measures its set this frame (the gather's ahead pass from now)
+        if (!a.joined && std::find(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()) == a.refusedBy.end())
             a.refusedBy.push_back(scene->historyId());
+        scene->noteRouteAheadWanted(bit, id == kAheadGather);
         return false;
     }
-    joinAhead(id);
+    if (door == rayahead::Door::Join) joinAhead(id);
+    if (scene) scene->noteRouteLanded(bit);
     return true;
+}
+
+bool RayQueryTier::routeSetBuilt(AheadId id, const OgreScene *scene) const {
+    static_assert(kGatherRouteBit == 1u << unsigned(kAheadGather), "kGatherRouteBit is AheadId kAheadGather's bit");
+    if (!scene || !scene->computeOnService()) return true;   // (a synchronous scene: its pass compiles in its frame)
+    const unsigned bit = 1u << unsigned(id);
+    if (scene->routeLanded(bit)) return true;
+    // (a card build launched with the reflection: landed - its consumer's own door joins it - finished, or never
+    // startable: its make*Pipeline builds at its consumer, as before)
+    const auto buildDone = [this](AheadId b) {
+        const Ahead &c = mAhead[b];
+        return !c.started || c.joined || (c.done.load(std::memory_order_acquire) && !aheadHeld(b));
+    };
+    switch (id) {
+    case kAheadGather: return scene->routeSetBuilt(bit, true);
+    case kAheadReflect:
+        return scene->routeSetBuilt(bit, false) && (scene->aheadPassOff() ||
+                                                    (buildDone(kAheadCardGather) && buildDone(kAheadCardMovers)));
+    default: return true;
+    }
+}
+
+void RayQueryTier::noteRouteOwed(const ReflectPassListener *key, AheadId id) {
+    RoutesOwed &o = mRoutesOwed[key];
+    if (o.frame != frameNow()) o = RoutesOwed{ frameNow(), 0u };
+    o.bits |= 1u << unsigned(id);
+}
+
+unsigned RayQueryTier::routesOwed(const ReflectPassListener *key) const {
+    const auto it = mRoutesOwed.find(key);
+    return it != mRoutesOwed.end() && it->second.frame == frameNow() ? it->second.bits : 0u;
 }
 
 bool RayQueryTier::rayBuildRefusedPending(const OgreScene *scene) const {
@@ -7114,7 +7177,10 @@ void RayQueryTier::recordReflect(const ReflectPassListener *key, OgreView *view,
                                  Ogre::CompositorPass *pass, const HitListBinding &hit) {
     // THE NEED's DOOR (ORPHAN-REDS-1): the build started if it was not, joined - or, in flight in a scene that compiles
     // in the background, NOT THIS FRAME: `jahSsrReflection` holds what the resolve wrote, the returns below' contract
-    if (!aheadReady(kAheadReflect, view ? view->ogreScene() : nullptr)) return;
+    if (!aheadReady(kAheadReflect, view ? view->ogreScene() : nullptr)) {
+        noteRouteOwed(key, kAheadReflect);   // (P3: its request-only hit decode)
+        return;
+    }
     if (!isOpen() || mReflectFailed || !view || !pass) return;
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
@@ -9739,10 +9805,18 @@ void RayQueryTier::readReflectHistory(ReflectView &rv, VkCommandBuffer cmd) {
 
 void RayQueryTier::releaseGatherBinding(const ReflectPassListener *key) {
     if (mGather) mGather->releaseBinding(key);
+    // (P3: the ahead registration ends with the pass the real one would have ended with)
+    const auto it = mAheadGatherSm.find(key);
+    if (it != mAheadGatherSm.end()) {
+        FogHlmsListener::setAheadGather(it->second, false);
+        mAheadGatherSm.erase(it);
+    }
 }
 
 void RayQueryTier::forgetGather(const ReflectPassListener *key) {
     if (mGather) mGather->forget(key, key && key->mFoldsOnForget);
+    releaseGatherBinding(key);   // (P3: an ahead registration of the view's goes with it)
+    mRoutesOwed.erase(key);
 }
 
 void RayQueryTier::gatherStatsInto(const OgreScene *scene, GatherStatus &out) const {
@@ -10052,7 +10126,10 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
 
     // ITS PIPELINES ARE AN AHEAD BUILD (kAheadGather, COLD-BOOT-1 stage 4): in flight in a scene that compiles in the
     // background, not this frame; joined everywhere else. A launch that was refused builds them now, in record().
-    if (!aheadReady(kAheadGather, view ? view->ogreScene() : nullptr)) return;
+    if (!aheadReady(kAheadGather, view ? view->ogreScene() : nullptr)) {
+        noteRouteOwed(key, kAheadGather);   // (P3: its ahead registrations and its request-only hit decode)
+        return;
+    }
     if (!mGather) mGather = new ScreenProbeGather(*this);
     if (mAhead[kAheadGather].started && !mAhead[kAheadGather].ok) mGather->notePipelinesFailed(mAhead[kAheadGather].err);
     mGather->record(key, in);
@@ -10235,6 +10312,10 @@ void RayQueryTier::suspendPassBindings(const ReflectPassListener *key, const Ogr
         s.gatherSm = sm;
         s.gather = FogHlmsListener::probeGather(sm);
         if (s.gather.irradiance) FogHlmsListener::setProbeGather(sm, FogHlmsListener::ProbeGatherBind());
+        // (P3: the ahead registration with it)
+        const FogHlmsListener::SceneBinds *b = FogHlmsListener::bindsOf(sm);
+        s.aheadGather = b && b->aheadGather;
+        if (s.aheadGather) FogHlmsListener::setAheadGather(sm, false);
     }
     auto it = mSunContacts.find(key);
     if (it != mSunContacts.end() && it->second.bound && it->second.sceneMgr) {
@@ -10254,6 +10335,7 @@ void RayQueryTier::resumePassBindings(const ReflectPassListener *key) {
     const SuspendedBindings s = st->second;
     mSuspended.erase(st);
     if (s.gather.irradiance && s.gatherSm) FogHlmsListener::setProbeGather(s.gatherSm, s.gather);
+    if (s.aheadGather && s.gatherSm) FogHlmsListener::setAheadGather(s.gatherSm, true);
     auto it = mSunContacts.find(key);
     if (s.sun && it != mSunContacts.end() && it->second.bound && it->second.sceneMgr && it->second.vis)
         FogHlmsListener::setSunContact(it->second.sceneMgr, it->second.vis, it->second.divisor);
@@ -12433,6 +12515,10 @@ void ReflectPassListener::passPreExecute(Ogre::CompositorPass *pass) {
     if (def->mIdentifier == kBlendedPassIdentifier) {
         if (mView->ogreScene() && mView->mEngine->mRayTier->gatherSkyVis(this))
             FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), mView->mEngine->mRayTier->gatherSkyVis(this));
+        // ...or, the gather owed in this view, its ahead registration (P3): the blended pass as the landing will make it
+        else if (mView->ogreScene() && !mView->ogreScene()->aheadPassOff() &&
+                 (mView->mEngine->mRayTier->routesOwed(this) & RayQueryTier::kGatherRouteBit))
+            FogHlmsListener::setAheadFogSkyVis(mView->ogreScene()->sceneManager(), true);
         // ...and its escape list (PHOTON-7 10-4 R4)
         mView->mEngine->mRayTier->bindGlassEscape(this, mView, 0u);
         return;
@@ -12476,7 +12562,10 @@ void ReflectPassListener::passPosExecute(Ogre::CompositorPass *pass) {
         return;
     }
     if (def->mIdentifier == kBlendedPassIdentifier) {
-        if (mView->ogreScene()) FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), nullptr);
+        if (mView->ogreScene()) {
+            FogHlmsListener::setFogSkyVis(mView->ogreScene()->sceneManager(), nullptr);
+            FogHlmsListener::setAheadFogSkyVis(mView->ogreScene()->sceneManager(), false);
+        }
         // ...its escapes traced and added into its target (PHOTON-7 10-4 R4)
         mView->mEngine->mRayTier->traceGlassEscape(this, mView, pass, 0u);
         return;
@@ -12942,7 +13031,18 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     if (!hv.live) return;
     const bool reflected = mReflects.count(key) && mReflects[key].finishPending;
     const bool gathered = mGather && mGather->tracedAtlas(key) != VK_NULL_HANDLE;
-    if (!reflected && !gathered) return;
+    // (H) THE REQUEST-ONLY DECODE (P3): nothing traced, but a route owed in this view (the reflection's or the gather's
+    // consumer refused: its build in flight or its set not built) - the decode is armed all the same, over this frame's
+    // EMPTY list (prepareHitList zeroed its counter: every decode draw is empty, its target unread), so the hit shading's
+    // permutations its landing will draw (Atom's hit mode for the gather, the PBS decode twins for the reflection) are
+    // asked for on the service now; their count of objects not built is the routes' set (endHitDecode)
+    OgreScene *owedScene = view->ogreScene();
+    const unsigned kOwedBits = (1u << unsigned(kAheadReflect)) | (1u << unsigned(kAheadGather));
+    const unsigned owed =
+        !reflected && !gathered && owedScene && !owedScene->aheadPassOff() ? routesOwed(key) & kOwedBits : 0u;
+    if (!reflected && !gathered && !owed) return;
+    // (an owed decode that cannot be armed has not measured its set: not built)
+    const auto unmeasured = [&]() { if (owed && owedScene) owedScene->noteRouteNotReady(owed, 1ull); };
     // A STALE TWIN NEVER DRAWS: a PBS datablock that changed its permutation since
     // updateScene's sync (the engine edits datablocks in place — the sky's manual
     // cube taken away when a probe grid binds, mid-frame) leaves its twin a copy
@@ -12953,7 +13053,7 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     // set (the pin's count assert is compiled out): the Xid 109s this lane's gate
     // measured. This frame's records go unshaded (the write-back's "unshaded"
     // answer); the next updateScene re-derives the twin.
-    if (decodeTwinsStale(view->ogreScene())) return;
+    if (decodeTwinsStale(view->ogreScene())) { unmeasured(); return; }
     // ARM THE DECODE for this pass alone: the source (the list and the GPU scene's
     // tables, re-read now — they are re-created when they grow), the scene's
     // decode draws shown, and the camera's auto aspect held off so the pass'
@@ -12961,9 +13061,9 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
     auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr;
     OgreScene *scene = view->ogreScene();
-    if (!atom || !scene) return;
+    if (!atom || !scene) { unmeasured(); return; }
     detail::GpuScene &gs = scene->gpuScene();
-    if (!gs.live()) return;
+    if (!gs.live()) { unmeasured(); return; }
     gs.flushGeomRows();
     HlmsAtom::DecodeSource src;
     src.ids = hv.ids;
@@ -12975,6 +13075,11 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     atom->setDecodeSource(src);
     atom->showSceneDecodes(scene->sceneManager(), true);
     hv.armedSm = scene->sceneManager();
+    hv.aheadRoutes = owed;
+    if (owed) {
+        const Ogre::RenderQueue *rq = scene->sceneManager()->getRenderQueue();
+        hv.aheadCountsAt = rq->getNumPlaceholderDraws() + rq->getNumPendingSkips();
+    }
 }
 
 void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
@@ -12984,6 +13089,15 @@ void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
     if (hv.pinnedCam) hv.pinnedCam->setAutoAspectRatio(hv.camAuto);
     hv.pinnedCam = nullptr;
     if (!hv.armedSm) return;
+    // (H) THE REQUEST-ONLY DECODE's SET (P3): its draws that met an object not built (a placeholder or a skip)
+    if (hv.aheadRoutes) {
+        if (OgreScene *scene = sceneOfManager(hv.armedSm)) {
+            const Ogre::RenderQueue *rq = hv.armedSm->getRenderQueue();
+            scene->noteRouteNotReady(hv.aheadRoutes,
+                                     rq->getNumPlaceholderDraws() + rq->getNumPendingSkips() - hv.aheadCountsAt);
+        }
+        hv.aheadRoutes = 0u;
+    }
     Ogre::HlmsManager *hm = Ogre::Root::getSingleton().getHlmsManager();
     if (auto *atom = hm ? dynamic_cast<HlmsAtom *>(hm->getHlms(HlmsAtom::kType)) : nullptr) {
         atom->showSceneDecodes(hv.armedSm, false);
@@ -13039,6 +13153,14 @@ void RayQueryTier::resolveRayJobs(const ReflectPassListener *key, OgreView *view
         // chain's flag, and a pass with no diffuse product would draw no indirect light for the frame
         const Ogre::TextureGpu *t = next->getAnyTargetTexture();
         if (view->chainDesc().probeGather && t) mGather->holdLast(key, t->getWidth(), t->getHeight(), t->getNumSlices());
+    }
+    // THE AHEAD REGISTRATION (P3): the gather owed in this view registers its stand-ins where it would have registered
+    // itself - pass-scoped as the real registration (suspended, resumed and released with it); the ahead pass reads it
+    if ((routesOwed(key) & (1u << unsigned(kAheadGather))) && view->ogreScene() &&
+        !FogHlmsListener::probeGather(view->ogreScene()->sceneManager()).irradiance &&
+        !view->ogreScene()->aheadPassOff()) {
+        FogHlmsListener::setAheadGather(view->ogreScene()->sceneManager(), true);
+        mAheadGatherSm[key] = view->ogreScene()->sceneManager();
     }
     finishSunContact(key);
     finishAreaVis(key);

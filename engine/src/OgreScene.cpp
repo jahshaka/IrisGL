@@ -2596,7 +2596,8 @@ void OgreScene::noteFrameCompleteness() {
     unsigned terms = 0u;
     terms |= counts[0] != mIncompleteDrawsSeen[0] ? 1u : 0u;
     terms |= counts[1] != mIncompleteDrawsSeen[1] ? 2u : 0u;
-    terms |= rayBuildRefusedPending() ? 4u : 0u;
+    // (a route refused for its LANDED SET - P3 - owes its term as a build in flight does)
+    terms |= rayBuildRefusedPending() || mRouteWanted != 0u ? 4u : 0u;
     terms |= mPhoton.materialsAwaitingTexture() > 0u ? 8u : 0u;
     // (bit 5 = 32: a ray job refused its dispatch, or JAH_RQ_INIT a ray, for an undefined input - GATHER-HANG-1 stage 2.
     // THE TERMS FROM 8 UP ARE FOUR, EACH ITS OWN BIT, KEPT ALL FOUR BY WHOEVER LANDS SECOND: 8 a material awaiting its
@@ -2615,11 +2616,46 @@ void OgreScene::noteFrameCompleteness() {
     mDispatchDeferralsSeen = deferrals;
     mIncompleteDrawsSeen[0] = counts[0];
     mIncompleteDrawsSeen[1] = counts[1];
+    // THE ROUTES' SETS (P3): the frame just drawn's measure latched for this frame's doors; the ahead pass ends with
+    // the last owed route (zero cost at rest: no listener, no ahead hash)
+    mRouteWantedLast = mRouteWanted;
+    mRouteNotReadyLast = mRouteNotReady;
+    mAheadPassMissingLast = mAheadPassNotReady != 0ull;
+    if (mSceneMgr && !(mRouteWanted & mRouteAheadPassBits) &&
+        mSceneMgr->getRenderQueue()->getAheadListener() == &gRouteAhead)
+        mSceneMgr->getRenderQueue()->setAheadListener(nullptr);
+    mRouteWanted = mRouteNotReady = mRouteAheadPassBits = 0u;
+    mAheadPassNotReady = 0ull;
     const bool incomplete = terms != 0u;
     if (mCompleteness.incomplete && !incomplete) ++mCompleteness.completionSerial;
     mCompleteness.incompleteFrames = incomplete ? mCompleteness.incompleteFrames + 1ull : 0ull;
     mCompleteness.incomplete = incomplete;
     mCompleteness.terms = terms;
+}
+
+void OgreScene::noteRouteAheadWanted(unsigned routeBit, bool aheadPass) {
+    mRouteWanted |= routeBit;
+    if (!aheadPass || aheadPassOff()) return;
+    mRouteAheadPassBits |= routeBit;
+    if (mSceneMgr && !mSceneMgr->getRenderQueue()->getAheadListener())
+        mSceneMgr->getRenderQueue()->setAheadListener(&gRouteAhead);
+}
+
+void OgreScene::noteRouteNotReady(unsigned routeBits, unsigned long long notReady) {
+    if (notReady) mRouteNotReady |= routeBits;
+}
+
+void OgreScene::noteAheadPass(size_t, size_t notReady) { mAheadPassNotReady += notReady; }
+
+bool OgreScene::routeSetBuilt(unsigned routeBit, bool aheadPass) const {
+    if (aheadPassOff()) return true;   // (the arm: the landing as before P3)
+    return (mRouteWantedLast & routeBit) && !(mRouteNotReadyLast & routeBit) && !(aheadPass && mAheadPassMissingLast);
+}
+
+bool OgreScene::aheadPassOff() const { return mEngine && mEngine->armRegistry().on(ArmId::AheadPassOff); }
+
+unsigned long long OgreScene::aheadPassesPrepared() const {
+    return mSceneMgr ? mSceneMgr->getRenderQueue()->getNumAheadPasses() : 0ull;
 }
 }}}   // namespace jahshaka::engine::detail
 

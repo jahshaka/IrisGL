@@ -3723,6 +3723,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.rayBuildsLanded = rayAheadLanded();
     out.completed = c->getNumCompleted();
     out.failed    = c->getNumFailed();
+    out.submitted = c->getJahNumResolved() + c->getNumOutstanding();
     out.placeholderDraws = mRetiredPlaceholderDraws;
     out.pendingSkips     = mRetiredPendingSkips;
     for (const auto &sc : mScenes) {
@@ -3735,6 +3736,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
         out.placeholderDraws += rq->getNumPlaceholderDraws() - capPh;
         out.pendingSkips     += rq->getNumPendingSkips() - capSkip;
         out.captureDeferredDraws += capPh + capSkip;
+        out.aheadPasses += sc->aheadPassesPrepared();
     }
     unsigned background = 0;
     unsigned foreground = 0;
@@ -4300,6 +4302,10 @@ void OgreEngine::teardown() {
         if (mRoot && mRoot->getRenderSystem())
             FogHlmsListener::releaseShadowTransmitNone(mRoot->getRenderSystem()->getTextureGpuManager());
     } catch (...) {}
+    try {
+        if (mRoot && mRoot->getRenderSystem())
+            FogHlmsListener::releaseAheadStandIns(mRoot->getRenderSystem()->getTextureGpuManager());
+    } catch (...) {}
     // ...and the specular albedo table's buffer goes back to the VaoManager that made it (PHOTON-3).
     try { Ogre::PhotonSpecularAlbedo::releaseConstBuffer(); } catch (...) {}
     // The pooled mip jobs (ENGINE-UPGRADE-ASYNC-3) go back to the compute Hlms that cloned them.
@@ -4503,6 +4509,8 @@ void OgreEngine::ensureHlms() {
     mRoot->getHlmsManager()->getHlms(Ogre::HLMS_PBS)->setListener(&gFogListener);
     // ...and the shadows' transmittance layer's white stand-in it binds where a node has no layer (PHOTON-7 10-4 R8)
     FogHlmsListener::createShadowTransmitNone(mRoot->getRenderSystem()->getTextureGpuManager());
+    // ...and the ahead pass's stand-ins (SHADER-SYSTEM-1 stage 7, P3: one set for the engine, never bound)
+    FogHlmsListener::createAheadStandIns(mRoot->getRenderSystem()->getTextureGpuManager());
     // THE SPECULAR LOBE'S ALBEDO TABLE (PHOTON-3): the one immutable constant buffer every
     // colour pass's environment term (bound by that listener) and the Photon jobs read, made
     // HERE - an immutable upload is a copy on the device queue, never one inside a pass.
