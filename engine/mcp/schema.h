@@ -16,6 +16,9 @@
 //   * an array -> "items" (its element's kind, and the parameter's domain: the registry checks it on each element; an
 //     object element its own object schema), count > 0 -> "minItems" = "maxItems" = count, else maxCount > 0 (upTo())
 //     -> "maxItems";
+//   * single precision (Param::single, SCRIPT-IN-ENGINE-1 2b) -> "format":"float" and said in the description (a
+//     number past a float's range FAILS); a FLAT array (Param::stride) -> its items count NUMBERS ("maxItems" in numbers)
+//     and the description says the stride (a length off it FAILS);
 //   * an object -> "properties", "required" and "additionalProperties":false the same way, nested;
 //   * a default -> "default", the checked default as it is (the codec writes it).
 // A FIELD THE GENERATOR CANNOT CARRY - one set where its kind has no form for it (choices on an integer, a count on a
@@ -31,7 +34,7 @@ namespace jahshaka { namespace engine { namespace mcp {
 
 /// The Param and Signature fields this generator reads (Signature's `access`, `returns` and `returnsHandle` describe
 /// the command and its answer, not the arguments: read by the tools that list a command, given no form here).
-constexpr int kParamFieldsMapped = 15;
+constexpr int kParamFieldsMapped = 17;   // (+ single and stride: SCRIPT-IN-ENGINE-1 2b, "format": "float" and the flat description)
 constexpr int kSignatureFieldsMapped = 4;
 
 /// The JSON Schema of `command`'s arguments into `schema`; false with `why` naming EVERY fault (command: where: what).

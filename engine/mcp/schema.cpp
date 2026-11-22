@@ -105,6 +105,10 @@ private:
             if (p.min) s.emplace_back(p.minExclusive ? "exclusiveMinimum" : "minimum", bound(*p.min, k));
             if (p.max) s.emplace_back("maximum", bound(*p.max, k));
         }
+        if (p.single && k == Kind::Number) {   // (SCRIPT-IN-ENGINE-1 2b: a client knows a 1e39 is refused before it sends it)
+            s.emplace_back("format", Value("float"));
+            said.push_back("single precision: past a float's range FAILS");
+        }
         if (!p.unit.empty()) said.push_back(p.unit);
         if (p.nonFinite) said.push_back("NaN and infinity allowed (JSON carries neither)");
         return s;
@@ -126,6 +130,8 @@ public:
         if ((p.min || p.max) && ((k != Kind::Int && k != Kind::Number) || !p.handle.empty())) unmapped(where, "min/max", k);
         if (!p.handle.empty() && k != Kind::Int) unmapped(where, "handle", k);
         if (p.nonFinite && k != Kind::Number) unmapped(where, "nonFinite", k);
+        if (p.single && k != Kind::Number) unmapped(where, "single", k);
+        if (p.stride && !array) unmapped(where, "stride", p.kind);
 
         std::vector<std::string> said;
         Value::Object s;
@@ -140,6 +146,9 @@ public:
             } else if (p.maxCount) {
                 s.emplace_back("maxItems", Value(p.maxCount));
             }
+            if (p.stride > 1)   // FLAT (SCRIPT-IN-ENGINE-1 2b): the items count numbers; a length off the stride FAILS
+                said.push_back("flat: " + std::to_string(p.stride) + " numbers an item, the length a multiple of " +
+                               std::to_string(p.stride));
         } else {
             s = value(p, k, where, said);
         }
