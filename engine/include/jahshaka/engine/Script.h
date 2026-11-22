@@ -241,6 +241,11 @@ public:
     /// The call by name: the arguments checked against the signature (the laws above), then the command run (an
     /// exception it throws: Failed, "<name>: threw: <what>").
     Result call(const std::string &name, const Value::Array &args);
+    /// THE CALL BY NAME (MCP-ON-HOST-1: an adapter that knows no command): each member of `args` names a parameter (one
+    /// that names none FAILS, "<name>: has no parameter 'x' (<signature>)"; one named twice FAILS); the members go to
+    /// their parameters' POSITIONS in the signature's order, an absent one null (its default, or "is required"), and the
+    /// call is callAt's - every strict law holds, in the same words as call.
+    Result callNamed(const std::string &name, Value::Object args);
     /// The same call by the command's INDEX (its place in commands(), fixed at registration): a language binding
     /// resolves each command ONCE and calls it by index - no lookup by name a call - and hands its arguments over (the
     /// check moves them into the call, it copies nothing it can move).
@@ -351,8 +356,10 @@ public:
     /// A judgement the verdict runs before it counts (a declaration no frame asserted is a failed law(), by name).
     void atVerdict(std::function<void()> judge);
 
-    /// The language binding's doors: a command call by name or by its registry index, and a console line.
+    /// The callers' doors: a command call by name (positional arguments, or named: callNamed), by its registry index,
+    /// and a console line.
     Result call(const std::string &name, const Value::Array &args);
+    Result callNamed(const std::string &name, Value::Object args);
     Result callAt(std::size_t index, Value::Array args);
     void print(const std::string &line);
 

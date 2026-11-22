@@ -663,14 +663,41 @@ std::vector<const CommandInfo *> Registry::commands() const
     return out;
 }
 
+namespace {
+Result failed(std::string message)
+{
+    Result r;
+    r.status = Status::Failed;
+    r.message = std::move(message);
+    return r;
+}
+}  // namespace
+
 Result Registry::call(const std::string &name, const Value::Array &args)
 {
     const auto it = mByName.find(name);
     if (it != mByName.end()) return callAt(it->second, args);
-    Result r;
-    r.status = Status::Failed;
-    r.message = name + " is not a command";
-    return r;
+    return failed(name + " is not a command");
+}
+
+Result Registry::callNamed(const std::string &name, Value::Object args)
+{
+    const auto it = mByName.find(name);
+    if (it == mByName.end()) return failed(name + " is not a command");
+    const CommandInfo &info = mEntries[it->second].info;
+    const std::vector<Param> &params = info.signature.params;
+    Value::Array positional(params.size());   // null: absent (conform gives its default, or "is required")
+    std::vector<bool> given(params.size(), false);
+    for (Value::Member &m : args) {
+        std::size_t i = 0;
+        while (i < params.size() && params[i].name != m.first) ++i;   // the SIGNATURE's order decides the position
+        if (i == params.size())
+            return failed(name + ": has no parameter '" + m.first + "' (" + signatureText(info) + ")");
+        if (given[i]) return failed(name + ": the parameter '" + m.first + "' is named twice");
+        given[i] = true;
+        positional[i] = std::move(m.second);
+    }
+    return callAt(it->second, std::move(positional));
 }
 
 Result Registry::callAt(std::size_t index, Value::Array args)

@@ -94,6 +94,8 @@ int Host::verdict(const Result &run)
 
 Result Host::call(const std::string &name, const Value::Array &args) { return mRegistry.call(name, args); }
 
+Result Host::callNamed(const std::string &name, Value::Object args) { return mRegistry.callNamed(name, std::move(args)); }
+
 Result Host::callAt(std::size_t index, Value::Array args) { return mRegistry.callAt(index, std::move(args)); }
 
 void Host::print(const std::string &line)
