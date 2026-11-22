@@ -202,8 +202,13 @@ void registerFrameCommands(Host &host, const Commands &k)
           [k](Call &c) -> Value {
               if (!k.engine(c)) return Value();
               const std::int64_t n = c[0].asInt();
-              for (std::int64_t i = 0; i < n; ++i)
+              for (std::int64_t i = 0; i < n; ++i) {
+                  // THE KEEP-GOING POLL at each frame boundary (Host::keepGoing: a caller's cancel, and its progress)
+                  if (!k.st->host->keepGoing(double(i), double(n)))
+                      return c.fail("cancelled at frame " + std::to_string(i) + " of " + std::to_string(n));
                   if (!k.frame(c)) return Value();
+              }
+              k.st->host->keepGoing(double(n), double(n));   // the end, as progress: every frame is drawn
               return Value();
           });
 }

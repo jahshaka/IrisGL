@@ -413,6 +413,9 @@ public:
         // catchable error that FAILS the run or the call by name; the host lives on
         JS_SetMemoryLimit(mRt, host.options().heapLimit());
         JS_SetHostPromiseRejectionTracker(mRt, &JavaScript::rejection, this);
+        // THE CANCEL (Host::keepGoing): the runtime's periodic interrupt poll asks the host; false stops the script with
+        // an error no catch takes
+        JS_SetInterruptHandler(mRt, &JavaScript::interrupt, this);
         // THE REALM HAS NO WALL CLOCK (the re-read's C1; CODING_RULES § 5: a test counts FRAMES): JS_NewContext's own
         // intrinsics (quickjs.c, JS_NewContext) MINUS Date and performance; Math.random REPLACED below by a fixed-seed
         // stream (quickjs seeds its own from the time of day)
@@ -464,6 +467,7 @@ public:
         install();
         clearRejections();
         mRejectionLost = false;
+        mCancelled = false;
         mRandom = mHost.options().randomSeed ? mHost.options().randomSeed : 1;   // every run draws the same stream
         Result r;
         JSValue v = JS_Eval(mCtx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
@@ -488,6 +492,10 @@ public:
         if (r.status != Status::Failed && mRejectionLost) {
             r.status = Status::Failed;
             r.message = "an unhandled promise rejection could not be recorded (its tracker threw)";
+        }
+        if (mCancelled) {
+            r.status = Status::Failed;
+            r.message = "cancelled";
         }
         clearRejections();
         return r;
@@ -618,6 +626,14 @@ private:
         return JS_NewFloat64(ctx, double((x * 0x2545F4914F6CDD1Dull) >> 11) * (1.0 / 9007199254740992.0));
     }
 
+    /// The runtime's interrupt poll: non-zero stops the running script (Host::keepGoing, no count).
+    static int interrupt(JSContext *, void *opaque)
+    {
+        JavaScript *self = static_cast<JavaScript *>(opaque);
+        if (!self->mHost.keepGoing(0, 0)) self->mCancelled = true;
+        return self->mCancelled ? 1 : 0;
+    }
+
     static JSValue log(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv)
     {
         JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
@@ -644,6 +660,7 @@ private:
     std::vector<std::pair<std::unique_ptr<Namespace>, JSValue>> mSpaces;   // each namespace's object, by path
     std::size_t mInstalled = 0;                                             // the commands made so far
     std::uint64_t mRandom = 1;                                              // Math.random's state (run's seed)
+    bool mCancelled = false;                                                // the host said stop during this run
     std::vector<std::pair<JSValue, std::string>> mRejections;  // rejected, no handler yet: the promise, its reason
     bool mRejectionLost = false;                                // a rejection the tracker could not hold (it threw)
 };

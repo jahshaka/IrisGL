@@ -40,6 +40,8 @@ void Host::addLanguage(std::string extension, LanguageMaker make)
 
 void Host::setConsole(ConsoleSink sink) { mConsole = std::move(sink); }
 
+void Host::setKeepGoing(KeepGoing hook) { mKeepGoing = std::move(hook); }
+
 /// THE HOST STARTS ONLY WHOLE (the final read's W4): a command its registry refused is a named start failure - of a
 /// run and of every call alike (MCP-ON-HOST-1: a call that went round the run's check served a host the run refuses).
 static Result notWhole(const Registry &registry)

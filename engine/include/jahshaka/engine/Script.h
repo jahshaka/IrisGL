@@ -476,10 +476,20 @@ public:
     Result callAt(std::size_t index, Value::Array args);
     void print(const std::string &line);
 
+    /// THE KEEP-GOING HOOK (MCP-ON-HOST-1: a caller's cancel, and its progress): long work asks keepGoing at its
+    /// boundaries - the script language's interrupt poll as (0, 0) (no count), engine.frames before each frame as
+    /// (frames done, frames asked) and once more at its end as (n, n) - and stops when it answers false: a script FAILS
+    /// "cancelled", engine.frames "cancelled at frame i of n" (a frame is never cut; the state is what the drawn frames
+    /// made). Unset: always true. The same call carries progress: a hook may report `done` of `total` (total > 0).
+    using KeepGoing = std::function<bool(double done, double total)>;
+    void setKeepGoing(KeepGoing hook);
+    bool keepGoing(double done, double total) { return !mKeepGoing || mKeepGoing(done, total); }
+
 private:
     Options mOptions;
     Registry mRegistry;
     ConsoleSink mConsole;
+    KeepGoing mKeepGoing;
     int mChecksRun = 0;
     int mChecksFailed = 0;
     std::vector<std::function<void()>> mJudges;
