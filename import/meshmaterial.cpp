@@ -9,14 +9,14 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include "document/materials/meshmaterial.h"
+#include "import/meshmaterial.h"
 
 #include <QColor>
 #include <QFileInfo>
 #include <algorithm>
 #include <cmath>
 
-#include "document/assets/mesh.h"
+#include "import/scenebuilder.h"
 #include "document/materials/pbrmaterial.h"
 
 namespace iris

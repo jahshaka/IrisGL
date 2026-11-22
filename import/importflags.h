@@ -23,7 +23,7 @@ namespace iris
 // import/importflags.cpp, and every ReadFile inside IrisGL passes one of
 // these two. Outside IrisGL nothing calls ReadFile at all: Studio goes through
 // the import facade (import/scenesource.h, import/modelsceneinfo.h,
-// import/clipfileinfo.h, MeshNode::loadAsSceneFragment) — the white-box test
+// import/clipfileinfo.h, iris::loadAsSceneFragment) — the white-box test
 // suites that drive the vendored importer directly link assimp themselves and
 // pass these same constants, so "one definition" still holds.
 //

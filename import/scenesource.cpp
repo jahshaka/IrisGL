@@ -84,7 +84,7 @@ bool findMeshNodeChain(aiNode *node, unsigned meshIndex, QVector<aiNode *> &chai
 /// THE SINGLE-MESH FOLD (SPECS/IMPORT_DIALOG_SPEC.md §2 finding d, §4.2).
 ///
 /// A file with ONE mesh and no bones takes the "single MeshNode, no children"
-/// shortcut in every consumer (MeshNode::loadAsSceneFragment and the bake's
+/// shortcut in every consumer (iris::loadAsSceneFragment and the bake's
 /// mirror of it), and that shortcut used to put the file's own mesh-node
 /// pos/rot/SCALE on the fragment ROOT — the node the user places. So a
 /// single-mesh file authored with a node scale arrived at scale != 1 no matter

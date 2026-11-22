@@ -62,7 +62,7 @@ namespace iris
 
 /// THE RESOLVED EFFECT OF AN ASSET'S IMPORT SETTINGS ON ONE PARSE — the form
 /// the choke point (readSceneFile) and the two builders that consume a parse
-/// (MeshBake::buildFromScene, MeshNode::loadAsSceneFragment) take.
+/// (MeshBake::buildFromScene, iris::loadAsSceneFragment) take.
 ///
 /// It has two halves, and they are applied in different places, which is why
 /// they travel together: the GEOMETRY half (scale, rotation, origin) is handed
@@ -130,7 +130,7 @@ struct ImportTransform
     /// false: no animation clip is carried at all.
     bool clips = true;
     /// Non-empty: only these clips, matched case-insensitively against the
-    /// names Mesh::extractAnimations produces (the names assets.metadata and
+    /// names iris::extractAnimations produces (the names assets.metadata and
     /// the clip list show).
     QStringList clipNames;
     /// false: no material data is read from the file — the fragment gets the

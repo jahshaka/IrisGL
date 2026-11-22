@@ -411,7 +411,7 @@ public:
     // ---- The CHARACTER rig (AVATAR_RIG_PERF_SPEC §3.1, decision D5 = U2) ----
     //
     // An imported character is several skinned pieces (body, head, eyes, hair)
-    // and `Mesh::extractSkeleton` gives each piece a rig of ITS OWN BONES, in
+    // and `iris::extractSkeleton` gives each piece a rig of ITS OWN BONES, in
     // ITS OWN ORDER — five pieces, five rigs, five SkeletonDefs, five
     // SkeletonInstances. Ogre refuses to let two Items share a SkeletonInstance
     // unless their meshes name the SAME skeleton (OgreItem.cpp:249-254), so

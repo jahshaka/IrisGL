@@ -20,24 +20,8 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 #include "document/assets/mesh.h"
 
-// No assimp in this header (ENGINEERING_DEBT L4 part 3, 2026-09-10): assimp
-// is a PRIVATE dependency of IrisGL. The parse a caller may keep is the
-// opaque SceneSource (import/scenesource.h); the importer's progress hook is
-// an implementation detail of meshnode.cpp.
-#include "import/scenesource.h"
-
-struct aiScene;
-
 namespace iris
 {
-
-struct MeshMaterialData;
-
-class IModelReadProgress
-{
-public:
-    virtual float onProgress(float percentage) = 0;
-};
 
 enum class FaceCullingMode
 {
@@ -90,47 +74,6 @@ public:
     virtual PropertyRows getProperties() override;
     virtual QVariant getPropertyValue(QString valueName) override;
     virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
-
-    /**
-     * Some model contains multiple meshes with child-parent relationships. This funtion Loads the model as a scene
-     * itself. If only one mesh is in the scene, it returns it as an MeshNode rather than a SceneNode. Otherwise, it
-     * returns a null shared pointer.
-     * @param path
-     * @return
-     */
-    /// `scene_` may be null: a local importer is used and the aiScene dies
-    /// with the call (everything returned owns copies). Pass a SceneSource
-    /// only to keep the aiScene alive for follow-up work (metadata counts).
-    /// `extractDir`: where embedded textures and derived maps are WRITTEN
-    /// (import staging). Empty = beside the source file (legacy behavior —
-    /// wrong for read-only sources; the import pipeline always passes one).
-    /// `xf`: the ASSET's resolved import recipe (import/importsettings.h) —
-    /// the scale, rotation and origin its settings baked in, AND the tuning
-    /// half (skeleton / clips / materials) that decides what is built from the
-    /// parse. Identity for a raw path with no library row behind it; a library
-    /// asset's parse that passes identity renders a DIFFERENT SIZE, or a
-    /// different set of products, from the asset's own bake.
-    static SceneNodePtr loadAsSceneFragment(
-        QString path,
-        std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-        SceneSource *scene_ = Q_NULLPTR,
-        IModelReadProgress* progressReader = Q_NULLPTR,
-        const QString &extractDir = QString(),
-        const ImportTransform &xf = ImportTransform()
-    );
-
-    /// IrisGL-internal form of the above (a complete aiScene needs assimp's
-    /// headers, which only this library's own translation units and the
-    /// white-box importer suites include).
-	static SceneNodePtr loadAsSceneFragment(
-		const QString &filePath,
-		const aiScene* scene_,
-		std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
-		const QString &extractDir = QString(),
-		const ImportTransform &xf = ImportTransform()
-	);
-
-    static SceneNodePtr loadAsAnimatedModel(QString path);
 
     void setMesh(MeshPtr mesh);
 

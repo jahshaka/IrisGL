@@ -5949,7 +5949,7 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
         const iris::BonePtr &b = bones[i];
         BoneDesc &bd = out.bones[size_t(i)];
         bd.name = b->name.toStdString();
-        // The parent comes from Bone::parentBone, which Mesh::extractSkeleton
+        // The parent comes from Bone::parentBone, which iris::extractSkeleton
         // fills with the NEAREST BONE ANCESTOR in the aiNode tree — skipping the
         // `$AssimpFbx$` pivot nodes that sit between real bones in every
         // pivot-preserving FBX. (Before that fix every bone of such a rig was

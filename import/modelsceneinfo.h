@@ -127,7 +127,7 @@ struct ModelSceneInfo
         double durationTicks = 0.0;     ///< raw
         /// durationTicks / ticksPerSecond, with the importer's documented
         /// 25 fps fallback when the file states none — the same rule
-        /// Mesh::extractAnimations keys its tracks with.
+        /// iris::extractAnimations keys its tracks with.
         double lengthSeconds = 0.0;
         QStringList channelNames;       ///< one per channel, the node it drives
     };

@@ -142,7 +142,7 @@ ClipFileInfo ClipFileInfo::fromScene(const aiScene *scene, const QVector<double>
         clip.ticksPerSecond = anim->mTicksPerSecond;
         clip.durationTicks = anim->mDuration;
         // ticksPerSecond is 0 in more exports than not — the same fallback
-        // Mesh::extractAnimations uses.
+        // iris::extractAnimations uses.
         const double tps = anim->mTicksPerSecond > 0.0 ? anim->mTicksPerSecond : 25.0;
         clip.lengthSeconds = anim->mDuration / tps;
         for (unsigned c = 0; c < anim->mNumChannels; ++c)

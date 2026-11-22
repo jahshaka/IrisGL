@@ -16,7 +16,6 @@ For more information see the LICENSE file
 #include "core/math/vec.h"
 #include <QString>
 #include <QStringList>
-#include <QColor>
 #include <QVector>
 
 #include "irisglfwd.h"
@@ -26,106 +25,10 @@ For more information see the LICENSE file
 #include "document/assets/vertexlayout.h"
 #include "document/assets/vertexbuffer.h"
 
-// No assimp in this header (ENGINEERING_DEBT L4 part 2, 2026-09-09): every use
-// below is by POINTER, so the two forward declarations are all a consumer needs;
-// the TUs that read aiMesh/aiScene include assimp themselves.
-struct aiScene;
-
-struct aiMesh;
-
 namespace iris
 {
 
 class BoundingSphere;
-
-struct MeshMaterialData
-{
-    QColor diffuseColor;
-    QColor specularColor;
-    QColor ambientColor;
-    QColor emissionColor;
-    float shininess = 0.0f;
-
-    QString diffuseTexture;
-    QString specularTexture;
-    QString normalTexture;
-    QString hightTexture;
-
-    bool hasEmbeddedDiffTexture = false;
-    bool hasEmbeddedSpecularTexture = false;
-    bool hasEmbeddedNormalTexture = false;
-    bool hasEmbeddedHightTexture = false;
-
-    // glTF 2.0 metallic-roughness, read at import (GLB importer fix phase 0).
-    // hasPbr is true when the source material is a PBR one at all — any glTF
-    // material qualifies, in whichever workflow it was authored; importers then
-    // build an iris::PbrMaterial from these instead of faking a legacy
-    // Blinn-Phong material out of assimp's lossy shininess back-conversion.
-    //
-    // THE DEFAULTS ARE A POLICY, and they are DIELECTRIC (2026-09-08).
-    // glTF says an omitted `metallicFactor` inside a PRESENT
-    // `pbrMetallicRoughness` block is 1.0, and the importer honours that
-    // exactly (a metallic car imports as metal and looks dark in a scene with
-    // nothing to reflect — physics, not a defect). But a material that states
-    // NO workflow at all — no metallic-roughness block and no
-    // KHR_materials_pbrSpecularGlossiness — is not a statement that it is a
-    // mirror; reading it as one is how models imported black. Such a material,
-    // and any importer that fills none of these in, lands here: a plain
-    // dielectric, half rough, which is the only defensible "unknown surface".
-    bool hasPbr = false;
-    QColor baseColorFactor = QColor(255, 255, 255, 255);
-    float metallicFactor = 0.0f;
-    float roughnessFactor = 0.5f;
-    /// KHR_materials_unlit: the source says this surface is NOT lit. Imports as
-    /// PbrMaterial shadingModel 1 (the engine's Unlit family) — see
-    /// iris::materialFromMeshData (document/materials/meshmaterial.h) for what carries the colour there.
-    bool unlit = false;
-    /// glTF `doubleSided` (and every other format's two-sided flag), as assimp's
-    /// AI_MATKEY_TWOSIDED (CULL-MODE-1): the import writes it onto the MeshNode
-    /// as faceCullingMode None — the node's cull is what the mirror pushes.
-    bool twoSided = false;
-    /// HOW THE SURFACE COVERS (BISTRO-IMPORT-1) — PbrMaterial's `alphaMode` row
-    /// (0 opaque, 1 masked, 3 glass) and its `alpha` / `alphaCutoff`. Read from the
-    /// SOURCE's own facts by MaterialHelper::extractMaterialData: an FBX/OBJ opacity
-    /// below 1 is glass at that alpha; a bound base-colour map whose own alpha channel
-    /// has texels below the cutoff is a cutout. Every import used to drop both.
-    int alphaMode = 0;
-    float alpha = 1.0f;
-    float alphaCutoff = 0.5f;
-    QString baseColorTexture;
-    QString metallicTexture;    // split from the packed MR map (blue channel)
-    QString roughnessTexture;   // split from the packed MR map (green channel)
-    QString emissiveTexture;
-
-    // ---- Specular / fresnel workflows (MATERIAL_GAPS_SPEC GAP 1) ----------
-    //
-    // The renderer has three PBR workflows, so a source authored in one of the
-    // two SPECULAR ones no longer has to be converted to metallic-roughness to
-    // arrive. The conversion (specularGlossinessToMetallicRoughness) is still
-    // here and still correct — it is now the FALLBACK, for targets that cannot
-    // carry a workflow (web export), not the import path.
-    //
-    // 0 Metallic (the default, and what a metallic-roughness glTF is),
-    // 1 Specular (legacy KHR_materials_pbrSpecularGlossiness — native, lossless),
-    // 2 Specular-as-Fresnel (KHR_materials_specular — the pin's own docs call
-    //   this "what most PBRs mean by specular").
-    int    workflow = 0;
-    /// kS. From KHR_materials_specular's specularFactor, or a spec-gloss
-    /// material's specularFactor. White is inert.
-    QColor specularFactor = QColor(255, 255, 255, 255);
-    /// F0 straight from KHR_materials_specular's specularColorFactor. Only
-    /// meaningful with `useFresnelColor`; otherwise `ior` supplies F0.
-    QColor fresnelFactor = QColor(10, 10, 10, 255);
-    bool   useFresnelColor = false;
-    /// KHR_materials_ior. 1.5 is the extension's own default and ours.
-    float  ior = 1.5f;
-    /// The SPECULAR / spec-gloss map. It binds to the renderer's shared
-    /// metallic/specular texture unit — the same unit metallicTexture uses —
-    /// so exactly one of the two is ever set, decided by `workflow`. Before
-    /// the workflow switch existed this map had no home at all and was dropped
-    /// with a warning.
-    QString specularMapTexture;
-};
 
 enum class PrimitiveMode
 {
@@ -313,9 +216,10 @@ public:
     // translationgizmo.cpp:495) and what the bake writes back out.
     PrimitiveMode primitiveMode = PrimitiveMode::Triangles;
     // `usesIndexBuffer` is written by both constructors and so satisfies
-    // source.member_init without this — but Mesh(aiMesh*) writes it AFTER the
-    // `if (!mesh->HasPositions()) return;` early return (mesh.cpp:89/181), which
-    // is the exact shape the rule's `a helper can grow an early return` is about.
+    // source.member_init without this — but the import's aiMesh build
+    // (meshFromAiMesh, import/scenebuilder.cpp) writes it AFTER its
+    // `if (!mesh->HasPositions()) return out;` early return, which is the exact
+    // shape the rule's `a helper can grow an early return` is about.
     bool usesIndexBuffer = false;
 
     BoundingSphere boundingSphere;
@@ -403,8 +307,6 @@ public:
     // chain, and the document holds a reference to the asset like it does for
     // every model a user imports. A Mesh is built from a parsed scene (the
     // importers) or read from a bake; nothing loads one from a path.)
-    static SkeletonPtr extractSkeleton(const aiMesh* mesh, const aiScene* scene);
-    static QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QString source = "");
 
 
 
@@ -414,12 +316,6 @@ public:
 	static MeshPtr create();
 
 	Mesh();
-
-    /// `withBones` false: the bone index/weight vertex arrays are NOT built,
-    /// so a rigged file becomes static geometry. The import-settings switch
-    /// `skeleton:false` (irisgl/import/importsettings.h §4.3) is the only
-    /// caller that passes false; every other build is unchanged.
-    Mesh(aiMesh* mesh, bool withBones = true);
 
     /**
      *
@@ -445,12 +341,6 @@ public:
 	AABB getAABB(){return aabb;}
 	BoundingSphere getBoundingSphere() { return boundingSphere; }
 
-private:
-    void addVertexArray(VertexAttribUsage usage,void* data,int size,int type,int numComponents);
-
-	void calculateBounds(const aiMesh* mesh);
-
-    static BoundingSphere calculateBoundingSphere(const aiMesh* mesh);
 };
 
 }

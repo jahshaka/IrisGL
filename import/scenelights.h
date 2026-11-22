@@ -45,7 +45,7 @@ class SceneSource;
 ///     document's VERTICAL angle through the file's aspect, its clip planes the file's.
 ///
 /// Returns how many of each were adopted. The fragment must be the one built from
-/// `source`'s scene (MeshNode::loadAsSceneFragment over the same SceneSource).
+/// `source`'s scene (iris::loadAsSceneFragment over the same SceneSource).
 struct AdoptedSceneNodes
 {
     int lights = 0;

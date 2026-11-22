@@ -24,7 +24,7 @@ struct aiTexture;
 #include <QStringList>
 
 #include "irisglfwd.h"
-#include "document/assets/mesh.h"
+#include "import/scenebuilder.h"   // MeshMaterialData
 
 
 namespace iris

@@ -76,6 +76,7 @@ For more information see the LICENSE file
 #include "import/importsettings.h"
 #include "import/materialhelper.h"
 #include "import/modelsceneinfo.h"
+#include "import/scenebuilder.h"
 
 namespace iris
 {
@@ -285,7 +286,11 @@ namespace
 // level, the surface cache, the ray BLAS, the cards) is at most eight UNIFORM-DEPTH CUTS of the cluster DAG, each its
 // bound the largest stored error at that depth; the old level chain (its simplifier loop, its sampled metric, its
 // displacement lock and its stop rule) and the bound check are deleted. Every bake re-bakes (BAKEKEY-1).
-constexpr int kFormatVersion = 32;
+// v33 (2026-11-22, NOQT-DOCUMENT-1 stage 1): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — the import seam left the
+// document (import/scenebuilder.{h,cpp}, now on the hashed list) and this file's and meshbake.h's calls and include moved
+// with it; source.bake_key_versioned's law (a hashed file changes only with a format bump). Every byte of a blob but
+// this version and the fingerprint is equal to v32's (41 fixtures, spikes/noqt-document/s1-builder/). Every bake re-bakes.
+constexpr int kFormatVersion = 33;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -394,7 +399,7 @@ MeshMaterialData readMaterial(QDataStream &s)
 //
 // Only the NAME, the offset matrix and the parent link are stored. Everything
 // else (meshSpacePoseMatrix, localMatrix, the bind TRS) is re-derived by the
-// SAME arithmetic Mesh::extractSkeleton runs, so a baked rig is identical to a
+// SAME arithmetic extractSkeleton (import/scenebuilder.cpp) runs, so a baked rig is identical to a
 // parsed one by construction rather than by promise — and the format cannot
 // drift out of step with the derivation.
 
@@ -435,7 +440,7 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
         if (p >= count || p == i) { *okOut = false; return SkeletonPtr(); }
         skel->bones[p]->addChild(skel->bones[i]);
     }
-    // The bind local of every bone — the identical loop Mesh::extractSkeleton
+    // The bind local of every bone — the identical loop extractSkeleton
     // runs after linking (ANIMATION_ENGINE_MIGRATION_SPEC §1.5 F1).
     for (const auto &bone : skel->bones) {
         const iris::Mat4 bindLocal = !bone->parentBone.isNull()
@@ -561,7 +566,7 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
     s << qint32(vbs.size());
     for (const VertexBufferPtr &vb : vbs) {
         // Every buffer this pipeline builds carries exactly one attribute
-        // (Mesh::addVertexArray) — the format records that shape explicitly so
+        // (addVertexArray, import/scenebuilder.cpp) — the format records that shape explicitly so
         // a future multi-attribute buffer fails the read instead of silently
         // losing elements.
         QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
@@ -1174,7 +1179,7 @@ BakedNode bakeNode(const aiScene *scene, const aiNode *node, QVector<int> &mater
 }
 
 /// The single-mesh shortcut's transform: the accumulated (root -> node)
-/// transform of the first aiNode referencing mesh 0 — meshnode.cpp's
+/// transform of the first aiNode referencing mesh 0 — scenebuilder.cpp's
 /// _findMeshNodeTransform, over the same convention (child * parent).
 bool findMeshNodeTransform(const aiNode *node, unsigned meshIndex,
                            const aiMatrix4x4 &parent, aiMatrix4x4 &out)
@@ -2461,12 +2466,12 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         // THE TUNING SWITCHES (import/importsettings.h §4.3). They act on what
         // is BUILT, never on the parse: `skeleton:false` drops the skeleton AND
         // the bone index/weight arrays, so a rigged file bakes as static
-        // geometry; the same two lines are what MeshNode::loadAsSceneFragment
+        // geometry; the same two lines are what iris::loadAsSceneFragment
         // does, because the bake and the parse fallback have to agree node for
         // node (tests/meshbake compares the two trees).
         cancelPoint(cancel);
-        auto mesh = MeshPtr(new Mesh(const_cast<aiMesh *>(m), xf.skeleton));
-        if (m->HasBones() && xf.skeleton) mesh->setSkeleton(Mesh::extractSkeleton(m, scene));
+        auto mesh = meshFromAiMesh(const_cast<aiMesh *>(m), xf.skeleton);
+        if (m->HasBones() && xf.skeleton) mesh->setSkeleton(extractSkeleton(m, scene));
         model.meshes.append(mesh);
     }
     cancelPoint(cancel);   // between the mesh conversion and the stages
@@ -2525,7 +2530,7 @@ MeshBake::Model MeshBake::buildFromSceneUnguarded(const aiScene *scene, const QS
         model.materials.append(data);
     }
 
-    model.animations = Mesh::extractAnimations(scene, filePath);
+    model.animations = extractAnimations(scene, filePath);
     // `clips:false` / `clips:[names]`: filtered AFTER extraction, on the names
     // the rest of the app shows (extractAnimations uniquifies raw names, and a
     // filter written against the raw ones would miss).
@@ -2791,7 +2796,7 @@ MeshBake::Clip MeshBake::buildClipFromScene(const aiScene *scene, const QString 
     if (!scene) return clip;
     clip.info = ClipFileInfo::fromScene(scene, ClipFileInfo::stripFractions());
     if (!clip.info.parsed) return Clip();
-    clip.animations = Mesh::extractAnimations(scene, filePath);
+    clip.animations = extractAnimations(scene, filePath);
     clip.declaredUnitScale = ModelSceneInfo::fromScene(scene).declaredUnitScale;
     clip.fingerprint = fingerprint;
     clip.valid = true;

@@ -21,7 +21,7 @@ For more information see the LICENSE file
 //
 // THE BAKE is the built form: the exact `iris::Mesh` objects, skeletons,
 // animation clips, per-material data and node hierarchy that
-// `MeshNode::loadAsSceneFragment` / `GraphicsHelper::loadAllMeshesFromAssimpScene`
+// `iris::loadAsSceneFragment` (import/scenebuilder.h) / `GraphicsHelper::loadAllMeshesFromAssimpScene`
 // produce from an aiScene, written once at IMPORT and read back at OPEN as a
 // sequence of memcpys. It is DERIVED DATA — disposable, rebuildable, keyed on
 // the source content plus the code that produced it; the original file stays
@@ -110,7 +110,7 @@ For more information see the LICENSE file
 #include "import/clipfileinfo.h"
 #include "import/modelsceneinfo.h"
 #include "import/scenesource.h"
-#include "document/assets/mesh.h"   // MeshMaterialData
+#include "import/scenebuilder.h"   // MeshMaterialData
 #include "import/atomdag/build.h"   // ClusterDagStats / Options
 
 struct aiScene;
@@ -119,7 +119,7 @@ namespace iris
 {
 
 /// One node of the baked fragment hierarchy — the shape
-/// `MeshNode::loadAsSceneFragment` builds, without the aiScene.
+/// `iris::loadAsSceneFragment` builds, without the aiScene.
 struct BakedNode
 {
     QString name;
@@ -327,7 +327,7 @@ public:
         /// Names, numbers, the node hierarchy and the pose-strip poses
         /// (ClipFileInfo::stripFractions()) of the parse.
         ClipFileInfo info;
-        /// Mesh::extractAnimations of the parse, at identity.
+        /// extractAnimations (import/scenebuilder.h) of the parse, at identity.
         QMap<QString, SkeletalAnimationPtr> animations;
         /// Metres per source unit as the FILE declares it — what a rig's UNIT
         /// OVERRIDE is resolved against (import/scenesource.h) without a probe.
@@ -423,7 +423,7 @@ public:
     /// final path is either absent or complete, even through a SIGKILL.
     static bool write(const QString &path, const Model &model, QString *errorOut);
 
-    /// The baked equivalent of `MeshNode::loadAsSceneFragment` — same node
+    /// The baked equivalent of `iris::loadAsSceneFragment` — same node
     /// shape, same materials, same animations, no assimp.
     static SceneNodePtr buildFragment(
         const Model &model, const QString &filePath,

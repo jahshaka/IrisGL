@@ -280,6 +280,8 @@ set(SRCS
     import/meshprewarm.cpp
     import/parsecensus.cpp
     import/meshbake.cpp
+    import/scenebuilder.cpp
+    import/meshmaterial.cpp
     # ATOM-2: the cluster DAG's builder (build.h states the design)
     import/atomdag/adjacency.cpp
     import/atomdag/leaves.cpp
@@ -312,7 +314,6 @@ set(SRCS
     document/scenegraph/particlesystemnode.cpp
     core/math/mathhelper.cpp
     document/materials/pbrmaterial.cpp
-    document/materials/meshmaterial.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp
     document/scenegraph/decalnode.cpp
@@ -364,6 +365,8 @@ set (HEADERS
     import/meshprewarm.h
     import/parsecensus.h
     import/meshbake.h
+    import/scenebuilder.h
+    import/meshmaterial.h
     import/bakeshared.h
     import/atomdag/adjacency.h
     import/atomdag/leaves.h
@@ -395,7 +398,6 @@ set (HEADERS
     core/colorjson.h
     document/scenegraph/particlesystemnode.h
     document/materials/pbrmaterial.h
-    document/materials/meshmaterial.h
     document/animation/propertyanim.h
     document/animation/animableproperty.h
     document/assets/skeleton.h
@@ -531,9 +533,18 @@ endif()
 #       the locality links) and clusterizer.cpp (meshopt_computeSphereBounds, the
 #       spheres) besides the simplifier; indexgenerator.cpp is NOT here: its
 #       position remap is an equality test with one answer.
+#   import/scenebuilder.{h,cpp} — ADDED by NOQT-DOCUMENT-1 stage 1 (2026-11-22): the import side of the document moved
+#       out of document/assets/mesh.{cpp,h} and document/scenegraph/meshnode.cpp (watched) into its own files: the
+#       aiMesh -> Mesh build, the skeleton and clip extraction and MeshMaterialData's fields and defaults are what
+#       MeshBake::buildFromScene writes, so they are producers of baked bytes like meshbake.cpp.
+#       import/meshmaterial.{h,cpp} is DELIBERATELY NOT HASHED: materialFromMeshData READS a MeshMaterialData when a
+#       fragment is built (the bake stores the record itself, meshbake.cpp writeMaterial), so it writes no baked byte
+#       and an edit of the material conversion must not stale every library.
 set(_mesh_bake_hashed_sources
     import/meshbake.cpp
     import/meshbake.h
+    import/scenebuilder.cpp
+    import/scenebuilder.h
     import/materialhelper.cpp
     thirdparty/meshoptimizer/src/meshoptimizer.h
     thirdparty/meshoptimizer/src/simplifier.cpp

@@ -19,7 +19,7 @@ For more information see the LICENSE file
 // what the `clips` import setting FILTERS ON (import/importsettings.h:
 // ImportTransform::wantsClip matches these names case-insensitively). The
 // filter and the list must therefore agree exactly, and they are produced in
-// two different places: Mesh::extractAnimations builds the real clips at
+// two different places: iris::extractAnimations builds the real clips at
 // import, and the dialog's light pre-read (ModelPreRead) lists the names
 // before anything is imported at all. A checklist offering a name the filter
 // cannot match would silently import nothing.
