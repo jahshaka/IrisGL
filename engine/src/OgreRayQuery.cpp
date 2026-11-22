@@ -9802,8 +9802,8 @@ void RayQueryTier::recordGather(const ReflectPassListener *key, OgreView *view,
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
     if (!scene || !cam) return;
-    // ...AND ONLY FOR A VIEW WHOSE CHAIN GATHERS (ChainDesc::probeGather: the scene's answer AND the view's offscreen
-    // contract - a Live or undeclared offscreen view takes the field's answer). Recorded for any view with the prepass,
+    // ...AND ONLY FOR A VIEW WHOSE CHAIN GATHERS (ChainDesc::probeGather, detail::chainGiRoutes: every view of a scene
+    // whose GI is on and traces - ROUTE-ROWS-1 stage 0: no offscreen contract enters it). Recorded for any view with the prepass,
     // the gather bound its texture into a chain that is not a gathering chain - whose opaque pass reads the world
     // caches - and the pass read two diffuse terms and two speculars (measured, PHOTON-7 7-5: a 0.35-rough metal on
     // gi.rt_reflect_asan's undeclared view at 2.19x the reflection's reference, a blended pane in a live view +29 %).
@@ -10546,9 +10546,9 @@ void RayQueryTier::recordAreaVis(const ReflectPassListener *key, OgreView *view,
     OgreScene *scene = view->ogreScene();
     Ogre::Camera *cam = view->camera();
     if (!scene || !cam) return;
-    // ...AND NEVER FOR A CHAIN OF THE NO-RAY ROUTE (ChainDesc::screenIntegrate: a chain that does not gather - a Live
-    // or undeclared offscreen view of a ray scene - whose ScreenGiListener traces the area visibility through the
-    // voxel chain): ONE PRODUCER A VIEW (the 7-5 recordGather rule). Recorded here too, both traced and registered
+    // ...AND NEVER FOR A CHAIN OF THE NO-RAY ROUTE (ChainDesc::screenIntegrate: a mono view of a scene that does not
+    // trace - detail::chainGiRoutes - whose ScreenGiListener traces the area visibility through the voxel chain): ONE
+    // PRODUCER A VIEW (the 7-5 recordGather rule). Recorded here too, both traced and registered
     // every frame for the one view, the passes read whichever registered last (measured, gi.screen_bind (4): twice
     // the producer's residency).
     if (view->chainDesc().screenIntegrate) {

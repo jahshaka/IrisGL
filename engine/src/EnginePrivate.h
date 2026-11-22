@@ -8745,8 +8745,9 @@ private:
     /// (View::setLodHysteresisOffscreen)? Graph shape, like the two above; false
     /// everywhere but the one suite that has to read what the band does.
     bool                       mLodHysteresisOffscreen = false;
-    /// The declared contract (Engine::createOffscreenView's required parameter; View::setOffscreenContract). Its
-    /// default is never seen by a frame: creation sets it before the view is adopted.
+    /// The declared contract (Engine::createOffscreenView's required parameter; View::setOffscreenContract): read by
+    /// the meter's rule and the stand-in's identity, never by the GI route (ROUTE-ROWS-1 stage 0). Its default is never
+    /// seen by a frame: creation sets it before the view is adopted.
     OffscreenContract          mOffscreenContract = OffscreenContract::Live;
     /// An exposure multiplier a host handed over before this view had a chain
     /// that could take it (View::seedExposureHistory). Spent by attachWorkspace
