@@ -114,8 +114,18 @@ vec3 jahVoxelHalvesFacingRay( int c, ivec3 iv, vec3 uvw, vec3 invRes, vec3 dirLS
 	return wSum > 0.0 ? sum * ( 1.0 / wSum ) : vec3( 0.0, 0.0, 0.0 );
 }
 
-/// HOW A RAY ENDED.
 const int kJahVoxResMax = 2048;	///< a cascade side the march steps at most (GATHER-HANG-1 stage 2: the law, below)
+/// A CASCADE's CELLS A SIDE AT THE MARCH's LAW (GATHER-HANG-1 stage 2; the final read's F1): the resolution steers a march's
+/// step count, so the host's float word is tested by its bits and held to [1, kJahVoxResMax] a side (a cascade of 2048 a
+/// side is 2048 cubed voxels, 32 GiB at 4 bytes - twice the whole of the card the engine is measured on: no cascade the
+/// host can make is larger). The ONE form: the march's cascade (maxSteps) and a finer cascade's segment (maxK) take it.
+ivec3 jahVoxResAtLaw( vec3 res )
+{
+	return finite3( res ) ? clamp( ivec3( min( res, vec3( kJahVoxResMax ) ) + 0.5 ), ivec3( 1 ), ivec3( kJahVoxResMax ) )
+						  : ivec3( 1 );
+}
+
+/// HOW A RAY ENDED.
 const uint kJahRayExhausted = 0u;	///< out of steps, or not a number: NO SAMPLE
 const uint kJahRayHit = 1u;			///< an occupied cell (not the origin's own)
 const uint kJahRayEscaped = 2u;		///< it left the last cascade: the sky's
@@ -601,11 +611,8 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 		const vec3 dq = dirLS * s0j * res;
 		const vec3 nudge = entered ? sign( dq ) * 1e-4 : vec3( 0.0, 0.0, 0.0 );
 		ivec3 iv = ivec3( floor( qS + dq * tCur + nudge ) );
-		// THE MARCH's STEPS AT THEIR LAW (GATHER-HANG-1 stage 2; CODING_RULES section 2): the resolution steers maxSteps,
-		// so it is tested by its bits and held to kJahVoxResMax a side (a cascade of 2048 a side is 2048 cubed voxels, 32
-		// GiB at 4 bytes - twice the whole of the card the engine is measured on: no cascade the host can make is larger)
-		const ivec3 resI = finite3( res ) ? clamp( ivec3( min( res, vec3( kJahVoxResMax ) ) + 0.5 ), ivec3( 1 ), ivec3( kJahVoxResMax ) )
-										  : ivec3( 1 );
+		// THE MARCH's STEPS AT THEIR LAW (GATHER-HANG-1 stage 2; CODING_RULES section 2): the resolution steers maxSteps
+		const ivec3 resI = jahVoxResAtLaw( res );
 		if( all( greaterThanEqual( iv, ivec3( 0, 0, 0 ) ) ) && all( lessThan( iv, resI ) ) )
 		{
 			ivec3 stp;
@@ -742,7 +749,7 @@ JahVoxelRayResult jahVoxelRay( vec3 posLS0, vec3 dirLS, vec3 surfLS0, vec3 nLS, 
 							const vec3 qSK = pK * resK;
 							const vec3 dqK = dirLS * s0k * resK;
 							ivK = ivec3( floor( qSK + dqK * tIn + sign( dqK ) * 1e-4 ) );
-							resIK = ivec3( resK + 0.5 );
+							resIK = jahVoxResAtLaw( resK );   // (it steers maxK, the segment's own exit: F1)
 							for( int a = 0; a < 3; ++a )
 							{
 								stpK[a] = dqK[a] > 0.0 ? 1 : -1;
