@@ -14,6 +14,7 @@ Host::Host()
                   [this](Call &c) {
                       const bool ok = c[0]["ok"].asBool();
                       print((ok ? "ok:   " : "FAIL: ") + c[0]["what"].asString());
+                      ++mChecksRun;
                       if (!ok) ++mChecksFailed;
                       return Value(ok);
                   });
@@ -33,6 +34,20 @@ Result Host::run(const std::string &source, const std::string &name)
 {
     if (!mJs) mJs = detail::makeJavaScript(*this);
     return mJs->run(source, name);
+}
+
+int Host::verdict(const Result &run)
+{
+    int faults = mChecksFailed;
+    if (run.status == Status::Failed) {
+        print("FAIL: the script stopped: " + run.message);
+        ++faults;
+    }
+    if (mChecksRun == 0) {
+        print("FAIL: the script checked nothing (no host.check ran: a row that measured nothing is never a green)");
+        ++faults;
+    }
+    return faults;
 }
 
 Result Host::call(const std::string &name, const Value::Array &args)

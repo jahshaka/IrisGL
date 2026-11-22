@@ -202,11 +202,19 @@ public:
     void setConsole(ConsoleSink sink);
     /// Where a command call runs (default: inline, on the script's thread).
     void setExecutor(Executor executor);
-    /// Runs JavaScript `source`, `name` its file name in errors. Failed carries an uncaught error's text and its stack
-    /// (the script's line); a command's Failed is a thrown error the script may catch.
+    /// Runs JavaScript `source`, `name` its file name in errors, TO ITS END: the script, then every job it queued (the
+    /// code after an `await`, a promise's reactions) until none is left. Failed carries an uncaught error's text and
+    /// its stack (the script's line), or a rejected promise no handler took ("an unhandled promise rejection: ...");
+    /// a command's Failed is a thrown error the script may catch.
     Result run(const std::string &source, const std::string &name);
-    /// The host.check calls that failed, over every run.
+    /// The host.check calls that ran, and those that failed, over every run.
+    int checksRun() const { return mChecksRun; }
     int checksFailed() const { return mChecksFailed; }
+    /// THE VERDICT of a test script whose last run answered `run` (jahengine's): the faults, each printed as a
+    /// `FAIL: <why>` line through the console — the run stopped (its message), every failed check, and A SCRIPT THAT
+    /// CHECKED NOTHING (no host.check ran: a row that measured nothing is never a silent green). Answers their count;
+    /// 0 = PASSED.
+    int verdict(const Result &run);
 
     /// The language binding's two doors: a command call by name (through the executor) and a console line.
     Result call(const std::string &name, const Value::Array &args);
@@ -218,6 +226,7 @@ private:
     Registry mRegistry;
     ConsoleSink mConsole;
     Executor mExecutor;
+    int mChecksRun = 0;
     int mChecksFailed = 0;
     std::unique_ptr<Language> mJs;
 };

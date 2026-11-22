@@ -7,8 +7,9 @@
 // and Hlms media; the engine's thread is this one, no render thread; the fixtures' shared warm shader cache when
 // JAHSHAKA_SHADER_CACHE_DIR names it — read ONCE, here — held to the fixtures' 1 GiB cap; the Ogre log
 // `<script stem>-ogre.log` in the working directory), makes the process's script host, registers the engine's commands
-// (a failed boot registers them too: each says why), runs the script on this thread, and EXITS WITH ITS VERDICT: 0 when
-// the script ran to its end with every host.check held and every shader program compiled, else 1. Its LAST LINE is
+// (a failed boot registers them too: each says why), runs the script on this thread, and EXITS WITH ITS VERDICT
+// (Host::verdict): 0 when the script ran to its end (its queued async work included), at least one host.check ran and
+// every one held, and every shader program compiled, else 1. Its LAST LINE is
 // `<script stem>: PASSED` or `<script stem>: FAILED (<n>)`. --test-doors opens the engine's TEST arms (ArmInfo::test).
 // The process ends at its engine's death: the exit-only teardown (ProcessExit.h), then _Exit with the verdict.
 #include "jahshaka/engine/Engine.h"
@@ -61,12 +62,7 @@ int main(int argc, char **argv)
 
     script::Host host;
     script::registerEngineCommands(host.registry(), engine.get(), bootError, testDoors);
-    const script::Result run = host.run(source.str(), scriptPath);
-    int failures = host.checksFailed();
-    if (run.status == script::Status::Failed) {
-        std::printf("FAIL: the script stopped: %s\n", run.message.c_str());
-        ++failures;
-    }
+    int failures = host.verdict(host.run(source.str(), scriptPath));
     if (const unsigned long long failed = Engine::processShaderCompileErrors()) {
         std::printf("FAIL: %llu shader program(s) failed to compile (the readings are of draws that never happened) - see "
                     "%s\n", failed, cfg.logFile.c_str());

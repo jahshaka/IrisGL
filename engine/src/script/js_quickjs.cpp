@@ -184,6 +184,7 @@ public:
     explicit JavaScript(Host &host) : mHost(host)
     {
         mRt = JS_NewRuntime();
+        JS_SetHostPromiseRejectionTracker(mRt, &JavaScript::rejection, this);
         mCtx = JS_NewContext(mRt);
         JS_SetContextOpaque(mCtx, this);
         JSValue global = JS_GetGlobalObject(mCtx);
@@ -202,15 +203,21 @@ public:
     }
     ~JavaScript() override
     {
+        clearRejections();
         for (auto &s : mSpaces) JS_FreeValue(mCtx, s.second);
         JS_FreeValue(mCtx, mStrict);
         JS_FreeContext(mCtx);
         JS_FreeRuntime(mRt);
     }
 
+    /// THE RUN TO ITS END (the final read's F1): the script, then EVERY JOB IT QUEUED (the code after an `await`, a
+    /// promise's reactions) until none is left — a check after an `await` runs, and a row cannot pass by never reaching
+    /// it. The first fault decides: an uncaught error (its text and stack), else a rejected promise no handler took by
+    /// the end (the tracker below). The queue is drained even after a fault, so no job of this run leaks into the next.
     Result run(const std::string &source, const std::string &name) override
     {
         install();
+        clearRejections();
         Result r;
         JSValue v = JS_Eval(mCtx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(v)) {
@@ -218,6 +225,20 @@ public:
             r.message = takeException(mCtx);
         }
         JS_FreeValue(mCtx, v);
+        for (;;) {
+            JSContext *jobCtx = nullptr;
+            const int ran = JS_ExecutePendingJob(mRt, &jobCtx);
+            if (ran == 0) break;
+            if (ran < 0 && r.status != Status::Failed) {
+                r.status = Status::Failed;
+                r.message = takeException(jobCtx);
+            }
+        }
+        if (r.status != Status::Failed && !mRejections.empty()) {
+            r.status = Status::Failed;
+            r.message = "an unhandled promise rejection: " + mRejections.front().second;
+        }
+        clearRejections();
         return r;
     }
 
@@ -274,6 +295,33 @@ private:
         return toJs(ctx, r.value);
     }
 
+    /// THE UNHANDLED REJECTIONS: a promise rejected with no handler is held (with its reason's text and stack) until a
+    /// handler is attached (`is_handled`: it leaves) or the run ends (it FAILS the run).
+    static void rejection(JSContext *ctx, JSValueConst promise, JSValueConst reason, bool handled, void *opaque)
+    {
+        JavaScript *self = static_cast<JavaScript *>(opaque);
+        auto &held = self->mRejections;
+        for (auto it = held.begin(); it != held.end(); ++it)
+            if (JS_VALUE_GET_PTR(it->first) == JS_VALUE_GET_PTR(promise)) {
+                JS_FreeValue(ctx, it->first);
+                held.erase(it);
+                break;
+            }
+        if (handled) return;
+        std::string why = toUtf8(ctx, reason);
+        if (JS_IsObject(reason)) {
+            JSValue stack = JS_GetPropertyStr(ctx, reason, "stack");
+            if (JS_IsString(stack)) why += "\n" + toUtf8(ctx, stack);
+            JS_FreeValue(ctx, stack);
+        }
+        held.emplace_back(JS_DupValue(ctx, promise), why);
+    }
+    void clearRejections()
+    {
+        for (auto &p : mRejections) JS_FreeValue(mCtx, p.first);
+        mRejections.clear();
+    }
+
     static JSValue log(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv)
     {
         JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
@@ -291,6 +339,7 @@ private:
     JSContext *mCtx = nullptr;
     JSValue mStrict = JS_UNDEFINED;                             // the namespaces' Proxy maker
     std::vector<std::pair<std::string, JSValue>> mSpaces;      // each namespace's target object, by path
+    std::vector<std::pair<JSValue, std::string>> mRejections;  // rejected, no handler yet: the promise, its reason
 };
 
 }  // namespace
