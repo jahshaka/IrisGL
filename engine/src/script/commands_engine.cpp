@@ -12,8 +12,8 @@
 // the arms; the registration of every family) - over the state and helpers of commands.h. A new family is a new file and
 // one line in registerEngineCommands below. Every command calls the PUBLIC engine
 // API on the calling thread, which is the engine's (the host calls commands inline; Engine.h's thread affinity).
-// SCENES AND VIEWS ARE INTEGER HANDLES (1, 2, ... in creation order, never reused); nodes, meshes and materials are the
-// engine's own ids. A picture is the request shape of PICTURE-REQUEST-1 (view, eyes, content, when); its reductions are
+// EVERY OBJECT IS A TYPED HANDLE (Script.h, THE HANDLES): scenes, views and pictures held by the host; nodes, meshes
+// and materials naming the engine's own ids, their existence asked of the engine at every call. A picture is the request shape of PICTURE-REQUEST-1 (view, eyes, content, when); its reductions are
 // NATIVE commands (the script language is an interpreter: a pixel loop is never a script's).
 //
 // THREE READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these, because the C++ fixtures' harness has

@@ -650,16 +650,17 @@ Result Registry::callAt(std::size_t index, Value::Array args)
         checked.push_back(std::move(v));
     }
     Call call(entry->info, std::move(checked), *this);
-    // THE EXISTENCE CHECKS of the named kinds (checkKind): every handle argument, before the command runs
-    for (size_t i = 0; i < params.size(); ++i) {
-        std::string why;
-        if (!judgeHandles(call, params[i], call[i], why)) {
-            r.status = Status::Failed;
-            r.message = name + ": " + why;
-            return r;
-        }
-    }
+    // THE EXISTENCE CHECKS of the named kinds (checkKind: an engine read) and then the command, both inside the try - a
+    // C++ exception from either is a Failed call by name, never an unwind through a language's C
     try {
+        for (size_t i = 0; i < params.size(); ++i) {
+            std::string why;
+            if (!judgeHandles(call, params[i], call[i], why)) {
+                r.status = Status::Failed;
+                r.message = name + ": " + why;
+                return r;
+            }
+        }
         r.value = entry->fn(call);
         r.status = call.status();
         r.message = call.message();

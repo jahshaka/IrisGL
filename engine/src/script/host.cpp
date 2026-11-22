@@ -1,4 +1,4 @@
-// THE HOST (SCRIPT-IN-ENGINE-1 stage 1; jahshaka/engine/Script.h): its registry, its console, its executor and its own
+// THE HOST (SCRIPT-IN-ENGINE-1 stage 1; jahshaka/engine/Script.h): its registry, its console, its languages and its own
 // two commands. It knows the language only through Language.h (source.script_neutral).
 #include "script/Language.h"
 
@@ -39,7 +39,6 @@ void Host::addLanguage(std::string extension, LanguageMaker make)
 
 void Host::setConsole(ConsoleSink sink) { mConsole = std::move(sink); }
 
-void Host::setExecutor(Executor executor) { mExecutor = std::move(executor); }
 
 Result Host::run(const std::string &source, const std::string &name)
 {
@@ -92,21 +91,9 @@ int Host::verdict(const Result &run)
     return faults;
 }
 
-Result Host::call(const std::string &name, const Value::Array &args)
-{
-    if (!mExecutor) return mRegistry.call(name, args);
-    Result r;
-    mExecutor([&] { r = mRegistry.call(name, args); });
-    return r;
-}
+Result Host::call(const std::string &name, const Value::Array &args) { return mRegistry.call(name, args); }
 
-Result Host::callAt(std::size_t index, Value::Array args)
-{
-    if (!mExecutor) return mRegistry.callAt(index, std::move(args));
-    Result r;
-    mExecutor([&] { r = mRegistry.callAt(index, std::move(args)); });
-    return r;
-}
+Result Host::callAt(std::size_t index, Value::Array args) { return mRegistry.callAt(index, std::move(args)); }
 
 void Host::print(const std::string &line)
 {

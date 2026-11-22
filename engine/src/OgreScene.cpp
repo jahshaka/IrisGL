@@ -1347,11 +1347,6 @@ unsigned OgreScene::vrHandBoneNodes(unsigned hand, NodeId *out, unsigned count) 
     return n;
 }
 
-// WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
-// chain the node hangs from and brings the derived transform up to date first,
-// which is the whole reason this is not `node->getPosition()`: the caller is
-// asking about the picture, and the scene manager's own walk happens later in
-// the frame.
 // THE EXISTENCE READS (Engine.h, Scene::nodePresence): the lookups the scene's own calls make, read in lockstep only.
 Scene::Presence OgreScene::nodePresence(NodeId id) const {
     JAH_SYNC_GETTER("Scene::nodePresence");
@@ -1369,6 +1364,11 @@ Scene::Presence OgreScene::materialPresence(MaterialId id) const {
     return mMaterials.count(id) ? Presence::Present : Presence::Absent;
 }
 
+// WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
+// chain the node hangs from and brings the derived transform up to date first,
+// which is the whole reason this is not `node->getPosition()`: the caller is
+// asking about the picture, and the scene manager's own walk happens later in
+// the frame.
 bool OgreScene::nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const {
     JAH_SYNC_GETTER("Scene::nodeWorldPose");
     Ogre::SceneNode *n = node(id);

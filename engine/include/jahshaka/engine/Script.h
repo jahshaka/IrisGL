@@ -235,13 +235,14 @@ public:
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
 
-    /// A held object's new handle; `scoped`: released at the end of the run that made it (releaseScoped).
+    /// A held object's new handle; `scoped`: released by releaseScoped - NOT at a run's end: a held object lives across
+    /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call).
     std::int64_t hold(const std::string &kind, std::shared_ptr<void> object, bool scoped = false);
     /// A handle of the NAMED kind `kind` carrying `id` (< 2^32; the caller has checked it).
     std::int64_t name(const std::string &kind, std::uint32_t id);
     /// Releases a held handle: false when it names no live held object of this registry.
     bool release(std::int64_t handle);
-    /// Releases every scoped handle (Host::run calls it at a run's end).
+    /// Releases every scoped handle: the caller's at ITS end (jahengine, at its script's end). Host::run never calls it.
     void releaseScoped();
     /// The object of a live held handle; null otherwise.
     void *object(std::int64_t handle) const;
@@ -271,19 +272,21 @@ private:
 
 /// THE HOST — one per process (the process makes it; every Engine registers its commands into its registry, so a
 /// process whose engine failed to start still has a host that can say why). It runs a script on the CALLING thread and
-/// every command inline; a host whose scripts run on another thread than the engine's (Studio, later) installs an
-/// EXECUTOR that carries each command call to the engine's thread. Its own commands: `host.check({ok, what})` (one
-/// law: Host::law) and `host.lastError()` (the registry's last refusal).
+/// every command inline (a host whose scripts run on another thread than the engine's comes with the item that needs
+/// it: STUDIO-CLIENT-1). Its own commands: `host.check({ok, what})` (one law: Host::law) and `host.lastError()` (the
+/// registry's last refusal).
 class Host {
 public:
     using ConsoleSink = std::function<void(const std::string &line)>;
-    using Executor = std::function<void(const std::function<void()> &call)>;
     /// THE HOST's OPTIONS, fixed at its construction (no environment variable, no script command changes them): each
     /// caller - jahengine, the MCP adapter - passes its own.
     struct Options {
         /// The bytes the live pictures may hold (engine.picture.*: a picture past it FAILS by name) - 512 MiB: fifteen
         /// 4K RGBA8 pictures, or three of PICTURE-REQUEST-1's 4K float radiance.
         std::size_t pictureBytesCap = std::size_t(512) << 20;
+        /// THE SCRIPT's RANDOM STREAM (no wall clock, no entropy: CODING_RULES § 5): Math.random is xorshift64* from
+        /// this seed, reset at every run - the same sequence every run; a caller that wants another stream states it.
+        std::uint64_t randomSeed = 0x9E3779B97F4A7C15ull;
     };
     Host();   // the default options
     explicit Host(Options options);
@@ -295,8 +298,6 @@ public:
     Registry &registry() { return mRegistry; }
     /// Where the script's console lines and host.check's lines go (default: stdout, flushed a line).
     void setConsole(ConsoleSink sink);
-    /// Where a command call runs (default: inline, on the script's thread).
-    void setExecutor(Executor executor);
     /// A SCRIPT LANGUAGE (the lead's S5): one small interface, each language's binding ONE file of the engine that
     /// converts its values to Value, installs the registry's commands as its functions and calls Host::call. The
     /// built-in languages are THE LANGUAGE TABLE (src/script/LanguageTable.inc: an extension and a maker a line);
@@ -332,8 +333,7 @@ public:
     /// A judgement the verdict runs before it counts (a declaration no frame asserted is a failed law(), by name).
     void atVerdict(std::function<void()> judge);
 
-    /// The language binding's doors: a command call by name or by its registry index (through the executor) and a
-    /// console line.
+    /// The language binding's doors: a command call by name or by its registry index, and a console line.
     Result call(const std::string &name, const Value::Array &args);
     Result callAt(std::size_t index, Value::Array args);
     void print(const std::string &line);
@@ -342,7 +342,6 @@ private:
     Options mOptions;
     Registry mRegistry;
     ConsoleSink mConsole;
-    Executor mExecutor;
     int mChecksRun = 0;
     int mChecksFailed = 0;
     std::vector<std::function<void()>> mJudges;

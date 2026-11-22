@@ -188,9 +188,25 @@ public:
     {
         mRt = JS_NewRuntime();
         JS_SetHostPromiseRejectionTracker(mRt, &JavaScript::rejection, this);
-        mCtx = JS_NewContext(mRt);
+        // THE REALM HAS NO WALL CLOCK (the re-read's C1; CODING_RULES § 5: a test counts FRAMES): JS_NewContext's own
+        // intrinsics (quickjs.c, JS_NewContext) MINUS Date and performance; Math.random REPLACED below by a fixed-seed
+        // stream (quickjs seeds its own from the time of day)
+        mCtx = JS_NewContextRaw(mRt);
+        JS_AddIntrinsicBaseObjects(mCtx);
+        JS_AddIntrinsicEval(mCtx);
+        JS_AddIntrinsicRegExp(mCtx);
+        JS_AddIntrinsicJSON(mCtx);
+        JS_AddIntrinsicProxy(mCtx);
+        JS_AddIntrinsicMapSet(mCtx);
+        JS_AddIntrinsicTypedArrays(mCtx);
+        JS_AddIntrinsicPromise(mCtx);
+        JS_AddIntrinsicWeakRef(mCtx);
+        JS_AddIntrinsicAToB(mCtx);
         JS_SetContextOpaque(mCtx, this);
         JSValue global = JS_GetGlobalObject(mCtx);
+        JSValue math = JS_GetPropertyStr(mCtx, global, "Math");
+        JS_SetPropertyStr(mCtx, math, "random", JS_NewCFunction(mCtx, &JavaScript::random, "random", 0));
+        JS_FreeValue(mCtx, math);
         JSValue console = JS_NewObject(mCtx);
         JS_SetPropertyStr(mCtx, console, "log", JS_NewCFunction(mCtx, &JavaScript::log, "log", 1));
         JS_SetPropertyStr(mCtx, global, "console", console);
@@ -222,6 +238,7 @@ public:
     {
         install();
         clearRejections();
+        mRandom = mHost.options().randomSeed ? mHost.options().randomSeed : 1;   // every run draws the same stream
         Result r;
         JSValue v = JS_Eval(mCtx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
         if (JS_IsException(v)) {
@@ -353,6 +370,17 @@ private:
         mRejections.clear();
     }
 
+    /// Math.random: xorshift64* from the host's fixed seed (Host::Options::randomSeed), 53 bits into [0, 1).
+    static JSValue random(JSContext *ctx, JSValueConst, int, JSValueConst *)
+    {
+        JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
+        std::uint64_t &x = self->mRandom;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        return JS_NewFloat64(ctx, double((x * 0x2545F4914F6CDD1Dull) >> 11) * (1.0 / 9007199254740992.0));
+    }
+
     static JSValue log(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv)
     {
         JavaScript *self = static_cast<JavaScript *>(JS_GetContextOpaque(ctx));
@@ -371,7 +399,8 @@ private:
     struct Namespace { std::string path; };
     JSClassID mNamespaceClass = 0;
     std::vector<std::pair<std::unique_ptr<Namespace>, JSValue>> mSpaces;   // each namespace's object, by path
-    std::size_t mInstalled = 0;                                            // the commands made so far
+    std::size_t mInstalled = 0;
+    std::uint64_t mRandom = 1;                                              // Math.random's state (run's seed)                                            // the commands made so far
     std::vector<std::pair<JSValue, std::string>> mRejections;  // rejected, no handler yet: the promise, its reason
 };
 
