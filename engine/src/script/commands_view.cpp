@@ -47,7 +47,8 @@ void registerViewCommands(Host &host, const Commands &k)
     Registry &r = host.registry();
     const PostFxDesc fx;
     r.add({"engine.view.createOffscreen",
-           {{object("desc", {arg("name", Kind::String), arg("width", Kind::Int), arg("height", Kind::Int),
+           {{object("desc", {arg("name", Kind::String), arg("width", Kind::Int).range(1, 16384).in("px"),
+                             arg("height", Kind::Int).range(1, 16384).in("px"),
                              numbers("background", 3, Value(Value::Array{Value(0.0), Value(0.0), Value(0.0)}))})},
             Kind::Int, kView},
            "A new offscreen view of width x height (its background an RGB in 0..1), drawing live (the scripted frames); "
@@ -56,7 +57,6 @@ void registerViewCommands(Host &host, const Commands &k)
               Engine *e = k.engine(c);
               if (!e) return Value();
               const std::int64_t w = c[0]["width"].asInt(), h = c[0]["height"].asInt();
-              if (w < 1 || h < 1 || w > 16384 || h > 16384) return c.fail("width and height must be 1..16384");
               View *v = e->createOffscreenView(c[0]["name"].asString(), unsigned(w), unsigned(h),
                                                toColour(c[0]["background"]), OffscreenContract::Live);
               if (!v) return c.refuse(e->lastError());
@@ -73,7 +73,7 @@ void registerViewCommands(Host &host, const Commands &k)
           });
     r.add({"engine.view.setPostFx",
            {{target(handle("view", kView)), object("desc", {arg("allowOffscreen", Kind::Bool, Value(fx.allowOffscreen)),
-                                                     arg("ssr", Kind::Int, Value(fx.ssr))})},
+                                                     arg("ssr", Kind::Int, Value(fx.ssr)).range(0, 2)})},
             Kind::Null},
            "The view's post chain: allowOffscreen (an offscreen view runs the chain: display-encoded bytes) and ssr "
            "(the reflection's tier, 0 off); every other field at its default."},
@@ -95,7 +95,12 @@ void registerViewCommands(Host &host, const Commands &k)
               if (!v) return Value();
               CameraDesc d;
               d.position = toVec3(c[1]["eye"]);
-              d.orientation = lookAtRotation(d.position, toVec3(c[1]["target"]));
+              const Vec3 t = toVec3(c[1]["target"]);
+              // a direction with no horizontal part (or none at all: eye == target) has no right vector under +Y up:
+              // the pose would be NaN (the final read's leftover), so it FAILS by name
+              if (t.x - d.position.x == 0.f && t.z - d.position.z == 0.f)
+                  return c.fail("eye and target are on one vertical line (or equal): +Y up defines no camera there");
+              d.orientation = lookAtRotation(d.position, t);
               v->setCamera(d);
               return Value();
           });
@@ -157,9 +162,9 @@ void registerViewCommands(Host &host, const Commands &k)
     // THE PENDING DECLARATIONS, JUDGED AT THE VERDICT (enginetesthelpers.h's failPendingRoutes): a declaration no frame
     // asserted is a row that measured nothing it said - a FAIL by name, never a silent green
     r.add({"engine.view.readPixels",
-           {{object("request", {handle("view", kView), arg("eyes", Kind::String, Value("left")),
-                                arg("content", Kind::String, Value("display")),
-                                arg("when", Kind::String, Value("nextFrame"))})},
+           {{object("request", {handle("view", kView), arg("eyes", Kind::String, Value("left")).oneOf({"left", "right", "both"}),
+                                arg("content", Kind::String, Value("display")).oneOf({"display", "radiance"}),
+                                arg("when", Kind::String, Value("nextFrame")).oneOf({"nextFrame", "settled"})})},
             Kind::Object},
            "A picture, by PICTURE-REQUEST-1's request: the view, its eyes (\"left\": a mono view), its content "
            "(\"display\": RGBA8, the bytes the view shows) and when (\"nextFrame\": one lockstep frame is drawn and its "

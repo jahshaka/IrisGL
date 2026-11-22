@@ -61,8 +61,8 @@ void registerSceneCommands(Host &host, const Commands &k)
           });
     r.add({"engine.material.createPbr",
            {{target(handle("scene", kScene)),
-             object("params", {numbers("albedo", 3, rgb(pbr.albedo)), arg("metalness", Kind::Number, Value(double(pbr.metalness))),
-                               arg("roughness", Kind::Number, Value(double(pbr.roughness))),
+             object("params", {numbers("albedo", 3, rgb(pbr.albedo)), arg("metalness", Kind::Number, Value(double(pbr.metalness))).range(0, 1),
+                               arg("roughness", Kind::Number, Value(double(pbr.roughness))).range(0, 1),
                                numbers("emissive", 3, rgb(pbr.emissive))})},
             Kind::Int, kMaterial},
            "A PBR material in the scene: albedo and emissive (linear RGB), metalness and perceptual roughness (0..1); "

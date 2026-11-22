@@ -41,7 +41,9 @@
 namespace jahshaka { namespace engine { namespace script {
 
 /// A value's kind. Int and Number are two kinds of one script number: a language with one number type converts an
-/// integral number of magnitude <= 2^53 to Int and any other to Number.
+/// integral number of magnitude <= 2^53 to Int and any other to Number. An Int parameter takes a Number only when it
+/// is integral and of magnitude <= 2^53 (above it a script's number is no longer exact: a larger integer is an Int
+/// value - a BigInt in JS).
 enum class Kind { Null, Bool, Int, Number, String, Array, Object, Bytes };
 const char *kindName(Kind);
 
@@ -106,6 +108,18 @@ struct Param {
     /// A HANDLE (Kind::Int): the kind of object it must name ("scene", "node", "mesh"); empty = a plain number. The
     /// registry checks the handle's owner and kind at the call (Registry, THE HANDLES).
     std::string handle;
+    /// THE DECLARED DOMAIN (the lead's S2): checked by the host at the call and printed by signatureText - so the strict
+    /// host enforces it and the generated documentation shows it, and a command's body never re-checks it.
+    std::vector<std::string> choices;   ///< Kind::String: the only values allowed (empty: any)
+    std::optional<double> min, max;     ///< Kind::Int / Number, an array's elements too: the closed range
+    std::string unit;                   ///< a number's unit ("px", "m", "frames"): documentation
+    /// Kind::Number: NaN and infinity are FAILED (read by their bits) unless this says the parameter takes them.
+    bool nonFinite = false;
+    Param oneOf(std::vector<std::string> values) const;
+    Param range(double lo, double hi) const;
+    Param atLeast(double lo) const;
+    Param in(std::string unitName) const;
+    Param allowNonFinite() const;
 };
 /// A required parameter; one with its default.
 Param arg(std::string name, Kind kind);
@@ -123,6 +137,8 @@ Param objects(std::string name, std::vector<Param> fields);
 /// A required handle of `kind` (target(handle(...)) when it is what the command acts on).
 Param handle(std::string name, std::string kind);
 
+/// A command's signature: its parameters and its answer. (A struct of named fields, extended by a field: stage 2 adds
+/// the command's ACCESS tag here - MCP-ON-HOST-1's "every command declares its access" - and validate() requires it.)
 struct Signature {
     std::vector<Param> params;
     Kind returns = Kind::Null;

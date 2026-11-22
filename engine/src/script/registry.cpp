@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <exception>
 
 namespace jahshaka { namespace engine { namespace script {
@@ -129,6 +130,38 @@ Param objects(std::string name, std::vector<Param> fields)
     Param p = arg(std::move(name), Kind::Array);
     p.element = Kind::Object;
     p.fields = std::move(fields);
+    return p;
+}
+
+Param Param::oneOf(std::vector<std::string> values) const
+{
+    Param p = *this;
+    p.choices = std::move(values);
+    return p;
+}
+Param Param::range(double lo, double hi) const
+{
+    Param p = *this;
+    p.min = lo;
+    p.max = hi;
+    return p;
+}
+Param Param::atLeast(double lo) const
+{
+    Param p = *this;
+    p.min = lo;
+    return p;
+}
+Param Param::in(std::string unitName) const
+{
+    Param p = *this;
+    p.unit = std::move(unitName);
+    return p;
+}
+Param Param::allowNonFinite() const
+{
+    Param p = *this;
+    p.nonFinite = true;
     return p;
 }
 
@@ -276,6 +309,53 @@ void *Call::heldObject(const Value &h) const { return mRegistry.object(h.asInt()
 
 namespace {
 
+/// A double's number, as text without trailing zeros ("16384", "0.5").
+std::string numberText(double d)
+{
+    std::string t = std::to_string(d);
+    if (t.find('.') != std::string::npos) {
+        while (t.back() == '0') t.pop_back();
+        if (t.back() == '.') t.pop_back();
+    }
+    return t;
+}
+
+/// NaN or an infinity, READ BY ITS BITS (CODING_RULES § 2: never `x == x`, which an optimiser may fold): the exponent
+/// all ones.
+bool nonFiniteBits(double d)
+{
+    std::uint64_t u = 0;
+    std::memcpy(&u, &d, sizeof u);
+    return (u & 0x7ff0000000000000ull) == 0x7ff0000000000000ull;
+}
+
+/// The declared domain as text: ` "a"|"b"`, ` 1..16384`, ` >= 0`, then the unit.
+std::string domainText(const Param &p)
+{
+    std::string t;
+    for (size_t i = 0; i < p.choices.size(); ++i) t += (i ? "|\"" : " \"") + p.choices[i] + "\"";
+    if (p.min && p.max) t += " " + numberText(*p.min) + ".." + numberText(*p.max);
+    else if (p.min) t += " >= " + numberText(*p.min);
+    else if (p.max) t += " <= " + numberText(*p.max);
+    if (!p.unit.empty()) t += " " + p.unit;
+    if (p.nonFinite) t += " (non-finite allowed)";
+    return t;
+}
+
+/// The value `v` (an Int or a Number, checked of its kind) inside `p`'s declared range and finite, else `why`.
+bool inDomain(const Param &p, double v, const std::string &where, std::string &why)
+{
+    if (!p.nonFinite && nonFiniteBits(v)) {
+        why = where + " is not a finite number (" + numberText(v) + ")";
+        return false;
+    }
+    if ((p.min && v < *p.min) || (p.max && v > *p.max)) {
+        why = where + " " + numberText(v) + " is outside" + domainText(p);
+        return false;
+    }
+    return true;
+}
+
 std::string paramText(const Param &p)
 {
     std::string t = p.name + (p.target ? ": target " : ": ");
@@ -287,6 +367,7 @@ std::string paramText(const Param &p)
     } else {
         t += kindName(p.kind);
     }
+    t += domainText(p);
     if (!p.fields.empty()) {
         t += " {";
         for (size_t i = 0; i < p.fields.size(); ++i) t += (i ? ", " : "") + paramText(p.fields[i]);
@@ -308,22 +389,42 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
     case Kind::Int:
         if (k == Kind::Int) {
             out = in;
-            return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
-        }
-        if (k == Kind::Number) {
+        } else if (k == Kind::Number) {
             const double d = in.asNumber();
-            // 2^63 is exact in a double: [-2^63, 2^63) is every int64
-            if (std::trunc(d) == d && d >= -9223372036854775808.0 && d < 9223372036854775808.0) {
-                out = Value(static_cast<std::int64_t>(d));
-                return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
+            // an integral number is an integer only while a script's number is exact: |d| <= 2^53 (above it, a
+            // neighbouring integer reads the same: an Int value - a BigInt - says it exactly)
+            if (nonFiniteBits(d) || std::trunc(d) != d) {
+                why = where + " must be an integer (" + numberText(d) + " is not; it is never truncated)";
+                return false;
             }
-            why = where + " must be an integer (" + std::to_string(d) + " is not; it is never truncated)";
-            return false;
+            if (std::fabs(d) > 9007199254740992.0) {
+                why = where + " " + numberText(d) + " is beyond 2^53, where a number is no longer an exact integer";
+                return false;
+            }
+            out = Value(static_cast<std::int64_t>(d));
+        } else {
+            break;
+        }
+        if ((p.min || p.max) && !inDomain(p, double(out.asInt()), where, why)) return false;
+        return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
+    case Kind::Number:
+        if (k == Kind::Int || k == Kind::Number) {
+            out = Value(in.asNumber());
+            return inDomain(p, out.asNumber(), where, why);
         }
         break;
-    case Kind::Number:
-        if (k == Kind::Int || k == Kind::Number) { out = Value(in.asNumber()); return true; }
-        break;
+    case Kind::String:
+        if (k != Kind::String) break;
+        if (!p.choices.empty()) {
+            bool known = false;
+            for (const std::string &c : p.choices) known = known || c == in.asString();
+            if (!known) {
+                why = where + " '" + in.asString() + "' is not one of" + domainText(p);
+                return false;
+            }
+        }
+        out = in;
+        return true;
     case Kind::Array: {
         if (k != Kind::Array) break;
         const Value::Array &a = in.asArray();

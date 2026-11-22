@@ -51,7 +51,7 @@ void registerPictureCommands(Host &host, const Commands &k)
               return Value(text);
           });
     r.add({"engine.view.columnStep",
-           {{target(picture("picture")), object("span", {arg("axis", Kind::String), arg("a", Kind::Int), arg("b", Kind::Int),
+           {{target(picture("picture")), object("span", {arg("axis", Kind::String).oneOf({"column", "row"}), arg("a", Kind::Int), arg("b", Kind::Int),
                                                  arg("from", Kind::Int), arg("to", Kind::Int)})},
             Kind::Number},
            "The mean absolute step, in codes over R, G and B, between column (axis \"column\") or row (\"row\") a and b, "
@@ -60,7 +60,6 @@ void registerPictureCommands(Host &host, const Commands &k)
               const Value &p = c[0], &sp = c[1];
               if (!wellFormed(c, p)) return Value();
               const bool columns = sp["axis"].asString() == "column";
-              if (!columns && sp["axis"].asString() != "row") return c.fail("axis must be \"column\" or \"row\"");
               const std::int64_t across = columns ? p["width"].asInt() : p["height"].asInt();
               const std::int64_t along = columns ? p["height"].asInt() : p["width"].asInt();
               const std::int64_t a = sp["a"].asInt(), b = sp["b"].asInt(), from = sp["from"].asInt(), to = sp["to"].asInt();

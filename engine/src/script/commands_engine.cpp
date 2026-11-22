@@ -89,13 +89,12 @@ void registerFrameCommands(Host &host, const Commands &k)
               if (!ok) return c.refuse(e->lastError());
               return Value(true);
           });
-    r.add({"engine.frames", {{arg("n", Kind::Int)}, Kind::Null},
+    r.add({"engine.frames", {{arg("n", Kind::Int).atLeast(0).in("frames")}, Kind::Null},
            "Draws n frames in lockstep, each one grid step (1/60 s) of every scene no host stamps; returns when the "
            "n-th frame is drawn and published."},
           [k](Call &c) -> Value {
               if (!k.engine(c)) return Value();
               const std::int64_t n = c[0].asInt();
-              if (n < 0) return c.fail("n must be 0 or more");
               for (std::int64_t i = 0; i < n; ++i)
                   if (!k.frame(c)) return Value();
               return Value();

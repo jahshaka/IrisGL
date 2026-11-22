@@ -11,10 +11,12 @@ void registerGiCommands(Host &host, const Commands &k)
     static const char *const kQualities[] = {"low", "medium", "high", "epic"};
     r.add({"engine.gi.set",
            {{target(handle("scene", kScene)),
-             object("params", {arg("mode", Kind::String), arg("quality", Kind::String, Value(kQualities[int(gi.quality)])),
+             object("params", {arg("mode", Kind::String).oneOf({kModes[0], kModes[1], kModes[2]}),
+                               arg("quality", Kind::String, Value(kQualities[int(gi.quality)]))
+                                   .oneOf({kQualities[0], kQualities[1], kQualities[2], kQualities[3]}),
                                arg("bounces", Kind::Bool, Value(gi.bounces)),
-                               objects("cascades", {arg("halfSize", Kind::Number), arg("resolution", Kind::Int),
-                                                    arg("stepCells", Kind::Number, Value(0.0))})})},
+                               objects("cascades", {arg("halfSize", Kind::Number).in("m"), arg("resolution", Kind::Int).in("cells"),
+                                                    arg("stepCells", Kind::Number, Value(0.0)).in("cells")})})},
             Kind::Bool},
            "The scene's global illumination: mode \"off\" | \"vct\" | \"vctPccHybrid\", quality \"low\" | \"medium\" | "
            "\"high\" | \"epic\", the bounces, and the voxel cascades (1..4 of {halfSize, resolution, stepCells}; none: "
@@ -24,11 +26,9 @@ void registerGiCommands(Host &host, const Commands &k)
               if (!s) return Value();
               GiParams p;
               const std::string mode = c[1]["mode"].asString(), quality = c[1]["quality"].asString();
-              int m = -1, q = -1;
+              int m = 0, q = 0;   // (the signature declared the choices: the host refused any other)
               for (int i = 0; i < 3; ++i) if (mode == kModes[i]) m = i;
               for (int i = 0; i < 4; ++i) if (quality == kQualities[i]) q = i;
-              if (m < 0) return c.fail("mode '" + mode + "' is not off | vct | vctPccHybrid");
-              if (q < 0) return c.fail("quality '" + quality + "' is not low | medium | high | epic");
               const Value::Array &cs = c[1]["cascades"].asArray();
               if (cs.size() > size_t(kGiTierMaxCascades))
                   return c.fail("at most " + std::to_string(kGiTierMaxCascades) + " cascades");
