@@ -52,9 +52,23 @@ static Result notWhole(const Registry &registry)
     return r;
 }
 
+/// THE DOORS' ONE CHECK: true (with the failure in `r`) when this host serves no run and no call - a documentation-only
+/// host, or one not whole.
+static bool shut(const Host::Options &options, const Registry &registry, Result &r)
+{
+    if (options.documentationOnly) {
+        r.status = Status::Failed;
+        r.message = "this host lists commands for documentation only";
+        return true;
+    }
+    if (!registry.faulted()) return false;
+    r = notWhole(registry);
+    return true;
+}
+
 Result Host::run(const std::string &source, const std::string &name)
 {
-    if (mRegistry.faulted()) return notWhole(mRegistry);
+    if (Result r; shut(mOptions, mRegistry, r)) return r;
     // THE LANGUAGE OF THE NAME's EXTENSION (the table, LanguageTable.inc, and any addLanguage)
     const size_t dot = name.rfind('.');
     const std::string ext = dot == std::string::npos || name.find('/', dot) != std::string::npos ? "" : name.substr(dot);
@@ -98,17 +112,20 @@ int Host::verdict(const Result &run)
 
 Result Host::call(const std::string &name, const Value::Array &args)
 {
-    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.call(name, args);
+    if (Result r; shut(mOptions, mRegistry, r)) return r;
+    return mRegistry.call(name, args);
 }
 
 Result Host::callNamed(const std::string &name, Value::Object args)
 {
-    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.callNamed(name, std::move(args));
+    if (Result r; shut(mOptions, mRegistry, r)) return r;
+    return mRegistry.callNamed(name, std::move(args));
 }
 
 Result Host::callAt(std::size_t index, Value::Array args)
 {
-    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.callAt(index, std::move(args));
+    if (Result r; shut(mOptions, mRegistry, r)) return r;
+    return mRegistry.callAt(index, std::move(args));
 }
 
 void Host::print(const std::string &line)

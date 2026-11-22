@@ -45,7 +45,9 @@ int main(int argc, char **argv)
     }
     if (list) {
         // THE COMMANDS, AS THE HOST SERVES THEM (no engine: each would say why - the list is the registration's)
-        script::Host host;
+        script::Host::Options docs;
+        docs.documentationOnly = true;
+        script::Host host(docs);
         script::registerEngineCommands(host, nullptr, "--list boots no engine", testDoors);
         const std::vector<std::string> faults = host.registry().validate();
         for (const script::CommandInfo *c : host.registry().commands())

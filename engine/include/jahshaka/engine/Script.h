@@ -415,6 +415,9 @@ public:
         /// THE SCRIPT's RANDOM STREAM (no wall clock, no entropy: CODING_RULES § 5): Math.random is xorshift64* from
         /// this seed, reset at every run - the same sequence every run; a caller that wants another stream states it.
         std::uint64_t randomSeed = 0x9E3779B97F4A7C15ull;
+        /// A DOCUMENTATION-ONLY host (jahengine --list; the MCP server before its first tools/call): its registry
+        /// lists every command, and every run and every call FAILS "this host lists commands for documentation only".
+        bool documentationOnly = false;
     };
     Host();   // the default options
     explicit Host(Options options);
@@ -463,7 +466,7 @@ public:
 
     /// The callers' doors: a command call by name (positional arguments, or named: callNamed), by its registry index,
     /// and a console line. A host whose registry holds a fault serves NO call (as it runs no script): each FAILS with
-    /// run's words, naming every fault.
+    /// run's words, naming every fault; a documentation-only host serves none either (Options::documentationOnly).
     Result call(const std::string &name, const Value::Array &args);
     Result callNamed(const std::string &name, Value::Object args);
     Result callAt(std::size_t index, Value::Array args);
