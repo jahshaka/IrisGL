@@ -73,6 +73,17 @@ class View;
 /// boundary function over this build's own terms (ShaderIdentity says what). The startup pass keys on it and
 /// `Jahshaka --print-shader-identity` prints it: the harness reads the engine, never a re-derivation.
 ShaderIdentity shaderIdentity();
+/// THE ENGINE's MEDIA BY CONTENT (SHADER-SYSTEM-1 stage 6a; it was Studio's startuppass::mediaDigest): every regular file
+/// under `dir` (an executable's media/: the Hlms templates and pieces, the compute media, the low-level material scripts
+/// and compositors the shaders are made from), by its path RELATIVE to `dir` ('/'-separated) and its bytes, in sorted
+/// path order; a symlinked directory is not followed. Never a tree's path (#154: two trees at one content read one
+/// digest), never a file's time. Hex (the cache's own 128-bit hash, as every key of it); "none" for no directory.
+std::string mediaDigest(const std::string &dir);
+/// THE IDENTITY ANY EXECUTABLE THAT LINKS THE ENGINE PRINTS (`--print-shader-identity`; WARM-SHARE-1's reader): the lines
+/// `shader-identity 1`, `layer.pipeline|microcode|hlms|compute`, `cache`, `engine`, `ray-spirv`, `media` and
+/// `engine-identity engine=<engine>|ray=<ray-spirv>|media=<media>|cache=<cache>`, one `<name> <value>` each, `media` the
+/// caller's mediaDigest of its media/. An executable adds its own lines after them (the app: `pass-code`, `identity`).
+std::string shaderIdentityText(const std::string &mediaDigest);
 
 /// A renderable scene. Views draw it; several Views may share one, or each may own one.
 /// Owned by the Engine: destroy with Engine::destroyScene().

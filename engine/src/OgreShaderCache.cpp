@@ -48,6 +48,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <sstream>
@@ -1832,14 +1833,46 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
 ShaderIdentity shaderIdentity() {
     const detail::LayerKeys k = detail::composeLayerKeys(detail::buildLayerKeyInputs());
     ShaderIdentity id;
-    id.pipelineKey = detail::hexOf(k.pipeline);
-    id.microcodeKey = detail::hexOf(k.microcode);
-    id.hlmsKey = detail::hexOf(k.hlms);
-    id.computeKey = detail::hexOf(k.compute);
-    id.fingerprint = detail::hexOf(detail::fingerprintText(k));
+    const auto hex = [](const std::string &s) { return detail::cachefile::hex128(s.data(), s.size()); };
+    id.pipelineKey = hex(k.pipeline);
+    id.microcodeKey = hex(k.microcode);
+    id.hlmsKey = hex(k.hlms);
+    id.computeKey = hex(k.compute);
+    id.fingerprint = hex(detail::fingerprintText(k));
     id.engineBuildId = JAHSHAKA_ENGINE_BUILD_ID;
     id.raySpirvId = JAHSHAKA_RAY_SPIRV_ID;
     return id;
+}
+
+// THE HASH IS THE CACHE's OWN 128-bit one (cachefile::hex128, MurmurHash3 x64-128), as every key of the cache: an
+// IDENTITY (which content), never a security boundary - one hash for every key. The file set, the path and the order
+// are the digest it replaced (Studio's, SHA-256 over Qt): regular files with a file symlink followed, directories never
+// followed through a link, the path relative with '/', sorted by its BYTES (std::string's operator<, never a locale).
+std::string mediaDigest(const std::string &dir) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return "none";
+    std::vector<std::string> files;
+    for (fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) files.push_back(it->path().lexically_relative(dir).generic_string());
+    std::sort(files.begin(), files.end());
+    std::string blob;
+    for (const std::string &rel : files) {
+        std::ifstream f(dir + "/" + rel, std::ios::binary);
+        if (!f) continue;
+        const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        blob += rel + "\n" + detail::cachefile::hex128(bytes.data(), bytes.size()) + "\n";
+    }
+    return detail::cachefile::hex128(blob.data(), blob.size());
+}
+
+std::string shaderIdentityText(const std::string &media) {
+    const ShaderIdentity id = shaderIdentity();
+    return "shader-identity 1\nlayer.pipeline " + id.pipelineKey + "\nlayer.microcode " + id.microcodeKey +
+           "\nlayer.hlms " + id.hlmsKey + "\nlayer.compute " + id.computeKey + "\ncache " + id.fingerprint +
+           "\nengine " + id.engineBuildId + "\nray-spirv " + id.raySpirvId + "\nmedia " + media +
+           "\nengine-identity engine=" + id.engineBuildId + "|ray=" + id.raySpirvId + "|media=" + media +
+           "|cache=" + id.fingerprint + "\n";
 }
 
 }}  // namespace jahshaka::engine
