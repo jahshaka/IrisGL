@@ -1,8 +1,9 @@
 # The engine abstraction and its Ogre-Next backend.
 # Studio links this; Studio never links Ogre directly.
 # The backend is split across Ogre-private translation units; EnginePrivate.h
-# holds the shared declarations and is never installed. The list is exported so
-# the sanitised copy in tests/engine builds exactly the same sources.
+# holds the shared declarations and is never installed. The lists (the engine's and
+# the script host's) are exported so the sanitised copy in tests/engine builds
+# exactly the same sources.
 # THE SPIR-V RULES READ GLSLANG'S DEPFILES (below) as CMake transforms them for Ninja (3.20's CMP0116; this directory is
 # added from Studio's root, whose 3.16 minimum leaves it unset).
 if(POLICY CMP0116)
@@ -107,9 +108,15 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp
-    # THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1; include/jahshaka/engine/Script.h): the value and the registry, the
-    # host, and the ONE file that names the JavaScript engine (js_quickjs.cpp: source.script_neutral).
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp)
+set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
+# THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1; include/jahshaka/engine/Script.h): the value and the registry, the host,
+# and the ONE file that names the JavaScript engine (js_quickjs.cpp: source.script_neutral). COMPILED INTO THE LIBRARY
+# BUT OUTSIDE THE ENGINE BUILD ID (2a a3; _build_id_inputs below): a command is a HOST of the engine - it calls only the
+# public API (jahshaka/engine/*.h: source.script_build_id holds its includes), so no edit of it can change what a
+# shader permutation means, what the texture cache keys or what the warm-up tops up; hashing it re-keyed those caches
+# on every command edit.
+set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/host.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
@@ -124,7 +131,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_view.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_picture.cpp)
-set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
+set(JAHSHAKA_ENGINE_SCRIPT_SOURCES "${JAHSHAKA_ENGINE_SCRIPT_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
 # OgreRayQuery.cpp is the ONE TU that includes Vulkan itself: it needs the
@@ -811,6 +818,7 @@ set(JAHSHAKA_ENGINE_BUILD_ID_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/GpuSubstrate.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/PhotonStatus.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Types.h)
+# (the script host's sources are NOT inputs: JAHSHAKA_ENGINE_SCRIPT_SOURCES above says why; source.script_build_id)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
 # THE C++ THAT WRITES THE HLMS LAYER's BYTES (JAHSHAKA_SHADER_CACHE_CODE_ID): the container alone. A source of ours that
 # puts shader SOURCE text into an Hlms entry other than through properties and pieces is listed here too
@@ -905,7 +913,7 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
 # the frame after a stop (ReadbackDecode.h).
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/ReadbackDecode.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
-add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
+add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_SCRIPT_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 jahshaka_engine_generated_deps(JahshakaEngine)
 jahshaka_engine_ray_query(JahshakaEngine)
