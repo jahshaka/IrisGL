@@ -771,6 +771,7 @@ bool ShaderCache::clear() {
     mComputeRecordsLoaded = mComputeRecordsRejected = mComputeRecordsStale = 0;
     mUses.clear();   // (F10) the stamps went with the files: the next write rebuilds them, evicting nothing
     mUsesSignalAt = kNoUsesJob;
+    mStampsTrusted = false;
     mForceCompute = true;   // the store still holds its records: the next save writes them back
     // The next save must WRITE, even though nothing has compiled since the last
     // one — the files it would have skipped as "already on disk" are gone.
@@ -929,6 +930,7 @@ void ShaderCache::load(Ogre::Root *root) {
                     "this launch and the table is rebuilt");
         }
         mLaunch = written + 1u;
+        mStampsTrusted = mUsesState == "loaded";
     }
 
     // WHICH KEYS THIS RUN READS AT (URGENT #126, HARNESS-4): one line per boot naming the directory and this build's
@@ -1341,6 +1343,7 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
     job->microcodeDirty = mCopyLayersDirty && gpm.isCacheDirty();
     job->launch = mLaunch;
     job->uses = mUses;   // the table the last write left (the writer updates it; no write is in flight here)
+    job->stampsTrusted = mStampsTrusted;
     // A LOST DEVICE IS NOT READ (the read's item 5): after the engine latched a loss, the writer serializes the CPU
     // copies only — no vkGetPipelineCacheData against a dead device. (Its destruction is not reachable while the
     // writer runs: the fork never recreates a lost device and no forced election exists — validateDevice(true) has
@@ -1513,7 +1516,16 @@ bool ShaderCache::runWrite(PendingWrite &job) {
         // THE SIZE CAP (the final read's ruling): AGE ALONE NEVER DROPS AN ENTRY. Only when the layers would pass
         // mMaxBytes are whole stamps evicted, the oldest first and never this launch's, each layer that held the stamp
         // re-serialized, until the total is under the cap. pipeline.cache is not entry-evictable: it counts, it stays.
-        if (total() > mMaxBytes) {
+        // WITH NO TRUSTWORTHY STAMPS (the sidecar was missing, damaged or of an older format at this launch's load) the
+        // cap evicts NOTHING and never wipes - a damaged 1-KB file is no reason to throw the cache away (the lead): every
+        // entry counts as used this launch, the table is rebuilt from this launch's uses, and the eviction runs at the
+        // first save of a launch that reads it intact.
+        if (total() > mMaxBytes && !job.stampsTrusted)
+            logLine("OVER ITS BUDGET WITH NO STAMPS: the layers hold " + std::to_string(total()) + " bytes, " +
+                    std::to_string(total() - mMaxBytes) + " over the cap of " + std::to_string(mMaxBytes) +
+                    ", and this launch read no intact entry-uses.bin - nothing is evicted; the next launch evicts by the "
+                    "stamps this one writes");
+        else if (total() > mMaxBytes) {
             std::set<std::uint32_t> older;
             for (const auto &h : held)
                 if (h.second < job.launch) older.insert(h.second);

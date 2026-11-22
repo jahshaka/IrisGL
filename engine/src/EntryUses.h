@@ -8,7 +8,8 @@
 // would pass the size cap - the oldest stamp first, a whole stamp at a time, never this launch's (OgreShaderCache.cpp
 // runWrite). The sidecar also holds the LAUNCH COUNTER, so a launch that compiled and evicted nothing writes no layer and
 // no manifest - only this file, when a stamp moved. A sidecar missing, damaged or of an older format is not read: every
-// entry is stamped with this launch (nothing is evictable on a missing stamp) and the table is rebuilt.
+// entry is stamped with this launch, that launch evicts NOTHING and never wipes, even over the cap (one line says so),
+// and the table is rebuilt - the next launch that reads it intact evicts by it.
 #pragma once
 
 #include <cstddef>

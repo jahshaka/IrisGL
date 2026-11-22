@@ -3382,6 +3382,7 @@ private:
         Ogre::GpuProgramManager::HashSet        microcodeUsed;
         std::vector<ComputeKey128>              computeUsed;
         std::vector<bool>                       hlmsDirty;
+        bool                                    stampsTrusted = false;   ///< the launch read its sidecar intact
         Ogre::RenderSystem                     *rs = nullptr;   ///< null: no pipeline blob (no dirty layer, a lost device)
         unsigned                       compileCount = 0;
         unsigned                       enginePipelines = 0;   ///< sEnginePipelines when serialized
@@ -3484,6 +3485,9 @@ private:
     UseTable                       mUses;
     std::string                    mUsesState = "absent";
     std::uint64_t                  mUsesSignalAt = kNoUsesJob;
+    /// The table load() read was whole and of this format: only then may this launch's saves evict (or wipe) - with no
+    /// trustworthy stamps a launch over the cap evicts nothing and says so (the lead's ruling on the fix pass).
+    bool                           mStampsTrusted = false;
     /// load()'s half for compute.bin: parse, reject, keep the rest for prewarmCompute (which prunes the stale).
     void loadCompute(const std::vector<char> &bytes);
     void composeFingerprint();
