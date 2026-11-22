@@ -146,8 +146,11 @@ public:
     virtual VkImageView gatherView(Ogre::TextureGpu *t, detail::RayViewKind kind) = 0;
     /// THE GUARD (RayInputGuard.h, GATHER-HANG-1 stage 2): true when every view is made; else the job refuses its
     /// dispatch this frame - the tier counts it, logs the first refusal of `job`, and the frame is INCOMPLETE
-    /// (PublishedFrame::Completeness term bit 5).
-    virtual bool gatherInputsMade(const char *job, std::initializer_list<VkImageView> views) = 0;
+    /// (PublishedFrame::Completeness term bit 5). One call is one refusal, however many of its views are null.
+    virtual bool gatherInputsMade(const char *job, const VkImageView *views, size_t count) = 0;
+    bool gatherInputsMade(const char *job, std::initializer_list<VkImageView> views) {
+        return gatherInputsMade(job, views.begin(), views.size());
+    }
 
     /// THE RETIRE WINDOW for what the gather made itself (its buffers, images, sets and Ogre textures) - never for a
     /// gatherView view, which the tier's cache retires.
@@ -390,6 +393,11 @@ private:
 /// THE HIT SET's ORDER: every input it reads resolved for a compute read (the card instance table read AND written:
 /// the hits' demand stamps), into the caller's transitions before its command buffer is taken.
 void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const HitSetSources &src);
+/// THE HIT SET's INPUTS BEFORE A JOB's STATE (GATHER-HANG-1 stage 2): the views `write` binds of the sources - the
+/// volumes, the sky, the card layers and view term, the hit list's two, the hit surface's two; never a stand-in - looked
+/// up through the guard (GatherHost::gatherInputsMade) as ONE refusal of `job`. A job calls it before anything it
+/// advances; `write` keeps its own checks.
+bool hitSetInputsMade(GatherHost &host, const char *job, const HitSetSources &src);
 struct GatherRestInputs;
 /// THE BRICK MASKS a raw reader binds (the rest's inputs): read by the compute stage after the light pass that wrote them.
 void brickMaskTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArray &trans, const GatherRestInputs &rest);

@@ -299,6 +299,28 @@ void hitSetTransitions(Ogre::BarrierSolver &solver, Ogre::ResourceTransitionArra
     if (src.geomRows) solver.resolveTransition(trans, src.geomRows, Ogre::ResourceAccess::Read, computeStage);
 }
 
+bool hitSetInputsMade(GatherHost &host, const char *job, const HitSetSources &src) {
+    // (every source `write` views; a null source takes its stand-in there and is no input here)
+    VkImageView views[kGatherMaxCascades * kGatherVoxelKinds + 1u + 2u + SurfaceCache::kViewLayers + 2u + 2u] = {};
+    size_t n = 0u;
+    const auto put = [&](Ogre::TextureGpu *t) {
+        if (t) views[n++] = host.gatherView(t, detail::RayViewKind::Sampled);
+    };
+    for (unsigned c = 0; c < src.cascadeCount && c < kGatherMaxCascades; ++c)
+        for (unsigned k = 0; k < kGatherVoxelKinds; ++k) put(src.voxel[c][k]);
+    put(src.sky);
+    if (src.cardsBound()) {
+        put(src.cardDepth);
+        put(src.cardRadiance);
+        for (Ogre::TextureGpu *t : src.cardView) put(t);
+    }
+    put(src.hitPool);
+    put(src.cloudField);
+    views[n++] = src.hit.ids;    // (the job's list or the tier's stand-ins: never null in a set)
+    views[n++] = src.hit.dest;
+    return host.gatherInputsMade(job, views, n);
+}
+
 // THE BRICK MASKS (DETERMINISM-1): Photon's light passes write them through Hlms (the solver sees a compute WRITE); the
 // reflection and the gather read them by raw descriptor. Unnamed, they were ordered only by accident - the card-instance
 // buffer's own read-write transition in the same call emitting a global memory barrier - and by nothing in a frame with

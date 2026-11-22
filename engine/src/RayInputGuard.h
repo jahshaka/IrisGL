@@ -6,6 +6,17 @@
 // has no image. THE LAW: a job whose views are not all made REFUSES ITS DISPATCH that frame - the frame keeps what the
 // job last wrote - and the refusal is SAID ONCE per job for the tier's life (a persistent one must not flood the log;
 // a silent one is indistinguishable from a trace that draws nothing), and COUNTED every time.
+// WHERE A JOB CALLS IT: BEFORE ANY STATE ITS FRAME ADVANCES (a ring index, a history, a frame counter, a "ran" flag, a
+// registration) - a job that refused after advancing would leave its next frame reading a state that never happened.
+// Every job of the tier does (OgreRayQuery.cpp; the probe gather, OgreScreenProbeGather.cpp; the hit set's inputs by
+// hitSetInputsMade); engine.ray_input_guard reads that order in the source.
+//
+// THE FRAME's TERM: a refusal (or a ray JAH_RQ_INIT refused, the tier counter [2]) makes the frame INCOMPLETE -
+// PublishedFrame::Completeness bit 5 = 32, "a ray job refused its dispatch" (bit 6 = 64 is RESERVED for SHADER-SYSTEM-1-7's
+// "a compute dispatch deferred"). THE TERM IS TIER-WIDE (accepted for GATHER-HANG-1 stage 2): one guard and one counter
+// per tier, shared by every scene, view and eye, so a refusal anywhere marks every scene that notes that frame. A
+// RESIDUE FOR MULTIVIEW: the per-scene (per-view) accounting - a refusal charged to the scene whose job refused - is not
+// built here.
 //
 // No Vulkan and no Ogre type here: a view is its 64-bit handle, the job its name; the tier logs what admit() says
 // (tests/engine/test_ray_input_guard.cpp, engine.ray_input_guard). Not thread-safe: the tier records on one thread.

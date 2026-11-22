@@ -1644,7 +1644,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     if (mFailed || !in.scene || !in.sceneMgr || !in.hits.tlas || !in.normals || !in.depth || !in.shadowRough) return;
     if (!in.width || !in.height) return;
     // THE GUARD (RayInputGuard.h, GATHER-HANG-1 stage 2): the frame's INPUT views - the prepass's three, the photon
-    // overlay, the field's two atlases - are made BEFORE any state this frame advances (the view's age, its rest, its
+    // overlay, the field's two atlases, the hit set - are made BEFORE any state this frame advances (the view's age, its rest, its
     // flip): a texture not resident or with no image refuses the dispatch, said once, counted, and the frame is
     // incomplete (PublishedFrame::Completeness bit 5). The cache answers the later lookups of the same views.
     {
@@ -1663,6 +1663,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
                                 { mHost.gatherView(in.fieldIrradiance, detail::RayViewKind::Sampled),
                                   mHost.gatherView(in.fieldDepth, detail::RayViewKind::Sampled) }))
         return;
+    if (!hitSetInputsMade(mHost, "the probe gather (its hit set)", in.hits)) return;
     const auto cpuStart = Clock::now();
 
     if (!mPlacePipeline) {   // the tier's ahead build was refused: built now, in the frame (as before COLD-BOOT-1)
