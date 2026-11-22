@@ -1266,7 +1266,7 @@ GiStatus PhotonComponent::giStatus() const {
         if (st.giAtRest && !mScene.reflectRestPastHandOver()) st.giAtRest = false;
         if (st.giAtRest && !mScene.gatherRestPastHandOver()) st.giAtRest = false;
         // ...AND THE FRAME IS COMPLETE (COLD-BOOT-1 item 3, PublishedFrame::Completeness): a scene that drew a placeholder,
-        // skipped a pending draw, had a card reader refused by its build or wore a fallback texture is not at rest
+        // skipped a pending draw, had a ray consumer refused by its build or wore a fallback texture is not at rest
         if (st.giAtRest && mScene.frameIncomplete()) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;

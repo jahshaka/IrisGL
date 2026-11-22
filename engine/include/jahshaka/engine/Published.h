@@ -166,8 +166,8 @@ struct PublishedFrame {
     /// failed texture load is the fallback. The predicate a view needs to show only complete frames (SHADER-SYSTEM-1).
     struct Completeness {
         bool incomplete = false;
-        /// Its terms on that frame: bit 0 a placeholder drawn, 1 a pending draw skipped, 2 a card reader refused by its
-        /// ray build, 3 a material awaiting its texture; 4 a TEST term (the door frames.incompleteHold, never set in the
+        /// Its terms on that frame: bit 0 a placeholder drawn, 1 a pending draw skipped, 2 a ray consumer (any of the
+        /// six) refused by its build in flight, 3 a material awaiting its texture; 4 a TEST term (the door frames.incompleteHold, never set in the
         /// app: a frame incomplete with no demand change, gi.card_build_late.window); 5 a RAY INPUT REFUSED (GATHER-HANG-1
         /// stage 2: a ray job refused its dispatch for a view not made, or JAH_RQ_INIT a ray for an undefined input -
         /// RayQueryTier::rayInputRefused); 6 a COMPUTE DISPATCH DEFERRED (SHADER-SYSTEM-1 7a: an asynchronous scene's

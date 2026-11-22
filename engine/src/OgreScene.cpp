@@ -2599,7 +2599,7 @@ void OgreScene::noteFrameCompleteness() {
     unsigned terms = 0u;
     terms |= counts[0] != mIncompleteDrawsSeen[0] ? 1u : 0u;
     terms |= counts[1] != mIncompleteDrawsSeen[1] ? 2u : 0u;
-    terms |= cardReaderBuildPending() ? 4u : 0u;
+    terms |= rayBuildRefusedPending() ? 4u : 0u;
     terms |= mPhoton.materialsAwaitingTexture() > 0u ? 8u : 0u;
     // (bit 5 = 32: a ray job refused its dispatch, or JAH_RQ_INIT a ray, for an undefined input - GATHER-HANG-1 stage 2.
     // THE TERMS FROM 8 UP ARE FOUR, EACH ITS OWN BIT, KEPT ALL FOUR BY WHOEVER LANDS SECOND: 8 a material awaiting its
