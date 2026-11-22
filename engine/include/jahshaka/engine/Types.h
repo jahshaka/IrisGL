@@ -9823,6 +9823,7 @@ struct ArmInfo {
     double      defaultValue = 0.0;
     double      minValue = 0.0, maxValue = 0.0;
     std::string what;            ///< what the arm changes, and the suite that measures it
+    bool        test = false;    ///< a TEST DOOR (a fixture's, through Engine::setArm): the scripting verb engine.arm refuses it
 };
 
 /// THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4). A row that runs "under the Khronos

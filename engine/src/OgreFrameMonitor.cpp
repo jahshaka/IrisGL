@@ -1258,6 +1258,9 @@ struct ArmDef {
     ArmId id = ArmId::Count;
     double def = 0.0, lo = 0.0, hi = 0.0;
     const char *what = nullptr;
+    /// A TEST DOOR (a fixture's, through Engine::setArm): the scripting verb engine.arm refuses it
+    /// (ArmInfo::test; source.test_arms_unreachable)
+    bool test = false;
 };
 // THE TABLE, in ArmId's order: a row names its arm by its enumerator, and EVERY enumerator is asserted below to
 // own the row at its index (decision 19.3). Each row names the door it replaced.
@@ -1754,7 +1757,8 @@ constexpr ArmDef kArms[] = {
     { ArmId::ShaderAsyncFail, 0.0, 0.0, 1.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): 1 = every object's OWN graphics permutation "
       "requested while on FAILS at its request (the fork's HlmsAsyncCompiler::_jahFailRequests; a placeholder's request "
-      "is never failed): the object draws its placeholder as its final answer. 0 = shipped." },
+      "is never failed): the object draws its placeholder as its final answer. 0 = shipped.",
+      true },
     { ArmId::TextureResidencyHold, 0.0, 0.0, 1.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's texture case): 1 = every texture bound to a material while on "
       "is AWAITED as if its pixels had not landed (PhotonComponent's awaiting list), and nothing on the list settles "
@@ -1763,7 +1767,8 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (SHADER-SYSTEM-1, COLD-BOOT-1's leftover L2; gi.card_build_late.window): 1 = every scene's drawn frame "
       "is noted INCOMPLETE (PublishedFrame::Completeness term bit 4, the door's own) - a frame that turns incomplete with "
       "NO demand change, as an object entering the view under a sub-pixel turn while its permutation compiles. Read at "
-      "each frame's completeness note. 0 = shipped." },
+      "each frame's completeness note. 0 = shipped.",
+      true },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
@@ -1808,6 +1813,7 @@ std::vector<ArmInfo> ArmRegistry::list() const {
         a.minValue = kArms[i].lo;
         a.maxValue = kArms[i].hi;
         a.what = kArms[i].what;
+        a.test = kArms[i].test;
         out.push_back(std::move(a));
     }
     return out;
