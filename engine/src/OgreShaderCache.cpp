@@ -885,7 +885,11 @@ void ShaderCache::load(Ogre::Root *root) {
     if (mWriter) {
         timespec now {}, up {};
         ::clock_gettime(CLOCK_REALTIME, &now);
+#ifdef CLOCK_BOOTTIME   // Linux: the time since boot, suspend included
         ::clock_gettime(CLOCK_BOOTTIME, &up);
+#else                   // macOS: CLOCK_MONOTONIC also counts the time asleep (Apple's clock_gettime(3)): the same boot
+        ::clock_gettime(CLOCK_MONOTONIC, &up);
+#endif
         const time_t bootStart = now.tv_sec - up.tv_sec;
         unsigned swept = 0;
         if (DIR *d = opendir(mDir.c_str())) {
