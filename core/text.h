@@ -4,6 +4,8 @@
 // a key or a name compare), numbers go through std::to_chars / std::from_chars (never the C locale's strtod or printf).
 #pragma once
 
+#include "core/export.h"
+
 #include <charconv>
 #include <cstdint>
 #include <optional>
@@ -17,12 +19,12 @@ namespace text {
 
 /// True when `s` is well-formed UTF-8: no overlong form, no surrogate (U+D800-DFFF), nothing above U+10FFFF, no
 /// truncated sequence.
-bool validUtf8(std::string_view s);
+IRIS_CORE_API bool validUtf8(std::string_view s);
 
 /// ASCII case folding; every other byte (UTF-8 continuation bytes included) is kept as it is.
-std::string asciiLower(std::string_view s);
-std::string asciiUpper(std::string_view s);
-bool iequalsAscii(std::string_view a, std::string_view b);
+IRIS_CORE_API std::string asciiLower(std::string_view s);
+IRIS_CORE_API std::string asciiUpper(std::string_view s);
+IRIS_CORE_API bool iequalsAscii(std::string_view a, std::string_view b);
 
 inline bool startsWith(std::string_view s, std::string_view prefix)
 {
@@ -34,22 +36,22 @@ inline bool endsWith(std::string_view s, std::string_view suffix)
 }
 
 /// `s` without its leading and trailing ASCII whitespace (space, \t, \n, \v, \f, \r).
-std::string_view trim(std::string_view s);
+IRIS_CORE_API std::string_view trim(std::string_view s);
 
 /// The pieces of `s` between each `sep` (empty pieces kept: "a,,b" is three; "" is one empty piece).
-std::vector<std::string> split(std::string_view s, char sep);
-std::string join(const std::vector<std::string> &parts, std::string_view sep);
+IRIS_CORE_API std::vector<std::string> split(std::string_view s, char sep);
+IRIS_CORE_API std::string join(const std::vector<std::string> &parts, std::string_view sep);
 
 /// The shortest text that parses back to exactly `v` (std::to_chars: locale-free); "inf", "-inf", "nan" for those.
-std::string shortest(double v);
+IRIS_CORE_API std::string shortest(double v);
 /// `v` with exactly `digits` digits after the point (std::to_chars fixed: locale-free).
-std::string fixed(double v, int digits);
+IRIS_CORE_API std::string fixed(double v, int digits);
 
 /// The WHOLE of `s` as a base-10 integer, or nothing: no sign but a leading '-', no space, no trailing text, no overflow.
-std::optional<std::int64_t> parseInt(std::string_view s);
+IRIS_CORE_API std::optional<std::int64_t> parseInt(std::string_view s);
 /// The WHOLE of `s` as a double (std::from_chars general form, locale-free), or nothing: no leading '+' or space, no
 /// trailing text, nothing out of a double's range.
-std::optional<double> parseDouble(std::string_view s);
+IRIS_CORE_API std::optional<double> parseDouble(std::string_view s);
 
 namespace detail {
 inline void append(std::string &out, std::string_view s) { out.append(s.data(), s.size()); }

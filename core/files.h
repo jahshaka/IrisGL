@@ -21,6 +21,8 @@
 // library GC and the library reset READ that shape (src/services/assetgc.cpp, libraryreset.cpp): it does not change.
 #pragma once
 
+#include "core/export.h"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -37,24 +39,24 @@ enum class Durability
 };
 
 /// UTF-8 text <-> a path, the same on every platform.
-std::filesystem::path path(std::string_view utf8);
-std::string utf8(const std::filesystem::path &p);
+IRIS_CORE_API std::filesystem::path path(std::string_view utf8);
+IRIS_CORE_API std::string utf8(const std::filesystem::path &p);
 
 /// The whole file's bytes, or nothing when it does not exist or cannot be read.
-std::optional<std::string> readAll(const std::filesystem::path &p);
+IRIS_CORE_API std::optional<std::string> readAll(const std::filesystem::path &p);
 /// mkdir -p. False only when a component could not be created.
-bool makeDirs(const std::filesystem::path &dir);
+IRIS_CORE_API bool makeDirs(const std::filesystem::path &dir);
 
 /// The staged write's three steps, for a writer that streams into its temp itself (the CAS copy, an archive's or a video's
 /// partial): a unique sibling temp path for `target`; the flush of a written file to the device (no-op off POSIX: the
 /// rename's ordering only); the atomic replace of `to` by `from` - on failure `from` is removed and `error` says why.
-std::filesystem::path stagingTempPath(const std::filesystem::path &target);
-void fsyncPath(const std::filesystem::path &p);
-bool atomicRename(const std::filesystem::path &from, const std::filesystem::path &to, std::string *error = nullptr);
+IRIS_CORE_API std::filesystem::path stagingTempPath(const std::filesystem::path &target);
+IRIS_CORE_API void fsyncPath(const std::filesystem::path &p);
+IRIS_CORE_API bool atomicRename(const std::filesystem::path &from, const std::filesystem::path &to, std::string *error = nullptr);
 
 /// `bytes` written to `target` through a staged temp (its directory made first): the old file stays whole until the
 /// rename replaces it. False with `error` said when anything failed - the target is then untouched and no temp is left.
-bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability = Durability::Flush,
+IRIS_CORE_API bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability = Durability::Flush,
                  std::string *error = nullptr);
 
 }   // namespace files

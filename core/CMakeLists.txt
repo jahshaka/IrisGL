@@ -1,10 +1,13 @@
 # IrisCore (NOQT-CORE-1, V2 plan 0.12): THE Qt-FREE BOTTOM of everything below the editor's UI - the standard library only,
-# a static library with position-independent code, which the document library (IrisGL, PUBLIC) links. Its sources join
+# ONE SHARED library (the lead's ruling 2026-11-22: a static archive pulled into two images keeps two copies of a stateful
+# symbol - the temp serial, the guid engine, the log sink - wherever the platform does not interpose, Windows always: one
+# shared object makes ONE copy by construction), which the document library (IrisGL, PUBLIC) links. Its sources join
 # it as they lose Qt (NOQT-CORE-1 stages 1-4); trianglebvh.cpp joins with trimesh.cpp in stage 2 (its trimesh.h includes
 # <QList> today). It declares C++17 itself (no Qt usage requirement gives it one) and runs no Qt code generator.
 # tests/hygiene/no_qt_below.py holds it: no Qt include directory, define or generator on its compile lines, no Qt symbol
-# in its archive, no include outside core/ and the standard library.
-add_library(IrisCore STATIC
+# in it, no include outside core/ and the standard library, and no other image defines its stateful symbols.
+add_library(IrisCore SHARED
+    export.h
     files.cpp
     files.h
     geometry/plane.cpp
@@ -17,6 +20,14 @@ add_library(IrisCore STATIC
     text.h
 )
 target_compile_features(IrisCore PUBLIC cxx_std_17)
-set_target_properties(IrisCore PROPERTIES POSITION_INDEPENDENT_CODE ON AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+# Hidden by default: only what core/export.h's IRIS_CORE_API marks is exported (the iris:: API). Beside IrisGL in bin/.
+set_target_properties(IrisCore PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+target_compile_definitions(IrisCore PRIVATE IRIS_CORE_BUILD)
 # includes are path-qualified from irisgl/: "core/..."
 target_include_directories(IrisCore PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
+include(GNUInstallDirs)
+install(TARGETS IrisCore
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

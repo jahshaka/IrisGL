@@ -4,11 +4,13 @@
 // guids, sidecar file names): its TEXT is the contract. A random (version 4, RFC 4122 variant) id.
 #pragma once
 
+#include "core/export.h"
+
 #include <string>
 
 namespace iris {
 
 /// A new random version-4 guid as 36-character lowercase text, "xxxxxxxx-xxxx-4xxx-[89ab]xxx-xxxxxxxxxxxx".
-std::string newGuid();
+IRIS_CORE_API std::string newGuid();
 
 }   // namespace iris

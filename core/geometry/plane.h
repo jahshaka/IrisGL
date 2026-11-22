@@ -1,6 +1,7 @@
 #ifndef PLANE_H
 #define PLANE_H
 
+#include "core/export.h"
 #include "core/math/vec.h"
 
 
@@ -15,7 +16,7 @@ enum SphereClassification
     Behind
 };
 
-class Plane
+class IRIS_CORE_API Plane
 {
 public:
     iris::Vec3 normal;
