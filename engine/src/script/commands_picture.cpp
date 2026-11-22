@@ -1,5 +1,10 @@
-// THE PICTURE FAMILY (SCRIPT-IN-ENGINE-1): a picture's NATIVE reductions (the script language is an interpreter: a
-// pixel loop is never a script's).
+// THE PICTURE FAMILY (SCRIPT-IN-ENGINE-1; the lead's S3): PICTURES BY HANDLE. A picture (engine.view.readPixels'
+// answer, or engine.picture.create's) is held NATIVELY by the host and addressed by a picture handle: its reductions
+// (hash, columnStep, mean) read it in place - the script language is an interpreter, a pixel loop is never a script's,
+// and no picture crosses into the script unless engine.picture.bytes asks (one copy, then). A picture LIVES ACROSS
+// CALLS until engine.picture.release (MCP-ON-HOST-1: a session drives the host call by call); jahengine releases every
+// one at its script's end. THE CAP: the live pictures hold at most kPictureBytesCap bytes - a picture past it FAILS by
+// name (release one first).
 #include "script/commands.h"
 
 #include <cmath>
@@ -9,40 +14,78 @@ namespace jahshaka { namespace engine { namespace script {
 
 namespace {
 
-/// The picture a readPixels answered: {width, height, rgba}.
-Param picture(const char *name)
-{
-    return object(name, {arg("width", Kind::Int), arg("height", Kind::Int), arg("rgba", Kind::Bytes)});
-}
+/// THE LIVE PICTURES' CAP (stated by the builder, 2026-11-22): 512 MiB - fifteen 4K RGBA8 pictures (33 MB each), or
+/// three of PICTURE-REQUEST-1's 4K float radiance (133 MB each).
+constexpr std::size_t kPictureBytesCap = std::size_t(512) << 20;
 
 /// The checked picture's byte at (x, y, channel); the caller has bounded x and y.
-int byteAt(const Value &pic, std::int64_t x, std::int64_t y, int c)
+inline int byteAt(const Image &p, std::int64_t x, std::int64_t y, int c)
 {
-    return pic["rgba"].asBytes()[size_t((y * pic["width"].asInt() + x) * 4 + c)];
-}
-
-/// The picture's own consistency: width x height x 4 bytes.
-bool wellFormed(Call &c, const Value &pic)
-{
-    const std::int64_t w = pic["width"].asInt(), h = pic["height"].asInt();
-    if (w <= 0 || h <= 0 || std::int64_t(pic["rgba"].asBytes().size()) != w * h * 4) {
-        c.fail("the picture is not width x height x 4 bytes");
-        return false;
-    }
-    return true;
+    return p.rgba[size_t((y * std::int64_t(p.width) + x) * 4 + c)];
 }
 
 }  // namespace
 
+/// A picture held by the host: its handle and size, {picture, width, height}; null (the call FAILED by name) past the
+/// cap. The picture's bytes are counted while it lives (its deleter gives them back).
+bool Commands::roomForPicture(Call &c, std::size_t bytes) const
+{
+    if (st->pictureBytes + bytes <= kPictureBytesCap) return true;
+    c.fail("the live pictures would hold " + std::to_string(st->pictureBytes + bytes) + " bytes, over the cap " +
+           std::to_string(kPictureBytesCap) + " (512 MiB): release one first (engine.picture.release)");
+    return false;
+}
+
+Value Commands::holdPicture(Call &c, Image img) const
+{
+    const std::size_t bytes = img.rgba.size();
+    if (!roomForPicture(c, bytes)) return Value();
+    const unsigned w = img.width, h = img.height;
+    st->pictureBytes += bytes;
+    std::weak_ptr<EngineState> owner = st;
+    std::shared_ptr<Image> held(new Image(std::move(img)), [owner, bytes](Image *p) {
+        if (auto s = owner.lock()) s->pictureBytes -= bytes;
+        delete p;
+    });
+    const Value handle = c.hold(kPicture, std::move(held), true);
+    if (handle.isNull()) return Value();
+    return Value(Value::Object{{"picture", handle}, {"width", Value(w)}, {"height", Value(h)}});
+}
+
 void registerPictureCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
-    r.add({"engine.view.hash", {{target(picture("picture"))}, Kind::String},
+    const Param pic = target(handle("picture", kPicture));
+    r.add({"engine.picture.create",
+           {{object("picture", {arg("width", Kind::Int).range(1, 16384).in("px"), arg("height", Kind::Int).range(1, 16384).in("px"),
+                                arg("rgba", Kind::Bytes)})},
+            Kind::Object},
+           "A picture from the script's bytes (a reference it built): {width, height, rgba: width x height x 4 bytes, "
+           "row-major, top-left origin}. Answers {picture: picture handle, width, height}."},
+          [k](Call &c) -> Value {
+              const std::int64_t w = c[0]["width"].asInt(), h = c[0]["height"].asInt();
+              if (std::int64_t(c[0]["rgba"].asBytes().size()) != w * h * 4)
+                  return c.fail("rgba holds " + std::to_string(c[0]["rgba"].asBytes().size()) + " bytes, not width x "
+                                "height x 4 = " + std::to_string(w * h * 4));
+              if (!k.roomForPicture(c, std::size_t(w * h * 4))) return Value();   // before the copy
+              Image img;
+              img.width = unsigned(w);
+              img.height = unsigned(h);
+              img.rgba.assign(c[0]["rgba"].asBytes().begin(), c[0]["rgba"].asBytes().end());
+              return k.holdPicture(c, std::move(img));
+          });
+    r.add({"engine.picture.bytes", {{pic}, Kind::Bytes},
+           "The picture's RGBA bytes, copied into the script (width x height x 4, row-major, top-left origin): for a "
+           "script that truly needs the pixels - a reduction is a native command."},
+          [](Call &c) -> Value { return Value::bytes(c.object<Image>(c[0])->rgba); });
+    r.add({"engine.picture.release", {{pic}, Kind::Bool},
+           "Releases the picture: its handle is stale from here on, its bytes leave the live pictures' cap."},
+          [](Call &c) -> Value { return Value(c.registry().release(c[0].asInt())); });
+    r.add({"engine.picture.hash", {{pic}, Kind::String},
            "The picture's FNV-1a 64 over its RGBA bytes, as 16 hex digits."},
           [](Call &c) -> Value {
-              if (!wellFormed(c, c[0])) return Value();
               unsigned long long h = 14695981039346656037ull;
-              for (std::uint8_t b : c[0]["rgba"].asBytes()) {
+              for (std::uint8_t b : c.object<Image>(c[0])->rgba) {
                   h ^= b;
                   h *= 1099511628211ull;
               }
@@ -50,18 +93,17 @@ void registerPictureCommands(Host &host, const Commands &k)
               std::snprintf(text, sizeof text, "%016llx", h);
               return Value(text);
           });
-    r.add({"engine.view.columnStep",
-           {{target(picture("picture")), object("span", {arg("axis", Kind::String).oneOf({"column", "row"}), arg("a", Kind::Int), arg("b", Kind::Int),
-                                                 arg("from", Kind::Int), arg("to", Kind::Int)})},
+    r.add({"engine.picture.columnStep",
+           {{pic, object("span", {arg("axis", Kind::String).oneOf({"column", "row"}), arg("a", Kind::Int).in("px"),
+                                  arg("b", Kind::Int).in("px"), arg("from", Kind::Int).in("px"), arg("to", Kind::Int).in("px")})},
             Kind::Number},
            "The mean absolute step, in codes over R, G and B, between column (axis \"column\") or row (\"row\") a and b, "
            "over the other axis' span [from, to)."},
           [](Call &c) -> Value {
-              const Value &p = c[0], &sp = c[1];
-              if (!wellFormed(c, p)) return Value();
+              const Image &p = *c.object<Image>(c[0]);
+              const Value &sp = c[1];
               const bool columns = sp["axis"].asString() == "column";
-              const std::int64_t across = columns ? p["width"].asInt() : p["height"].asInt();
-              const std::int64_t along = columns ? p["height"].asInt() : p["width"].asInt();
+              const std::int64_t across = columns ? p.width : p.height, along = columns ? p.height : p.width;
               const std::int64_t a = sp["a"].asInt(), b = sp["b"].asInt(), from = sp["from"].asInt(), to = sp["to"].asInt();
               if (a < 0 || b < 0 || a >= across || b >= across || from < 0 || to > along || from > to)
                   return c.fail("the span lies outside the picture");
@@ -73,16 +115,16 @@ void registerPictureCommands(Host &host, const Commands &k)
                                                     : byteAt(p, t, a, ch) - byteAt(p, t, b, ch)));
               return Value(n ? s / n : 0.0);
           });
-    r.add({"engine.view.mean",
-           {{target(picture("picture")), object("rect", {arg("x0", Kind::Int), arg("y0", Kind::Int), arg("x1", Kind::Int),
-                                                 arg("y1", Kind::Int)})},
+    r.add({"engine.picture.mean",
+           {{pic, object("rect", {arg("x0", Kind::Int).in("px"), arg("y0", Kind::Int).in("px"), arg("x1", Kind::Int).in("px"),
+                                  arg("y1", Kind::Int).in("px")})},
             Kind::Array},
            "The mean of each channel, in codes, over the rectangle [x0, x1) x [y0, y1): [r, g, b, a]."},
           [](Call &c) -> Value {
-              const Value &p = c[0], &rc = c[1];
-              if (!wellFormed(c, p)) return Value();
+              const Image &p = *c.object<Image>(c[0]);
+              const Value &rc = c[1];
               const std::int64_t x0 = rc["x0"].asInt(), y0 = rc["y0"].asInt(), x1 = rc["x1"].asInt(), y1 = rc["y1"].asInt();
-              if (x0 < 0 || y0 < 0 || x1 > p["width"].asInt() || y1 > p["height"].asInt() || x0 >= x1 || y0 >= y1)
+              if (x0 < 0 || y0 < 0 || x1 > std::int64_t(p.width) || y1 > std::int64_t(p.height) || x0 >= x1 || y0 >= y1)
                   return c.fail("the rectangle is empty or lies outside the picture");
               double sum[4] = {0, 0, 0, 0};
               for (std::int64_t y = y0; y < y1; ++y)

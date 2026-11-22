@@ -168,8 +168,10 @@ void registerViewCommands(Host &host, const Commands &k)
             Kind::Object},
            "A picture, by PICTURE-REQUEST-1's request: the view, its eyes (\"left\": a mono view), its content "
            "(\"display\": RGBA8, the bytes the view shows) and when (\"nextFrame\": one lockstep frame is drawn and its "
-           "picture read). Answers {width, height, rgba} (row-major, top-left origin). Stage 1 serves exactly these "
-           "values: right/both, radiance and settled are refused by name until PICTURE-REQUEST-1."},
+           "picture read). Answers {picture: picture handle, width, height}: the picture is HELD NATIVELY (the "
+           "engine.picture.* reductions read it in place; engine.picture.bytes copies it only when asked; it lives until "
+           "engine.picture.release). eyes \"both\" will answer {left, right}, each such an answer. Stage 1 serves exactly "
+           "left / display / nextFrame: right/both, radiance and settled FAIL by name until PICTURE-REQUEST-1."},
           [k](Call &c) -> Value {
               View *v = k.view(c, c[0]["view"]);
               if (!v) return Value();
@@ -182,8 +184,7 @@ void registerViewCommands(Host &host, const Commands &k)
               if (!k.frame(c)) return Value();
               Image img;
               if (!v->readPixels(img)) return c.refuse(k.st->engine->lastError());
-              return Value(Value::Object{{"width", Value(img.width)}, {"height", Value(img.height)},
-                                         {"rgba", Value::bytes(std::move(img.rgba))}});
+              return k.holdPicture(c, std::move(img));
           });
 }
 

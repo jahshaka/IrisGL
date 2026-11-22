@@ -27,6 +27,7 @@ struct EngineState {
     std::string bootError;
     bool testDoors = false;
     std::vector<DeclaredRoutes> declared;
+    std::size_t pictureBytes = 0;   // the live pictures' bytes (commands_picture.cpp: THE CAP)
 };
 
 inline Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }
@@ -60,6 +61,10 @@ public:
     /// ROUTE DECLARATION JUDGED on it (RouteDeclaration.h: held or broken, each a law of the host's verdict; a product
     /// not live yet waits). False, the call FAILED naming the first broken declaration, when one broke.
     bool frame(Call &c) const;
+    /// THE PICTURES (commands_picture.cpp): `img` held by the host - {picture: picture handle, width, height} - or null,
+    /// the call FAILED by name, past the live pictures' cap; roomForPicture: the cap's check alone (before a copy).
+    Value holdPicture(Call &c, Image img) const;
+    bool roomForPicture(Call &c, std::size_t bytes) const;
 
     std::shared_ptr<EngineState> st;
 };
@@ -67,7 +72,8 @@ public:
 /// An engine object the engine owns, held by a handle that never owns it (the engine destroys it).
 template <class T> std::shared_ptr<void> unowned(T *p) { return std::shared_ptr<void>(static_cast<void *>(p), [](void *) {}); }
 /// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
-constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material";
+constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material",
+                     *kPicture = "picture";
 
 /// Each family's commands (commands_<family>.cpp), registered by registerEngineCommands (commands_engine.cpp).
 void registerSceneCommands(Host &host, const Commands &k);

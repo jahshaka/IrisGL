@@ -63,6 +63,7 @@ int main(int argc, char **argv)
     script::Host host;
     script::registerEngineCommands(host, engine.get(), bootError, testDoors);
     int failures = host.verdict(host.run(source.str(), scriptPath));
+    host.registry().releaseScoped();   // the script's pictures, released at its end (they live across calls until then)
     if (const unsigned long long failed = Engine::processShaderCompileErrors()) {
         std::printf("FAIL: %llu shader program(s) failed to compile (the readings are of draws that never happened) - see "
                     "%s\n", failed, cfg.logFile.c_str());
