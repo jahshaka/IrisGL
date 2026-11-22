@@ -7510,6 +7510,7 @@ private:
     uint32_t mDrawSerial = 0u;   ///< noteDrawn: the engine frames that drew this scene
     PublishedFrame::Completeness mCompleteness;   ///< noteFrameCompleteness
     unsigned long long mIncompleteDrawsSeen[2] = { 0ull, 0ull };   ///< the views' placeholders and skips at the last note
+    unsigned long long mDispatchDeferralsSeen = 0ull;   ///< the scene's deferred compute dispatches at the last note
     struct GiPlanStash {
         bool owed = false, pushed = false, materialPreview = false;
         std::optional<unsigned long long> refreshSerial;

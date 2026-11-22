@@ -654,6 +654,10 @@ public:
         return GiArmStage::None;
     }
     unsigned materialsAwaitingTexture() const { return unsigned(mMaterialsAwaitingTexture.size()); }
+    /// The lighting arm's deferred builds over the scene's life, and whether one still owes the arm its whole rebuild
+    /// (giDeferrable): OgreScene::noteFrameCompleteness's "a compute dispatch deferred" term.
+    unsigned long long giDeferrals() const { return mGiDeferrals; }
+    bool giDeferralOwed() const { return mGiDeferralRetry; }
     unsigned long long giRebuildCount() const { return mGiRebuilds; }
     unsigned long long giMaterialGeneration() const { return mGiMaterialGeneration; }
     /// Moves on every frame a bound texture that was still streaming became resident (settleTextureResidency): the

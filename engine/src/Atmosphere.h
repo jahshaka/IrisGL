@@ -131,6 +131,8 @@ public:
     bool update();
     /// A table update deferred and not yet rebuilt (update's false, until a true).
     bool tablesPending() const { return mTablesPending; }
+    /// The deferred table rebuilds over the component's life (AtmosphereStatus::deferredUpdates).
+    unsigned deferredUpdates() const { return mStatus.deferredUpdates; }
 
     /// The transmittance from radius `rKm` along the zenith cosine `mu` to the
     /// top of the air — the table's integral, on the CPU (the sun's tint).

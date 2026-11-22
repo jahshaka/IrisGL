@@ -14,6 +14,7 @@
 // SURFACE-CACHE phase 2: the cache is a unique_ptr member and the per-frame
 // pass lives here, so this TU needs the Component's complete type.
 #include "SurfaceCache.h"
+#include "Atmosphere.h"
 #include <OgreHlmsAsyncCompiler.h>
 #include <OgreHlmsManager.h>
 #include <OgreRoot.h>
@@ -2602,6 +2603,15 @@ void OgreScene::noteFrameCompleteness() {
     terms |= rayInputRefused() ? 32u : 0u;
     // (the TEST term: the door frames.incompleteHold - a frame turning incomplete with no demand change)
     terms |= mEngine && mEngine->armRegistry().on(ArmId::FrameIncompleteHold) ? 16u : 0u;
+    // A COMPUTE DISPATCH DEFERRED (SHADER-SYSTEM-1 7a; bit 6 - bit 5 is a ray job's refused dispatch, GATHER-HANG-1): an
+    // asynchronous scene's dispatch the fork deferred to the background compiler since the last note (the atmosphere's
+    // tables, the convolution, the lighting arm), or one still owed its retry. The frame drew without that work.
+    const unsigned long long deferrals = (mAtmosphere ? mAtmosphere->deferredUpdates() : 0u) + mIblDeferrals +
+                                         mPhoton.giDeferrals();
+    const bool deferralOwed =
+        (mAtmosphere && mAtmosphere->tablesPending()) || mIblPending || mPhoton.giDeferralOwed();
+    terms |= (deferrals != mDispatchDeferralsSeen || deferralOwed) ? 64u : 0u;
+    mDispatchDeferralsSeen = deferrals;
     mIncompleteDrawsSeen[0] = counts[0];
     mIncompleteDrawsSeen[1] = counts[1];
     const bool incomplete = terms != 0u;

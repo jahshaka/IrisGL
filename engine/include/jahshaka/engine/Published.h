@@ -170,8 +170,10 @@ struct PublishedFrame {
         /// ray build, 3 a material awaiting its texture; 4 a TEST term (the door frames.incompleteHold, never set in the
         /// app: a frame incomplete with no demand change, gi.card_build_late.window); 5 a RAY INPUT REFUSED (GATHER-HANG-1
         /// stage 2: a ray job refused its dispatch for a view not made, or JAH_RQ_INIT a ray for an undefined input -
-        /// RayQueryTier::rayInputRefused); bit 6 is RESERVED (SHADER-SYSTEM-1-7: a compute dispatch deferred). The second of
-        /// the two lanes to land keeps every term - 8, 16, 32 and 64 - each its own bit, and this one comment naming both.
+        /// RayQueryTier::rayInputRefused); 6 a COMPUTE DISPATCH DEFERRED (SHADER-SYSTEM-1 7a: an asynchronous scene's
+        /// atmosphere tables, sky convolution or lighting arm met a permutation still building in the background since
+        /// the last note, or still owes its retry - the frame drew without that work). Every term - 8, 16, 32 and 64 -
+        /// is its own bit.
         unsigned terms = 0u;
         /// The drawn frames it has been incomplete IN A ROW (0 = complete): a scene stuck incomplete shows here (and on
         /// the startup gate's card line) instead of as a silent never-rest.
