@@ -1,7 +1,8 @@
 // jahengine — THE ENGINE, SCRIPTED, WITH NO STUDIO AND NO QT (SCRIPT-IN-ENGINE-1 stage 1). It links the engine library and
 // nothing of Studio, IrisGL's document or Qt (source.script_neutral reads its NEEDED list).
 //
-//     jahengine --script <file.js> [--test-doors]
+//     jahengine --script <file.js> [--test-doors] [--name <row>]
+//     jahengine --list
 //
 // It boots the engine as the engine fixtures do (enginetest::testEngineConfig's fields: the build's render-system plugins
 // and Hlms media; the engine's thread is this one, no render thread; the fixtures' shared warm shader cache when
@@ -10,7 +11,9 @@
 // (a failed boot registers them too: each says why), runs the script on this thread, and EXITS WITH ITS VERDICT
 // (Host::verdict): 0 when the script ran to its end (its queued async work included), at least one host.check ran and
 // every one held, and every shader program compiled, else 1. Its LAST LINE is
-// `<script stem>: PASSED` or `<script stem>: FAILED (<n>)`. --test-doors opens the engine's TEST arms (ArmInfo::test).
+// `<name>: PASSED` or `<name>: FAILED (<n>)` - <name> the row's (--name; the script's stem without it). --test-doors opens
+// the engine's TEST arms (ArmInfo::test). --list boots nothing: it prints every command the host serves - its signature
+// (the declared kinds, choices, ranges and units) and its doc, the seed of the generated documentation - and exits 0.
 // The process ends at its engine's death: the exit-only teardown (ProcessExit.h), then _Exit with the verdict.
 #include "jahshaka/engine/Engine.h"
 #include "jahshaka/engine/ProcessExit.h"
@@ -23,21 +26,36 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace jahshaka::engine;
 
 int main(int argc, char **argv)
 {
-    std::string scriptPath;
-    bool testDoors = false;
+    std::string scriptPath, rowName;
+    bool testDoors = false, list = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--script") && i + 1 < argc) scriptPath = argv[++i];
+        else if (!std::strcmp(argv[i], "--name") && i + 1 < argc) rowName = argv[++i];
         else if (!std::strcmp(argv[i], "--test-doors")) testDoors = true;
-        else scriptPath.clear(), i = argc;
+        else if (!std::strcmp(argv[i], "--list")) list = true;
+        else scriptPath.clear(), list = false, i = argc;
+    }
+    if (list) {
+        // THE COMMANDS, AS THE HOST SERVES THEM (no engine: each would say why - the list is the registration's)
+        script::Host host;
+        script::registerEngineCommands(host, nullptr, "--list boots no engine", testDoors);
+        const std::vector<std::string> faults = host.registry().validate();
+        for (const script::CommandInfo *c : host.registry().commands())
+            std::printf("%s\n    %s\n", script::signatureText(*c).c_str(), c->doc.c_str());
+        for (const std::string &f : faults) std::printf("FAULT: %s\n", f.c_str());
+        std::fflush(nullptr);
+        return faults.empty() ? 0 : 1;
     }
     std::ifstream in(scriptPath, std::ios::binary);
     if (scriptPath.empty() || !in) {
-        std::printf("usage: jahengine --script <file.js> [--test-doors]%s%s\n", scriptPath.empty() ? "" : " - cannot read ",
+        std::printf("usage: jahengine --script <file.js> [--test-doors] [--name <row>] | --list%s%s\n",
+                    scriptPath.empty() ? "" : " - cannot read ",
                     scriptPath.c_str());
         std::printf("jahengine: FAILED (1)\n");
         return 2;
@@ -46,6 +64,7 @@ int main(int argc, char **argv)
     source << in.rdbuf();
     std::string stem = scriptPath.substr(scriptPath.find_last_of('/') + 1);
     stem = stem.substr(0, stem.rfind('.'));
+    const std::string verdictName = rowName.empty() ? stem : rowName;
 
     EngineConfig cfg;
     cfg.pluginDir = JAHENGINE_OGRE_PLUGIN_DIR;
@@ -73,8 +92,8 @@ int main(int argc, char **argv)
         markProcessExit();
         engine.reset();
     }
-    if (failures) std::printf("%s: FAILED (%d)\n", stem.c_str(), failures);
-    else std::printf("%s: PASSED\n", stem.c_str());
+    if (failures) std::printf("%s: FAILED (%d)\n", verdictName.c_str(), failures);
+    else std::printf("%s: PASSED\n", verdictName.c_str());
     std::fflush(nullptr);
     std::_Exit(failures ? 1 : 0);
 }
