@@ -385,6 +385,10 @@ public:
     explicit JavaScript(Host &host) : mHost(host)
     {
         mRt = JS_NewRuntime();
+        // THE HEAP LIMIT (Host::Options::heapLimit, D1's class fix): every allocation the script drives - its values,
+        // and what quickjs allocates for a conversion (an own-key list) - is refused past it: "out of memory", a
+        // catchable error that FAILS the run or the call by name; the host lives on
+        JS_SetMemoryLimit(mRt, host.options().heapLimit());
         JS_SetHostPromiseRejectionTracker(mRt, &JavaScript::rejection, this);
         // THE REALM HAS NO WALL CLOCK (the re-read's C1; CODING_RULES § 5: a test counts FRAMES): JS_NewContext's own
         // intrinsics (quickjs.c, JS_NewContext) MINUS Date and performance; Math.random REPLACED below by a fixed-seed

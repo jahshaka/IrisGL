@@ -379,6 +379,24 @@ public:
         ///    arrays are bounded by their declarations; this bounds only what no declaration reaches.
         ///  - depth: 64, the registry's deepest declaration is 3 (an object of an array of objects).
         ValueBounds callBounds{std::size_t(1) << 20, 64, kPictureBytesCap + kPictureBytesCap / 8};
+        /// THE SCRIPT's HEAP LIMIT (2b's final read, D1: the class fix): the most the language's own heap may hold -
+        /// the script's values AND what the language allocates for a conversion (an own-key list) - past it an
+        /// allocation is refused, the run or the call FAILS by name ("out of memory") and the host lives on. 0 =
+        /// DERIVED, heapLimit(): 2 x callBounds.bytes + kHeapFloor - the script's own copy of the largest argument a
+        /// call carries (a picture's rgba at the cap: the host's converted copy is outside this heap) BESIDE the
+        /// largest answer it may hold (a picture's bytes read back, at most pictureBytesCap <= callBounds.bytes); the
+        /// floor the interpreter and a script's working set (measured 2026-11-22: a fresh host with its 31 commands
+        /// 0.11 MiB; the full 65,536-transform batch built as JS numbers 12.6 MiB more). jahengine's: 1168 MiB. A
+        /// host for an outside client (MCP) derives it from its own smaller callBounds, or states its own. NO HOST IS
+        /// UNLIMITED: 0 never means "no limit".
+        static constexpr std::size_t kHeapFloor = std::size_t(16) << 20;
+        std::size_t memoryLimit = 0;
+        std::size_t heapLimit() const
+        {
+            const std::size_t twice = callBounds.bytes > (SIZE_MAX - kHeapFloor) / 2 ? SIZE_MAX - kHeapFloor
+                                                                                     : 2 * callBounds.bytes;
+            return memoryLimit ? memoryLimit : twice + kHeapFloor;
+        }
         /// THE SCRIPT's RANDOM STREAM (no wall clock, no entropy: CODING_RULES § 5): Math.random is xorshift64* from
         /// this seed, reset at every run - the same sequence every run; a caller that wants another stream states it.
         std::uint64_t randomSeed = 0x9E3779B97F4A7C15ull;
