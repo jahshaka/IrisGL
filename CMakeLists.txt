@@ -271,6 +271,9 @@ endforeach()
 set(BUILD_SHARED_LIBS "${_jah_outer_shared_libs}")
 set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
+# THE Qt-FREE CORE (NOQT-CORE-1): irisgl/core's sources that no longer need Qt build into IrisCore (core/CMakeLists.txt)
+add_subdirectory(core)
+
 set(SRCS
     document/assets/mesh.cpp
     document/scenegraph/meshnode.cpp
@@ -326,7 +329,6 @@ set(SRCS
     document/scenegraph/nodegraph.cpp
     document/scenegraph/scenepicking.cpp
     document/scenegraph/socket.cpp
-    core/geometry/plane.cpp
     core/geometry/frustum.cpp
     core/geometry/aabb.cpp
     core/logger.cpp
@@ -413,7 +415,6 @@ set (HEADERS
     document/scenegraph/socket.h
     core/properties/property.h
     core/geometry/boundingsphere.h
-    core/geometry/plane.h
     core/geometry/frustum.h
     core/geometry/aabb.h
     core/logger.h
@@ -626,6 +627,7 @@ target_include_directories(IrisGL PRIVATE
 target_include_directories(IrisGL PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
 
 target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL PUBLIC IrisCore)   # the Qt-free core (NOQT-CORE-1)
 target_compile_definitions(IrisGL PUBLIC BT_THREADSAFE=1)   # Bullet's multi-threaded build (above)
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
