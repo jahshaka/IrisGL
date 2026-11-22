@@ -40,17 +40,21 @@ void Host::addLanguage(std::string extension, LanguageMaker make)
 
 void Host::setConsole(ConsoleSink sink) { mConsole = std::move(sink); }
 
+/// THE HOST STARTS ONLY WHOLE (the final read's W4): a command its registry refused is a named start failure - of a
+/// run and of every call alike (MCP-ON-HOST-1: a call that went round the run's check served a host the run refuses).
+static Result notWhole(const Registry &registry)
+{
+    const std::vector<std::string> faults = registry.validate();
+    Result r;
+    r.status = Status::Failed;
+    r.message = "the host did not start: its registry refused what was offered (" + std::to_string(faults.size()) + " fault(s)):";
+    for (const std::string &f : faults) r.message += "\n  " + f;
+    return r;
+}
 
 Result Host::run(const std::string &source, const std::string &name)
 {
-    // THE HOST STARTS ONLY WHOLE (the final read's W4): a command its registry refused is a named start failure
-    if (const std::vector<std::string> faults = mRegistry.validate(); !faults.empty()) {
-        Result r;
-        r.status = Status::Failed;
-        r.message = "the host did not start: its registry refused what was offered (" + std::to_string(faults.size()) + " fault(s)):";
-        for (const std::string &f : faults) r.message += "\n  " + f;
-        return r;
-    }
+    if (mRegistry.faulted()) return notWhole(mRegistry);
     // THE LANGUAGE OF THE NAME's EXTENSION (the table, LanguageTable.inc, and any addLanguage)
     const size_t dot = name.rfind('.');
     const std::string ext = dot == std::string::npos || name.find('/', dot) != std::string::npos ? "" : name.substr(dot);
@@ -92,11 +96,20 @@ int Host::verdict(const Result &run)
     return faults;
 }
 
-Result Host::call(const std::string &name, const Value::Array &args) { return mRegistry.call(name, args); }
+Result Host::call(const std::string &name, const Value::Array &args)
+{
+    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.call(name, args);
+}
 
-Result Host::callNamed(const std::string &name, Value::Object args) { return mRegistry.callNamed(name, std::move(args)); }
+Result Host::callNamed(const std::string &name, Value::Object args)
+{
+    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.callNamed(name, std::move(args));
+}
 
-Result Host::callAt(std::size_t index, Value::Array args) { return mRegistry.callAt(index, std::move(args)); }
+Result Host::callAt(std::size_t index, Value::Array args)
+{
+    return mRegistry.faulted() ? notWhole(mRegistry) : mRegistry.callAt(index, std::move(args));
+}
 
 void Host::print(const std::string &line)
 {
