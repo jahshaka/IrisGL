@@ -16,6 +16,7 @@
 // (the declared kinds, choices, ranges and units) and its doc, the seed of the generated documentation - and exits 0.
 // The process ends at its engine's death: the exit-only teardown (ProcessExit.h), then _Exit with the verdict.
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/EngineInspect.h"
 #include "jahshaka/engine/ProcessExit.h"
 #include "jahshaka/engine/Script.h"
 
@@ -70,12 +71,7 @@ int main(int argc, char **argv)
     cfg.pluginDir = JAHENGINE_OGRE_PLUGIN_DIR;
     cfg.hlmsMediaDir = JAHENGINE_MEDIA_DIR;
     cfg.logFile = stem + "-ogre.log";
-    if (const char *cache = std::getenv("JAHSHAKA_SHADER_CACHE_DIR")) {
-        // THE FIXTURES' SHARED CACHE (tests/CMakeLists.txt's engine rows): the union of every family's shaders outgrows the
-        // app's 256 MiB cap, and a save past the cap wipes the directory - the fixtures' 1 GiB (enginetesthelpers.h).
-        cfg.shaderCacheDir = cache;
-        cfg.shaderCacheMaxBytes = 1024ull * 1024ull * 1024ull;
-    }
+    inspect::applyHarnessShaderCache(cfg);   // the fixtures' shared warm cache and its cap: ONE function (EngineInspect.h)
     std::string bootError;
     std::unique_ptr<Engine> engine = Engine::create(cfg, bootError);
 

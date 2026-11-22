@@ -10,6 +10,8 @@
 // NOTHING UNDER src/ OR irisgl/mirror MAY INCLUDE THIS HEADER (source.testing_rules R11): the host keeps its own.
 #include "Engine.h"
 
+#include <cstdlib>
+
 namespace jahshaka { namespace engine { namespace inspect {
 
 /// THE TEST SURFACE's SHARED NUMBERS — ONE HOME, read by the C++ fixtures' helper (tests/support/enginetesthelpers.h)
@@ -19,6 +21,21 @@ namespace jahshaka { namespace engine { namespace inspect {
 /// route declaration): a bound on a startup, not a law - the store's first voxelisation and the field's first pass land
 /// in the first frames, read back at the renderer's lag (4 on this stack).
 constexpr int kRouteProductFrames = 16;
+/// THE HARNESS's SHARED WARM SHADER CACHE (ENGINE-UPGRADE-1 stage 1, BOOT; one home since SCRIPT-IN-ENGINE-1 S8): a row
+/// registered CLASS engine runs through fresh_home.sh --warm, which links the tree's one shared cache into the row's home
+/// and exports it as JAHSHAKA_SHADER_CACHE_DIR. Every engine-booting test process - a C++ fixture
+/// (enginetest::applyHarnessDefaults) and jahengine - takes it through this ONE function, held to this ONE cap: the
+/// union of every engine family's shaders outgrows the app's 256 MiB (220 MB / 1,686 shaders on one tree's night), and a
+/// save past the cap WIPES the directory - a script row with a smaller cap than the fixtures' would wipe their warm cache.
+/// Unset (a process run by hand, a cold row): no cache, the engine's default.
+constexpr unsigned long long kHarnessShaderCacheMaxBytes = 1024ull * 1024ull * 1024ull;
+inline void applyHarnessShaderCache(EngineConfig &cfg)
+{
+    if (const char *dir = std::getenv("JAHSHAKA_SHADER_CACHE_DIR")) {
+        cfg.shaderCacheDir = dir;
+        cfg.shaderCacheMaxBytes = kHarnessShaderCacheMaxBytes;
+    }
+}
 
 /// The scene's record of the host's pushes (each the value its setter last accepted).
 class SceneEcho {
