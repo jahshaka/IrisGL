@@ -359,27 +359,32 @@ void ShaderCache::configure(const std::string &dir, const std::string &seedDir, 
     // layer any more: a fork commit or a media edit that changes no producer drops nothing - an entry is named by the
     // content it was made from (SPIR-V by its source, a recipe by its properties and pieces under Ogre's template
     // checksum, a compute record by its input key).
-    mKeyInputs = LayerKeyInputs();
-    mKeyInputs.format = kCacheFormat;
-    mKeyInputs.code = JAHSHAKA_SHADER_CACHE_CODE_ID;
-    mKeyInputs.microcodePath = JAHSHAKA_COMPILE_PATH_MICROCODE_ID;
-    mKeyInputs.preprocessorPath = JAHSHAKA_COMPILE_PATH_PREPROCESSOR_ID;
-    mKeyInputs.computePath = JAHSHAKA_COMPILE_PATH_COMPUTE_ID;
-    mKeyInputs.glslang = JAH_GLSLANG_VERSION_TERM;
+    mKeyInputs = buildLayerKeyInputs();
+    applyLayerKeys();
+    // The GPU terms are added by load(): the render system has no device until then, and configure() runs earlier.
+}
+
+LayerKeyInputs buildLayerKeyInputs() {
+    LayerKeyInputs in;
+    in.format = kCacheFormat;
+    in.code = JAHSHAKA_SHADER_CACHE_CODE_ID;
+    in.microcodePath = JAHSHAKA_COMPILE_PATH_MICROCODE_ID;
+    in.preprocessorPath = JAHSHAKA_COMPILE_PATH_PREPROCESSOR_ID;
+    in.computePath = JAHSHAKA_COMPILE_PATH_COMPUTE_ID;
+    in.glslang = JAH_GLSLANG_VERSION_TERM;
 #if OGRE_DEBUG_MODE
-    mKeyInputs.debugBuild = true;
+    in.debugBuild = true;
 #endif
 #ifdef OGRE_DEBUG_STR_SIZE
-    mKeyInputs.dbgstr = std::to_string(OGRE_DEBUG_STR_SIZE);
+    in.dbgstr = std::to_string(OGRE_DEBUG_STR_SIZE);
 #else
     // Undefined in a Release-built Ogre: IdString then carries no readable string and HlmsDiskCache writes 0 for it. The
     // Debug/Release asymmetry OgreHlmsDiskCache.h:65-70 warns about lives exactly here - a Release cache cannot load into
     // Debug - so the term must appear either way.
-    mKeyInputs.dbgstr = "0";
+    in.dbgstr = "0";
 #endif
-    mKeyInputs.hashBits = OGRE_HASH_BITS;
-    applyLayerKeys();
-    // The GPU terms are added by load(): the render system has no device until then, and configure() runs earlier.
+    in.hashBits = OGRE_HASH_BITS;
+    return in;
 }
 
 void ShaderCache::applyLayerKeys() {
@@ -482,9 +487,17 @@ LayerKeys composeLayerKeys(const LayerKeyInputs &in) {
     return k;
 }
 
+std::string fingerprintText(const LayerKeys &k) {
+    return "pipeline{" + k.pipeline + "}microcode{" + k.microcode + "}hlms{" + k.hlms + "}compute{" + k.compute + "}";
+}
+
 void ShaderCache::composeFingerprint() {
-    mFingerprint = "pipeline{" + mLayerKey[0] + "}microcode{" + mLayerKey[1] + "}hlms{" +
-                   mLayerKey[2] + "}compute{" + mLayerKey[3] + "}";
+    LayerKeys k;
+    k.pipeline = mLayerKey[0];
+    k.microcode = mLayerKey[1];
+    k.hlms = mLayerKey[2];
+    k.compute = mLayerKey[3];
+    mFingerprint = fingerprintText(k);
 }
 
 std::string ShaderCache::layerKeyFor(const std::string &name) const {
@@ -1760,6 +1773,12 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.computeRecordsLoaded = mComputeRecordsLoaded;
     s.computeRecordsRejected = mComputeRecordsRejected;
     s.computeRecordsStale = mComputeRecordsStale;
+    if (mEnabled) {   // what the load left EMPTY, whatever the reason (its key moved, absent, damaged, refused, all stale)
+        if (!mPipelineLoaded) s.layersNotLoaded.push_back("pipeline");
+        if (!mMicrocodeLoaded) s.layersNotLoaded.push_back("microcode");
+        if (mHlmsLoaded == 0) s.layersNotLoaded.push_back("hlms");
+        if (mComputeRecordsLoaded == 0) s.layersNotLoaded.push_back("compute");
+    }
     s.compiledThisRun = mCounter ? mCounter->compiled.load() : 0u;
     s.loadedThisRun   = mCounter ? mCounter->fromCache.load() : 0u;
     s.expectedShaders = mExpectedShaders;
@@ -1807,4 +1826,20 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
 }
 
 }  // namespace detail
+
+// THE ENGINE's SHADER IDENTITY, NO DEVICE (SHADER-SYSTEM-1 stage 6a; Engine.h): the cache's own build terms
+// (detail::buildLayerKeyInputs, what configure() starts from), composed and hashed exactly as the cache does.
+ShaderIdentity shaderIdentity() {
+    const detail::LayerKeys k = detail::composeLayerKeys(detail::buildLayerKeyInputs());
+    ShaderIdentity id;
+    id.pipelineKey = detail::hexOf(k.pipeline);
+    id.microcodeKey = detail::hexOf(k.microcode);
+    id.hlmsKey = detail::hexOf(k.hlms);
+    id.computeKey = detail::hexOf(k.compute);
+    id.fingerprint = detail::hexOf(detail::fingerprintText(k));
+    id.engineBuildId = JAHSHAKA_ENGINE_BUILD_ID;
+    id.raySpirvId = JAHSHAKA_RAY_SPIRV_ID;
+    return id;
+}
+
 }}  // namespace jahshaka::engine

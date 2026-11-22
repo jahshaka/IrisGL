@@ -69,6 +69,11 @@ class Engine;
 class Scene;
 class View;
 
+/// THE ENGINE's SHADER IDENTITY WITH NO DEVICE (SHADER-SYSTEM-1 stage 6a): no engine, no window, no GPU - a stateless
+/// boundary function over this build's own terms (ShaderIdentity says what). The startup pass keys on it and
+/// `Jahshaka --print-shader-identity` prints it: the harness reads the engine, never a re-derivation.
+ShaderIdentity shaderIdentity();
+
 /// A renderable scene. Views draw it; several Views may share one, or each may own one.
 /// Owned by the Engine: destroy with Engine::destroyScene().
 class Scene {

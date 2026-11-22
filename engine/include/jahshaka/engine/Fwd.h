@@ -202,5 +202,6 @@ struct ViewFrames;
 
 enum class TargetFormat;
 struct WindowTargetShape;
+struct ShaderIdentity;
 
 }}  // namespace jahshaka::engine

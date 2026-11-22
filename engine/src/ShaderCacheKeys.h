@@ -32,4 +32,11 @@ struct LayerKeys {
 
 LayerKeys composeLayerKeys(const LayerKeyInputs &in);
 
+/// THE BUILD's TERMS, NO DEVICE (SHADER-SYSTEM-1 stage 6a): every input but the GPU's, exactly as this build sets them -
+/// ShaderCache::configure() starts from it and shaderIdentity() (Engine.h) prints it: one definition, so the printed
+/// identity IS the cache's own before its first view's load adds the GPU.
+LayerKeyInputs buildLayerKeyInputs();
+/// The four keys composed as the cache's fingerprint TEXT (ShaderCacheStats::fingerprint is its hex).
+std::string fingerprintText(const LayerKeys &k);
+
 }  // namespace jahshaka::engine::detail

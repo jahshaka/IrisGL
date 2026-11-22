@@ -99,6 +99,17 @@ struct AsyncShaderStats {
     unsigned long long computeDeferred = 0;
 };
 
+/// THE ENGINE's SHADER IDENTITY, NO DEVICE (SHADER-SYSTEM-1 stage 6a; WARM-SHARE-1's one source, shaderIdentity() in
+/// Engine.h): what the shader cache keys on that THE BUILD decides - each layer's key over its build terms only (the GPU's
+/// join at the first view's load and are the cache's own: a layer they move is dropped there and named in
+/// ShaderCacheStats::layersNotLoaded) - and the engine's two content ids. Equal on every box that runs one build.
+struct ShaderIdentity {
+    std::string pipelineKey, microcodeKey, hlmsKey, computeKey;   ///< hex: each layer's key over its build terms
+    std::string fingerprint;     ///< hex: the four composed (ShaderCacheStats::fingerprint before the GPU's terms join)
+    std::string engineBuildId;   ///< JAHSHAKA_ENGINE_BUILD_ID: the engine's C++ and public headers
+    std::string raySpirvId;      ///< JAHSHAKA_RAY_SPIRV_ID: the ray tier's SPIR-V ("none": the tier compiled out)
+};
+
 /// What the persistent shader cache did this run, and what is on disk
 /// (SHADER_CACHE_SPEC.md §4.5). `app.shaderCache()` is this struct.
 struct ShaderCacheStats {
@@ -154,6 +165,13 @@ struct ShaderCacheStats {
     unsigned computeRecordsLoaded = 0;
     unsigned computeRecordsRejected = 0;
     unsigned computeRecordsStale = 0;
+    /// THE LAYERS THIS LAUNCH's LOAD LEFT EMPTY (SHADER-SYSTEM-1 stage 6a), of "pipeline", "microcode", "hlms" and
+    /// "compute", whatever the reason: the layer's key moved (another driver or card: the pipeline and hlms keys hold the
+    /// GPU's terms), its file absent or damaged, the driver refusing the pipeline blob (outdated, rejected, or silent on a
+    /// device whose pipeline cache is a no-op), every compute record stale. Empty with the cache off. The startup pass runs
+    /// while it is not empty: the pass's key is the device-free identity (shaderIdentity()), so a driver change is seen
+    /// HERE - its recipes regenerate from a whole microcode layer and compile nothing a count would show.
+    std::vector<std::string> layersNotLoaded;
 
     // ---- shader accounting for THIS process ----
     /// Shaders the compiler actually built this run (GLSL -> SPIR-V).
