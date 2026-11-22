@@ -109,8 +109,9 @@ struct Param {
     unsigned count = 0;
     /// A TARGET: what the command acts on (a positional parameter; the shape rule above).
     bool target = false;
-    /// A HANDLE (Kind::Int): the kind of object it must name ("scene", "node", "mesh"); empty = a plain number. The
-    /// registry checks the handle's owner and kind at the call (Registry, THE HANDLES).
+    /// A HANDLE (Kind::Int; or Kind::Array of them, handles()): the kind of object it must name ("scene", "node",
+    /// "mesh"); empty = a plain number. The registry checks the handle's owner and kind at the call - each element's
+    /// of an array (Registry, THE HANDLES).
     std::string handle;
     /// THE DECLARED DOMAIN (the lead's S2): checked by the host at the call and printed by signatureText - so the strict
     /// host enforces it and the generated documentation shows it, and a command's body never re-checks it.
@@ -140,6 +141,9 @@ Param object(std::string name, std::vector<Param> fields, Value fallback);
 Param objects(std::string name, std::vector<Param> fields);
 /// A required handle of `kind` (target(handle(...)) when it is what the command acts on).
 Param handle(std::string name, std::string kind);
+/// A required array of handles of `kind` ("nodes: node handle[]"): EVERY element is checked as a handle() is - its
+/// owner and kind, and a named kind's existence asked of the engine - and a bad one FAILS naming it ("nodes[3]").
+Param handles(std::string name, std::string kind);
 
 /// WHAT CALLING A COMMAND MAY DO (SCRIPT-IN-ENGINE-1 2a; MCP-ON-HOST-1's read-only surface): `Reads` changes nothing
 /// the engine holds (a read, a reduction, an assertion); `Changes` changes the engine's state (an object made or
@@ -218,8 +222,8 @@ struct Result {
 /// registry's process-wide serial, 12 bits) << 40 | its KIND (interned by the registry, 8 bits) << 32 | its VALUE (32
 /// bits). A HELD kind (scene, view, picture: objects the host holds) has a slot of the registry's table as its value -
 /// released, the handle is STALE; a NAMED kind (node, mesh, material: the engine's own ids) has the engine's id as its
-/// value and no table (existence is its family's own record). A parameter declared handle(name, kind) is checked at
-/// the call, before the command runs: a number that is no handle of this registry (another host's or engine's), a
+/// value and no table (existence is its family's own record). A parameter declared handle(name, kind) - or each
+/// element of one declared handles(name, kind) - is checked at the call, before the command runs: a number that is no handle of this registry (another host's or engine's), a
 /// handle of another kind and a stale one each FAIL by name. No allocation and no table lookup for a named kind.
 class Registry {
 public:
@@ -257,7 +261,8 @@ public:
     /// True when `h` is a live handle of this registry of kind `kind`; else false with `why` (naming `where`).
     bool checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const;
     /// THE EXISTENCE CHECK of a NAMED kind (its family's: the engine asked whether the id is its scene's now), run at
-    /// every call on every argument declared a handle of `kind`, after the arguments are checked and before the
+    /// every call on every argument declared a handle of `kind` (on every element of an array of them), after the
+    /// arguments are checked and before the
     /// command: false with `why` FAILS the call by name. No check = the kind's ids are taken as they come.
     using HandleCheck = std::function<bool(const Call &call, std::uint32_t id, std::string &why)>;
     void checkKind(const std::string &kind, HandleCheck check);

@@ -184,6 +184,14 @@ Param handle(std::string name, std::string kind)
     return p;
 }
 
+Param handles(std::string name, std::string kind)
+{
+    Param p = arg(std::move(name), Kind::Array);
+    p.element = Kind::Int;
+    p.handle = std::move(kind);
+    return p;
+}
+
 namespace {
 // THE HANDLE'S BITS (Script.h, THE HANDLES): owner 12 | kind 8 | value 32 - 52 bits, exact in a script's number
 constexpr int kOwnerShift = 40, kKindShift = 32;
@@ -283,13 +291,24 @@ void Registry::checkKind(const std::string &kind, HandleCheck check)
 
 bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const
 {
+    // one handle (its kind checked at conform) asked of its kind's existence check, if the kind has one
+    const auto exists = [&](const Value &h) {
+        const unsigned k = unsigned(std::uint64_t(h.asInt()) >> kKindShift & kKindMask);
+        return !(k && k <= mChecks.size() && mChecks[k - 1] &&
+                 !mChecks[k - 1](call, std::uint32_t(std::uint64_t(h.asInt()) & kValueMask), why));
+    };
     if (!p.handle.empty() && v.kind() == Kind::Int) {
-        const unsigned k = unsigned(std::uint64_t(v.asInt()) >> kKindShift & kKindMask);
-        if (k && k <= mChecks.size() && mChecks[k - 1] &&
-            !mChecks[k - 1](call, std::uint32_t(std::uint64_t(v.asInt()) & kValueMask), why)) {
-            why = p.name + ": " + why;
-            return false;
-        }
+        if (exists(v)) return true;
+        why = p.name + ": " + why;
+        return false;
+    }
+    if (!p.handle.empty() && v.kind() == Kind::Array) {   // handles(): EVERY element asked, a dead one named by its index
+        const Value::Array &a = v.asArray();
+        for (size_t i = 0; i < a.size(); ++i)
+            if (!exists(a[i])) {
+                why = p.name + "[" + std::to_string(i) + "]: " + why;
+                return false;
+            }
         return true;
     }
     if (p.kind == Kind::Object && v.kind() == Kind::Object) {
@@ -386,7 +405,7 @@ std::string paramText(const Param &p)
 {
     std::string t = p.name + (p.target ? ": target " : ": ");
     if (p.kind == Kind::Array) {
-        t += p.element == Kind::Object ? "object" : kindName(p.element);
+        t += !p.handle.empty() ? p.handle + " handle" : p.element == Kind::Object ? "object" : kindName(p.element);
         t += p.count ? "[" + std::to_string(p.count) + "]" : "[]";
     } else if (!p.handle.empty()) {
         t += p.handle + " handle";
