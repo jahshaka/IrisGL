@@ -5183,6 +5183,9 @@ public:
     /// A card reader of this scene waits on a ray build in flight (RayQueryTier::cardReaderBuildPending; COLD-BOOT-1 item
     /// 3): its cards will still arrive - giAtRest is false. No ray tier: false.
     bool cardReaderBuildPending() const;
+    /// A ray job of the tier refused its dispatch, or a ray its inputs (RayQueryTier::rayInputRefused; GATHER-HANG-1
+    /// stage 2, PublishedFrame::Completeness term bit 5) since this scene's last note. No ray tier: false.
+    bool rayInputRefused();
     /// THE REFLECTION's REST PAST ITS HAND-OVER (RayQueryTier::reflectRestPastHandOver; GiStatus::giAtRest's term,
     /// PHOTON-7 stage 10-3 carrier 2). True without a ray tier.
     bool reflectRestPastHandOver() const;

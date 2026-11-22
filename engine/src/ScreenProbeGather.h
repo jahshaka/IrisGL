@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -143,6 +144,10 @@ public:
     /// The layer kinds are the 2D_ARRAY views of every layer the gather's screen shaders declare. Null for a null
     /// texture or one with no image.
     virtual VkImageView gatherView(Ogre::TextureGpu *t, detail::RayViewKind kind) = 0;
+    /// THE GUARD (RayInputGuard.h, GATHER-HANG-1 stage 2): true when every view is made; else the job refuses its
+    /// dispatch this frame - the tier counts it, logs the first refusal of `job`, and the frame is INCOMPLETE
+    /// (PublishedFrame::Completeness term bit 5).
+    virtual bool gatherInputsMade(const char *job, std::initializer_list<VkImageView> views) = 0;
 
     /// THE RETIRE WINDOW for what the gather made itself (its buffers, images, sets and Ogre textures) - never for a
     /// gatherView view, which the tier's cache retires.

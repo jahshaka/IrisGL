@@ -2580,6 +2580,8 @@ void OgreScene::noteFrameCompleteness() {
     terms |= counts[1] != mIncompleteDrawsSeen[1] ? 2u : 0u;
     terms |= cardReaderBuildPending() ? 4u : 0u;
     terms |= mPhoton.materialsAwaitingTexture() > 0u ? 8u : 0u;
+    // (a ray job refused its dispatch, or JAH_RQ_INIT a ray, for an undefined input: GATHER-HANG-1 stage 2)
+    terms |= rayInputRefused() ? 32u : 0u;
     // (the TEST term: the door frames.incompleteHold - a frame turning incomplete with no demand change)
     terms |= mEngine && mEngine->armRegistry().on(ArmId::FrameIncompleteHold) ? 16u : 0u;
     mIncompleteDrawsSeen[0] = counts[0];

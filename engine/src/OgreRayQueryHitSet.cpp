@@ -63,7 +63,10 @@ bool HitSetWrite::writeVolumes(GatherHost &host, VkDescriptorSet set, const uint
             mVolumes[k][c].sampler = linear;
             mVolumes[k][c].imageView = view;
             mVolumes[k][c].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!mVolumes[k][c].imageView) { err = "a voxel view is null"; return false; }
+            if (!host.gatherInputsMade("the hit set (a voxel volume)", { mVolumes[k][c].imageView })) {
+                err = "a voxel view is null";
+                return false;
+            }
         }
         VkWriteDescriptorSet &e = w[binding[k]];
         e = VkWriteDescriptorSet{};
@@ -122,7 +125,7 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     mSky.sampler = linear;
     mSky.imageView = src.sky ? sampledView(src.sky) : dummyCube;
     mSky.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!mSky.imageView) { err = "the sky view is null"; return false; }
+    if (!host.gatherInputsMade("the hit set (the sky)", { mSky.imageView })) { err = "the sky view is null"; return false; }
     entry(s.sky, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mSky;
 
     // THE CARD READ'S FOUR AND ITS VIEW TERM: the cache's own or the stand-ins (zero slots: never indexed).
@@ -137,7 +140,10 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
         mCardImgs[i].sampler = point;
         mCardImgs[i].imageView = cards ? sampledView(layers[i]) : dummyFlat;
         mCardImgs[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        if (!mCardImgs[i].imageView || !mCardBufs[i].buffer) { err = "a card-read binding is null"; return false; }
+        if (!host.gatherInputsMade("the hit set (a card layer)", { mCardImgs[i].imageView }) || !mCardBufs[i].buffer) {
+            err = "a card-read binding is null";
+            return false;
+        }
         entry(s.card[i], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1u).pBufferInfo = &mCardBufs[i];
         entry(s.card[2 + i], VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCardImgs[i];
     }
@@ -147,7 +153,10 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
         mCardView[i].imageView = cards ? sampledView(src.cardView[i])
                                        : i == SurfaceCache::kViewSunVis ? host.gatherDummyUint() : dummyFlat;
         mCardView[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        if (!mCardView[i].imageView) { err = "a card view-term binding is null"; return false; }
+        if (!host.gatherInputsMade("the hit set (a card view term)", { mCardView[i].imageView })) {
+            err = "a card view-term binding is null";
+            return false;
+        }
         entry(s.cardView + i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCardView[i];
     }
 
@@ -175,7 +184,10 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     mHitBufs[1].range = hit.buf ? hit.bufRange : VK_WHOLE_SIZE;
     const VkImageView hitViews[2] = { hit.ids, hit.dest };
     for (int i = 0; i < 2; ++i) {
-        if (!hitViews[i]) { err = "a hit-list view is null"; return false; }
+        if (!host.gatherInputsMade("the hit set (the hit list)", { hitViews[i] })) {
+            err = "a hit-list view is null";
+            return false;
+        }
         mHitImgs[i] = VkDescriptorImageInfo{};
         mHitImgs[i].imageView = hitViews[i];
         mHitImgs[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -191,7 +203,10 @@ bool HitSetWrite::write(GatherHost &host, VkDescriptorSet set, const HitSetSlots
     mCloud.sampler = wrap;
     mCloud.imageView = src.cloudField ? sampledView(src.cloudField) : dummyFlat;
     mCloud.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!mPool.imageView || !mCloud.imageView || !mPool.sampler) { err = "a hit-surface binding is null"; return false; }
+    if (!host.gatherInputsMade("the hit set (the hit surface)", { mPool.imageView, mCloud.imageView }) || !mPool.sampler) {
+        err = "a hit-surface binding is null";
+        return false;
+    }
     entry(s.pool, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mPool;
     entry(s.cloud, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1u).pImageInfo = &mCloud;
     return true;

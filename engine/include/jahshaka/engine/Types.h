@@ -9602,7 +9602,9 @@ struct PublishedFrame {
         bool incomplete = false;
         /// Its terms on that frame: bit 0 a placeholder drawn, 1 a pending draw skipped, 2 a card reader refused by its
         /// ray build, 3 a material awaiting its texture; 4 a TEST term (the door frames.incompleteHold, never set in the
-        /// app: a frame incomplete with no demand change, gi.card_build_late.window).
+        /// app: a frame incomplete with no demand change, gi.card_build_late.window); 5 a RAY INPUT REFUSED (GATHER-HANG-1
+        /// stage 2: a ray job refused its dispatch for a view not made, or JAH_RQ_INIT a ray for an undefined input -
+        /// RayQueryTier::rayInputRefused); bit 6 is RESERVED (SHADER-SYSTEM-1-7: a compute dispatch deferred).
         unsigned terms = 0u;
         /// The drawn frames it has been incomplete IN A ROW (0 = complete): a scene stuck incomplete shows here (and on
         /// the startup gate's card line) instead of as a silent never-rest.

@@ -67,6 +67,7 @@
 #include "EnginePrivate.h"
 #include "HitListLaw.h"   // the reflection rest's record allowance (URGENT #157)
 #include "RayQueryViewCache.h"   // the views of Ogre textures, cached per texture (GATHER-HANG-1)
+#include "RayInputGuard.h"       // a job with a null input view refuses its dispatch, said once (GATHER-HANG-1)
 #include "GpuCheckpoints.h"
 #include "SceneLightList.h"
 #include "photon/voxel/PhotonVoxelMaterial.h"
@@ -1027,6 +1028,11 @@ public:
     unsigned long long joinedWaiting() const { return mJoinedWaiting; }
     /// A card reader of `scene` was refused by a build still in flight (Ahead::refusedBy): its cards will still arrive.
     bool cardReaderBuildPending(const OgreScene *scene) const;
+    /// A RAY INPUT WAS REFUSED since `scene` last asked (GATHER-HANG-1 stage 2, the lead's call 4): a job refused its
+    /// dispatch (the guard) or JAH_RQ_INIT refused a ray (counter [2], read without a fence: a few frames late). ONE
+    /// guard and ONE counter per tier, shared by every scene, view and eye: a refusal anywhere marks every scene that
+    /// notes its frame - never a rest decision on a frame the tier did not trace whole.
+    bool rayInputRefused(const OgreScene *scene);
     /// THE JOIN-FREE EXIT (the lead's ruling, COLD-BOOT-1 stage 4): only in the exit-only teardown (processExitMarked).
     /// Every build still in flight is DETACHED and the tier is never destroyed (OgreEngine keeps it, as it keeps Root): one
     /// uninterruptible driver call (a cold rq_reflect: ~50 s) no longer holds the process's end. True when any was.
@@ -1245,6 +1251,13 @@ private:
                                   [this](uint64_t v) { retireView(reinterpret_cast<VkImageView>(v)); },
                                   [this](const void *t, bool on) { watchView(t, on); } };
     ViewListener mViewListener{ mViewCache };
+    /// THE GUARD ON A JOB's INPUTS (RayInputGuard.h, GATHER-HANG-1 stage 2): true when every view is made; else the job
+    /// refuses its dispatch this frame - counted, and logged the first time that job refuses
+    bool inputsMade(const char *job, std::initializer_list<VkImageView> views);
+    RayInputGuard mInputGuard;
+    /// THE FRAME's RAY INPUT TERM (PublishedFrame::Completeness bit 5, the lead's call 4): per scene (its historyId),
+    /// the guard's refusals and the shader's refused rays (the tier counter [2]) when it last noted its frame
+    std::unordered_map<NodeId, std::pair<uint64_t, uint32_t>> mInputSeen;
     void drainRetired();
     void evictStaleBlas(SceneAs &sa);
 
@@ -1653,6 +1666,9 @@ public:
         retireImage(img);
     }
     VkImageView gatherView(Ogre::TextureGpu *t, RayViewKind kind) override { return textureView(t, kind); }
+    bool gatherInputsMade(const char *job, std::initializer_list<VkImageView> views) override {
+        return inputsMade(job, views);
+    }
     void gatherRetireSet(VkDescriptorSet set, VkDescriptorPool pool) override {
         retireSet(set, pool);
     }
@@ -2674,10 +2690,40 @@ VkImageView RayQueryTier::textureView(Ogre::TextureGpu *t, RayViewKind kind) {
     case RayViewKind::LayerStorage: key.mipCount = 1u; break;
     }
     if (layer) key.layerCount = std::max<uint32_t>(t->getNumSlices(), 1u);
-    // EACH KIND READS THE IMAGE IT IS BUILT ON: Ogre's `_createView` builds on the DISPLAY image (the manager's blank
-    // one while the texture is not ready), the layer views on the FINAL image (0 while the texture has no storage).
-    const VkImage image = layer ? vt->getFinalTextureName() : vt->getDisplayTextureName();
+    // EACH KIND READS THE IMAGE IT IS BUILT ON: Ogre's `_createView` builds on the DISPLAY image, the layer views on the
+    // FINAL image (0 while the texture has no storage). A TEXTURE THAT IS NOT RESIDENT (OnStorage, OnSystemRam: its images
+    // destroyed) IS NO INPUT (GATHER-HANG-1 stage 2; the stage-1 audit's W2): image 0, so no view - before, its display
+    // image was the manager's blank one and a job traced it as the input. The job that binds it refuses its dispatch
+    // (inputsMade, RayInputGuard.h).
+    const VkImage image = t->getResidencyStatus() != Ogre::GpuResidency::Resident ? VkImage(VK_NULL_HANDLE)
+                          : layer ? vt->getFinalTextureName() : vt->getDisplayTextureName();
     return reinterpret_cast<VkImageView>(mViewCache.view(key, reinterpret_cast<uint64_t>(image)));
+}
+
+bool RayQueryTier::inputsMade(const char *job, std::initializer_list<VkImageView> views) {
+    bool made = true;
+    for (const VkImageView v : views) made = made && v != VK_NULL_HANDLE;
+    if (made) return true;
+    std::vector<uint64_t> handles;
+    handles.reserve(views.size());
+    for (const VkImageView v : views) handles.push_back(reinterpret_cast<uint64_t>(v));
+    std::string say;
+    mInputGuard.admit(job, handles.data(), handles.size(), &say);
+    if (!say.empty()) Ogre::LogManager::getSingleton().logMessage(say);
+    return false;
+}
+
+bool RayQueryTier::rayInputRefused(const OgreScene *scene) {
+    const uint64_t jobs = mInputGuard.refused();
+    const uint32_t rays = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[2] : 0u;
+    auto it = mInputSeen.find(scene->historyId());
+    if (it == mInputSeen.end()) {   // a scene's first note: what the tier refused before it is not its frame's
+        mInputSeen.emplace(scene->historyId(), std::make_pair(jobs, rays));
+        return false;
+    }
+    const bool moved = it->second.first != jobs || it->second.second != rays;
+    it->second = std::make_pair(jobs, rays);
+    return moved;
 }
 
 uint64_t RayQueryTier::makeView(const RayViewKey &key, uint64_t image) {
@@ -14106,6 +14152,10 @@ bool OgreScene::cardReaderBuildPending() const {
     return mEngine && mEngine->mRayTier && mEngine->mRayTier->cardReaderBuildPending(this);
 }
 
+bool OgreScene::rayInputRefused() {
+    return mEngine && mEngine->mRayTier && mEngine->mRayTier->rayInputRefused(this);
+}
+
 bool OgreScene::reflectRestPastHandOver() const {
     return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->reflectRestPastHandOver(this);
 }
@@ -14393,6 +14443,7 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
 }
 bool OgreScene::reflectRestPastHandOver() const { return true; }
 bool OgreScene::cardReaderBuildPending() const { return false; }
+bool OgreScene::rayInputRefused() { return false; }
 bool OgreScene::gatherRestPastHandOver() const { return true; }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
