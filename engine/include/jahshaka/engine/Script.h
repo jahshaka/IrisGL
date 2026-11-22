@@ -422,6 +422,10 @@ public:
         /// language made for a run is dropped at its end, so no global of one run survives into the next. Off: one
         /// realm for the host's life (jahengine runs one script).
         bool freshRealmPerRun = false;
+        /// THE COMPLETION VALUE's BOUNDS (MCP-ON-HOST-1: run_script answers the script's completion value): stated, a
+        /// run's Result::value is the script's last expression (a promise's settled value), converted within them - one
+        /// past them, or one that cannot be carried, FAILS the run by name. Absent (jahengine): the value is dropped.
+        std::optional<ValueBounds> completionBounds;
     };
     Host();   // the default options
     explicit Host(Options options);
@@ -451,7 +455,8 @@ public:
     /// for it: Failed, naming the extensions this host reads), TO ITS END - in JavaScript: the script, then every job it
     /// queued (the code after an `await`, a promise's reactions) until none is left. Failed carries an uncaught error's
     /// text and its stack (the script's line), or a rejected promise no handler took ("an unhandled promise rejection:
-    /// ..."); a command's Failed is a thrown error the script may catch.
+    /// ..."); a command's Failed is a thrown error the script may catch. Ok's value: the script's COMPLETION VALUE when
+    /// Options::completionBounds is stated (else null).
     Result run(const std::string &source, const std::string &name);
     /// The host.check calls that ran, and those that failed, over every run.
     int checksRun() const { return mChecksRun; }

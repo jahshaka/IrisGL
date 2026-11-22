@@ -470,12 +470,11 @@ public:
         mCancelled = false;
         mRandom = mHost.options().randomSeed ? mHost.options().randomSeed : 1;   // every run draws the same stream
         Result r;
-        JSValue v = JS_Eval(mCtx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL);
-        if (JS_IsException(v)) {
+        const Owned v(mCtx, JS_Eval(mCtx, source.c_str(), source.size(), name.c_str(), JS_EVAL_TYPE_GLOBAL));
+        if (JS_IsException(v.get())) {
             r.status = Status::Failed;
             r.message = takeException(mCtx);
         }
-        JS_FreeValue(mCtx, v);
         for (;;) {
             JSContext *jobCtx = nullptr;
             const int ran = JS_ExecutePendingJob(mRt, &jobCtx);
@@ -497,11 +496,40 @@ public:
             r.status = Status::Failed;
             r.message = "cancelled";
         }
+        if (r.status != Status::Failed && mHost.options().completionBounds)
+            completion(v.get(), *mHost.options().completionBounds, r);
         clearRejections();
         return r;
     }
 
 private:
+    /// THE COMPLETION VALUE (MCP-ON-HOST-1: run_script's answer) into r.value, read AFTER the jobs ran: a promise's
+    /// settled value (a script's last expression `(async () => ...)()`; a top-level `await` stays a syntax error), else
+    /// the value itself - through the ONE bounded conversion, OPEN (no declaration), at the host's stated bounds. One
+    /// that cannot be carried - past a bound, a function, a promise still pending or rejected - FAILS the run by name.
+    void completion(JSValueConst v, const ValueBounds &bounds, Result &r)
+    {
+        const JSPromiseStateEnum state = JS_PromiseState(mCtx, v);
+        std::string why;
+        if (state == JS_PROMISE_PENDING) why = "a promise still pending after the script's jobs ran";
+        if (state == JS_PROMISE_REJECTED) why = "a rejected promise";
+        const Owned settled(mCtx, state == JS_PROMISE_FULFILLED ? JS_PromiseResult(mCtx, v) : JS_UNDEFINED);
+        Place at;
+        at.open = true;
+        Budget budget{bounds};
+        Value out;
+        try {   // (inside its bounds nothing throws; past a host's own too-generous ones, the run FAILS, never the process)
+            if (why.empty() && fromJs(mCtx, state == JS_PROMISE_FULFILLED ? settled.get() : v, at, budget, out, why, 0)) {
+                r.value = std::move(out);
+                return;
+            }
+        } catch (const std::exception &e) {
+            why = e.what();
+        }
+        r.status = Status::Failed;
+        r.message = "the script's completion value cannot be carried: " + why;
+    }
+
     /// Every command registered since the last install as a function of its namespace's object, bound to its
     /// registry index (made once: the registry only grows).
     void install()
