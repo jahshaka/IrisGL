@@ -884,6 +884,8 @@ public:
     /// Runs `work` (a lighting-arm build) under the deferred dispatch when the scene is
     /// asynchronous; a deferral owes the arm a whole rebuild (mGiDeferralRetry).
     void giDeferrable(const std::function<void()> &work);
+    /// giDeferrable's deferral without its region: the frame's record runs it inside the Compute region.
+    void deferDispatches(const std::function<void()> &work);
     /// The flush proper — what applyPendingGi was before the staged machine.
     void applyPendingGiFlush();
     /// Does this scene still owe a stage of a staged arm build? Read by

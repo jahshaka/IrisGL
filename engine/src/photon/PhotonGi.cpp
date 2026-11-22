@@ -3727,6 +3727,13 @@ void PhotonComponent::applyPendingGiDeferrable() {
 // inside the region, so the witness and the ASYNC bracket see every one of their dispatches.
 void PhotonComponent::giDeferrable(const std::function<void()> &work) {
     GiRegion region(RegionKind::Graphics);
+    deferDispatches(work);
+}
+
+// THE DEFERRAL ITSELF, IN WHATEVER REGION IS OPEN: giDeferrable's (a Graphics region) and the frame's record's (the
+// Compute region, updateGi: SHADER-SYSTEM-1 7a fixes B and C - the feedback set and the field's generation were
+// dispatched outside it, so an empty cache parsed and built them inside the frame).
+void PhotonComponent::deferDispatches(const std::function<void()> &work) {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (!mScene.asyncShaders() || !hc || !hm->getAsyncCompiler()->isRunning()) {
@@ -4169,7 +4176,9 @@ void PhotonComponent::updateGiTracking(const Ogre::Vector3 &camPos, bool driverS
         monitor::PhaseScope phase("gi.plan", mRoot->getRenderSystem());
         work = planFrame(camPos, driverStereo);
     }
-    recordFrame(work);
+    // AN ASYNCHRONOUS SCENE's RECORD DEFERS LIKE ITS BUILD (SHADER-SYSTEM-1 7a): a permutation still missing goes to
+    // the background compiler, its dispatch is skipped, and the arm is rebuilt whole once nothing is in flight.
+    deferDispatches([&]() { recordFrame(work); });
     // A STILL FRAME FILES NO GI ROW (gi.coalesce): the row exists only when the step dispatched (or submitted: a
     // bubble its phases place).
     if (!computeRegionDispatched() && !stepRow.submittedInside()) stepRow.cancel();
@@ -7113,17 +7122,20 @@ void PhotonComponent::recordLate() {
     GiRegion region(RegionKind::Compute);
     monitor::CacheScope lateRow(CacheKind::Gi, WorkReason::None, 0ull, "gi.late", mRoot->getRenderSystem(), this);
     lateRow.markAggregate();   // its dispatches no child row names file their own (photonDispatch)
-    {
-        monitor::PhaseScope phase("gi.regions", mRoot->getRenderSystem());
-        serviceRegions();
-    }
-    {
-        monitor::PhaseScope phase("gi.light", mRoot->getRenderSystem());
-        // (THE CHAIN'S SETTLE, the light tick and the drag's closing whole tick are deleted with the Jacobi restart they
-        // existed for: no cascade is ever off a fixed point the feedback does not converge - a rebuild's bricks resume, a
-        // commit's slab and band resume, a lamp's spheres resume.)
-        relightAndFeedback();
-    }
+    // THE LATE RECORD DEFERS LIKE THE FRAME's (SHADER-SYSTEM-1 7a, fix B: the feedback set): updateGi's rule.
+    deferDispatches([&]() {
+        {
+            monitor::PhaseScope phase("gi.regions", mRoot->getRenderSystem());
+            serviceRegions();
+        }
+        {
+            monitor::PhaseScope phase("gi.light", mRoot->getRenderSystem());
+            // (THE CHAIN'S SETTLE, the light tick and the drag's closing whole tick are deleted with the Jacobi restart
+            // they existed for: no cascade is ever off a fixed point the feedback does not converge - a rebuild's bricks
+            // resume, a commit's slab and band resume, a lamp's spheres resume.)
+            relightAndFeedback();
+        }
+    });
     // THE END OF A DRAG GESTURE'S OWN DEBT (MOVER-1), paid last and only once the re-voxelisations have drained and the
     // feedback has nothing owed: the PHOTOGRAPHS. The object is GI geometry again, at its new pose, in a chain whose light
     // has converged; this is the first frame a capture can hold the room as it actually is. One per gesture.
