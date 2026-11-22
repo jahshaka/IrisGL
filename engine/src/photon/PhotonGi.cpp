@@ -2027,6 +2027,7 @@ void PhotonComponent::settleTextureResidency() {
     // every frame once a scene has opened. Entries appear only in setPbrTexture,
     // and only for a bind whose texture was not resident yet.
     if (mMaterialsAwaitingTexture.empty()) return;
+    if (mEngine && mEngine->armRegistry().on(ArmId::TextureResidencyHold)) return;   // (the test door: held)
     // EVERY ENTRY THAT BECAME READY THIS FRAME IS ONE EVENT (clean-2 lane
     // review, F5). A scene's textures arrive in batches, and noting each
     // material separately staled the grid once per material and — worse — bumped

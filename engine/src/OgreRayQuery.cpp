@@ -2896,11 +2896,15 @@ bool RayQueryTier::launchAhead(AheadId id) {
     if (id == kAheadGather && !mGather) mGather = new ScreenProbeGather(*this);
     a.started = true;
     a.launchFrame = frameNow();
-    a.th = std::thread([this, &a, make]() {
+    // THE TEST DOOR rays.buildFail (a bit per AheadId): the build fails on its worker, as a pipeline that cannot be made
+    const unsigned failIds = unsigned(armValue(ArmId::RayBuildFail));
+    const bool fail = (failIds & (1u << unsigned(id))) != 0u;
+    a.th = std::thread([this, &a, make, fail]() {
         lowerBuilderPriority();
         mSlots.take();   // a slot of the tier's width, waited for here, on this thread
         tAheadNotes = &a.notes;
-        a.ok = (this->*make)(a.err);
+        if (fail) a.err = "a forced failure (the test door rays.buildFail)";
+        a.ok = !fail && (this->*make)(a.err);
         tAheadNotes = nullptr;
         mSlots.give();
         // ABANDONED: the build ended by the exit's flag reports no success (createComputePipeline) - nothing of it is read.

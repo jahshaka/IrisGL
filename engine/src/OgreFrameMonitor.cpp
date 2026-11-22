@@ -1747,6 +1747,18 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late): the builds rays.buildHold holds, bit k for RayQueryTier's "
       "AheadId k (1 the reflection, 2 the cards' gather, 4 the card movers, 8 the voxel sides, 16 the glass escape, 32 "
       "the screen-probe gather). 0 = every build." },
+    { ArmId::RayBuildFail, 0.0, 0.0, 63.0,
+      "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): the builds named, bit k for RayQueryTier's AheadId "
+      "k (rays.buildHoldIds' bits), FAIL on their workers - nothing is built, the build reports a failure, and its consumer "
+      "latches it as a pipeline that cannot be made (no reader). Read at each build's launch. 0 = shipped." },
+    { ArmId::ShaderAsyncFail, 0.0, 0.0, 1.0,
+      "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): 1 = every object's OWN graphics permutation "
+      "requested while on FAILS at its request (the fork's HlmsAsyncCompiler::_jahFailRequests; a placeholder's request "
+      "is never failed): the object draws its placeholder as its final answer. 0 = shipped." },
+    { ArmId::TextureResidencyHold, 0.0, 0.0, 1.0,
+      "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's texture case): 1 = every texture bound to a material while on "
+      "is AWAITED as if its pixels had not landed (PhotonComponent's awaiting list), and nothing on the list settles "
+      "while on - a material wearing a texture still loading, held. 0 = shipped (the list settles the next frame)." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

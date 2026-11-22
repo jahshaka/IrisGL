@@ -2362,8 +2362,10 @@ bool OgreScene::setPbrTexture(MaterialId mat, PbrTextureSlot slot, TextureId tex
             // its maps is ready.
             if (texId) {
                 auto tit = mTextures.find(texId);
+                // (the test door textures.residencyHold: every bind awaited, ready or not)
                 if (tit != mTextures.end() && tit->second.texture &&
-                    !tit->second.texture->isDataReady()) {
+                    (!tit->second.texture->isDataReady() ||
+                     (mEngine && mEngine->armRegistry().on(ArmId::TextureResidencyHold)))) {
                     mPhoton.awaitTexture(mat, voxelInput);
                 }
             }

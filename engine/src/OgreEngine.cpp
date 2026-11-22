@@ -1081,6 +1081,9 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) hc->_jahForceParamsMisfits(1u);
             mMisfitDoorArmed = on;
         }
+        // THE FAILED-PERMUTATION DOOR (COLD-BOOT-1 item 3; the arm shaders.asyncFail): while on, the fork fails every
+        // object's own permutation at its request (HlmsAsyncCompiler::_jahFailRequests) - a failure is final
+        mRoot->getHlmsManager()->getAsyncCompiler()->_jahFailRequests(mArms.on(ArmId::ShaderAsyncFail));
         // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1): Engine::setFramePace's, IN FORCE UNTIL SET AGAIN (never
         // lowered here - a caller that sets Streaming gives Complete back itself). Pushed to every scene here,
         // once, because the decisions it changes are per scene (the GI arm's

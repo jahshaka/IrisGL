@@ -2322,7 +2322,10 @@ private:
     X(GiForeignDetect, "gi.foreignDetect") /* NONDET-1: the brick mask readings judged against a relative change of N codes a frame (0 = off); GiStatus::CascadeStatus::foreign* */ \
     X(GiTruthRays, "gi.truthRays") /* the cards' indirect gather and the voxel sides' gather at N rays (0 = the tier's; the high-sample truth, PHOTON-7 stage 10 (8)) */ \
     X(RayBuildHold, "rays.buildHold") /* a ray pipeline build counts as in flight for N frames after its launch: a late build (a test door, gi.card_build_late) */ \
-    X(RayBuildHoldIds, "rays.buildHoldIds") /* the builds rays.buildHold holds, a bit per AheadId (0 = every build; a test door, gi.card_build_late) */
+    X(RayBuildHoldIds, "rays.buildHoldIds") /* the builds rays.buildHold holds, a bit per AheadId (0 = every build; a test door, gi.card_build_late) */ \
+    X(RayBuildFail, "rays.buildFail") /* the ray builds named (a bit per AheadId) FAIL on their workers (a test door, gi.card_build_late) */ \
+    X(ShaderAsyncFail, "shaders.asyncFail") /* every object's own graphics permutation fails at its request (the fork's _jahFailRequests; a test door, gi.card_build_late) */ \
+    X(TextureResidencyHold, "textures.residencyHold") /* every texture bind awaits its pixels while on (a test door, gi.card_build_late) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,
