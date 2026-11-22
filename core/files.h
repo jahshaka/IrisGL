@@ -51,10 +51,11 @@ IRIS_CORE_API bool makeDirs(const std::filesystem::path &dir);
 /// The staged write's three steps, for a writer that streams into its temp itself (the CAS copy, an archive's or a video's
 /// partial): a unique sibling temp path for `target`; the flush of a written file to the device - false when the file cannot
 /// be opened or the flush FAILED, and then the bytes must not be published (true off POSIX: the rename's ordering only); the
-/// atomic replace of `to` by `from` - on failure `from` is removed and `error` says why.
+/// atomic replace of `to` by `from` - on failure `from` is removed and `error` says why. The two that can fail are
+/// [[nodiscard]]: a caller that does not read the answer publishes bytes that may not be there (the build names it).
 IRIS_CORE_API std::filesystem::path stagingTempPath(const std::filesystem::path &target);
-IRIS_CORE_API bool fsyncPath(const std::filesystem::path &p);
-IRIS_CORE_API bool atomicRename(const std::filesystem::path &from, const std::filesystem::path &to, std::string *error = nullptr);
+[[nodiscard]] IRIS_CORE_API bool fsyncPath(const std::filesystem::path &p);
+[[nodiscard]] IRIS_CORE_API bool atomicRename(const std::filesystem::path &from, const std::filesystem::path &to, std::string *error = nullptr);
 
 /// `bytes` written to `target` through a staged temp (its directory made first): the old file stays whole until the
 /// rename replaces it. False with `error` said when anything failed - a Flush write whose fsync failed included - the target
