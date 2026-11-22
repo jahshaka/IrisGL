@@ -47,6 +47,7 @@
 // nothing of OgreScene's Node, which is what keeps it bindable from an
 // HlmsComputeJob and buildable on a platform with no ray queries.
 #include "AlphaMasks.h"   // the cut-outs' masks (ENGINE-POLISH-ATOM-1 stage 3)
+#include "BuildBurst.h"   // the notice's "n of m" (SHADER-SYSTEM-1 stage 7)
 #include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
 #include "SceneClock.h"     // a scene's clock, a pure value type (ONE-FRAME-1)
 #include "GpuCull.h"
@@ -9548,6 +9549,8 @@ public:
     void prepareRayPipelines() override;
     /// The ray tier's joins of a pipeline build that was NOT finished (a frame or a wait that blocked on a driver compile).
     unsigned long long rayAheadJoinedWaiting() const;
+    /// The ray tier's builds that landed (joined, a failure included; not the teardown's).
+    unsigned long long rayAheadLanded() const;
     /// prepareRayPipelines' body (OgreRayQuery.cpp): the tier opened if it is not, every ahead build launched.
     void launchRayPipelines();
 
@@ -9930,6 +9933,10 @@ private:
     FrameCause mNextFrameCause = FrameCause::Driver;
     /// What the next frames may put off (OPEN_COVER_SPEC §2.1). `Complete` is the default; IN FORCE UNTIL SET AGAIN.
     FramePace  mFramePace = FramePace::Complete;   ///< Engine::setFramePace (the driver's, in force until set again)
+    /// THE BUILDS' BURSTS (SHADER-SYSTEM-1 stage 7; BuildBurst.h): fed at each publish (fillPublished, the render thread:
+    /// AsyncShaderStats::shaderBurst, rayBurst) - the background compiler's jobs and the ray pipeline builds; a
+    /// re-publish with nothing moved feeds the same values (idempotent)
+    mutable BuildBurst mShaderBurst, mRayBurst;
     unsigned long long mStreamingFrames = 0;      ///< the frames rendered on Streaming (PublishedEngineFrame::streamingFrames)
 
     /// XID-2: latched the first frame the render system reports a lost device.

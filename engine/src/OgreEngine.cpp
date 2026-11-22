@@ -3557,6 +3557,17 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     }
     out.streaming = streamingWork();
     out.shaders = asyncShaderStats();
+    // THE BUILDS' BURST (SHADER-SYSTEM-1 stage 7; BuildBurst.h): fed once a publish, the notice's "n of m"
+    // (the background compiler's landings are its RESOLVED jobs - published or discarded - never completed + failed:
+    // `completed` counts a job when it finishes running, before its publish, so it would count a job twice inside a
+    // burst; read here on the render thread, the thread that submits and publishes: the two reads agree)
+    {
+        const Ogre::HlmsAsyncCompiler *ac = mRoot ? mRoot->getHlmsManager()->getAsyncCompiler() : nullptr;
+        mShaderBurst.feed(ac ? ac->getNumOutstanding() : 0u, ac ? ac->getJahNumResolved() : 0ull);
+    }
+    mRayBurst.feed(out.shaders.rayBuildsInFlight, out.shaders.rayBuildsLanded);
+    out.shaders.shaderBurst = { mShaderBurst.landed(), mShaderBurst.total() };
+    out.shaders.rayBurst = { mRayBurst.landed(), mRayBurst.total() };
     out.hasEnabledViews = hasEnabledViews();
     out.paceOwesWork = framePaceOwesWork();
     out.streamingFrames = mStreamingFrames;
@@ -3709,6 +3720,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.rayBuildsInFlight = rayAheadInFlight();
     out.pending   = c->getNumOutstanding() + out.rayBuildsInFlight;
     out.rayBuildsJoinedWaiting = rayAheadJoinedWaiting();
+    out.rayBuildsLanded = rayAheadLanded();
     out.completed = c->getNumCompleted();
     out.failed    = c->getNumFailed();
     out.placeholderDraws = mRetiredPlaceholderDraws;

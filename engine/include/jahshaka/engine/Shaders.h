@@ -97,6 +97,20 @@ struct AsyncShaderStats {
     /// Compute dispatches DEFERRED because their permutation was building in the background (a running total, the
     /// fork's HlmsCompute::getNumDeferredDispatches): a frame that moved it did not do all its work.
     unsigned long long computeDeferred = 0;
+    /// THE RAY PIPELINE BUILDS THAT LANDED (SHADER-SYSTEM-1 stage 7): ahead builds joined, a failure included (a running
+    /// total; the teardown's joins are not counted). Launched = rayBuildsLanded + rayBuildsInFlight.
+    unsigned long long rayBuildsLanded = 0;
+    /// THE BUILDS' BURST, "n of m" (SHADER-SYSTEM-1 stage 7; the notice's ONE fact, every host reads it - the app's
+    /// toolbar indicator, jahlab's overlay and LAB BUILDING lines, the headset's surround): a burst BEGINS when the pending
+    /// count rises from 0, `landed` counts its landings (a failure is a landing), `total` = landed + pending; when pending
+    /// returns to 0 it reads m of m until the next begins (engine/src/BuildBurst.h). `shaders` - the background
+    /// compiler's jobs (pending minus the ray builds; a landing is a job RESOLVED - published or discarded: the fork's
+    /// HlmsAsyncCompiler::getJahNumResolved); `rays` - the ray pipeline builds.
+    struct Burst {
+        unsigned landed = 0;
+        unsigned total = 0;
+    };
+    Burst shaderBurst, rayBurst;
 };
 
 /// THE ENGINE's SHADER IDENTITY, NO DEVICE (SHADER-SYSTEM-1 stage 6a; WARM-SHARE-1's one source, shaderIdentity() in

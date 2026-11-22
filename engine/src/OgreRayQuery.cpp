@@ -1012,6 +1012,9 @@ private:
     /// Joins of a build that was NOT finished: a frame or a wait blocked on a driver compile (published:
     /// AsyncShaderStats::rayBuildsJoinedWaiting). The teardown's joins are not counted.
     unsigned long long mJoinedWaiting = 0;
+    /// Builds that LANDED - joined, a failure included (published: AsyncShaderStats::rayBuildsLanded; the burst's
+    /// landings). The teardown's joins are not counted.
+    unsigned long long mLanded = 0;
     /// THE JOIN-FREE EXIT (COLD-BOOT-1 stage 4; abandonAhead): set once the process ends at the engine's death with a
     /// build in flight. A worker that sees it after its driver call returns skips every step of ours that follows.
     std::atomic<bool> mAbandoned{ false };
@@ -1040,6 +1043,7 @@ public:
     /// The builds started and not joined: AsyncShaderStats::pending counts them.
     unsigned aheadInFlight() const;
     unsigned long long joinedWaiting() const { return mJoinedWaiting; }
+    unsigned long long landed() const { return mLanded; }
     /// A ray consumer of `scene` was refused by a build still in flight (Ahead::refusedBy): its term will still arrive.
     bool rayBuildRefusedPending(const OgreScene *scene) const;
     /// A RAY INPUT WAS REFUSED since `scene` last asked (GATHER-HANG-1 stage 2, the lead's call 4): a job refused its
@@ -3088,6 +3092,7 @@ void RayQueryTier::joinAhead(AheadId id, bool counted) {
     Ahead &a = mAhead[id];
     if (!a.started || a.joined) return;
     if (counted && !a.done.load(std::memory_order_acquire)) ++mJoinedWaiting;   // a wait on a driver compile
+    if (counted) ++mLanded;   // a landing (a failure is one: final)
     const auto t0 = std::chrono::steady_clock::now();
     if (a.th.joinable()) a.th.join();
     a.joined = true;
@@ -14335,6 +14340,7 @@ void registerPhotonRayPasses(AtomPassProvider *provider) {
 
 unsigned OgreEngine::rayAheadInFlight() const { return mRayTier ? mRayTier->aheadInFlight() : 0u; }
 unsigned long long OgreEngine::rayAheadJoinedWaiting() const { return mRayTier ? mRayTier->joinedWaiting() : 0u; }
+unsigned long long OgreEngine::rayAheadLanded() const { return mRayTier ? mRayTier->landed() : 0u; }
 
 void OgreEngine::launchRayPipelines() {
     ensureRayTier();
@@ -14495,6 +14501,7 @@ void OgreEngine::ensureRayTier() {}
 void OgreEngine::listRayMovers(const std::vector<OgreScene *> &) {}
 unsigned OgreEngine::rayAheadInFlight() const { return 0u; }
 unsigned long long OgreEngine::rayAheadJoinedWaiting() const { return 0u; }
+unsigned long long OgreEngine::rayAheadLanded() const { return 0u; }
 void OgreEngine::launchRayPipelines() {}
 void OgreEngine::joinRayAhead() {}
 void OgreEngine::shutdownRayQuery() {}
