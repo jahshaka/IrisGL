@@ -630,7 +630,11 @@ private:
     static int interrupt(JSContext *, void *opaque)
     {
         JavaScript *self = static_cast<JavaScript *>(opaque);
-        if (!self->mHost.keepGoing(0, 0)) self->mCancelled = true;
+        try {   // (no C++ exception crosses quickjs's C: a hook that throws stops the script, as a false would)
+            if (!self->mHost.keepGoing(0, 0)) self->mCancelled = true;
+        } catch (...) {
+            self->mCancelled = true;
+        }
         return self->mCancelled ? 1 : 0;
     }
 
