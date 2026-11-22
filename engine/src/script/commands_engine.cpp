@@ -180,8 +180,10 @@ void registerFrameCommands(Host &host, const Commands &k)
     r.add({"engine.arm", {Access::Changes,
                           {object("arm", {arg("name", Kind::String), arg("value", Kind::Number)})}, Kind::Bool},
            "Sets the engine's measuring arm {name, value} (Engine::arms). A TEST arm opens only in a host started with "
-           "--test-doors."},
+           "--test-doors. An arm is engine-wide: a host for an outside client refuses it."},
           [k](Call &c) -> Value {
+              if (k.st->host->options().outsideClient)
+                  return c.fail("arms are engine-wide: this host serves an outside client");
               Engine *e = k.engine(c);
               if (!e) return Value();
               const std::string name = c[0]["name"].asString();

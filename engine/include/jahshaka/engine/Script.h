@@ -426,6 +426,9 @@ public:
         /// run's Result::value is the script's last expression (a promise's settled value), converted within them - one
         /// past them, or one that cannot be carried, FAILS the run by name. Absent (jahengine): the value is dropped.
         std::optional<ValueBounds> completionBounds;
+        /// A HOST FOR AN OUTSIDE CLIENT (the MCP server's): what is ENGINE-WIDE - beyond the scenes and views this host
+        /// made - is refused by name: engine.arm (an arm changes what the owner's own scenes draw).
+        bool outsideClient = false;
     };
     Host();   // the default options
     explicit Host(Options options);
