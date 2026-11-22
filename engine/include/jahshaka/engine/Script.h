@@ -483,7 +483,12 @@ namespace script {
 /// changes or destroys only a node, mesh or material its own host made there (a handle is computable: the made record
 /// is the authority), and the scene's settings (ambient, GI) not at all; the script may make its own objects in it. A
 /// VIEW is the script's to drive (bind a scene, place, post-fx, declare, read), never to destroy; its owner restores
-/// its own state when it takes the view back. (Not built: a scene handed in WRITABLE - the app's, when it comes.) A null `engine` (it did not start) still registers them: each FAILS with "the engine
+/// its own state when it takes the view back. (Not built: a scene handed in WRITABLE - the app's, when it comes.)
+/// WHAT IS HANDED IN OUTLIVES THE HOST (the owner's duty, as the host's own before its engine): the host holds the
+/// handed-in Scene* and View* - its end removes what it made in such a scene, and a route declared on such a view is
+/// judged at every frame - so an owner that destroys one before the host ends leaves the host touching freed memory.
+/// Not guarded: the engine has no public read of a scene's or a view's liveness by which the host could skip a dead
+/// one (it comes with 2e's header commit, beside the per-engine liveness read Engine::isAlive cannot give). A null `engine` (it did not start) still registers them: each FAILS with "the engine
 /// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open (jahengine --test-doors);
 /// without it engine.arm FAILS on one.
 void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);
