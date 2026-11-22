@@ -265,10 +265,15 @@ vec3 jahHitDirectPickSpec = vec3( 0.0 );   // THE PICK (the reds' instrument): t
 /// law): each light traces a ray, and the host writes EVERY light of the scene (no budget by design) into the lights'
 /// section u[2] .. u[3] (OgreRayQuery.cpp updateHitTable: u[3] is the first material row's word) - so the count never
 /// exceeds what that section holds and no scene loses a lamp; a header that claims more is not the table the host wrote.
+/// ...AND AT AN ABSOLUTE CEILING (the final read's leftover, the lead's ruling: a WHOLLY garbage header - its count and its
+/// section's two words coinciding - would still size the loop): the light records the table's BUFFER can hold, a host
+/// word (JAH_HIT_PARAMS.worldMax.w: hitSetParams), bit-tested.
 uint jahHitLightCount( JahHitTableRef T )
 {
 	const uint b = T.u[2], e = T.u[3];
-	return min( T.u[0], e > b ? ( e - b ) / kJahHitLightWords : 0u );
+	const float capF = JAH_HIT_PARAMS.worldMax.w;
+	const uint cap = finite1( capF ) ? uint( clamp( capF, 0.0, 16777216.0 ) ) : 0u;
+	return min( min( T.u[0], e > b ? ( e - b ) / kJahHitLightWords : 0u ), cap );
 }
 vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {

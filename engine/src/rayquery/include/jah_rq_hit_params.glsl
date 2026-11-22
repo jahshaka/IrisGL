@@ -38,7 +38,8 @@ struct JahHitParams
 	                        // rule - a cache's (10-3: camera-independent) or no camera (HitReader, C++)
 	vec4 level[4];          // ...per cascade: x its level radius, y its hand-over band (metres, max-norm from the camera)
 	vec4 worldMin;          // THE WORLD's BOX (PHOTON-7 10-3 R4): the traced instances' union - its corner (xyz), w 1 = known
-	vec4 worldMax;          // ...its far corner
+	vec4 worldMax;          // ...its far corner (xyz); w THE HIT TABLE's ABSOLUTE CEILING: the light records its buffer
+	                        // can hold (the host's, never the table's own header: jah_rq_hit_direct.glsl jahHitLightCount)
 };
 
 #define JAH_VOX_COUNT        int( JAH_HIT_PARAMS.counts.x )

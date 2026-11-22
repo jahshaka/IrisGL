@@ -9193,6 +9193,9 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     }
     // ---- THE HIT'S OWN SURFACE (FAR-SUN-2), the alpha table (REFLECT-MOVERS-2), the movers (MOVER-OCCLUSION-1)
     out.hitTable = hitTableOf(scene);
+    // THE COUNT's ABSOLUTE CEILING (jah_rq_hit_direct.glsl jahHitLightCount): the light records the live slot's buffer holds
+    out.hitTableLightsMax = out.hitTable && sa.hitSlot >= 0 && sa.hitTableCap[sa.hitSlot] > kHitHeaderWords
+                                ? (sa.hitTableCap[sa.hitSlot] - kHitHeaderWords) / kHitLightWords : 0u;
     {
         const HitSurfaceInputs hs = hitSurfaceInputsOf(scene);
         out.hitPool = hs.pool;

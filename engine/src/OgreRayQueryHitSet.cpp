@@ -232,6 +232,7 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
         out.worldMax[k] = src.worldMax[k];
     }
     out.worldMin[3] = src.worldOn ? 1.0f : 0.0f;
+    out.worldMax[3] = float(src.hitTableLightsMax);   // (exact: a count under 2^24)
     // THE LEVEL RULE (HitReader): a view's by the GI camera (10-2e: the camera and each cascade's radius and band, past
     // the chain's length the last's - never read, the outermost reads by its box); a cache's the box rule (the finest
     // box holding the hit), whatever the camera

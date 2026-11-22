@@ -278,6 +278,8 @@ struct HitSetSources {
     /// reads the store whole), the voxeliser's texture pool the rows sample and the cloud layer's shadow (field, map,
     /// sun; null = none).
     uint64_t hitTable = 0u;
+    /// ...and the light records its BUFFER can hold (the count's absolute ceiling: HitSetParams worldMax[3])
+    uint32_t hitTableLightsMax = 0u;
     Ogre::TextureGpu *hitPool = nullptr;
     Ogre::TextureGpu *cloudField = nullptr;
     float cloudMap[4] = {};
@@ -320,7 +322,7 @@ struct HitSetParams {
     float levelCam[4] = {};                          ///< the GI camera (xyz), the level rule (w: HitReader's code)
     float level[kGatherMaxCascades][4] = {};         ///< per cascade: its level radius, its band (metres), its K
     float worldMin[4] = {};    ///< THE WORLD's BOX (PHOTON-7 10-3 R4): its corner (xyz), w 1 = known
-    float worldMax[4] = {};    ///< ...its far corner (xyz)
+    float worldMax[4] = {};    ///< ...its far corner (xyz); w the hit table's light capacity (its count's ceiling)
 };
 static_assert(sizeof(HitSetParams) == 25u * 16u, "JahHitParams is twenty-five vec4s");
 /// THE BOUND OF THE RAY QUERY LOOPS (GATHER-HANG-1 stage 2): jah_rq_alpha.glsl's kJahRqStepLaw and kJahRqStepBound, mirrored
