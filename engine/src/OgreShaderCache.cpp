@@ -1070,7 +1070,16 @@ void ShaderCache::load(Ogre::Root *root) {
                 // scene's measured pool, clamp(hardware, 2, 8) — the same number
                 // Studio's Tier::Primary reads, never a copy of its policy.
                 const unsigned threads = unsigned(iris::threadBudget().ogrePool);
+                // THE APPLY's COST, NAMED (SHADER-SYSTEM-1 stage 5): with the fork's commit out of the key, a changed
+                // template or preprocessor makes Ogre RE-PARSE the recipes here ("the templates have changed") instead
+                // of the layer being dropped - this line is what that costs, every boot.
+                const auto applyStart = std::chrono::steady_clock::now();
                 disk.applyTo(h, threads);
+                logLine("hlms." + std::to_string(entry.first) + ".bin: " + std::to_string(h->getShaderCodeCache().size()) +
+                        " recipes applied in " +
+                        fmtMs(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - applyStart)
+                                  .count()) +
+                        " ms");
                 ++mHlmsLoaded;
             }
         }
