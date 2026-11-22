@@ -34,6 +34,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -255,6 +256,7 @@ public:
 private:
     struct Entry { CommandInfo info; CommandFn fn; };
     std::vector<Entry> mEntries;
+    std::unordered_map<std::string, std::size_t> mByName;   // a name's index (call / find by name: MCP's door)
     std::vector<std::string> mFaults;
     std::string mLastError;
     struct Held { unsigned kind = 0; std::shared_ptr<void> object; bool scoped = false; };

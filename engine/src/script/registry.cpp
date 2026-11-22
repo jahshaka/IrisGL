@@ -590,15 +590,15 @@ bool Registry::add(CommandInfo info, CommandFn fn)
         mFaults.insert(mFaults.end(), faults.begin(), faults.end());
         return false;
     }
+    mByName.emplace(info.name, mEntries.size());
     mEntries.push_back(Entry{std::move(info), std::move(fn)});
     return true;
 }
 
 const CommandInfo *Registry::find(const std::string &name) const
 {
-    for (const Entry &e : mEntries)
-        if (e.info.name == name) return &e.info;
-    return nullptr;
+    const auto it = mByName.find(name);
+    return it == mByName.end() ? nullptr : &mEntries[it->second].info;
 }
 
 std::vector<const CommandInfo *> Registry::commands() const
@@ -610,8 +610,8 @@ std::vector<const CommandInfo *> Registry::commands() const
 
 Result Registry::call(const std::string &name, const Value::Array &args)
 {
-    for (std::size_t i = 0; i < mEntries.size(); ++i)
-        if (mEntries[i].info.name == name) return callAt(i, args);
+    const auto it = mByName.find(name);
+    if (it != mByName.end()) return callAt(it->second, args);
     Result r;
     r.status = Status::Failed;
     r.message = name + " is not a command";
