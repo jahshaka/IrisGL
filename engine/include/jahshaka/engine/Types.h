@@ -9101,8 +9101,8 @@ enum class FrameCause { Unknown, Driver, Scripted, Offscreen, WarmUp, Player };
 /// whole safety argument: a caller that never asks — every offscreen readback,
 /// every thumbnail, every pixel suite, the selftest, the VR pump, a script's
 /// `editor.frame` — gets exactly the frame it always got, built to completion,
-/// with no streaming rule anywhere near it. Consumed by the next
-/// `renderOneFrame` and reset to `Complete`, like `FrameCause`.
+/// with no streaming rule anywhere near it. IN FORCE UNTIL SET AGAIN (Engine::setFramePace), never reset by a frame:
+/// a caller that sets `Streaming` gives `Complete` back itself.
 /// THE OTHER HALF — "nothing of this world is on screen yet" — is NOT a
 /// property of a frame and must not be modelled as one: a load is a stretch of
 /// many frames drawn from half a dozen places (the runner's slice boundaries,
@@ -9968,6 +9968,11 @@ struct PublishedEngineFrame {
     AsyncShaderStats   shaders;            ///< the compile counters (`compiledInForeground` = livecompiles' total)
     bool               hasEnabledViews = false;
     bool               paceOwesWork = false;   ///< Engine::framePaceOwesWork as the frame closed it
+    /// THE FRAMES RENDERED ON THE STREAMING PACE, a running total over the ENGINE's life (the pace is the engine's,
+    /// Engine::setFramePace, in force until set again): a caller that holds Streaming and forgets to give Complete back
+    /// shows here (the selftest asserts its frames add none). A per-view pace (SHADER-SYSTEM-1 stage 7 /
+    /// PICTURE-REQUEST-1) moves it to the view's record.
+    unsigned long long streamingFrames = 0;
     std::vector<ViewFrames> views;
     /// The view named `name` as this frame closed it; null when no live view has that name.
     const ViewFrames *view(NodeId id) const {

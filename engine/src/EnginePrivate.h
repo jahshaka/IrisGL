@@ -9834,10 +9834,9 @@ private:
     bool mMetricsBeforeCapture = false;
     /// Set for the NEXT frame only (FrameInput::cause, drained at the frame's head).
     FrameCause mNextFrameCause = FrameCause::Driver;
-    /// What the next frame may put off (OPEN_COVER_SPEC §2.1). `Complete` is
-    /// the default and the value every frame is reset to, so only a host that
-    /// asks per frame ever gets anything else.
+    /// What the next frames may put off (OPEN_COVER_SPEC §2.1). `Complete` is the default; IN FORCE UNTIL SET AGAIN.
     FramePace  mFramePace = FramePace::Complete;   ///< Engine::setFramePace (the driver's, in force until set again)
+    unsigned long long mStreamingFrames = 0;      ///< the frames rendered on Streaming (PublishedEngineFrame::streamingFrames)
 
     /// XID-2: latched the first frame the render system reports a lost device.
     bool mDeviceLost = false;

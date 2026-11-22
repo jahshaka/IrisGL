@@ -1081,13 +1081,13 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                 if (Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms()) hc->_jahForceParamsMisfits(1u);
             mMisfitDoorArmed = on;
         }
-        // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1), consumed exactly
-        // like the cause and reset to `Complete` — so a caller that sets
-        // nothing renders the frame it always did. Pushed to every scene here,
+        // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1): Engine::setFramePace's, IN FORCE UNTIL SET AGAIN (never
+        // lowered here - a caller that sets Streaming gives Complete back itself). Pushed to every scene here,
         // once, because the decisions it changes are per scene (the GI arm's
         // staged build) and per frame (the texture drain below).
         const FramePace pace = mFramePace;
         for (auto &sc : mScenes) sc->setFramePace(pace);
+        if (pace == FramePace::Streaming) ++mStreamingFrames;   // published: PublishedEngineFrame::streamingFrames
         std::unique_ptr<monitor::Stage> monPre;
         if (monitor::live()) {
             monPre.reset(new monitor::Stage("engine.pre"));
@@ -3454,6 +3454,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.shaders = asyncShaderStats();
     out.hasEnabledViews = hasEnabledViews();
     out.paceOwesWork = framePaceOwesWork();
+    out.streamingFrames = mStreamingFrames;
     out.views.clear();
     for (const auto &v : mViews)
         if (v) {
