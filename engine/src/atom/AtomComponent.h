@@ -35,7 +35,8 @@
 
 #include "GpuCull.h"
 #include "GpuScene.h"
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Overlay.h"
 
 #include <cstdint>
 #include <cstring>

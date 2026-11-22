@@ -57,6 +57,8 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/VoxelReader.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {

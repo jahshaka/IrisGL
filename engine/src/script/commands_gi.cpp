@@ -2,6 +2,8 @@
 #include "script/commands.h"
 
 #include <limits>
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
 
 namespace jahshaka { namespace engine { namespace script {
 
@@ -18,8 +20,8 @@ void registerGiCommands(Host &host, const Commands &k)
                                    .oneOf({kQualities[0], kQualities[1], kQualities[2], kQualities[3]}),
                                arg("bounces", Kind::Bool, Value(gi.bounces)),
                                // THE GI's OWN CASCADE BOUNDS (PhotonComponent::resolveCascadeTable, PhotonGi.cpp:4858-4893):
-                               // at most kGiTierMaxCascades (Types.h:2493); a resolution the engine CLAMPS to 16..256
-                               // (giCascadeResolution, Types.h:3396-3400); a halfSize <= 0 drops the WHOLE table to the
+                               // at most kGiTierMaxCascades (GiModes.h); a resolution the engine CLAMPS to 16..256
+                               // (giCascadeResolution, GiParams.h); a halfSize <= 0 drops the WHOLE table to the
                                // quality's (PhotonGi.cpp:4866); a pinned step is clamped to 1..resolution/2 (:4876-4877), so
                                // 0..128 here and the rest in the body
                                objects("cascades", {arg("halfSize", Kind::Number).above(0).in("m"),

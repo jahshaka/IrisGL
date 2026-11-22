@@ -151,6 +151,19 @@
 #include <set>
 #include <unordered_map>
 #include <vector>
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/GiVoxels.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Overlay.h"
+#include "jahshaka/engine/Planar.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/RayQuery.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace {
@@ -1064,7 +1077,7 @@ private:
     const ArmRegistry *mArms = nullptr;
     bool arm(ArmId a, bool otherwise) const { return mArms ? mArms->on(a) : otherwise; }
     double armValue(ArmId a) const { return mArms ? mArms->value(a) : 0.0; }
-    /// THE RAY ORIGIN'S DRAWN TERM for a view's ray jobs (READ_B F3; Types.h rayOriginDrawnFootprints, the one law): the
+    /// THE RAY ORIGIN'S DRAWN TERM for a view's ray jobs (READ_B F3; Mesh.h rayOriginDrawnFootprints, the one law): the
     /// pixel tolerance x the LOD bias over the view's switch band, x the bake's drift ratio, in sample footprints -
     /// SCALED by the measuring arm rays.originCut (1 shipped; the origin rows' controls: 0 = the float bound alone,
     /// 0.5 = half the term).
@@ -3696,7 +3709,7 @@ RayQueryTier::SceneAs::Feed::Rec RayQueryTier::SceneAs::Feed::measure(const deta
             const std::vector<float> *b = scene->lodBoundsFor(mp.get());
             const float bound = (b && !b->empty()) ? b->back() : 0.0f;
             if (bound > 0.0f) {
-                // THE GAP IS A DISTANCE FROM LEVEL 0 (the one origin law, Types.h rayOriginLevelLift): the coarsest
+                // THE GAP IS A DISTANCE FROM LEVEL 0 (the one origin law, Mesh.h rayOriginLevelLift): the coarsest
                 // level's STORED bound bounds each simplification step against its input, and its drift from level 0
                 // is within kLevelDriftOverBound of it (atom2.one_step_drift_bound, per cut and per cluster).
                 const float grown = rayOriginLevelLift(bound * worldMaxAxisScale(now->world));

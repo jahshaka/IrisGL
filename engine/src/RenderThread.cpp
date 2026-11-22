@@ -9,6 +9,9 @@
 #include <thread>
 #include <exception>
 #include <utility>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Published.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

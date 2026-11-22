@@ -60,6 +60,7 @@ THE SOFTWARE.
 #include "Vao/OgreUavBufferPacked.h"
 #include "Vao/OgreVaoManager.h"
 #include "Vao/OgreVertexArrayObject.h"
+#include "jahshaka/engine/Ids.h"
 
 #define TODO_deal_no_index_buffer
 

@@ -2,7 +2,7 @@
 // shape: an `Ogre::AtmosphereComponent` (the interface HlmsPbs asks for its
 // fog block and its const buffer — the one upstream's AtmosphereNpr implements),
 // four Hlms compute jobs for its look-up tables, and a sky quad drawn from them.
-// Types.h (AtmosphereSky) states the model; media/Hlms/Jahshaka/JahAtmo*_cs.glsl
+// Sky.h (AtmosphereSky) states the model; media/Hlms/Jahshaka/JahAtmo*_cs.glsl
 // and src/rayquery/include/jah_atmosphere.glsl carry its arithmetic.
 //
 // WHAT IT OWNS, per scene:
@@ -27,7 +27,7 @@
 #include <OgreMaterial.h>
 #include <OgreVector3.h>
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/Sky.h"
 
 namespace Ogre {
 class Root; class SceneManager; class TextureGpu; class Rectangle2D; class ConstBufferPacked;

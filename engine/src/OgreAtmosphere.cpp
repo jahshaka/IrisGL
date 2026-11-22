@@ -29,6 +29,10 @@
 
 #include <chrono>
 #include <cmath>
+#include "jahshaka/engine/Fog.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Sky.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

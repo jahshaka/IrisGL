@@ -17,6 +17,30 @@
 //     MeshManager::removeAll -> Root. A MeshPtr outliving Root hits a dead VaoManager.
 //   * No Ogre exception may escape: every virtual is wrapped and translated.
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Culling.h"
+#include "jahshaka/engine/Fog.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/GiVoxels.h"
+#include "jahshaka/engine/GpuSceneRecords.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/Planar.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/RayQuery.h"
+#include "jahshaka/engine/Shaders.h"
+#include "jahshaka/engine/Skeleton.h"
+#include "jahshaka/engine/Sky.h"
+#include "jahshaka/engine/Snapshot.h"
+#include "jahshaka/engine/Stats.h"
+#include "jahshaka/engine/VoxelReader.h"
+#include "jahshaka/engine/Vr.h"
 #include "jahshaka/engine/EngineInspect.h"
 // THE GPU SCENE's tables (A3 slice). Engine-private and Ogre-aware — it holds
 // MeshPtrs and hands out UavBufferPackeds — but it knows nothing of Vulkan and
@@ -942,7 +966,7 @@ constexpr const char *kAtomCasterPassId = "atom_caster";
 /// The chain's id image (R32G32_UINT, AtomId's words): what the id pass writes and
 /// the screen decode reads (OgreChain.cpp defines it; the listener finds it by name).
 constexpr const char *kAtomIdTexture = "jahAtomIds";
-/// THE ATOM VIEW (D0-ATOM-VIEW, Types.h AtomView). Its two passes — the copy of
+/// THE ATOM VIEW (D0-ATOM-VIEW, Overlay.h AtomView). Its two passes — the copy of
 /// the id pass's depth and the false-colour quad after the post chain — carry THIS
 /// execution-mask bit and nothing else, and the view's atom listener clears it from
 /// the workspace's mask every frame the scene's view is Off: switching the view
@@ -959,7 +983,7 @@ constexpr const char *kAtomViewMaterial = "Jahshaka/AtomView";
 /// frame: no stock occluder, nothing to draw). The low bits (0x01: a clear pass's default) stay everyone's.
 constexpr Ogre::uint8 kAtomStockExecutionBit   = 0x04u;
 constexpr Ogre::uint8 kAtomNoStockExecutionBit = 0x02u;
-/// THE PHOTON VIEW (PHOTON-VIEW-1, Types.h PhotonView): two gated stages after the
+/// THE PHOTON VIEW (PHOTON-VIEW-1, Overlay.h PhotonView): two gated stages after the
 /// post chain, before the overlays — a depth copy, a PASS_SCENE drawing the
 /// kPhotonViewBit drawables (Voxels, Probes, Cards) into the view's photon layer and
 /// the layer's composite, on kPhotonSceneExecutionBit; and a PASS_QUAD compositing
@@ -2208,7 +2232,7 @@ private:
 // entire cost of the monitor when it is off. Engine calls are UI-thread-only by
 // contract, so nothing here is atomic.
 // ---------------------------------------------------------------------------
-// THE ARM REGISTRY (lane TEST-1, the perf audit's A2; Types.h ArmInfo)
+// THE ARM REGISTRY (lane TEST-1, the perf audit's A2; Monitor.h ArmInfo)
 // ---------------------------------------------------------------------------
 //
 // The engine's MEASUREMENT ARMS, one table. Each was a process-environment read in
@@ -6331,7 +6355,7 @@ private:
     /// The UNLIT half of applyPbr (HLMS_ADOPTION P4a): the subset of PbrParams
     /// the Unlit family can actually honour — base colour, alpha and its mode,
     /// two-sidedness. Everything else is dropped, deliberately and visibly
-    /// (see ShadingModel in Types.h; the panel disables the rows this cannot
+    /// (see ShadingModel in Materials.h; the panel disables the rows this cannot
     /// carry rather than letting a user discover them).
     static void applyUnlit(Ogre::HlmsUnlitDatablock *db, const PbrParams &p,
                            FaceCull cull = FaceCull::Material);
@@ -8010,7 +8034,7 @@ public:
     /// which is how `HzbStatus::primed` is answered.
     unsigned long long workspaceFramesPresented() const { return mWorkspaceFramesPresented; }
     unsigned long long blankFramesPresented() const;
-    PublishedEngineFrame::ViewFrames published() const override;
+    ViewFrames published() const override;
     bool warmUpShaders() override;
     void setAsyncShaders(bool on) override;
     bool asyncShaders() const override;

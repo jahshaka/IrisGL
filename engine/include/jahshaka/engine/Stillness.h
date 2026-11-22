@@ -52,7 +52,8 @@
 // readback arms are instruments.
 #pragma once
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Pictures.h"
 
 #include <functional>
 #include <memory>

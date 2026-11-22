@@ -52,31 +52,22 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#include "Types.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Config.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Overlay.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Particles.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/Fwd.h"
 
 namespace jahshaka { namespace engine {
 
 class Engine;
 class Scene;
 class View;
-
-/// THE ATMOSPHERE'S TINT ON THE DIRECT SUNLIGHT — a STATELESS boundary function (ENGINE-UPGRADE-U3 stage 2, F-A;
-/// it was Scene::atmosphereSunTint). The fraction of the sun's beam that survives the trip from the top of the air to
-/// the observer, per channel, relative to the trip it makes at the zenith (the transmittance table's own integral:
-/// the same three species, the same coefficients, the same ray), times the earth's occlusion of the disc across the
-/// astronomical sunset band. Exactly (1,1,1) at noon — the user's picked colour IS the noon colour — falling, blue
-/// first, as the sun goes down; white when `air.on` is false (no realistic sky). Pure: never a read of the engine.
-/// `toSun` need not be unit length. A host building a record tints its sun by THE AIR THAT RECORD SETS
-/// (atmosphereAirOf, below): the published air is the last frame's, so a record that changes the sky and tints by it
-/// lights the new sky with the old sun for a frame (PHOTON-7 stage 7: the sun's colour then landed a frame after the
-/// sky, a second change - every card relit behind the first - that the screen gather's rough lobe showed as a
-/// one-frame dip on a metal sphere, scripting.e2e.sky_swap_transient's repro arm).
-Colour atmosphereSunTint(const PublishedFrame::Atmosphere &air, const Vec3 &toSun);
-/// THE AIR A REALISTIC SKY DESCRIBES (PHOTON-7 stage 7): the model the engine builds its tables from for `sky` (the
-/// one mapping - the engine's own setSky takes its model from it) at the observer's altitude `observerKm` (the
-/// engine's, Scene::published().atmosphere.observerKm: it follows the eye, a continuous input) - atmosphereSunTint's
-/// input for the record that SETS this sky. `on` is true: the caller asks it of a realistic sky only.
-PublishedFrame::Atmosphere atmosphereAirOf(const AtmosphereSky &sky, float observerKm);
 
 /// A renderable scene. Views draw it; several Views may share one, or each may own one.
 /// Owned by the Engine: destroy with Engine::destroyScene().
@@ -127,7 +118,7 @@ public:
     /// dome cubemap, or nothing (an unlit backdrop) - photographed at the setEnvironmentLight gain; the camera's sky is
     /// SkyDesc's either way. A change is one recapture. False (lastError) for unknown or unequal faces: the source in
     /// force stays.
-    virtual bool        setEnvironment(const EnvironmentDesc &) { return false; }
+    virtual bool        setEnvironment(const EnvironmentDesc &) = 0;
     /// Exponential distance fog (+ optional height layer) on lit (PBR) surfaces —
     /// see FogDesc for the model. Unlit overlays (gizmos, wires, billboards) and
     /// the sky are never fogged. Off by default, and OFF IS EXACT: a disabled
@@ -138,7 +129,7 @@ public:
     /// THE EXPONENTIAL HEIGHT FOG (HeightFogDesc: the world's medium, beyond a
     /// start distance, over the sky's pixels too). Off by default and OFF IS
     /// EXACT: no shader carries its code. The enabled edge is a shader variant.
-    virtual void        setHeightFog(const HeightFogDesc &) {}
+    virtual void        setHeightFog(const HeightFogDesc &) = 0;
     /// THE SCENE'S SKY, as one description — SkyDesc carries the whole model
     /// (modes, face order, and why the flat colour and the CPU-baked skies are
     /// not in it). Its ENVIRONMENT (the reflection cube, the ambient SH) is the
@@ -207,16 +198,14 @@ public:
     /// Synchronous — a GPU wait; an export-time call, never a frame-time one.
     /// False with no sky bound (or headless).
     virtual bool        renderSkyEquirect(unsigned width, unsigned height, unsigned faceSize,
-                                          float exposure, std::vector<unsigned char> &rgba)
-    { (void)width; (void)height; (void)faceSize; (void)exposure; (void)rgba; return false; }
+                                          float exposure, std::vector<unsigned char> &rgba) = 0;
     /// THE CLOUD FIELD AS NUMBERS (CLOUDS-2D-3's suites): the baked tile of the
     /// layer's VERTICAL optical depth, `size` x `size` floats, row-major, row 0
     /// at tile v = 0, covering one tile of `tileMetres` (a world point (x, z)
     /// reads the tile at ((x, z) + the scroll) / tileMetres, wrapped). Bakes a
     /// pending field first. Synchronous — a GPU wait; a test-time call, never a
     /// frame-time one. False with no layer drawn (or headless).
-    virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres)
-    { tau.clear(); size = 0; tileMetres = 0.0f; return false; }
+    virtual bool        cloudField(std::vector<float> &tau, unsigned &size, float &tileMetres) = 0;
     // THE ATMOSPHERE'S TABLES, counted (AtmosphereStatus). A scene without
     // the planet's atmosphere answers `on` false and zeros.
     // -> Scene::published().atmosphereStatus (U3 stage 2b).
@@ -226,7 +215,7 @@ public:
     /// (jah_fog_along.glsl); shut, they fog nothing there — gi.reflect_fog's paired
     /// cost arm, both in one process. The colour pass and the voxel march's share
     /// keep the law either way (it is compiled into their shaders).
-    virtual void setReflectionFogEnabled(bool on) { (void)on; }
+    virtual void setReflectionFogEnabled(bool on) = 0;
     /// THIS SCENE'S SHADOW REQUEST — ShadowDesc says what the shape means and
     /// why it exists (the backend's filter and atlas are global; this hides
     /// that rather than pretending otherwise). Idempotent, and cheap when
@@ -294,7 +283,7 @@ public:
     /// setShadingModel for why that one is a separate, atomic call.
     virtual bool        setPbrMaterial(MaterialId, const PbrParams &) = 0;
     /// Moves a material between the LIT and UNLIT shading families
-    /// (HLMS_ADOPTION P4a). See ShadingModel in Types.h for what Unlit costs.
+    /// (HLMS_ADOPTION P4a). See ShadingModel in Materials.h for what Unlit costs.
     ///
     /// ATOMIC, and it has to be: the two families are different backend
     /// material types, so this destroys the backend material, builds a new one
@@ -349,7 +338,7 @@ public:
     /// ATOM stage 1 (SPECS/NANITE_SPEC.md §7): the scene-wide LOD dial. 1 is the
     /// reference — every mesh switches level where its baked geometric error
     /// covers ONE PIXEL of the pass that is drawing it, at that pass's live lens
-    /// and its render target's height (Types.h, `kLodBudgetPixels`), so the same
+    /// and its render target's height (Mesh.h, `kLodBudgetPixels`), so the same
     /// object switches at the same SIZE ON SCREEN in the viewport, in a
     /// thumbnail and in a headset eye rather than at one distance for all three.
     /// The dial is a multiplier on that pixel budget: larger swaps earlier
@@ -532,7 +521,7 @@ public:
     virtual bool attachClips(NodeId, const ClipDesc *clips, size_t count) = 0;
     // The node's clip names, in attach order — including any uniquifying
     // suffix the backend added for a collision. Empty when it has no rig.
-    // -> Scene::published().factsBlock().clipsOf(node) — content id and engine name, in attach order (U3 stage 3); a host names a clip it pushes with clipNameFor (Types.h), the engine's own rule.
+    // -> Scene::published().factsBlock().clipsOf(node) — content id and engine name, in attach order (U3 stage 3); a host names a clip it pushes with clipNameFor (FrameInput.h), the engine's own rule.
 
     /// THE per-frame clip call. Absolute times only. Clips the array does not
     /// name are disabled. Weights are raw intent; the backend normalizes them
@@ -921,37 +910,35 @@ public:
     /// id pass draws, which stay on stock PBS and why, and how many decode draws
     /// the atom items' materials need (AtomDrawStatus). Computes the bucket keys
     /// (no shader is compiled); a tool and test read, not a per-frame one.
-    virtual AtomDrawStatus atomDrawStatus() { return AtomDrawStatus(); }
+    virtual AtomDrawStatus atomDrawStatus() = 0;
     /// ...its `on` alone (BUGS-1 item 10): the split is live here - the GPU scene exists, this device runs the id
     /// pass and the measurement door is open - without the status walk (every item's route and bucket key, the cut's
     /// and the density's reads) a verb that answers only `on` used to pay.
-    virtual bool atomDrawOn() const { return false; }
+    virtual bool atomDrawOn() const;
     /// THE CUT PROBE (ATOM-2 stage 1; AtomCutProbe — a measuring door, never a frame's path): arms the NEXT frame of
     /// the first view of this scene that carries the id pass to record every group decision of its cut, the clusters
     /// it drew and its visible Atom pixels per object; false where nothing can record it (no id pass). `atomCutProbe`
     /// then reads that frame back (a synchronous read) and disarms: true with `out.valid` once the armed frame has
     /// been drawn and no later frame has overwritten it, false while it is still owed (render a frame and ask again).
-    virtual bool armAtomCutProbe() { return false; }
-    virtual bool atomCutProbe(AtomCutProbe &out) { out = AtomCutProbe(); return false; }
+    virtual bool armAtomCutProbe() = 0;
+    virtual bool atomCutProbe(AtomCutProbe &out) = 0;
     /// ...and the arming taken back (BUGS-1 item 7): a caller that gave up waiting for the armed frame disarms, so no
     /// LATER frame records a probe nobody reads (and a later read answers "not armed").
-    virtual void disarmAtomCutProbe() {}
+    virtual void disarmAtomCutProbe() = 0;
     /// THE SUN MAPS' CONTENT (ShadowMapDigest; a test door: a synchronous read of the first view's
     /// shadow atlas). False without a view or an atlas.
-    virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) { out.clear(); return false; }
+    virtual bool shadowMapDigests(std::vector<ShadowMapDigest> &out) = 0;
     /// THE SUN MAPS' CASTERS BY ROUTE (ShadowRouteShare; a measuring door). False without a view or a sun.
-    virtual bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) { out.clear(); return false; }
+    virtual bool shadowCasterRoutes(std::vector<ShadowRouteShare> &out) = 0;
     /// THE COVERAGE A/B (CoverageCompare; a measuring door, ENGINE-POLISH-ATOM-1 stage 3's silhouette bound): a
     /// synchronous read of the first view's final depth and of its sun maps into snapshot `slot` (0 or 1), and the
     /// two snapshots compared. False without a view.
-    virtual bool coverageSnapshot(unsigned slot) { (void)slot; return false; }
-    virtual bool coverageCompare(float viewRelDepth, float mapDepthTexels, bool maskedOnly, CoverageCompare &out) {
-        (void)viewRelDepth; (void)mapDepthTexels; (void)maskedOnly; out = CoverageCompare(); return false;
-    }
+    virtual bool coverageSnapshot(unsigned slot) = 0;
+    virtual bool coverageCompare(float viewRelDepth, float mapDepthTexels, bool maskedOnly, CoverageCompare &out) = 0;
     /// THE MEASUREMENT DOOR of the visibility buffer (a tool's A/B, never a mode):
     /// off, every item draws through PBS and every view's chain is rebuilt without
     /// the id pass. On by default.
-    virtual void setAtomDrawEnabled(bool on) { (void)on; }
+    virtual void setAtomDrawEnabled(bool on) = 0;
     /// THE MEASURING DOOR OF THE ID PASS'S OCCLUSION (ATOM-OCCLUSION-1; a tool's A/B,
     /// never a mode, not saved): on (the default) every view that carries the id pass
     /// culls the Atom queue against the depth pyramid in the two-pass form — the
@@ -959,52 +946,48 @@ public:
     /// frame's — and draws exactly the same picture; off, every chain is rebuilt
     /// frustum-only (no pyramid, no late pass). AtomDrawStatus::occluded and
     /// ::disoccluded count what it does.
-    virtual void setAtomOcclusionEnabled(bool on) { (void)on; }
+    virtual void setAtomOcclusionEnabled(bool on) = 0;
     /// THE MEASURING DOOR OF THE SUN MAPS' RECEIVER TEST (ENGINE-UPGRADE-U5 stage 4b; a tool's A/B and the parity
     /// arm, never a mode, not saved): on (the default) a sun map's caster cut draws only the clusters whose shadow
     /// can fall on a surface the camera sees; off, every cluster the light's frustum and depth keep.
-    virtual void setShadowReceiverCull(bool on) { (void)on; }
+    virtual void setShadowReceiverCull(bool on) = 0;
     /// A TEST DOOR (ATOM-BLACK-FRAMES-1's coverage trace; never a mode, not saved): every
     /// view of this scene re-creates its id pass's cut buffers at `indices` of stream on
     /// its next frame — smaller than the need, the overflow path runs (the root cut from
     /// the reserve, the stats ring's report, the budget's growth), exactly as
     /// GpuCull::setCutBudgetForTest does for an engine suite.
-    virtual void setAtomCutBudgetForTest(unsigned indices) { (void)indices; }
-    /// THE ATOM VIEW (AtomView, Types.h): the false-colour picture of the
+    virtual void setAtomCutBudgetForTest(unsigned indices) = 0;
+    /// THE ATOM VIEW (AtomView, Overlay.h): the false-colour picture of the
     /// visibility buffer over every view of this scene that carries the id pass.
     /// Switching it rebuilds nothing (the chain's pass is gated by the workspace's
     /// execution mask); Off is byte-identical to a scene that never had it.
-    virtual void setAtomView(AtomView view) { (void)view; }
+    virtual void setAtomView(AtomView view) = 0;
     // Whether the view can paint (the split is live AND every windowed view carries the id pass) is
     // PublishedFrame::atomViewPaintable — hosts refuse a mode other than Off when it is false.
-    /// THE PHOTON VIEW (PhotonView, Types.h): the lighting's debug pictures over
+    /// THE PHOTON VIEW (PhotonView, Overlay.h): the lighting's debug pictures over
     /// every view of this scene that draws the post chain. Switching it rebuilds
     /// nothing; Off is byte-identical to a scene that never had it.
-    virtual void setPhotonView(PhotonView view) { (void)view; }
+    virtual void setPhotonView(PhotonView view);
     // WHY a mode cannot paint right now ("" = it can; Off always can) is PublishedFrame::photonViewRefusals[view] —
     // hosts refuse a mode with a reason.
     /// WHICH CASCADE the Voxels picture shows: -1 (the default) the finest that
     /// holds the scene's whole lit content (the outermost when none does), n the
     /// chain's cascade n (clamped to the chain). Not saved.
-    virtual void setPhotonVoxelCascade(int cascade) { (void)cascade; }
+    virtual void setPhotonVoxelCascade(int cascade) = 0;
     // THE GPU SCENE'S TEST AND TOOL DOOR (A3 slice). `gpuSceneStatus` is
     // counters and costs nothing; `gpuSceneEntry` reads the CPU mirror (the
     // authoritative copy); `gpuSceneDeviceEntry` DOWNLOADS the device table,
     // which flushes the render system's recorded commands first and is
     // therefore a suite's verb and never a frame's.
     // -> Scene::published().gpuScene (U3 stage 2b).
-    virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const {
-        (void)slot; (void)out; return false;
-    }
+    virtual bool gpuSceneEntry(unsigned slot, GpuSceneEntry &out) const = 0;
     virtual bool gpuSceneDeviceEntries(unsigned first, unsigned count,
-                                       std::vector<GpuSceneEntry> &out) {
-        (void)first; (void)count; out.clear(); return false;
-    }
+                                       std::vector<GpuSceneEntry> &out) = 0;
     /// Runs the dirty scan NOW and records its cost in
     /// `GpuSceneStatus::lastScanMicros`. A suite's verb: the scan is
     /// epoch-gated and idempotent, so this measures the same walk a frame
     /// would run, with the timing that a frame deliberately does not pay.
-    virtual void measureGpuSceneScan(bool graphIsCurrent) { (void)graphIsCurrent; }
+    virtual void measureGpuSceneScan(bool graphIsCurrent) = 0;
     /// SURFACE-CACHE phase 2 — the card cache's TEST AND TOOL readbacks.
     ///
     /// The cache itself has no verb: it is configured through
@@ -1019,10 +1002,7 @@ public:
     /// card's own parameters in [0, 1]. Both readbacks flush the render
     /// system's commands first (the AsyncTextureTicket rule) and block.
     virtual bool readCardTexel(NodeId, unsigned /*card*/, float /*u*/, float /*v*/,
-                               CardSample &out) {
-        out = CardSample();
-        return false;
-    }
+                               CardSample &out) = 0;
     /// ...and the question a ray's hit asks, answered on the CPU: what does
     /// the cache hold at this WORLD POINT, on a surface facing this way?
     /// Lumen's own order — the cards facing the normal, projected with three
@@ -1032,31 +1012,17 @@ public:
     /// the pick to one instance's cards, the ray job's own scope. The ray job's
     /// GPU port of this read is held to it by gi.card_read_parity.
     virtual bool readCardAt(const Vec3 & /*world*/, const Vec3 & /*normal*/, CardSample &out,
-                            NodeId /*onlyNode*/ = 0) {
-        out = CardSample();
-        return false;
-    }
+                            NodeId /*onlyNode*/ = 0) = 0;
     /// EVERY RESIDENT CARD'S RADIANCE, WHOLE (PHOTON-7 stage 5's oracle door): one download of the lit atlas, sliced per
     /// card, with each card's relight frames (`cacheFrame` the cache's frame now). Flushes the commands and blocks.
-    virtual bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) {
-        out.clear();
-        cacheFrame = 0ull;
-        return false;
-    }
-    /// EVERY FACE'S DEMAND (PHOTON-7 stage 7; Types.h's CardFaceDemand): under the measuring arm cards.demandCount, each
+    virtual bool readCardRadiance(std::vector<CardRadiance> &out, unsigned long long &cacheFrame) = 0;
+    /// EVERY FACE'S DEMAND (PHOTON-7 stage 7; GiCards.h's CardFaceDemand): under the measuring arm cards.demandCount, each
     /// face the readers read, resident or not - the read rate the residency's settle law is stated in (`cacheFrame` the
     /// cache's frame now). Empty with the arm off.
-    virtual bool readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) {
-        out.clear();
-        cacheFrame = 0ull;
-        return false;
-    }
+    virtual bool readCardFaceDemand(std::vector<CardFaceDemand> &out, unsigned long long &cacheFrame) = 0;
     /// Writes every layer of every RESIDENT card to `<prefix>-<layer><n>.png`.
     /// A tool path for reading a capture channel by channel.
-    virtual bool dumpCardAtlas(const std::string & /*prefix*/, std::string &err) {
-        err = "no surface cache in this build";
-        return false;
-    }
+    virtual bool dumpCardAtlas(const std::string & /*prefix*/, std::string &err) = 0;
     /// THE SCREEN-PROBE GATHER'S TUNING -- TEST AND TOOL ONLY
     /// (SPECS/SCREEN_PROBE_GATHER_SPEC.md; the switch is `GiParams::gather`,
     /// pushed with the rest of the GI configuration).
@@ -1066,25 +1032,23 @@ public:
     /// time -- the probe stride, the ray count, the adaptive budget, the
     /// determinism arm that holds the frame index, the ray length. It is not
     /// a document row and never reaches a panel: a person tunes the TIER.
-    virtual void setGatherTuning(const GatherTuning &) {}
-    /// THE GI PLACEMENT PIN (Types.h GiPlacementPin; PHOTON-2's stillness door) — a MEASURING DOOR: the cascades'
+    virtual void setGatherTuning(const GatherTuning &);
+    /// THE GI PLACEMENT PIN (GiParams.h GiPlacementPin; PHOTON-2's stillness door) — a MEASURING DOOR: the cascades'
     /// and the field's placements taken from a recorded state at their next re-placement, until a pin with `on`
     /// false. A message: it applies at the next frame's drain.
-    virtual void setGiPlacementPin(const GiPlacementPin &) {}
-    /// THE CASCADES' VOXEL DIGESTS WITHOUT A WAIT (Types.h GiVoxelDigests; the stillness door's path check, PHOTON-2
+    virtual void setGiPlacementPin(const GiPlacementPin &) = 0;
+    /// THE CASCADES' VOXEL DIGESTS WITHOUT A WAIT (GiParams.h GiVoxelDigests; the stillness door's path check, PHOTON-2
     /// stage 2's round H5): a MESSAGE - the render thread fills `out` at its next frame's drain and sets `ready`; the
     /// host renders on and polls. (giVoxelStats answers the same digests with every statistic, synchronously: a host
     /// waits for its downloads.)
-    virtual void requestGiVoxelDigests(const std::shared_ptr<GiVoxelDigests> &out) {
-        if (out) out->ready = true;
-    }
+    virtual void requestGiVoxelDigests(const std::shared_ptr<GiVoxelDigests> &out) = 0;
 
-    /// HARD SUN CONTACT SHADOWS (Types.h `SunContactDesc`; PHOTON P5 RY-R3).
+    /// HARD SUN CONTACT SHADOWS (GiParams.h `SunContactDesc`; PHOTON P5 RY-R3).
     /// The project's row, pushed by the host from the document like the ray
     /// row: storing it builds nothing; a view whose scene resolves it on gains
     /// the prepass the rays start from on its next frame. Off by default.
-    virtual void setSunContact(const SunContactDesc &) {}
-    // What the job did on the last drawn frame (Types.h `SunContactStatus`).
+    virtual void setSunContact(const SunContactDesc &) = 0;
+    // What the job did on the last drawn frame (GiGather.h `SunContactStatus`).
     // -> Scene::published().sunContact (U3 stage 2b).
 
     /// WHAT THE VOXEL LIGHTING VOLUME HOLDS (PHOTON-M3) — a TEST AND TOOL
@@ -1103,18 +1067,18 @@ public:
     /// `traceRays` above. Answers `available = false` — and nothing else —
     /// without a VCT arm, without that cascade, or on a device that refuses
     /// the download.
-    virtual GiVoxelStats giVoxelStats(int cascade) { (void)cascade; return GiVoxelStats(); }
+    virtual GiVoxelStats giVoxelStats(int cascade) = 0;
     /// THE IRRADIANCE FIELD'S ATLASES (PHOTON-WRITER-1) — a TEST AND TOOL readback
     /// (flushes and BLOCKS on a download of both atlases, never a frame path):
     /// the proof that a scrolled field kept the probes that stayed in its window
     /// byte for byte. False without a bound field.
-    virtual bool giFieldAtlas(GiFieldAtlas &out) { out = GiFieldAtlas(); return false; }
+    virtual bool giFieldAtlas(GiFieldAtlas &out) = 0;
     /// ONE CASCADE'S VOXELS, WHOLE (PHOTON-VOXEL-3) — a TEST AND TOOL readback
     /// (flushes and BLOCKS on three whole-volume downloads): mip 0 of the total
     /// light, the albedo and the per-axis coverage volume, decoded (Types.h
     /// GiVoxelVolume). False
     /// without a VCT arm or that cascade.
-    virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    virtual bool giVoxelVolume(int cascade, GiVoxelVolume &out) = 0;
     /// ...ITS LIGHT ALONE (PHOTON-7 stage 4) - the same TEST AND TOOL readback (flushes and BLOCKS): the half store as
     /// stored (`halfLight`, VOXEL-R13), `light` the cell's light derived from its six halves (Types.h
     /// GiVoxelVolume::light), and the placement
@@ -1122,22 +1086,19 @@ public:
     /// whole door decodes a dozen volumes and every directional level).
     /// `worldLo` / `worldHi` (both or neither, world metres): THE CELLS THAT BOX REACHES alone, as giVoxelHalves' box (its
     /// own `width` / `height` / `depth`, `origin` its first cell's corner) - and only those rows downloaded.
-    virtual bool giVoxelLight(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr, const float *worldHi = nullptr)
-    {
-        (void)cascade; (void)worldLo; (void)worldHi; out = GiVoxelVolume(); return false;
-    }
+    virtual bool giVoxelLight(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr, const float *worldHi = nullptr) = 0;
     /// ...ITS HALF STORE AS STORED (BISTRO-REST-1; a TEST readback, flushes and BLOCKS): level 0 of the half light, the
-    /// texture's own RGBA16F words in its texel order (Types.h GiVoxelVolume::halfLight's layout, four words a texel), NO
+    /// texture's own RGBA16F words in its texel order (GiVoxels.h GiVoxelVolume::halfLight's layout, four words a texel), NO
     /// decode - for a law that compares the store word for word (a rest that writes nothing: the same words). False
     /// without that cascade.
-    virtual bool giHalfStoreWords(int cascade, std::vector<std::uint16_t> &out) { (void)cascade; out.clear(); return false; }
+    virtual bool giHalfStoreWords(int cascade, std::vector<std::uint16_t> &out) = 0;
     /// ...ITS DIRECT TERM ALONE (BISTRO-REST-1; jahlab's `voxels <c> direct`, gi.light_is_world) - the same TEST AND TOOL
     /// readback (flushes and BLOCKS): the half store's direct terms (`halfDirect`), `direct` the cell's direct derived from
-    /// its six halves as `light` is (Types.h GiVoxelVolume::direct), and the placement; every other member left empty.
+    /// its six halves as `light` is (GiVoxels.h GiVoxelVolume::direct), and the placement; every other member left empty.
     /// One volume, where the whole door decodes some twenty-five (the half store, every voxeliser volume, the albedo's
     /// levels and every directional level): about two seconds a dump in Debug since VOXEL-R13. False where the cascade
     /// keeps no direct term (no bounce).
-    virtual bool giVoxelDirect(int cascade, GiVoxelVolume &out) { (void)cascade; out = GiVoxelVolume(); return false; }
+    virtual bool giVoxelDirect(int cascade, GiVoxelVolume &out) = 0;
     /// ...ITS HALF STORE (VOXEL-R13 stage 1) - the same TEST AND TOOL readback (flushes and BLOCKS): `halfLight` and
     /// `halfDirect` (the six half lights and their direct terms), the halves' own faces (`halfSide`, `halfNormal`), the
     /// coverage and the surface position per half, and the placement; every other member empty.
@@ -1146,24 +1107,21 @@ public:
     /// whole cascade decoded in Debug cost a fixture about a second and a half a cascade); only the box's rows and
     /// slices are downloaded (BISTRO-REST-1: twelve whole volumes a read before).
     virtual bool giVoxelHalves(int cascade, GiVoxelVolume &out, const float *worldLo = nullptr,
-                               const float *worldHi = nullptr)
-    {
-        (void)cascade; (void)worldLo; (void)worldHi; out = GiVoxelVolume(); return false;
-    }
+                               const float *worldHi = nullptr) = 0;
     /// THE VOXEL SIDES' ESCAPE SHARES of cascade 0 (GiVoxelSideShares; PHOTON-7 11-2 (6)) as the ray tier's last sides'
     /// gathers left them - a host-visible copy, read without a stall (a few frames behind the GPU). False without the ray
     /// tier's sides' gather or before its first cascade-0 pass.
-    virtual bool giVoxelSideShares(GiVoxelSideShares &out) { out = GiVoxelSideShares(); return false; }
+    virtual bool giVoxelSideShares(GiVoxelSideShares &out) = 0;
     /// THE FEEDBACK'S BRICK STATE of one cascade as it stands (GiFeedbackBricks; a stalling readback - a law's instrument:
     /// the store's rounding orbits against their bricks' bounds). False without a built cascade there.
-    virtual bool giFeedbackBricks(int cascade, GiFeedbackBricks &out) { (void)cascade; out = GiFeedbackBricks(); return false; }
-    /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; Types.h GiChangedRegions) - the CPU copy of the
+    virtual bool giFeedbackBricks(int cascade, GiFeedbackBricks &out) = 0;
+    /// THE CHANGED-REGION LIST AS IT LAST CLOSED (PHOTON-7 stage 3; GiStatus.h GiChangedRegions) - the CPU copy of the
     /// one buffer the consumers bind, no GPU read. False before a list has closed (no frame has drawn the scene).
-    virtual bool giChangedRegions(GiChangedRegions &out) { out = GiChangedRegions(); return false; }
-    /// ONE CASCADE'S BRICK MASK (PHOTON-7 stage 3; Types.h GiBrickMask), TAKEN: the brick-wise most of the readings
+    virtual bool giChangedRegions(GiChangedRegions &out) = 0;
+    /// ONE CASCADE'S BRICK MASK (PHOTON-7 stage 3; GiStatus.h GiBrickMask), TAKEN: the brick-wise most of the readings
     /// landed since the last take, in codes; the fold starts again. No GPU wait (the readings land a few frames late).
     /// False without that cascade or before a reading landed.
-    virtual bool takeGiBrickMask(int cascade, GiBrickMask &out) { (void)cascade; out = GiBrickMask(); return false; }
+    virtual bool takeGiBrickMask(int cascade, GiBrickMask &out) = 0;
     /// TRACE A BATCH OF RAYS against this scene's acceleration structure and
     /// wait for the answer — a TEST AND TOOL path, never a per-frame one.
     ///
@@ -1188,11 +1146,7 @@ public:
     ///
     /// False when the tier is off, unavailable, or the scene has no structure
     /// yet (render one frame first).
-    virtual bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) {
-        (void)rays;
-        hits.clear();
-        return false;
-    }
+    virtual bool traceRays(const std::vector<float> &rays, std::vector<float> &hits) = 0;
 
     /// "This object must not decide WHERE the reflection-probe grid is placed"
     /// (REFLECTIONS_ADOPTION_SPEC.md P1a; renamed by D4-PHOTON-TIERS). The object
@@ -1525,7 +1479,7 @@ public:
     /// of Engine::published().views, BY VALUE (one lookup, by id; nothing points into the double-buffered frame) — the
     /// achieved target size and sample count, the frames presented, the generations. A default row (id 0) before the
     /// view's first frame.
-    virtual PublishedEngineFrame::ViewFrames published() const = 0;
+    virtual ViewFrames published() const = 0;
     /// WHAT THE HOST LAST PUSHED for this view (ENGINE-UPGRADE-U3 stage 2 — the host's own shadow, F5): the chain, the
     /// clear colour, the shadows flag, the enable, the overlay and the picture-in-picture, each as the host last set it, by a setter or by a view part of a
     /// submitted record (its merge, on the submitting side). NEVER the engine's applied state — a record's part lands
@@ -2031,7 +1985,7 @@ public:
     /// session the runtime took away, at the close of the frame that saw it (VrStatus::active as the next frame
     /// reads it).
     /// The host's record AND the snapshot (decision 45, D5): a session the runtime ended is gone for the host too.
-    bool vrSessionLive() const { return mHostVrSessionLive && (!mHostRecordsMode || published().vrSessionLive); }
+    bool vrSessionLive() const;
     /// THE DEVICE'S CONSTANTS, fixed the moment the device exists (the first view, or a scene before any view —
     /// prepareDevice): its identity and whether it can trace rays. Defaults (an empty name, false) before.
     DeviceInfo deviceInfo() const { return mDeviceInfo; }
@@ -2917,7 +2871,7 @@ public:
     /// GI rebuild and a workspace recreation.
     virtual void setFrameMonitor(MonitorLevel level) = 0;
 
-    // ---- THE ARM REGISTRY (lane TEST-1; Types.h ArmInfo) -------------------
+    // ---- THE ARM REGISTRY (lane TEST-1; Monitor.h ArmInfo) -------------------
     /// Sets a measurement arm by name. The value is LATCHED at the start of the
     /// next frame (a frame never reads two values of one arm). False, with
     /// lastError(), for a name the registry does not hold or a value outside the
@@ -2927,7 +2881,7 @@ public:
     /// default, its range and what it changes.
     virtual std::vector<ArmInfo> arms() const = 0;
 
-    // ---- THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Types.h ValidationStatus) ----
+    // ---- THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Monitor.h ValidationStatus) ----
     /// Read now: was the Khronos validation layer asked for, is it live on this engine's
     /// device, and which layer libraries did the loader load. Every row that runs under the
     /// layer asserts `requested && active` — a layered row whose layer never loaded is
@@ -3219,10 +3173,7 @@ public:
     /// GiLaw::Card a card texel's stored terms, read and move (jah_card_view.glsl, rq_card_law.comp, gi.card_law) - each a
     /// test-only compute job. A MEASUREMENT (dispatch, stall) - a suite, never a frame. False without a ray-query device
     /// (the reason in takeLastError()).
-    virtual bool giLaw(GiLaw law, const std::vector<GiLawQuestion> &questions, std::vector<GiLawAnswer> &out)
-    {
-        (void)law; (void)questions; out.clear(); return false;
-    }
+    virtual bool giLaw(GiLaw law, const std::vector<GiLawQuestion> &questions, std::vector<GiLawAnswer> &out) = 0;
 
     /// THE ENVIRONMENT'S CONE LOOKUP, MEASURED (PHOTON-ENV-1). Evaluates the one
     /// environment's cone lookup (jah_environment.glsl's jahEnvCone) for every

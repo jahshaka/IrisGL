@@ -18,6 +18,7 @@
 
 #include <map>
 #include <utility>
+#include "jahshaka/engine/Ids.h"
 
 namespace Ogre
 {

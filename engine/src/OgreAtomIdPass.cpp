@@ -78,6 +78,8 @@
 #include "rayquery/atom_id_masked_frag_spv.h"
 #include "rayquery/atom_id_masked_vert_spv.h"
 #include "rayquery/atom_id_vert_spv.h"
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Culling.h"
 #endif
 
 namespace jahshaka {

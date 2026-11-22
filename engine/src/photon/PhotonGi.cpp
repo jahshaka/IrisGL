@@ -46,6 +46,15 @@
 #include <Vao/OgreIndexBufferPacked.h>
 #include <Vao/OgreUavBufferPacked.h>
 #include <Vao/OgreVertexArrayObject.h>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/GiVoxels.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -1058,7 +1067,7 @@ GiStatus PhotonComponent::giStatus() const {
             st.ifdReadUnheld = mIfd->countReadUnheld();
         }
         {
-            // THE ONE SETTLE PREDICATE (Types.h, GiStatus::giAtRest; giInputsOwed) - AND THE CARDS OWE NOTHING
+            // THE ONE SETTLE PREDICATE (GiStatus.h, GiStatus::giAtRest; giInputsOwed) - AND THE CARDS OWE NOTHING
             // (PHOTON-7 stage 10, the contract fix): the stop's one decision taken, its captures, relights and
             // card-to-card rounds done, no report in flight (readersHoldOwed). "At rest" with the cards still relighting
             // was false since 10-2c: the voxels' sides and the reflection read the cards, and a screenshot taken
@@ -4865,7 +4874,7 @@ std::vector<GiParams::GiCascadeDesc> PhotonComponent::resolveCascadeTable() cons
         // meaning of "0 = the tier decides".
         if (d.halfSize <= 0.0f || d.resolution <= 0) { table.clear(); break; }
         GiParams::GiCascadeDesc e = d;
-        e.resolution = giCascadeResolution(d.resolution);   // 16..256, a multiple of 8 (Types.h: the passes' whole bricks)
+        e.resolution = giCascadeResolution(d.resolution);   // 16..256, a multiple of 8 (GiParams.h: the passes' whole bricks)
         // A PINNED STEP IS VALIDATED LIKE A DERIVED ONE (audit B10). The clamp
         // below was applied only where the engine derived the step, so a table
         // could ask for a step of a tenth of a cell (a re-centre every frame,
@@ -4898,7 +4907,7 @@ std::vector<GiParams::GiCascadeDesc> PhotonComponent::resolveCascadeTable() cons
         // the same reach at their own resolution: the far cascade is what stops
         // a corridor going black, and losing it would cost more picture than
         // the cells it saves.
-        // THE TIER TABLE IS `giQualityFacts` (Types.h) — the same function the
+        // THE TIER TABLE IS `giQualityFacts` (GiParams.h) — the same function the
         // app generates its tier descriptions from, so a chain the renderer
         // builds and a chain a tooltip promises are one table (render audit A5).
         // Low is 2 cascades at 64^3 and NOT the quality dial's 32 (PHOTON_SPEC
@@ -5093,7 +5102,7 @@ size_t PhotonComponent::buildCascadeArm(const Ogre::Vector3 &camPos) {
 
 // Re-centres one cascade's region on the cell lattice around `camPos` and
 // records the camera it was placed for. Does NOT voxelise.
-// THE CAMERA A CASCADE IS PLACED FOR: the eye, or under a placement pin (a measuring door, Types.h GiPlacementPin) the
+// THE CAMERA A CASCADE IS PLACED FOR: the eye, or under a placement pin (a measuring door, GiParams.h GiPlacementPin) the
 // pin's recorded camera - for EVERY placement decision the cascade takes (its step test and the jump guard, a scroll's
 // target, a rebuild's recentre), never the pin for one and the eye for another (PHOTON-7 stage 1, PREFLIGHT_1_2 W2: the
 // scroll aimed at the eye while its commit recentred at the pin - an assert in Debug, the store misplaced in Release).
@@ -5869,7 +5878,7 @@ bool PhotonComponent::rebuildCascade(size_t idx, GiStaleReason reason, bool *pla
 //
 // It is deliberately not a velocity or a time rule: the distance is the physics
 // (how far the volume is from describing where the camera is), a clock is not.
-static const float kStepHysteresis = kGiStepHysteresis;   // (Types.h: the level radius reads it)
+static const float kStepHysteresis = kGiStepHysteresis;   // (GiParams.h: the level radius reads it)
 
 // THE INCREMENTAL SCROLL'S SPREAD (PHOTON-7 stage 2; PREFLIGHT_1_2 §5.6): a scroll's entering slab is cut into chunks
 // and the chunks into A COUNT of frames - giCascadeScrollFrames: the cascade's motion slack walked at 1.4 m/s, the
@@ -9202,7 +9211,7 @@ void PhotonComponent::updateSurfaceCache() {
 }
 
 /// THE CACHE RAYS' LAST WORLD SHELL (PHOTON-7 stage 10, 10-1; jah_voxel_ray.glsl): the outermost cascade's GUARANTEED
-/// RADIUS (Types.h's giCascadeGuaranteedRadius, through its own function) - the ball about the head its box covers at
+/// RADIUS (GiParams.h's giCascadeGuaranteedRadius, through its own function) - the ball about the head its box covers at
 /// every placement, so a ray from near the head that has read that far unhit has left every placement's world and is
 /// the sky's, whichever way the scroll's hysteresis put the box. A ray from farther out may meet the box's face first:
 /// THE BAND, that ray the placement's.

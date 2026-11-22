@@ -27,6 +27,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Culling.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Overlay.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Published.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -414,7 +423,7 @@ const ViewOverlayDesc &OgreView::overlay() const { return mOverlay; }
 
 // ---------------------------------------------------------------------------
 // THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7). The graph shape and every
-// spike finding behind it: ViewPipDesc (Types.h) and chain::buildPip.
+// spike finding behind it: ViewPipDesc (Camera.h) and chain::buildPip.
 
 namespace {
 /// WRITES A CLEAR COLOUR THAT IS ALREADY ON THE GPU'S BOOKS.
@@ -1673,10 +1682,10 @@ Ogre::CompositorShadowNode *OgreView::shadowNodeInstance() const {
 bool OgreView::isEnabled() const { return drawing(); }
 
 // THE VIEW'S ROW OF THE ENGINE'S SNAPSHOT (ENGINE-UPGRADE-U3 stage 2b): what the last closed frame drew for it.
-PublishedEngineFrame::ViewFrames OgreView::published() const {
-    if (!mEngine) return PublishedEngineFrame::ViewFrames();
-    const PublishedEngineFrame::ViewFrames *row = mEngine->published().view(mIdentityId);
-    return row ? *row : PublishedEngineFrame::ViewFrames();
+ViewFrames OgreView::published() const {
+    if (!mEngine) return ViewFrames();
+    const ViewFrames *row = mEngine->published().view(mIdentityId);
+    return row ? *row : ViewFrames();
 }   // what draws (the host's wish and the session's cover)
 
 // The ACHIEVED size, exactly like sampleCount() reports the achieved sample

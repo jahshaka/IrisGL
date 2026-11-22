@@ -9,6 +9,9 @@
 //
 // NOTHING UNDER src/ OR irisgl/mirror MAY INCLUDE THIS HEADER (source.testing_rules R11): the host keeps its own.
 #include "Engine.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Sky.h"
 
 #include <cstdlib>
 

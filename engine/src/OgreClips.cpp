@@ -56,6 +56,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/Skeleton.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -249,7 +254,7 @@ bool OgreScene::attachClips(NodeId id, const ClipDesc *clips, size_t count) {
             // the FIRST match and throws if absent, so a second clip of the same
             // name would be unreachable forever. Uniquified here, and the
             // mapping is what clipNames reports back.
-            // The rule is clipNameFor (Types.h): a host that pushes a clip names it the same way the moment it pushes.
+            // The rule is clipNameFor (FrameInput.h): a host that pushes a clip names it the same way the moment it pushes.
             rec.name = clipNameFor(desc.name, nc.clips.size(),
                                    [&](const std::string &n) { return skel->hasAnimation(Ogre::IdString(n)); });
 

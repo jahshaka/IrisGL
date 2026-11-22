@@ -31,7 +31,7 @@
 // sampling was measured and refused (spikes/photon-gather-1c). SINCE
 // PHOTON-GATHER-1d: a hit reads its surface CARD first (the reflection's own
 // `jahHitRadiance`, GA-1e), and the row is ON BY TIER — `GiToggle::Auto`
-// resolves through the tier table's gather row (Types.h `GiGatherFacts`: High
+// resolves through the tier table's gather row (GiParams.h `GiGatherFacts`: High
 // and Epic on, Medium at 36 rays, Low off). SINCE PHOTON-GA-VR: STEREO — a
 // two-eye target gathers per EYE in the same four dispatches (each eye its own
 // layer and its own probe grid, LAYERED-STEREO-1; each eye reconstructs and
@@ -39,7 +39,10 @@
 // history is ONE PACKED 8-byte texel (16 B a pixel for the pair, every view).
 #pragma once
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
 #include "SurfaceCache.h"   // kViewLayers: the card read's view-term layers (PHOTON-CARDS-5)
 #include "MovingSample.h"   // the moving sample index's one rule (TEST-STREAMLINE-1 3c)
 #include "RayQueryViewCache.h"   // the ray tier's views of Ogre textures (GATHER-HANG-1)
@@ -490,7 +493,7 @@ struct GatherInputs {
     /// length.
     float farOverlap = 0.0f;
     /// THE DRAWN SURFACE'S BOUND against level 0, in full-resolution sample footprints (PHOTON-7 stage 6, READ_A W2,
-    /// READ_B F3: the origin law, Types.h rayOriginDrawnFootprints) - the probe sits on the drawn surface while its
+    /// READ_B F3: the origin law, Mesh.h rayOriginDrawnFootprints) - the probe sits on the drawn surface while its
     /// rays trace level 0. The host sets it every frame; 0 is the rays.originCut control.
     float drawnCutFootprints = rayOriginDrawnFootprints(kLodBudgetPixels, 0.0f);
     /// THE DEPTH-REBUILT POINT'S TERM (READ_B F5 (b), jah_ray_origin.glsl jahDepthPointError): the rasteriser's
@@ -509,7 +512,7 @@ struct GatherInputs {
 
     unsigned width = 0u, height = 0u;
 
-    /// THE TIER TABLE'S GATHER ROW for this scene (Types.h `GiGatherFacts`,
+    /// THE TIER TABLE'S GATHER ROW for this scene (GiParams.h `GiGatherFacts`,
     /// through `giQualityFacts` — the quality dial and the document's Epic
     /// tier): the stride, the octahedral resolution and the adaptive cap. Never
     /// the view's SSR row (GA-TIERROW). ...and the test door's overrides.

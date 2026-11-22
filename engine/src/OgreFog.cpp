@@ -39,6 +39,11 @@
 #include <OgreStagingTexture.h>
 #include <OgreTextureBox.h>
 #include <OgreTextureGpuManager.h>
+#include "jahshaka/engine/Fog.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Mesh.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

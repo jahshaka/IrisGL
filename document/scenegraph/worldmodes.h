@@ -16,7 +16,7 @@ For more information see the LICENSE file
 //
 // THE DOCUMENT'S TIER TABLE (LAB-1, 2026-10-22: moved down from Studio's src/services so the engine-only
 // harness `jahlab` sets a tier through the SAME table the app does — one table, two hosts). Pure document:
-// it writes iris::Scene fields and reads the engine's header-only tier facts (Types.h); no Studio type.
+// it writes iris::Scene fields and reads the engine's header-only tier facts (FrameInput.h); no Studio type.
 // The process's TEST tier (applyTestTier) stays Studio's (src/services/testtier.h).
 //
 // ONE TABLE, ONE FILE, in the ShortcutRegistry mould: every quality row the

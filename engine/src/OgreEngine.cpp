@@ -53,6 +53,24 @@
 #include <thread>
 
 #include "core/threadbudget.h"   // the multiload's width (THREADING-1)
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Config.h"
+#include "jahshaka/engine/Fog.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/Planar.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/Shaders.h"
+#include "jahshaka/engine/Sky.h"
+#include "jahshaka/engine/Stats.h"
+#include "jahshaka/engine/Vr.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {
@@ -189,7 +207,7 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
         // ABI mismatch still lands in Ogre's own sibling file.
         attachLogBridge();
         if (cfg.logSink) setLogSink(cfg.logSink);
-        // HEADLESS = the NULL render system (Types.h EngineConfig::headless).
+        // HEADLESS = the NULL render system (Config.h EngineConfig::headless).
         // It ships in every engine install unconditionally, needs no display,
         // no driver and no device, and its VaoManager/TextureGpuManager hand
         // out real objects backed by plain memory — meshes, Items, datablocks
@@ -375,7 +393,7 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
         // TWO WAYS TO SAY ZERO, and only one of them reaches Ogre as zero
         // (THREADING_ADOPTION_SPEC.md P5). `0` keeps its historical meaning —
         // "I do not care", answered with the old hardcoded 2 — while
-        // kSceneMainThreadOnly (Types.h) is the caller who genuinely wants no
+        // kSceneMainThreadOnly (Config.h) is the caller who genuinely wants no
         // pool: Ogre then sets mForceMainThread, spawns nothing, and runs every
         // parallel pass inline with no barrier (OgreSceneManager.cpp:171,
         // :4705-4717). Passing 1 instead is strictly worse — a thread is
@@ -616,7 +634,7 @@ View *OgreEngine::createView(const std::string &name,
     EngineSideScope engineSide;   // a join: the engine's own calls inside it are the render side's (U3 4a)
     if (viewNameTaken(name)) return nullptr;
     if (mHeadless) {
-        // A polite, documented refusal (Types.h EngineConfig::headless), not a
+        // A polite, documented refusal (Config.h EngineConfig::headless), not a
         // crash and not a View that draws nothing: the NULL render system has
         // no swapchain and no device to present with.
         (void)handle; (void)width; (void)height; (void)background;
@@ -808,7 +826,7 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
     if (viewNameTaken(name)) return nullptr;
     if (!width || !height) { mLastError = "createOffscreenView: zero size"; return nullptr; }
     if (mHeadless) {
-        // REFUSED, deliberately (Types.h EngineConfig::headless). The NULL
+        // REFUSED, deliberately (Config.h EngineConfig::headless). The NULL
         // render system would hand back a TextureGpu whose "contents" are
         // whatever malloc returned, and every readPixels caller in this tree
         // asserts on colours. A clean no with a reason beats a View that lies:
@@ -960,7 +978,7 @@ void OgreEngine::renderOneFrame() { mRenderThread.runOn([this] { mRenderThread.t
 
 // THE FRAME'S BODY (ENGINE-UPGRADE-U3 F7): the loop hands it the record the hand-over took.
 bool OgreEngine::runFrame(FrameInput &record, bool any) {
-    // LEGAL AND EMPTY WHEN HEADLESS (Types.h EngineConfig::headless): a
+    // LEGAL AND EMPTY WHEN HEADLESS (Config.h EngineConfig::headless): a
     // headless engine can hold no View, so every loop below iterates nothing
     // and Root::renderOneFrame walks a workspace-less render system. Hosts do
     // not have to special-case their frame loop; it simply costs nothing.
@@ -2891,7 +2909,7 @@ void OgreEngine::applyFrameDelta(float seconds) {
 }
 
 // ---------------------------------------------------------------------------
-// THE FRAME INPUT (ENGINE-UPGRADE-1 U0 3a; FrameInput in Types.h). submitFrame MERGES into the render loop's
+// THE FRAME INPUT (ENGINE-UPGRADE-1 U0 3a; FrameInput in FrameInput.h). submitFrame MERGES into the render loop's
 // hand-over slot (RenderThread::submit, ENGINE-UPGRADE-U3); the frame's head DRAINS the record the hand-over took —
 // every value a frame depends on lands here, in one place and one order: the frame's own fields, each scene's
 // environment, the engine-wide shadow pair, then each view.
@@ -3468,7 +3486,7 @@ void OgreEngine::fillPublished(PublishedEngineFrame &out) const {
     out.views.clear();
     for (const auto &v : mViews)
         if (v) {
-            PublishedEngineFrame::ViewFrames f;
+            ViewFrames f;
             f.id = v->id();
             f.name = v->name();
             f.presented = v->framesPresented();
@@ -4735,7 +4753,7 @@ void OgreEngine::createShadowNode() {
 }
 
 // ---------------------------------------------------------------------------
-// THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Types.h ValidationStatus). The probe
+// THE VALIDATION LAYER'S PROOF (TESTING-CLEANUP-2 H4; Monitor.h ValidationStatus). The probe
 // tests/atom ran alone (its validation_probe.h, deleted), generalised: with VK_LAYER_KHRONOS_validation
 // live on a device, that device's own entry points resolve INTO the layer's library (it
 // intercepts vkGetDeviceProcAddr), so where vkCmdDraw resolves is the proof.
@@ -4822,6 +4840,11 @@ std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &err
     detail::gRenderThreadId.store(std::this_thread::get_id(), std::memory_order_relaxed);
     if (!engine->init(cfg, error)) return nullptr;   // ~OgreEngine clears gLiveEngine
     return engine;
+}
+
+bool Engine::vrSessionLive() const
+{
+    return mHostVrSessionLive && (!mHostRecordsMode || published().vrSessionLive);
 }
 
 }}  // namespace jahshaka::engine

@@ -42,6 +42,9 @@
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Overlay.h"
 
 namespace jahshaka {
 namespace engine {

@@ -54,6 +54,9 @@
 #include <cstring>
 #include <limits>
 #include <unordered_map>
+#include "jahshaka/engine/GpuSceneRecords.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
 
 namespace jahshaka {
 namespace engine {
@@ -436,7 +439,7 @@ void GpuScene::setMeshDag(uint32_t meshIndex, std::vector<GpuCluster> clusters,
     if (meshIndex >= mMeshEntries.size()) return;
     if (boxes.size() != clusters.size()) boxes.assign(clusters.size(), GpuClusterBox());
     mMeshEntries[meshIndex].boxes = std::move(boxes);
-    // THE ROOT CUT (R8): Types.h clusterRootDrawn on the uploaded tables (error[0] the group's error, error[3] the
+    // THE ROOT CUT (R8): Mesh.h clusterRootDrawn on the uploaded tables (error[0] the group's error, error[3] the
     // clusters it produced; local group indices) - every current reference counts it.
     {
         MeshEntry &me = mMeshEntries[meshIndex];

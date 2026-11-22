@@ -147,7 +147,7 @@ struct MeshCard
 /// 8-32, each group simplified to about half and re-split, until one cluster is left, then an EMPTY TOP group. Every
 /// cluster is a member of exactly one group (`group`) and was produced by exactly one group (`refined`, -1 for a
 /// level-0 cluster); a group with no produced cluster draws nothing when it is affordable (the empty top: a thing
-/// under a pixel stops drawing). THE RENDER TEST is stated once in C++ in jahshaka/engine/Types.h (`clusterCut`) and
+/// under a pixel stops drawing). THE RENDER TEST is stated once in C++ in jahshaka/engine/Mesh.h (`clusterCut`) and
 /// once in GLSL (JahClusterCut.glsl): a cluster is drawn iff its own group's error is NOT affordable and its
 /// `refined` group's IS (or it is level 0).
 ///
@@ -243,7 +243,7 @@ public:
     /// one-step deviation chain of the DAG (import/atomdag/measure.h), monotone by construction — as a LENGTH in mesh
     /// units, positive and non-decreasing with i. Divided by the view distance it is a screen-space error; compared
     /// against a world-space cell size it answers "is this level fine enough for a voxel of that size". The one
-    /// selection rule over it is `lodLevelForWorldError` (jahshaka/engine/Types.h).
+    /// selection rule over it is `lodLevelForWorldError` (jahshaka/engine/Mesh.h).
     ///
     /// `lodErrors[i]` is a DIAGNOSTIC: the largest simplifier estimate of the groups that made level i+1's clusters.
     /// Nothing reads it to choose a level.

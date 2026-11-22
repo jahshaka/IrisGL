@@ -43,6 +43,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include "jahshaka/engine/Culling.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {

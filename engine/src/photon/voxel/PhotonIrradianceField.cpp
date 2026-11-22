@@ -50,6 +50,7 @@ THE SOFTWARE.
 #include "Vao/OgreTexBufferPacked.h"
 #include "Vao/OgreUavBufferPacked.h"
 #include "Vao/OgreVaoManager.h"
+#include "jahshaka/engine/Ids.h"
 
 
 namespace Ogre

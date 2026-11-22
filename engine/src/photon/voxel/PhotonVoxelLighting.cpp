@@ -58,6 +58,7 @@ THE SOFTWARE.
 #include "OgreDescriptorSetUav.h"
 
 #include <map>
+#include "jahshaka/engine/Ids.h"
 
 namespace Ogre
 {
@@ -531,7 +532,7 @@ namespace Ogre
         const uint32 width = albedoVox->getWidth();
         const uint32 height = albedoVox->getHeight();
         const uint32 depth = albedoVox->getDepth();
-        // EVERY AXIS A MULTIPLE OF 8 (NONDET-1 D1; giCascadeResolution, Types.h): the passes run whole 8^3 bricks and
+        // EVERY AXIS A MULTIPLE OF 8 (NONDET-1 D1; giCascadeResolution, GiParams.h): the passes run whole 8^3 bricks and
         // 4^3 groups with no bound check, and a cell past the edge lands in the next half's block of the half store.
         if( width % 8u || height % 8u || depth % 8u )
         {

@@ -28,6 +28,12 @@
 #include <OgreAsyncTextureTicket.h>
 #include <Vao/OgreVaoManager.h>
 #include <cstring>
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/Sky.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -215,7 +221,7 @@ bool OgreScene::setSky(const SkyDesc &desc) {
     // THE AERIAL PERSPECTIVE'S SCALE is an independent piece, for the same
     // reason as the disc above: it moves the air on every lit surface and NO
     // sky pixel, so dragging it must not re-capture the environment or rebuild
-    // a table. It is not part of AtmosphereSky's equality (Types.h says why);
+    // a table. It is not part of AtmosphereSky's equality (Sky.h says why);
     // it is a constant in the atmosphere's buffer. The probe faces are fogged
     // PBS renders, so they are stale exactly as a World fog edit makes them.
     // (It replaced AIR-HAZE-TOGGLE-1's on/off switch: 0 is off.)
@@ -1094,7 +1100,7 @@ void OgreScene::applyPendingSkyCapture() {
 
         // THE AMBIENT, off the sky the capture just took. The SUN DISC is
         // deliberately NOT in it (the compositor's queue range), and not in the
-        // reflections either: see the note on SunDisc::inProbes in Types.h for
+        // reflections either: see the note on SunDisc::inProbes in Sky.h for
         // what that switch can and cannot reach today.
         integrateSkyShFromCube(cube);
 
@@ -2175,12 +2181,12 @@ namespace {
 // (at 16 km a 2 km layer repeated itself ten times towards the horizon).
 constexpr float    kCloudTileMetres   = 64000.0f;   // one tile of the field, in world metres
 constexpr Ogre::uint32 kCloudFieldSize = 2048u;     // ~31 m a texel: the km edge ramp spans 50+
-// THE BUDGET IS THE PUBLIC NUMBER (Types.h kCloudFieldBytes): R16F, every mip to 1 x 1.
+// THE BUDGET IS THE PUBLIC NUMBER (Sky.h kCloudFieldBytes): R16F, every mip to 1 x 1.
 constexpr unsigned long long cloudFieldChainBytes(Ogre::uint32 n) {
     return n == 0u ? 0ull : 2ull * n * n + cloudFieldChainBytes(n / 2u);
 }
 static_assert(cloudFieldChainBytes(kCloudFieldSize) == kCloudFieldBytes,
-              "the cloud field's size and its stated budget (Types.h kCloudFieldBytes) disagree");
+              "the cloud field's size and its stated budget (Sky.h kCloudFieldBytes) disagree");
 constexpr Ogre::uint32 kCloudFootprintSize = 512u;  // the bake's footprint + blur grid (JahshakaClouds.compositor)
 constexpr float    kCloudTauFull      = 32.0f;      // a full column's optical depth at density 1 (a thick stratocumulus deck; its base transmits ~22 % diffusely)
 constexpr float    kCloudSlabMetres   = 1000.0f;    // the sheet's thickness the self-shadow crosses

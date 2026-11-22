@@ -53,6 +53,11 @@
 #include <OgreRoot.h>
 #include <OgreSceneManager.h>
 #include <OgreTextureGpuManager.h>
+#include "jahshaka/engine/Config.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Snapshot.h"
+#include "jahshaka/engine/Stats.h"
 
 namespace jahshaka { namespace engine { namespace detail { namespace monitor {
 
@@ -1272,7 +1277,7 @@ constexpr ArmDef kArms[] = {
     { ArmId::RaysOriginCut, 1.0, 0.0, 1.0,
       "THE RAY ORIGIN'S DRAWN TERM, A SCALE (PHOTON-7 stage 6, READ_A findings 2 and W1-W2, READ_B F3-F5): 1 = shipped, "
       "a ray leaving a pixel's drawn surface - the reflection's, the sun contact's, the gather's - starts off it by the "
-      "point's float bound plus the drawn surface's bound against level 0 (Types.h rayOriginDrawnFootprints: the "
+      "point's float bound plus the drawn surface's bound against level 0 (Mesh.h rayOriginDrawnFootprints: the "
       "tolerance x the LOD bias over the view's band, x the bake's drift ratio, at the point's Euclidean distance). The "
       "origin rows' controls: 0 = the float bound alone, 0.5 = half the term - a drawn surface that lies inside level 0 "
       "by more than that starts its rays inside it, and the rows must read red." },

@@ -38,6 +38,9 @@
 //    poolId 0 (shared with every PBR map) and its grayscale branch produces a
 //    NON-batched texture, which trips Decal::setDiffuseTexture's assert.
 #include "EnginePrivate.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {

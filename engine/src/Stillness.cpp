@@ -4,6 +4,14 @@
 #include "jahshaka/engine/Stillness.h"
 
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/RayQuery.h"
 
 #include <algorithm>
 #include <chrono>

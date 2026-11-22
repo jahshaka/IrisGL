@@ -1,4 +1,4 @@
-// THE PHOTON VIEW (PHOTON-VIEW-1; Types.h PhotonView) — the lighting's own debug
+// THE PHOTON VIEW (PHOTON-VIEW-1; Overlay.h PhotonView) — the lighting's own debug
 // pictures, beside the Atom view and in its shape: an enum in the boundary header,
 // a verb, a gated chain stage, nothing rebuilt when it switches, Off byte-identical.
 //
@@ -65,6 +65,8 @@
 #include <cmath>
 #include <string>
 #include <vector>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Overlay.h"
 
 namespace jahshaka {
 namespace engine {

@@ -9,7 +9,7 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include "jahshaka/engine/Types.h"   // reserveNodeId (U3 stage 3)
+#include "jahshaka/engine/Ids.h"
 #include "core/math/trs.h"
 #include "core/math/qtinterop.h"
 #include "core/math/mat4.h"

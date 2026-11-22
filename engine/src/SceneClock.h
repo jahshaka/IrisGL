@@ -1,5 +1,5 @@
 #pragma once
-// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; Types.h FrameInputScene::stepSerial says the law) — a pure value type: no Ogre,
+// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1; FrameInput.h FrameInputScene::stepSerial says the law) — a pure value type: no Ogre,
 // no Qt, no engine. OgreScene keeps one; the CPU rows (frame.clock_once, frame.two_scenes, frame.particle_scale,
 // frame.clock_drawn_only) drive it directly.
 //
@@ -12,7 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/FrameInput.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

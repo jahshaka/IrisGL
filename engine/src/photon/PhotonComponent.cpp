@@ -36,6 +36,11 @@
 #include <Compositor/OgreCompositorWorkspace.h>
 #include <Compositor/OgreCompositorWorkspaceDef.h>
 #include <Compositor/Pass/OgreCompositorPassDef.h>
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
 
 namespace jahshaka {
 namespace engine {

@@ -42,6 +42,9 @@
 #include <Vao/OgreVaoManager.h>
 
 #include <cstring>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Pictures.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {

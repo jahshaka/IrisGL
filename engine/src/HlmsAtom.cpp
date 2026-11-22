@@ -46,6 +46,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Materials.h"
 
 namespace jahshaka {
 namespace engine {

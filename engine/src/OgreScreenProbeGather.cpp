@@ -79,6 +79,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Monitor.h"
 
 namespace jahshaka {
 namespace engine {
@@ -1679,7 +1684,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     }
 
     // ---- WHAT THE TIER ASKS FOR: the tier table's gather row ----------------
-    // (Types.h `GiGatherFacts`, handed over in `in.facts`): 16 pixels a probe at
+    // (GiParams.h `GiGatherFacts`, handed over in `in.facts`): 16 pixels a probe at
     // Medium and High, 8 at Epic; 64 rays each, 36 at Medium. The ray budget is
     // NOT what decides these numbers — GATHER-0 measured the trace at 0.21 ns a
     // ray and found the 8,160-probe arm FASTER than a 2,040-probe one at the same

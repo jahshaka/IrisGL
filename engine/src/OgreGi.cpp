@@ -30,6 +30,10 @@
 #include <OgreHlmsAsyncCompiler.h>
 #include <OgreBitwise.h>
 #include <OgrePixelFormatGpuUtils.h>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Materials.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

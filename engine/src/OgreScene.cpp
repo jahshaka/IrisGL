@@ -24,6 +24,22 @@
 #include <algorithm>
 #include <array>
 #include <OgreSubItem.h>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Overlay.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/Skeleton.h"
+#include "jahshaka/engine/Sky.h"
+#include "jahshaka/engine/Stats.h"
+#include "jahshaka/engine/Vr.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -2602,3 +2618,13 @@ const SceneEcho *scene(const Scene *s) { return dynamic_cast<const SceneEcho *>(
 const ViewEcho *view(const View *v) { return dynamic_cast<const ViewEcho *>(v); }
 const EngineEcho *engine(const Engine *e) { return dynamic_cast<const EngineEcho *>(e); }
 }}}   // namespace jahshaka::engine::inspect
+
+namespace jahshaka { namespace engine {
+// SCENE's DEFAULT VERB BODIES, OUT OF LINE (ENGINE-HEADERS-1 call 8): a verb OgreScene does not override keeps its
+// default here, so Engine.h needs none of its types complete.
+bool Scene::atomDrawOn() const { return false; }
+
+void Scene::setPhotonView(PhotonView view) { (void)view; }
+
+void Scene::setGatherTuning(const GatherTuning &) {}
+}}  // namespace jahshaka::engine

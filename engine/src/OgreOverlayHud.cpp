@@ -72,6 +72,9 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Overlay.h"
+#include "jahshaka/engine/Stats.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace hud {

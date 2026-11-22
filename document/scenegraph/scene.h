@@ -360,7 +360,7 @@ struct HeightFog
 ///
 /// OFF BY DEFAULT, and a scene at the default writes NO `sunContact` key
 /// (SceneWriter) — so no shipped sample, fixture or selftest pose changes.
-/// The range's band — the renderer's (Types.h kSunContactMinRange/MaxRange),
+/// The range's band — the renderer's (GiGather.h kSunContactMinRange/MaxRange),
 /// restated because the document does not include the engine; SceneMirror,
 /// which includes both, asserts the two agree.
 constexpr float kSunContactMinRange = 0.05f;

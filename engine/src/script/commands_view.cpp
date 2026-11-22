@@ -5,6 +5,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Published.h"
 
 namespace jahshaka { namespace engine { namespace script {
 
@@ -127,7 +133,7 @@ void registerViewCommands(Host &host, const Commands &k)
               if (!v) return Value();
               Scene *s = v->scene();
               if (!s) return c.refuse("the view draws no scene");
-              const PublishedEngineFrame::ViewFrames row = v->published();
+              const ViewFrames row = v->published();
               const GiStatus g = s->published().gi;
               const inspect::SceneEcho *echo = inspect::scene(s);
               return Value(Value::Object{{"gather", Value(row.routeGather)}, {"integrate", Value(row.routeIntegrate)},

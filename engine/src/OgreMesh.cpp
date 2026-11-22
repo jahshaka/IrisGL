@@ -16,6 +16,10 @@
 #include <string>
 #include <algorithm>
 #include <unordered_map>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Stats.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -26,7 +30,7 @@ namespace jahshaka { namespace engine { namespace detail {
 // all, and two pixel-count ones, whose value is a projected AREA. Ours is the
 // only one that speaks the currency the bake produces — a world-space DEVIATION
 // — so the mesh's thresholds can be the BAKED ERRORS THEMSELVES and the level
-// the renderer picks is `lodLevelForWorldError` (Types.h) evaluated by Ogre's
+// the renderer picks is `lodLevelForWorldError` (Mesh.h) evaluated by Ogre's
 // own four-wide SoA loop:
 //
 //     value = (distance(centre, eye) - radius) * 2 * budget / (proj[1][1] * H)
@@ -150,7 +154,7 @@ public:
 
 private:
     /// MESH UNITS PER WORLD UNIT for one instance — the `meshToWorldScale`
-    /// divisor of the quality currency (`allowedWorldError`, Types.h), read
+    /// divisor of the quality currency (`allowedWorldError`, Mesh.h), read
     /// straight off the bounds Ogre already maintains.
     ///
     /// `mWorldRadius = mLocalRadius * max(derivedScale.x, .y, .z)` — verified in

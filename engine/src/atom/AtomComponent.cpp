@@ -14,6 +14,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <string>
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Overlay.h"
 
 namespace jahshaka {
 namespace engine {

@@ -12,7 +12,8 @@ For more information see the LICENSE file
 #include "document/scenegraph/worldmodes.h"
 
 #include "document/scenegraph/scene.h"
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
 
 #include <algorithm>
 
@@ -1563,7 +1564,7 @@ int photonBounces(PhotonTier t)   { return kPhotonTable[tierIndex(t)].bounces; }
 int photonProbeSize(PhotonTier t) { return kPhotonTable[tierIndex(t)].probeSize; }
 
 // THE GATHER COLUMN IS A PROJECTION, NOT A COPY (PHOTON-GATHER-1d): the engine's
-// tier table holds the gather row (Types.h GiGatherFacts — on/off, stride,
+// tier table holds the gather row (GiParams.h GiGatherFacts — on/off, stride,
 // octahedral resolution, adaptive cap) and this reads it for the tier's quality
 // row, so the column cannot drift from what the renderer does.
 jahshaka::engine::GiGatherFacts photonGather(PhotonTier t)

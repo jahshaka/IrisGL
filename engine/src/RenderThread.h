@@ -17,7 +17,9 @@
 //   * THE RENDER SIDE: tickInline() takes the slot under the same lock at the frame head (the HAND-OVER), stamps the
 //     serial THEN — never per submit — and an EMPTY slot is a legal hand-over that carries the last serial (F2).
 // Ogre-free: the engine's private TUs include it through EnginePrivate.h.
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Published.h"
 #include "SyncGetters.h"
 
 #include <atomic>

@@ -47,6 +47,9 @@
 #include <Animation/OgreSkeletonManager.h>
 
 #include <cstdio>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Skeleton.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

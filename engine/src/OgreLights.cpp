@@ -10,6 +10,11 @@
 #include <chrono>
 #include <map>
 #include <set>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Snapshot.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace lightextras {

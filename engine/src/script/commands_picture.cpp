@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include "jahshaka/engine/Pictures.h"
 
 namespace jahshaka { namespace engine { namespace script {
 

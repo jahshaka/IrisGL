@@ -17,6 +17,9 @@
 #include <vector>
 
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Mesh.h"
 
 namespace scenecmd {
 

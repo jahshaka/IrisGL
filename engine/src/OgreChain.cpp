@@ -110,6 +110,11 @@
 #include <OgreTextureUnitState.h>
 #include <OgreBitwise.h>
 #include <cstdlib>
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Planar.h"
+#include "jahshaka/engine/PostFx.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace chain {
@@ -1104,7 +1109,7 @@ void addAtomViewPass(Ogre::CompositorNodeDef *n, const ChainDesc &desc, ChainHan
     if (desc.letterbox) scissor(handles, q, /*clear=*/false);
 }
 
-/// THE PHOTON VIEW (PHOTON-VIEW-1; Types.h PhotonView), after every post pass and
+/// THE PHOTON VIEW (PHOTON-VIEW-1; Overlay.h PhotonView), after every post pass and
 /// the Atom view's quad, before the overlays — on the finished picture, so no
 /// history, exposure meter, bloom or G-buffer ever sees a debug drawable and the
 /// view Off is byte-identical. Gated stages:
@@ -3690,7 +3695,7 @@ void destroy(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
 
 // ---------------------------------------------------------------------------
 // THE PICTURE-IN-PICTURE INSET (CAMERAS_SPEC §7.7), ROUTE C. Design notes and
-// the full list of spike findings this obeys live on ViewPipDesc (Types.h);
+// the full list of spike findings this obeys live on ViewPipDesc (Camera.h);
 // what follows is only what is specific to the graph.
 //
 // WHY ROUTE C AND NOT THE SCENE PASS STRAIGHT INTO THE WINDOW. The inset used

@@ -41,6 +41,9 @@
 #include "script/commands.h"
 
 #include "jahshaka/engine/EngineInspect.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Published.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -156,7 +159,7 @@ bool Commands::frame(Call &c) const
         ran.store = !g.cascades.empty();
         const inspect::SceneEcho *se = inspect::scene(d.scene);
         ran.paused = se && se->giUpdateBudget() == 0;
-        const PublishedEngineFrame::ViewFrames row = d.view->published();
+        const ViewFrames row = d.view->published();
         pub.gather = row.routeGather; pub.integrate = row.routeIntegrate; pub.reflection = row.routeReflect;
         std::string line;
         const RouteJudgement j = judgeRoutes("view '" + d.view->name() + "'", d.words, ran, row.id != 0, pub,

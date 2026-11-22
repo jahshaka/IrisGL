@@ -1,5 +1,7 @@
 // THE NODE FAMILY (SCRIPT-IN-ENGINE-1): engine.node.* - a scene's nodes, by the engine's own ids.
 #include "script/commands.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
 
 namespace jahshaka { namespace engine { namespace script {
 

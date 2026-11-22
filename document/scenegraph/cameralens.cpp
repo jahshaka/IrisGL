@@ -10,7 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/scenegraph/cameralens.h"
-#include "jahshaka/engine/Types.h"   // filmToneGrey: the one C++ transcription of the film curve
+#include "jahshaka/engine/PostFx.h"
 
 #include <algorithm>
 #include <cmath>
@@ -229,7 +229,7 @@ namespace {
 /// FinalToneMapping_ps.glsl's jahFilmToneMap.
 double filmChannel(double x, const FilmParams &p)
 {
-    // THE ONE C++ TRANSCRIPTION of the scalar curve is the engine's (jahshaka/engine/Types.h filmToneGrey): the
+    // THE ONE C++ TRANSCRIPTION of the scalar curve is the engine's (jahshaka/engine/PostFx.h filmToneGrey): the
     // reflection rest's display slope reads the same arithmetic.
     return jahshaka::engine::filmToneGrey(x, p.slope, p.toe, p.shoulder, p.blackClip, p.whiteClip);
 }

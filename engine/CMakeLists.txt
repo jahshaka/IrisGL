@@ -824,11 +824,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ogre_head_inpu
 # perfectly valid. A custom command re-hashes the same file list on every build
 # and writes the value into a generated header; `copy_if_different` inside the
 # script keeps an unchanged value from cascading a rebuild.
-set(JAHSHAKA_ENGINE_BUILD_ID_HEADERS
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Engine.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/GpuSubstrate.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/PhotonStatus.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/Types.h)
+file(GLOB JAHSHAKA_ENGINE_BUILD_ID_HEADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/*.h)
+list(FILTER JAHSHAKA_ENGINE_BUILD_ID_HEADERS EXCLUDE REGEX "/(EngineInspect|Stillness|ProcessExit)\\.h$")
+list(SORT JAHSHAKA_ENGINE_BUILD_ID_HEADERS)
 # (the script host's sources are NOT inputs: JAHSHAKA_ENGINE_SCRIPT_SOURCES above says why; source.script_build_id)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
 # THE C++ THAT WRITES THE HLMS LAYER's BYTES (JAHSHAKA_SHADER_CACHE_CODE_ID): the container alone. A source of ours that

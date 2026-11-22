@@ -54,6 +54,11 @@
 #include <OgreDepthBuffer.h>
 
 #include <limits>       // keepNearestLamps' "unplaceable lamp" distance
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Stats.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

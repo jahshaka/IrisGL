@@ -92,6 +92,12 @@
 #include "rayquery/atom_caster_point_frag_spv.h"
 #include "rayquery/atom_caster_point_masked_frag_spv.h"
 #include "rayquery/atom_caster_vert_spv.h"
+#include "jahshaka/engine/Atom.h"
+#include "jahshaka/engine/Culling.h"
+#include "jahshaka/engine/GpuSceneRecords.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Monitor.h"
 #endif
 
 namespace jahshaka {

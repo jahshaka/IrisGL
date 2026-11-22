@@ -1,5 +1,8 @@
 // THE SCENE FAMILY (SCRIPT-IN-ENGINE-1): engine.scene.*, and what a scene holds - engine.mesh.*, engine.material.*.
 #include "script/commands.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Mesh.h"
 
 #include <algorithm>
 

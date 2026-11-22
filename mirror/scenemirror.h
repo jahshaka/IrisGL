@@ -36,6 +36,12 @@
 #include "irisgl/document/scenegraph/simulationclock.h"
 #include "irisgl/document/scenegraph/socket.h"
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Skeleton.h"
+#include "jahshaka/engine/Sky.h"
+#include "jahshaka/engine/Vr.h"
 
 // The graph-ownership handle (nodegraph.h's opaque pair) — forward-declared so
 // this header stays free of the graph API.
@@ -1858,7 +1864,7 @@ private:
     ///
     /// ONE VALUE FOR THE PROCESS, like the rest of the post-fx TUNING: Ogre's
     /// HDR materials are MaterialManager singletons, so the engine already
-    /// lives with the primary view's exposure everywhere (Types.h, PostFxDesc).
+    /// lives with the primary view's exposure everywhere (PostFx.h, PostFxDesc).
     /// The last view given an environment therefore speaks for the decision,
     /// which is the convention the chain itself follows.
     float mSunExposureGain = 1.0f;

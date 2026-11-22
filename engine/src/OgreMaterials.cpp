@@ -4,6 +4,11 @@
 #include "HlmsAtom.h"
 #include <algorithm>
 #include <cmath>
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Math.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
@@ -170,7 +175,7 @@ void OgreScene::applyPbr(Ogre::HlmsPbsDatablock *db, const PbrParams &p,
     // The shader really can produce NaNs there too, so this is a clamp, not a
     // log suppression; 1e-4 sits an order of magnitude above Ogre's own 1e-6
     // warning threshold and is visually indistinguishable from a mirror.
-    // The contract is stated on PbrParams::roughness in Types.h.
+    // The contract is stated on PbrParams::roughness in Materials.h.
     db->setRoughness(std::max(p.roughness, 1e-4f));
     db->setEmissive(Ogre::Vector3(p.emissive.r, p.emissive.g, p.emissive.b));
     db->setNormalMapWeight(p.normalMapWeight);

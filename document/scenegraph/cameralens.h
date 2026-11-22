@@ -113,7 +113,7 @@ float diagonalFovDeg(float verticalFovDeg, float aspect);
 /// `framingAspect`, when the real frame is WIDER than that.
 ///
 /// THE SAME POLICY THE ENGINE APPLIES WHEN IT DRAWS
-/// (jahshaka::engine::verticalFovForFramingAspect, engine/Types.h — the two are
+/// (jahshaka::engine::verticalFovForFramingAspect, engine/Camera.h — the two are
 /// deliberately NOT shared, because a document header may not include an engine
 /// one; the arithmetic below is the same pair of identities this file already
 /// exports, so there is no second formula, only a second call site):
@@ -536,7 +536,7 @@ const LensPreset     *lensPresets(int &count);
 // constructor, the reader and the writer, the camera's override keys, the
 // world.postFx / camera.postFx verbs and both panels, so an id, a default or
 // a range can never mean two things. The engine's twin is
-// jahshaka::engine::ImageGrade (Types.h), which carries the meaning of each.
+// jahshaka::engine::ImageGrade (PostFx.h), which carries the meaning of each.
 enum ImageParam {
     ImageContrast = 0,
     ImageSaturation,

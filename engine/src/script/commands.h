@@ -4,6 +4,7 @@
 // PER FAMILY (commands_<family>.cpp: a lane adding commands adds or edits its family's file, never one shared list);
 // commands_engine.cpp says the shape every command follows and registers the families. Private to the engine.
 #include "jahshaka/engine/Engine.h"
+#include "jahshaka/engine/Pictures.h"
 #include "jahshaka/engine/Script.h"
 #include "script/RouteDeclaration.h"
 

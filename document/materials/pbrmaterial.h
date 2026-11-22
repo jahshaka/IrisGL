@@ -117,7 +117,7 @@ public:
 
     // --- detail layers (MATERIAL_GAPS_SPEC GAP 2) ---
     /// HOW MANY detail layers a material carries. Mirrors the engine boundary's
-    /// kDetailLayerCount (jahshaka/engine/Types.h) — the document is the side
+    /// kDetailLayerCount (jahshaka/engine/Materials.h) — the document is the side
     /// that must not silently carry more than the renderer can bind, and this
     /// header cannot include the engine's (Studio's document layer never links
     /// it). A static_assert in the mirror keeps the two honest.

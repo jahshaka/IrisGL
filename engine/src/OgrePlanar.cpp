@@ -62,6 +62,9 @@
 #include <Compositor/Pass/PassScene/OgreCompositorPassSceneDef.h>
 #include <Compositor/Pass/PassMipmap/OgreCompositorPassMipmapDef.h>
 #include <Compositor/Pass/PassScene/OgreCompositorPassScene.h>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Planar.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace planar {

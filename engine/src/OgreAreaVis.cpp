@@ -32,6 +32,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

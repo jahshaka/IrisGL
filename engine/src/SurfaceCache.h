@@ -69,7 +69,9 @@
 // avoided.
 #pragma once
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
 #include "GpuUploadDelta.h"
 
 #include <Compositor/OgreCompositorWorkspaceListener.h>

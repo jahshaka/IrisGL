@@ -81,6 +81,14 @@
 #define XR_USE_GRAPHICS_API_VULKAN
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Config.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Pictures.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Vr.h"
 
 #endif  // JAH_VR
 
@@ -1452,7 +1460,7 @@ bool VrSession::create(std::string &reason) {
     // (automatic exposure across a +/-2.5 stop window) whatever the author had
     // chosen in the World panel. `SceneMirror::buildViewEnvironment` pushes the
     // project's description into this view every frame now, exactly as it does
-    // into the desktop's, and `applyVrViewPolicy` (Types.h) filters out what has
+    // into the desktop's, and `applyVrViewPolicy` (PostFx.h) filters out what has
     // no per-eye form yet — in ONE place, stated once, with the reason for every
     // entry.
     //

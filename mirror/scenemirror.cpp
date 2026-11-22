@@ -44,6 +44,26 @@
 #include <QFileInfo>
 #include <functional>
 #include <chrono>
+#include "jahshaka/engine/Camera.h"
+#include "jahshaka/engine/Config.h"
+#include "jahshaka/engine/Fog.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiGather.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Lights.h"
+#include "jahshaka/engine/Materials.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Particles.h"
+#include "jahshaka/engine/Planar.h"
+#include "jahshaka/engine/PostFx.h"
+#include "jahshaka/engine/Published.h"
+#include "jahshaka/engine/Skeleton.h"
+#include "jahshaka/engine/Sky.h"
+#include "jahshaka/engine/Vr.h"
 
 namespace {
 /// The change kinds that start a node's settle quiet clock (noteSettleWrite):
@@ -1057,7 +1077,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): this mirror is its ONE writer. The document's LIFETIME step serial
     // (monotone across play edges: SimulationClock::steps() resets there and the engine's cursor would read a rewind),
     // its grid step and its particle time scale; the engine advances the scene by the steps the serial moved since its
-    // last part, once (Types.h FrameInputScene::stepSerial). A second sync of the same frame stamps the same serial.
+    // last part, once (FrameInput.h FrameInputScene::stepSerial). A second sync of the same frame stamps the same serial.
     static_assert(jahshaka::engine::FrameInputScene::kMaxStepsPerFrame
                       == static_cast<unsigned long long>(iris::SimulationClock::kMaxStepsPerAdvance),
                   "a frame hands a scene at most the document's own catch-up bound");
@@ -2305,7 +2325,7 @@ void SceneMirror::setGridColours(const Colour &minor, const Colour &major)
 // MSAA/SMAA is treated poorly (GIZMO-2 measured all of that). Now the mirror
 // describes the grid — plane, cell, colours, thickness, fade — and the engine
 // draws it analytically from the camera ray with the plane's own depth
-// (Types.h GridDesc, OgreGrid.cpp, JahGrid_ps.glsl): infinite, anti-aliased,
+// (Sky.h GridDesc, OgreGrid.cpp, JahGrid_ps.glsl): infinite, anti-aliased,
 // one pixel wide at every distance, never z-fighting the floor, covered by
 // whatever stands on it. setGrid is idempotent, so this pushes every sync and
 // the description's own operator== is the change guard.
@@ -8577,7 +8597,7 @@ static CameraDesc toCameraDesc(const iris::CameraNodePtr &camera)
 //
 // THE DETERMINISM LAW is not re-implemented here and must not be: an offscreen
 // view discards the whole post description inside the engine unless a caller
-// deliberately opted in (PostFxDesc::allowOffscreen, Types.h). Thumbnails,
+// deliberately opted in (PostFxDesc::allowOffscreen, PostFx.h). Thumbnails,
 // previews and every pixel suite are therefore untouchable by construction, and
 // `screenshot({camera, postFx:true})` gets the camera's grade through the same
 // substitution because it opts in AFTER this runs.

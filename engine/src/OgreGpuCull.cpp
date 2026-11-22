@@ -54,6 +54,8 @@
 #include <chrono>
 #include <cstring>
 #include <vector>
+#include "jahshaka/engine/Culling.h"
+#include "jahshaka/engine/Monitor.h"
 
 namespace jahshaka {
 namespace engine {

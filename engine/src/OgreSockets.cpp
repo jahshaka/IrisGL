@@ -45,6 +45,8 @@
 #include <Animation/OgreSkeletonInstance.h>
 #include <Animation/OgreBone.h>
 #include <Animation/OgreTagPoint2.h>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

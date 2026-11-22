@@ -1,4 +1,4 @@
-// THE SHADER-DRAWN EDITOR GRID (GRID-2; Types.h GridDesc; media JahGrid.material).
+// THE SHADER-DRAWN EDITOR GRID (GRID-2; Sky.h GridDesc; media JahGrid.material).
 //
 // The sun disc's mechanism, for a helper: one Rectangle2D per scene at render
 // queue 13 — a v2 FAST queue after opaque geometry (10), before the blended surfaces
@@ -20,6 +20,7 @@
 #include <OgrePass.h>
 #include <OgreRectangle2D2.h>
 #include <OgreTechnique.h>
+#include "jahshaka/engine/Sky.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 namespace {

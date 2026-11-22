@@ -43,7 +43,16 @@
 #ifndef JAHSHAKA_ENGINE_PHOTONCOMPONENT_H
 #define JAHSHAKA_ENGINE_PHOTONCOMPONENT_H
 
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/GiModes.h"
+#include "jahshaka/engine/GiParams.h"
+#include "jahshaka/engine/GiStatus.h"
+#include "jahshaka/engine/GiVoxels.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Monitor.h"
+#include "jahshaka/engine/Overlay.h"
 #include "photon/PhotonDispatch.h"
 
 #include <OgrePixelFormatGpu.h>
@@ -655,7 +664,7 @@ public:
     PhotonView photonView() const { return mPhotonView; }
     void setPhotonVoxelCascade(int cascade) { mPhotonVoxelCascade = cascade < 0 ? -1 : cascade; }
     int photonVoxelCascade() const { return mPhotonVoxelCascade; }
-    // ---- THE CHANGED-REGION LIST (PHOTON-7 stage 3, AB S1; Types.h GiChangedRegions; PhotonComponent.cpp) ----------
+    // ---- THE CHANGED-REGION LIST (PHOTON-7 stage 3, AB S1; GiStatus.h GiChangedRegions; PhotonComponent.cpp) ----------
     /// A PRODUCER'S APPEND, at its point of the frame: a world box of `kind`. `cascadeMask` 0 = the cascades whose box
     /// meets it, taken at the close (a Slab names its own). At the cap the box MERGES into the entry of its kind whose
     /// margin grows least (the dirty path's metric) - never an overflow. An empty box lists nothing.
@@ -1451,7 +1460,7 @@ private:
     bool placedForCamera(size_t idx, const Ogre::Vector3 &eyePos) const;
 public:
     /// THE PLACEMENT PIN (Engine.h Scene::setGiPlacementPin, a measuring door).
-    /// The cascades' voxel digests (Types.h GiVoxelDigests), word-wise: Scene::requestGiVoxelDigests' render-thread half.
+    /// The cascades' voxel digests (GiParams.h GiVoxelDigests), word-wise: Scene::requestGiVoxelDigests' render-thread half.
     void giVoxelDigests(GiVoxelDigests &out);
     void setPlacementPin(const GiPlacementPin &pin) { mPlacementPin = pin; }
 private:

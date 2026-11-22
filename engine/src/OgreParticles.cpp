@@ -44,6 +44,9 @@
 #include "EnginePrivate.h"
 
 #include <cstdio>
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Math.h"
+#include "jahshaka/engine/Particles.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 

@@ -50,6 +50,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include "jahshaka/engine/GiCards.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Mesh.h"
+#include "jahshaka/engine/Monitor.h"
 
 // THE CAPTURES' ASYNCHRONOUS DRAWS, per SceneManager (ASYNC-SHADERS-1): a capture batch that met a
 // shader still building is discarded, and the engine leaves its draws out of the views' numbers.
@@ -80,7 +84,7 @@ namespace {
 /// scene rendering BLACK with nothing in any log.
 bool gCapturing = false;
 
-/// THE SIX AXIS FRAMES, read from THE CONTRACT (Types.h's cardAxisDirection /
+/// THE SIX AXIS FRAMES, read from THE CONTRACT (Mesh.h's cardAxisDirection /
 /// cardAxisU / cardAxisV — the one table the bake, the capture and phase 4's
 /// read all parameterise the same rectangle with). Cached as Ogre vectors
 /// because every card build multiplies them by a quaternion.
@@ -3284,7 +3288,7 @@ namespace {
 /// (cardFootprint's `margin`, sunLiftOf) — the ray starts that far off the card.
 constexpr float kFootprintMargin = 0.05f;
 /// THE STILL TRACE'S LIFT (rq_card_movers.comp's head; READ_A finding 3, READ_B finding 3 - the ORIGIN LAW every ray job
-/// keeps, Types.h rayOriginLevelLift): the origin moves off the receiver along the captured surface's GEOMETRIC normal by
+/// keeps, Mesh.h rayOriginLevelLift): the origin moves off the receiver along the captured surface's GEOMETRIC normal by
 /// THE CAPTURED LEVEL'S BOUND against level 0 (CardRec::levelBound, the stored bound, times the bake's drift ratio
 /// kLevelDriftOverBound: the surface the card captured lies within it of level 0, which every sun ray traces -
 /// PHOTON-7 stage 6, ONE RAY LEVEL PER MESH), plus the Depth layer's R16F quantum at the card's far end; the shader adds

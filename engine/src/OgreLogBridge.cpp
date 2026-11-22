@@ -24,6 +24,7 @@
 #include <OgreRenderSystemCapabilities.h>
 
 #include <mutex>
+#include "jahshaka/engine/Config.h"
 
 namespace jahshaka { namespace engine {
 namespace detail {

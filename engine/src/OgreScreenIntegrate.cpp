@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include "jahshaka/engine/GiModes.h"
 
 namespace jahshaka { namespace engine { namespace detail {
 
