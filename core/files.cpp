@@ -2,6 +2,7 @@
 #include "core/files.h"
 
 #include <atomic>
+#include <exception>
 #include <fstream>
 #include <system_error>
 
@@ -29,11 +30,19 @@ std::string utf8(const std::filesystem::path &p)
 
 std::optional<std::string> readAll(const std::filesystem::path &p)
 {
+    // Only a regular file has a length: a directory's seek-to-end answers 2^63-1 on ext4.
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(p, ec)) return std::nullopt;
     std::ifstream f(p, std::ios::binary | std::ios::ate);
     if (!f) return std::nullopt;
     const std::streamoff n = f.tellg();
     if (n < 0) return std::nullopt;
-    std::string out(static_cast<std::size_t>(n), '\0');
+    std::string out;
+    try {
+        out.resize(static_cast<std::size_t>(n));
+    } catch (const std::exception &) {   // longer than the memory this process may take (bad_alloc, length_error)
+        return std::nullopt;
+    }
     f.seekg(0);
     if (n && !f.read(out.data(), n)) return std::nullopt;
     return out;

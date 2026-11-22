@@ -42,7 +42,8 @@ enum class Durability
 IRIS_CORE_API std::filesystem::path path(std::string_view utf8);
 IRIS_CORE_API std::string utf8(const std::filesystem::path &p);
 
-/// The whole file's bytes, or nothing when it does not exist or cannot be read.
+/// The whole file's bytes, or nothing when it does not exist, is no regular file, cannot be read or is longer than the
+/// memory this process may take - never a throw.
 IRIS_CORE_API std::optional<std::string> readAll(const std::filesystem::path &p);
 /// mkdir -p. False only when a component could not be created.
 IRIS_CORE_API bool makeDirs(const std::filesystem::path &dir);
