@@ -115,7 +115,14 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/RouteDeclaration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/js_quickjs.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_engine.cpp)
+    # the engine's commands, ONE FILE PER FAMILY over commands.h (commands_engine.cpp registers them)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_engine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_scene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_node.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_view.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_picture.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
