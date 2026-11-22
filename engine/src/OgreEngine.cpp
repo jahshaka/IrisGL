@@ -13,6 +13,7 @@
 #include "photon/voxel/PhotonSpecularAlbedoBuffer.h"
 
 #include <OgreHlmsCompute.h>
+#include <OgreHlmsLowLevel.h>
 #include <OgreHlmsAsyncCompiler.h>
 #include <OgreGpuProgram.h>
 #include "AtomPass.h"
@@ -3684,6 +3685,10 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.graphicsPsoMs = double(costs.graphicsPsoUs) / 1000.0;
     out.computePsos = costs.computePsos;
     out.computePsoMs = double(costs.computePsoUs) / 1000.0;
+    // ...and WHAT A FRAME BUILT, graphics and low-level (the fork's process-wide counters, SHADER-SYSTEM-1 stage 7a).
+    out.graphicsBuiltInFrame = Ogre::Hlms::getJahBuiltInFrame();
+    out.graphicsCompiledInFrame = Ogre::Hlms::getJahCompiledInFrame();
+    out.lowLevelBuiltInFrame = Ogre::HlmsLowLevel::getJahLowLevelBuiltInFrame();
     out.compileErrors = Ogre::GpuProgram::getJahCompileErrors();
     return out;
 }

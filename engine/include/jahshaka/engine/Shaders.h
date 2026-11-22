@@ -71,6 +71,17 @@ struct AsyncShaderStats {
     double             graphicsPsoMs = 0.0;
     unsigned long long computePsos = 0;
     double             computePsoMs = 0.0;
+    /// WHAT A FRAME BUILT, GRAPHICS AND LOW-LEVEL (SHADER-SYSTEM-1 stage 7a; the fork's Hlms::getJahBuiltInFrame /
+    /// getJahCompiledInFrame and HlmsLowLevel::getJahLowLevelBuiltInFrame), running totals for the process:
+    ///   graphicsBuiltInFrame    - Hlms permutations built in a frame (the main thread or a blocking pass's compile
+    ///                             worker, while the background compiler runs): a pipeline the frame waited for;
+    ///   graphicsCompiledInFrame - of them, those whose shader COMPILED in the frame (the rest: a PSO from cached code);
+    ///   lowLevelBuiltInFrame    - low-level material pipelines (the post chain's quads - SMAA, the tonemap - and the
+    ///                             /Multiview clones): always built in the frame that first draws them.
+    /// After the startup gate the editor's frames move none of them: the gate draws what the editor draws.
+    unsigned long long graphicsBuiltInFrame = 0;
+    unsigned long long graphicsCompiledInFrame = 0;
+    unsigned long long lowLevelBuiltInFrame = 0;
     /// THE GATE's LAW (COLD-BOOT-1 stage 4): joins of a ray pipeline build that was NOT finished - a frame or a wait that
     /// blocked on a driver compile (a running total; the teardown's joins are not counted). After the startup gate and
     /// in every editor frame it reads 0: the gate waits on `pending`, never on a join.
