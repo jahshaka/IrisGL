@@ -210,7 +210,13 @@ void main()
 			jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs.w ), origin, 0.0,
 								   dir, tMax );
 			JahPanes panes = jahPanesNone();
-			JAH_RQ_PROCEED_PANES( rq, panes )
+			bool cut;
+			JAH_RQ_PROCEED_PANES( rq, panes, cut )
+			if( cut )
+			{
+				taken += 1.0;   // a cut ray answers as a black hit at the ray's end (jah_rq_alpha.glsl THE BOUND)
+				continue;
+			}
 			// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl) -
 			// on a miss, those before the world's exit (a pane beyond it does not exist)
 			const bool committed =

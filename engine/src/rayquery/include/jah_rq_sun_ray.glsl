@@ -47,7 +47,10 @@ float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range 
 		jahRqInit( rqFade, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, origin, hardEnd,
 							   toSun, range );
 		JahPanes panesFade = jahPanesNone();
-		JAH_RQ_PROCEED_PANES( rqFade, panesFade )
+		bool cutFade;
+		JAH_RQ_PROCEED_PANES( rqFade, panesFade, cutFade )
+		if( cutFade )
+			return 0.0;   // a cut light ray answers as blocked (jah_rq_alpha.glsl THE BOUND)
 		float tEnd = range;
 		if( jahRqType( rqFade, true ) ==
 			JAH_RQ_HIT_TRIANGLE )

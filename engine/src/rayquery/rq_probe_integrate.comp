@@ -543,7 +543,14 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		JahRq rq;
 		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, d,
 							   jahWorldExitT( origin, d, 1.0e4 ) );
-		JAH_RQ_PROCEED( rq )
+		bool cut;
+		JAH_RQ_PROCEED( rq, cut )
+		if( cut )
+		{
+			gRayT[i] = jahWorldExitT( origin, d, 1.0e4 );
+			taken += 1.0;   // a cut ray answers as a black hit at the ray's end (jah_rq_alpha.glsl THE BOUND)
+			continue;
+		}
 		if( jahRqType( rq, true ) != JAH_RQ_HIT_TRIANGLE )
 		{
 			gRayT[i] = -1.0;

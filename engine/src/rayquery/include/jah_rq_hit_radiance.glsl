@@ -137,7 +137,10 @@ vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float footprint, out bool 
 	JahRq q3;
 	jahRqInit( q3, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
 						   jahWorldExitT( o3, L3, 1.0e4 ) );
-	JAH_RQ_PROCEED( q3 )
+	bool cut3;
+	JAH_RQ_PROCEED( q3, cut3 )
+	if( cut3 )
+		return vec3( 0.0 );   // a cut ray answers as a black hit (jah_rq_alpha.glsl THE BOUND)
 	if( jahRqType( q3, true ) != JAH_RQ_HIT_TRIANGLE )
 		return w2 * JAH_HIT_LOBE_SKY( L3, alpha, true );   // an exit: the sky
 	const float t3 = jahRqT( q3, true );
@@ -293,7 +296,8 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	JahRq q;
 	const float exitB = jahWorldExitT( o, L2, 1.0e4 );
 	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
-	JAH_RQ_PROCEED( q )
+	bool cutB;
+	JAH_RQ_PROCEED( q, cutB )
 	jahC2SegO = o;
 	jahC2Seg[0] = vec4( L2, exitB );
 	vec3 rad = vec3( 0.0 );
@@ -303,7 +307,9 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	jahC2PickSpec = vec3( 0.0 );
 	jahC2PickMirror = vec3( 0.0 );
 	jahC2PickMirrorSlot = 0xFFFFFFFFu;
-	if( jahRqType( q, true ) != JAH_RQ_HIT_TRIANGLE )
+	if( cutB )
+		rad = vec3( 0.0 );   // a cut ray answers as a black hit (jah_rq_alpha.glsl THE BOUND)
+	else if( jahRqType( q, true ) != JAH_RQ_HIT_TRIANGLE )
 		rad = JAH_HIT_LOBE_SKY( L2, alpha, centre ) * wSkyB;   // an exit: the sky, at its balance weight (11-2 (6))
 	else
 	{
@@ -370,10 +376,11 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		JahRq qn;
 		const float exitN = jahWorldExitT( o, sky.L, 1.0e4 );
 		jahRqInit( qn, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
-		JAH_RQ_PROCEED( qn )
+		bool cutN;
+		JAH_RQ_PROCEED( qn, cutN )
 		jahC2Seg[1] = vec4( sky.L, jahRqType( qn, true ) == JAH_RQ_HIT_TRIANGLE
 										? jahRqT( qn, true ) : exitN );
-		if( jahRqType( qn, true ) != JAH_RQ_HIT_TRIANGLE )
+		if( !cutN && jahRqType( qn, true ) != JAH_RQ_HIT_TRIANGLE )   // (a cut ray is occluded: no sky)
 		{
 			const float qL = jahReflectFoldedPdf( N, N, V, sky.L, alpha );
 			const float ab = sa + sb;
@@ -392,11 +399,12 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 		JahRq qi;
 		const float exitI = jahWorldExitT( o, img.L, 1.0e4 );
 		jahRqInit( qi, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
-		JAH_RQ_PROCEED( qi )
+		bool cutI;
+		JAH_RQ_PROCEED( qi, cutI )
 		jahC2Seg[2] = vec4( img.L, jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE
 										 ? jahRqT( qi, true ) : exitI );
 		const JahImage m = jahImageAt( img.index );
-		if( jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE &&
+		if( !cutI && jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE &&   // (a cut ray answers as a black hit)
 			uint( jahRqCustomIndex( qi, true ) ) == m.mirror )
 		{
 			const float ti = jahRqT( qi, true );

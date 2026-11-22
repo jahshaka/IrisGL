@@ -165,13 +165,14 @@ void main()
 			mat4x3 toWorld = mat4x3( 1.0 );
 			JahPanes panes = jahPanesNone();
 			JahPanes panesFar = jahPanesNone();
+			bool cutNear = false, cutFar = false;
 			if( tStart < nearEnd )
 			{
 				JahRq rq;
 				jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask & 0x0Fu, origin, tStart, dir,
 									   nearEnd );
-				JAH_RQ_PROCEED_PANES( rq, panes )
-				if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
+				JAH_RQ_PROCEED_PANES( rq, panes, cutNear )
+				if( !cutNear && jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 				{
 					hit = true;
 					t = jahRqT( rq, true );
@@ -184,13 +185,13 @@ void main()
 				jahPanesInFront( panes, hit ? t : nearEnd );
 			}
 			const float farFrom = max( p.knobs.z, tStart );
-			if( !hit && farOn && farEnd > farFrom )
+			if( !cutNear && !hit && farOn && farEnd > farFrom )
 			{
 				JahRq rqFar;
 				jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, farFrom, dir,
 									   farEnd );
-				JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-				if( jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
+				JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
+				if( !cutFar && jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 				{
 					hit = true;
 					far = true;
@@ -207,7 +208,7 @@ void main()
 			// THE PANES IN FRONT: their own light and the throughput past them, the near list then the far one
 			float through = 1.0;
 			vec3 paneLight = vec3( 0.0 );
-			if( panes.n + panesFar.n > 0 )
+			if( !( cutNear || cutFar ) && panes.n + panesFar.n > 0 )
 			{
 				[[dont_unroll]] for( int list = 0; list < 2; ++list )
 				{
@@ -217,7 +218,9 @@ void main()
 					through *= th;
 				}
 			}
-			if( !hit )
+			if( cutNear || cutFar )
+				answer = vec3( 0.0 );   // a cut ray answers as a black hit at its end (jah_rq_alpha.glsl THE BOUND)
+			else if( !hit )
 			{
 				// THE ENVIRONMENT along the lobe: what the fragment would have lit the share by
 				answer = paneLight + through * jahFogAlongSky( jahEnvLobe( dir, rough ), origin.y, dir, eyeDist );

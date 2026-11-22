@@ -411,8 +411,9 @@ void main()
 		JahRq rq;
 		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, dir, maxT );
 		JahPanes panes = jahPanesNone();
-		JAH_RQ_PROCEED_PANES( rq, panes )
-		bool hit = jahRqType( rq, true ) ==
+		bool cutNear = false, cutFar = false;
+		JAH_RQ_PROCEED_PANES( rq, panes, cutNear )
+		bool hit = !cutNear && jahRqType( rq, true ) ==
 				   JAH_RQ_HIT_TRIANGLE;
 		float tHit = hit ? jahRqT( rq, true ) : -1.0;
 		// THE PANES IN FRONT (PHOTON-7 10-4 R7): the near query's, before its hit or its end; the far query's past it
@@ -445,13 +446,13 @@ void main()
 		// near length whose fine one lies just outside is not passed by both
 		// queries. A coarse hit in the overlap is honest: the near query has
 		// already proved no fine surface lies there.
-		if( !hit && farT > maxT )
+		if( !cutNear && !hit && farT > maxT )
 		{
 			JahRq rqFar;
 			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin,
 								   p.plane.z, dir, farT );
-			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-			if( jahRqType( rqFar, true ) ==
+			JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
+			if( !cutFar && jahRqType( rqFar, true ) ==
 				JAH_RQ_HIT_TRIANGLE )
 			{
 				hit = true;
@@ -471,9 +472,10 @@ void main()
 		// wide at distance t. A gather ray reading the FINEST mip would alias
 		// exactly as a cone march with no cone does.
 		const float spread = sqrt( 2.0 / float( rays ) );
+		const bool cutRay = cutNear || cutFar;
 		float through = 1.0;
 		vec3 paneLight = vec3( 0.0 );
-		if( panes.n + panesFar.n > 0 )
+		if( !cutRay && panes.n + panesFar.n > 0 )
 		{
 			// the near list, then the far one, through ONE call of the fold
 			[[dont_unroll]] for( int list = 0; list < 2; ++list )
@@ -490,7 +492,14 @@ void main()
 		float distance = -1.0;
 		bool ok = false;
 		bool recorded = false;
-		if( hit )
+		if( cutRay )
+		{
+			// A CUT RAY ANSWERS AS A BLACK HIT AT THE RAY's END (jah_rq_alpha.glsl THE BOUND): no radiance, no sky, no
+			// pane light - a cut never adds light
+			tHit = cutFar ? farT : maxT;
+			distance = tHit;
+		}
+		else if( hit )
 		{
 			distance = tHit;
 			// A MOVER, a RIGGED item, or a hit neither its card nor a cascade
@@ -558,7 +567,7 @@ void main()
 		{
 			const uint bin = jahRestBin( dir );
 			const uint at = kRestStoreWords * cellIndex;
-			if( hit )
+			if( hit || cutRay )   // (a cut ray is a hit at its end, never an escape)
 			{
 				atomicMin( jahCellStore[at + bin], floatBitsToUint( max( tHit, 0.0 ) ) );
 				atomicMax( jahCellStore[at + 64u + bin], floatBitsToUint( max( tHit, 0.0 ) ) );

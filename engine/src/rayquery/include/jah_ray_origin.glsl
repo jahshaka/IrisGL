@@ -114,7 +114,10 @@ bool jahRayOriginBuried( vec3 surface, vec3 geomN, vec3 origin, float pointError
 	JahRq q;
 	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, surface - geomN * behind, 0.0, geomN,
 						   behind + lift );
-	JAH_RQ_PROCEED( q )
+	bool cut;
+	JAH_RQ_PROCEED( q, cut )
+	if( cut )
+		return true;   // a cut ray answers as occluded (jah_rq_alpha.glsl THE BOUND): buried, no sample
 	if( jahRqType( q, true ) != JAH_RQ_HIT_TRIANGLE )
 		return false;
 	vec3 wound;

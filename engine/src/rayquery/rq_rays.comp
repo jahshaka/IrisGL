@@ -75,10 +75,14 @@ void main()
     // THE CANDIDATE LOOP (REFLECT-MOVERS-2): every BLAS is opaque, so an opaque
     // triangle commits inside the traversal; an alpha-tested item's instance is
     // FORCE_NO_OPAQUE and its candidates are confirmed where its mask is solid.
-    JAH_RQ_PROCEED( rq )
+    bool cut;
+    JAH_RQ_PROCEED( rq, cut )
 
     vec4 answer = vec4( -1.0, -1.0, -1.0, 0.0 );
-    if( jahRqType( rq, true ) ==
+    // A CUT RAY ANSWERS AS BLOCKED (jah_rq_alpha.glsl THE BOUND): a hit at its tMax naming no node and no triangle
+    if( cut )
+        answer = vec4( ray.dir.w, -1.0, -1.0, 1.0 );
+    else if( jahRqType( rq, true ) ==
         JAH_RQ_HIT_TRIANGLE )
     {
         answer.x = jahRqT( rq, true );

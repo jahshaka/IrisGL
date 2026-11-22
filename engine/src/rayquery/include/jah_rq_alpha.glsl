@@ -126,8 +126,14 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 /// one ray, and a pane is never committed, so every pane crossed is a trip. THE LAW IS THEREFORE A BUDGET,
 /// kJahRqStepLaw = 1024 trips: sixteen times the deepest harness scene's 64 (stage 0 measured 14 at most over 3.3 M loops a
 /// frame); THE BOUND is four times it, kJahRqStepBound = 4096, about 4096 mask tests for one ray - far below a TDR. A loop
-/// that reaches the bound TERMINATES its query, which then answers what it has committed so far: A CUT IS A BIAS (a missed
-/// nearer cut-out, panes left out of a transmittance), and the counter exists to make it VISIBLE, never silent.
+/// that reaches the bound TERMINATES its query and raises its `cut` flag. WHAT A CUT RAY ANSWERS (the lead's ruling (B),
+/// 2026-11-22): the hardware hands candidates and commits opaque triangles in a FREE order, so what a terminated query
+/// holds is not a function of the scene - it is never read. A CUT RAY ANSWERS AS OCCLUDED: a LIGHT or visibility ray
+/// returns 0 (blocked), a READING ray (the reflection, the gather, a card's or a side's gather) a BLACK HIT at the ray's
+/// end (no radiance, no sky, no pane light) - so a cut can never ADD light: the picture under a cut is darker than the
+/// truth, never brighter, and never the sky through a wall. A CUT IS A BIAS of ONE sign, and the counter exists to make
+/// it VISIBLE, never silent. JAH_RQ_PROCEED_TRANSMIT answers it itself (its T set to 0); every caller of the other three
+/// forms reads its `cut` flag before the committed intersection.
 /// PUBLISHED by the five jobs with the hit params (the probe gather, the reflection, the glass escape, the cards' gather,
 /// the voxel sides; the others are bounded the same and publish nothing - a named residue): a loop whose trips reach the
 /// threshold atomicMax-es them into the tier's counter [1]. In every real scene no loop reaches 1024, so the cost is one
@@ -172,15 +178,17 @@ uint jahRqStepBoundNow() { return kJahRqStepBound; }
 void jahRqStepsPublish( uint n, uint bound ) {}
 #endif
 /// ...the loop's head (a trip counted; at the bound the query terminated) and its end (the trips published)
-#define JAH_RQ_LOOP_BEGIN_( q )                                                                   \
+#define JAH_RQ_LOOP_BEGIN_( q, cut )                                                              \
 	{                                                                                             \
 		const uint jahRqBound_ = jahRqStepBoundNow();                                             \
 		uint jahRqTrips_ = 0u;                                                                    \
+		( cut ) = false;                                                                          \
 		while( jahRqProceed( q ) )                                                                \
 		{                                                                                         \
 			if( ++jahRqTrips_ >= jahRqBound_ )                                                    \
 			{                                                                                     \
 				jahRqTerminate( q );                                                              \
+				( cut ) = true;                                                                   \
 				break;                                                                            \
 			}
 #define JAH_RQ_LOOP_END_                                                                          \
@@ -189,16 +197,16 @@ void jahRqStepsPublish( uint n, uint bound ) {}
 	}
 
 /// THE LOOP of an OPAQUE query (JAH_RQ_FLAGS_OPAQUE: the hardware commits every triangle, so it hands back no candidate)
-/// - bounded like every other.
-#define JAH_RQ_PROCEED_OPAQUE( q )                                                                \
-	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
+/// - bounded like every other; `cut` a bool the caller declares (a cut query identifies nothing).
+#define JAH_RQ_PROCEED_OPAQUE( q, cut )                                                           \
+	JAH_RQ_LOOP_BEGIN_( q, cut )                                                                  \
 	JAH_RQ_LOOP_END_
 
 /// THE LOOP every ray query runs in place of `while( jahRqProceed( q ) ) {}`:
 /// a triangle candidate (only an alpha-tested instance makes one) is confirmed
-/// where its mask is solid.
-#define JAH_RQ_PROCEED( q )                                                                       \
-	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
+/// where its mask is solid. `cut` a bool the caller declares and reads first (a cut ray answers as occluded).
+#define JAH_RQ_PROCEED( q, cut )                                                                  \
+	JAH_RQ_LOOP_BEGIN_( q, cut )                                                                  \
 		if( jahRqType( q, false ) == JAH_RQ_CANDIDATE_TRIANGLE &&                                        \
 			jahAlphaSolid( uint( jahRqCustomIndex( q, false ) ),                                    \
 						   uint( jahRqInstanceId( q, false ) ),                                     \
@@ -293,9 +301,11 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 
 /// THE LOOP of a LIGHT ray (a lamp's, the sun's, an area stratum's, a card's lamp and sun, the mover sky gate): every
 /// pane's T multiplied as it is met into the float `T` (order-free: no list, no cap); an alpha-tested candidate
-/// confirmed where its mask is solid. The caller answers 0 on an opaque commit, else T.
+/// confirmed where its mask is solid. The caller answers 0 on an opaque commit, else T - and a CUT ray's T is 0 (blocked).
 #define JAH_RQ_PROCEED_TRANSMIT( q, T )                                                               \
-	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
+	{                                                                                                 \
+	bool jahRqCutT_;                                                                                  \
+	JAH_RQ_LOOP_BEGIN_( q, jahRqCutT_ )                                                           \
 		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
 		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \
@@ -310,12 +320,16 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 								uint( jahRqPrimitive( q, false ) ),                                   \
 								jahRqBary( q, false ) ) )                                             \
 			jahRqConfirm( q );                                                                        \
-	JAH_RQ_LOOP_END_
+	JAH_RQ_LOOP_END_                                                                                  \
+	if( jahRqCutT_ )                                                                                  \
+		( T ) = 0.0;                                                                                  \
+	}
 
 /// THE LOOP of a ray that CROSSES panes (the caches' gathers, the screen gather, the reflection; R8 the light rays):
-/// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0.
-#define JAH_RQ_PROCEED_PANES( q, panes )                                                              \
-	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
+/// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0; `cut` a bool the caller declares
+/// and reads first (a cut ray answers as occluded: its panes are not read).
+#define JAH_RQ_PROCEED_PANES( q, panes, cut )                                                         \
+	JAH_RQ_LOOP_BEGIN_( q, cut )                                                                  \
 		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
 		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \

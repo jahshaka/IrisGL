@@ -99,8 +99,9 @@ void main()
 		JahRq rq;
 		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, q.pos.xyz, 0.0,
 							   normalize( q.facing.xyz ), 1000.0 );
-		JAH_RQ_PROCEED( rq )
-		if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
+		bool cut;
+		JAH_RQ_PROCEED( rq, cut )
+		if( !cut && jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )   // (a cut ray names no surface)
 		{
 			const vec3 dir = normalize( q.facing.xyz );
 			slot = uint( jahRqCustomIndex( rq, true ) );

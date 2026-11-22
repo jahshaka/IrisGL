@@ -1182,7 +1182,9 @@ public:
     /// copies under `mask & kRayMaskNearField` (so 0xFF = the whole near
     /// field). `hits` comes back as 4 floats per ray:
     /// distance to the first hit (< 0 = miss), the hit node's index in the
-    /// scene's item order, the hit triangle's index, and 1 or 0.
+    /// scene's item order, the hit triangle's index, and 1 or 0. A ray cut at
+    /// the ray query loops' bound (more than 4096 non-opaque candidates:
+    /// GATHER-HANG-1) answers as BLOCKED: its tMax, node -1, triangle -1, 1.
     ///
     /// False when the tier is off, unavailable, or the scene has no structure
     /// yet (render one frame first).

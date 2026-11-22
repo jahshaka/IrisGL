@@ -1001,12 +1001,13 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, L, maxT );
 		JahPanes panes = jahPanesNone();
 		JahPanes panesFar = jahPanesNone();
-		JAH_RQ_PROCEED_PANES( rq, panes )
+		bool cutNear = false, cutFar = false;
+		JAH_RQ_PROCEED_PANES( rq, panes, cutNear )
 		float t = 0.0;
 		vec3 hitN = -L;
 		bool hitNormalKnown = false;
 		mat4x3 hitToWorld = mat4x3( 1.0 );
-		if( jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
+		if( !cutNear && jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
 		{
 			slotHit = true;
 			t = jahRqT( rq, true );
@@ -1018,7 +1019,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			hitNormalKnown = jahHitGeometricNormal( recSlot, recGeom, recPrim, hitToWorld, L, hitN );
 		}
 		jahPanesInFront( panes, slotHit ? t : maxT );
-		if( !slotHit && p.screen2.w > maxT )
+		if( !cutNear && !slotHit && p.screen2.w > maxT )
 		{
 			// (3) THE FAR COPIES for an escape (kRayMaskFar, each mesh's coarsest level), from the near length less
 			// the widest coarse-vs-fine hand-over gap to the far plane - the gather's continuation (rq_probe_gather.comp):
@@ -1028,8 +1029,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			JahRq rqFar;
 			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, L,
 								   p.screen2.w );
-			JAH_RQ_PROCEED_PANES( rqFar, panesFar )
-			if( jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
+			JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
+			if( !cutFar && jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
 				slotHit = true;
 				recFar = true;
@@ -1044,7 +1045,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		// THE PANES IN FRONT (PHOTON-7 10-4 R7): their own light and the throughput past them (jah_rq_panes.glsl)
 		float through = 1.0;
 		vec3 paneLight = vec3( 0.0 );
-		const bool crossedPanes = panes.n + panesFar.n > 0;
+		const bool cutRay = cutNear || cutFar;
+		const bool crossedPanes = !cutRay && panes.n + panesFar.n > 0;
 		if( crossedPanes )
 		{
 			// the near list, then the far one, through ONE call of the fold (its shading inlined once)
@@ -1056,7 +1058,15 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 				through *= th;
 			}
 		}
-		if( slotHit )
+		if( cutRay )
+		{
+			// A CUT RAY ANSWERS AS A BLACK HIT AT THE RAY's END (jah_rq_alpha.glsl THE BOUND): no radiance, no sky, no
+			// pane light - a cut never adds light
+			hitT = cutFar ? p.screen2.w : maxT;
+			traced = vec3( 0.0 );
+			ok = true;
+		}
+		else if( slotHit )
 		{
 			hitT = t;
 			// THE HIT, for its direct light at the hit (FAR-SUN-2, jah_rq_hit_direct.glsl).
@@ -1198,12 +1208,15 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	{
 		JahRq nq;
 		jahRqInit( nq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, nee.L, maxT );
-		JAH_RQ_PROCEED( nq )
+		bool cutNee = false, cutNeeFar = false;
+		JAH_RQ_PROCEED( nq, cutNee )
 		vec3 El = vec3( 0.0 );
 		bool neeHit = false, neeFar = false;
 		uint nSlot = 0u, nPrim = 0u, nGeom = 0u;
 		vec2 nBary = vec2( 0.0 );
-		if( jahRqType( nq, true ) == JAH_RQ_HIT_TRIANGLE )
+		if( cutNee )
+			;   // a cut ray answers as occluded (jah_rq_alpha.glsl THE BOUND): no emission, no far query
+		else if( jahRqType( nq, true ) == JAH_RQ_HIT_TRIANGLE )
 		{
 			neeHit = true;
 			neeT = jahRqT( nq, true );
@@ -1223,8 +1236,8 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			JahRq nqFar;
 			jahRqInit( nqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, nee.L,
 								   p.screen2.w );
-			JAH_RQ_PROCEED( nqFar )
-			if( jahRqType( nqFar, true ) == JAH_RQ_HIT_TRIANGLE )
+			JAH_RQ_PROCEED( nqFar, cutNeeFar )
+			if( !cutNeeFar && jahRqType( nqFar, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
 				neeHit = true;
 				neeFar = true;
@@ -1837,8 +1850,9 @@ void main()
 			JahRq idq;
 			jahRqInit( idq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
 								   dist * 1.01 );
-			JAH_RQ_PROCEED_OPAQUE( idq )
-			if( jahRqType( idq, true ) == JAH_RQ_HIT_TRIANGLE )
+			bool cutId;
+			JAH_RQ_PROCEED_OPAQUE( idq, cutId )
+			if( !cutId && jahRqType( idq, true ) == JAH_RQ_HIT_TRIANGLE )   // (a cut query identifies nothing)
 			{
 				const uint idSlot = uint( jahRqCustomIndex( idq, true ) );
 				vec3 was;
