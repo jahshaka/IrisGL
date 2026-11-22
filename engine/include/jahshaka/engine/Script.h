@@ -107,7 +107,9 @@ struct Param {
     /// Kind::Array: its elements' kind (Kind::Object: each is checked against `fields`) and their count (0 = any).
     Kind element = Kind::Number;
     unsigned count = 0;
-    /// Kind::Array: the most elements it may hold (0 = no bound), printed "node handle[] <= 65536"; more FAILS by name.
+    /// Kind::Array: the most elements it may hold, printed "node handle[] <= 65536"; more FAILS by name. An array
+    /// declares a count or a maximum (Registry::add refuses one with neither): a binding judges a script's array length
+    /// against it BEFORE it converts a single element.
     unsigned maxCount = 0;
     /// A TARGET: what the command acts on (a positional parameter; the shape rule above).
     bool target = false;
@@ -253,7 +255,7 @@ public:
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
     /// One line per add() refused: a command that lacks a name, a doc, a function, its access tag or a name on any
-    /// parameter or member, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
+    /// parameter or member, declares an array with neither a count nor a maximum, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
 

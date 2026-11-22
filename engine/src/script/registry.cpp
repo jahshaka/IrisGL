@@ -594,6 +594,18 @@ void namesMissing(const std::string &command, const std::vector<Param> &params, 
     }
 }
 
+/// AN ARRAY DECLARES ITS BOUND (SCRIPT-IN-ENGINE-1 2b): its count or its maximum - so a language binding judges a
+/// script's array length against it before converting a single element (a JS `a.length = 4e9` costs the script
+/// nothing), and no command is handed an unbounded amount of work.
+void arraysUnbounded(const std::string &command, const std::vector<Param> &params, std::vector<std::string> &out)
+{
+    for (const Param &p : params) {
+        if (p.kind == Kind::Array && !p.count && !p.maxCount)
+            out.push_back(command + ": the array '" + p.name + "' declares neither a count nor a maximum");
+        arraysUnbounded(command, p.fields, out);
+    }
+}
+
 }  // namespace
 
 std::string signatureText(const CommandInfo &c)
@@ -629,6 +641,7 @@ bool Registry::add(CommandInfo info, CommandFn fn)
     if (info.signature.access == Access::Unset) faults.push_back(info.name + ": no access tag");
     if (!fn) faults.push_back(info.name + ": no function");
     namesMissing(info.name, info.signature.params, faults);
+    arraysUnbounded(info.name, info.signature.params, faults);
     int named = 0;
     for (const Param &p : info.signature.params) {
         if (p.target && named) faults.push_back(info.name + ": the target '" + p.name + "' follows a named parameter");
