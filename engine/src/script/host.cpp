@@ -11,13 +11,7 @@ Host::Host()
     mRegistry.add({"host.check", {{object("law", {arg("ok", Kind::Bool), arg("what", Kind::String)})}, Kind::Bool},
                    "One law of a test script, {ok, what}: prints `ok:   <what>` or `FAIL: <what>` and counts a failure "
                    "(the host's verdict). Answers `ok`."},
-                  [this](Call &c) {
-                      const bool ok = c[0]["ok"].asBool();
-                      print((ok ? "ok:   " : "FAIL: ") + c[0]["what"].asString());
-                      ++mChecksRun;
-                      if (!ok) ++mChecksFailed;
-                      return Value(ok);
-                  });
+                  [this](Call &c) { return Value(law(c[0]["ok"].asBool(), c[0]["what"].asString())); });
     mRegistry.add({"host.lastError", {{}, Kind::String},
                    "The last refusal's message: a command that was called correctly but could not act answers falsy "
                    "and says why here (\"\" before any)."},
@@ -36,8 +30,19 @@ Result Host::run(const std::string &source, const std::string &name)
     return mJs->run(source, name);
 }
 
+bool Host::law(bool ok, const std::string &what)
+{
+    print((ok ? "ok:   " : "FAIL: ") + what);
+    ++mChecksRun;
+    if (!ok) ++mChecksFailed;
+    return ok;
+}
+
+void Host::atVerdict(std::function<void()> judge) { mJudges.push_back(std::move(judge)); }
+
 int Host::verdict(const Result &run)
 {
+    for (const auto &judge : mJudges) judge();
     int faults = mChecksFailed;
     if (run.status == Status::Failed) {
         print("FAIL: the script stopped: " + run.message);

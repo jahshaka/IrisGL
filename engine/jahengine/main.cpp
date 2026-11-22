@@ -61,7 +61,7 @@ int main(int argc, char **argv)
     std::unique_ptr<Engine> engine = Engine::create(cfg, bootError);
 
     script::Host host;
-    script::registerEngineCommands(host.registry(), engine.get(), bootError, testDoors);
+    script::registerEngineCommands(host, engine.get(), bootError, testDoors);
     int failures = host.verdict(host.run(source.str(), scriptPath));
     if (const unsigned long long failed = Engine::processShaderCompileErrors()) {
         std::printf("FAIL: %llu shader program(s) failed to compile (the readings are of draws that never happened) - see "

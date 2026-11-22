@@ -186,8 +186,8 @@ private:
 /// THE HOST — one per process (the process makes it; every Engine registers its commands into its registry, so a
 /// process whose engine failed to start still has a host that can say why). It runs a script on the CALLING thread and
 /// every command inline; a host whose scripts run on another thread than the engine's (Studio, later) installs an
-/// EXECUTOR that carries each command call to the engine's thread. Its own commands: `host.check(ok, what)` (prints
-/// `ok:   <what>` or `FAIL: <what>`, counting the failures) and `host.lastError()` (the registry's last refusal).
+/// EXECUTOR that carries each command call to the engine's thread. Its own commands: `host.check({ok, what})` (one
+/// law: Host::law) and `host.lastError()` (the registry's last refusal).
 class Host {
 public:
     using ConsoleSink = std::function<void(const std::string &line)>;
@@ -215,6 +215,12 @@ public:
     /// CHECKED NOTHING (no host.check ran: a row that measured nothing is never a silent green). Answers their count;
     /// 0 = PASSED.
     int verdict(const Result &run);
+    /// ONE LAW JUDGED: printed `ok:   <what>` or `FAIL: <what>` and counted as a check that ran (and failed) — what
+    /// host.check does, and what a command that judges a law the script declared calls (engine.view.declareRoutes'
+    /// judgement: a FAIL here fails the verdict whatever the script does with the command's error). Answers `ok`.
+    bool law(bool ok, const std::string &what);
+    /// A judgement the verdict runs before it counts (a declaration no frame asserted is a failed law(), by name).
+    void atVerdict(std::function<void()> judge);
 
     /// The language binding's two doors: a command call by name (through the executor) and a console line.
     Result call(const std::string &name, const Value::Array &args);
@@ -228,6 +234,7 @@ private:
     Executor mExecutor;
     int mChecksRun = 0;
     int mChecksFailed = 0;
+    std::vector<std::function<void()>> mJudges;
     std::unique_ptr<Language> mJs;
 };
 
@@ -235,9 +242,10 @@ private:
 class Engine;
 namespace script {
 /// THE ENGINE REGISTERS INTO THE HOST (src/script/commands_engine.cpp): its `engine.*` commands on `engine`, which the
-/// calling thread created (its commands are called inline). A null `engine` (it did not start) still registers them:
-/// each FAILS with "the engine did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open
-/// (jahengine --test-doors); without it engine.arm FAILS on one.
-void registerEngineCommands(Registry &registry, Engine *engine, std::string bootError, bool testDoors);
+/// calling thread created (its commands are called inline), and its judgements into the host's verdict (a route
+/// declaration no frame asserted). A null `engine` (it did not start) still registers them: each FAILS with "the engine
+/// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open (jahengine --test-doors);
+/// without it engine.arm FAILS on one.
+void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);
 
 }}}  // namespace jahshaka::engine::script

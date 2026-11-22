@@ -12,6 +12,14 @@
 
 namespace jahshaka { namespace engine { namespace inspect {
 
+/// THE TEST SURFACE's SHARED NUMBERS — ONE HOME, read by the C++ fixtures' helper (tests/support/enginetesthelpers.h)
+/// and by the engine's script host (src/script/, jahengine): a number moved here moves both, so a script row and a
+/// fixture can never judge one law by two numbers.
+/// The frames a DECLARED route product (field, cards, store) has to come live in after its declaration (URGENT #146's
+/// route declaration): a bound on a startup, not a law - the store's first voxelisation and the field's first pass land
+/// in the first frames, read back at the renderer's lag (4 on this stack).
+constexpr int kRouteProductFrames = 16;
+
 /// The scene's record of the host's pushes (each the value its setter last accepted).
 class SceneEcho {
 public:

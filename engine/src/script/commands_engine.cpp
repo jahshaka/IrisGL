@@ -13,16 +13,19 @@
 // engine's own ids. A picture is the request shape of PICTURE-REQUEST-1 (view, eyes, content, when); its reductions are
 // NATIVE commands (the script language is an interpreter: a pixel loop is never a script's).
 //
-// TWO READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these two, because the C++ fixtures' harness has
-// no public equivalent and a script row must give the same picture and the same route record as the fixture it
+// THREE READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these, because the C++ fixtures' harness has
+// no public equivalent and a script row must give the same picture and the same route judgement as the fixture it
 // replaces: (1) THE HARNESS's GRID — engine.frames steps every scene no host ever stamped by one grid step before each
 // frame (inspect::EngineEcho::harnessStep, enginetest::frames' law "a frame is one grid step"): an engine-only script's
-// scenes have no document, so nothing else gives them time; (2) THE PAUSE in engine.view.routes (inspect::SceneEcho::
-// giUpdateBudget() == 0), the one route word the published record does not carry. R11 (source.testing_rules) bars that
-// header from Studio's src/ and irisgl/mirror, the hosts; this is the engine's own file.
+// scenes have no document, so nothing else gives them time; (2) THE PAUSE in engine.view.routes and the route
+// judgement (inspect::SceneEcho::giUpdateBudget() == 0), the one route word the published record does not carry;
+// (3) THE ENGINE's OWN CHAIN RECORD (inspect::ViewEcho::routes) that engine.view.declareRoutes' judgement holds the
+// published row against (the two doors agree: requireRoutes' law). R11 (source.testing_rules) bars that header from
+// Studio's src/ and irisgl/mirror, the hosts; this is the engine's own file.
 #include "jahshaka/engine/Engine.h"
 #include "jahshaka/engine/EngineInspect.h"
 #include "jahshaka/engine/Script.h"
+#include "script/RouteDeclaration.h"
 
 #include <cmath>
 #include <cstdio>
@@ -34,12 +37,22 @@ namespace jahshaka { namespace engine { namespace script {
 
 namespace {
 
+/// A route declaration not yet judged held (engine.view.declareRoutes): its view, its scene, the words, the frames since.
+struct DeclaredRoutes {
+    View *view = nullptr;
+    Scene *scene = nullptr;
+    RouteWords words;
+    int frames = 0;
+};
+
 struct EngineState {
+    Host *host = nullptr;
     Engine *engine = nullptr;
     std::string bootError;
     bool testDoors = false;
     std::vector<Scene *> scenes;   // handle - 1
     std::vector<View *> views;     // handle - 1
+    std::vector<DeclaredRoutes> declared;
 };
 
 Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }
@@ -162,12 +175,44 @@ public:
         }
         return st->views[size_t(i - 1)];
     }
-    /// One lockstep frame: the harness's grid step (the file's header says why), then the frame.
-    void frame() const
+    /// One lockstep frame: the harness's grid step (the file's header says why), then the frame; then EVERY PENDING
+    /// ROUTE DECLARATION JUDGED on it (RouteDeclaration.h: held or broken, each a law of the host's verdict; a product
+    /// not live yet waits). False, the call FAILED naming the first broken declaration, when one broke.
+    bool frame(Call &c) const
     {
         if (const inspect::EngineEcho *echo = inspect::engine(st->engine))
             const_cast<inspect::EngineEcho *>(echo)->harnessStep(1);
         st->engine->renderOneFrame();
+        std::string broken;
+        for (size_t i = 0; i < st->declared.size();) {
+            DeclaredRoutes &d = st->declared[i];
+            RouteWords ran, pub;
+            if (const inspect::ViewEcho *ve = inspect::view(d.view)) {
+                const inspect::ViewRoutes vr = ve->routes();
+                ran.gather = vr.probeGather; ran.integrate = vr.screenIntegrate; ran.reflection = vr.rayReflect;
+            }
+            const GiStatus g = d.scene->published().gi;
+            ran.field = g.ifdBound;
+            ran.cards = g.cards.built;
+            ran.store = !g.cascades.empty();
+            const inspect::SceneEcho *se = inspect::scene(d.scene);
+            ran.paused = se && se->giUpdateBudget() == 0;
+            const PublishedEngineFrame::ViewFrames row = d.view->published();
+            pub.gather = row.routeGather; pub.integrate = row.routeIntegrate; pub.reflection = row.routeReflect;
+            std::string line;
+            const RouteJudgement j = judgeRoutes("view '" + d.view->name() + "'", d.words, ran, row.id != 0, pub,
+                                                 ++d.frames, line);
+            if (j == RouteJudgement::Wait) {
+                ++i;
+                continue;
+            }
+            st->host->law(j == RouteJudgement::Held, line);
+            if (j == RouteJudgement::Broken && broken.empty()) broken = line;
+            st->declared.erase(st->declared.begin() + long(i));
+        }
+        if (broken.empty()) return true;
+        c.fail(broken);
+        return false;
     }
 
     std::shared_ptr<EngineState> st;
@@ -175,9 +220,11 @@ public:
 
 }  // namespace
 
-void registerEngineCommands(Registry &r, Engine *engine, std::string bootError, bool testDoors)
+void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors)
 {
+    Registry &r = host.registry();
     auto st = std::make_shared<EngineState>();
+    st->host = &host;
     st->engine = engine;
     st->bootError = std::move(bootError);
     st->testDoors = testDoors;
@@ -385,7 +432,8 @@ void registerEngineCommands(Registry &r, Engine *engine, std::string bootError, 
               if (!k.engine(c)) return Value();
               const std::int64_t n = c[0].asInt();
               if (n < 0) return c.fail("n must be 0 or more");
-              for (std::int64_t i = 0; i < n; ++i) k.frame();
+              for (std::int64_t i = 0; i < n; ++i)
+                  if (!k.frame(c)) return Value();
               return Value();
           });
     r.add({"engine.view.routes", {{target("view", Kind::Int)}, Kind::Object},
@@ -405,6 +453,46 @@ void registerEngineCommands(Registry &r, Engine *engine, std::string bootError, 
                                          {"cards", Value(g.cards.built)}, {"store", Value(!g.cascades.empty())},
                                          {"paused", Value(echo && echo->giUpdateBudget() == 0)}});
           });
+    r.add({"engine.view.declareRoutes",
+           {{target("view", Kind::Int),
+             object("routes", {arg("gather", Kind::Bool, Value(false)), arg("integrate", Kind::Bool, Value(false)),
+                               arg("reflection", Kind::Bool, Value(false)), arg("field", Kind::Bool, Value(false)),
+                               arg("cards", Kind::Bool, Value(false)), arg("store", Kind::Bool, Value(false)),
+                               arg("paused", Kind::Bool, Value(false))})},
+            Kind::Null},
+           "THE ROW DECLARES THE ROUTE IT MEASURES (URGENT #146; source.testing_rules R16 reads this call): the view's "
+           "chain {gather, integrate, reflection} and paused (GI's update budget 0) EXACTLY, the scene's products {field, "
+           "cards, store} live if declared; an absent word is false. Judged after EVERY frame the host draws from here on "
+           "(engine.frames, readPixels' frame) as the C++ fixtures' requireRoutes judges: the view's published route row "
+           "must equal the engine's own (the two doors agree), the chain must hold on each frame judged, a declared product "
+           "has 16 frames to come live. Each judgement is a law of the verdict (`ok:` / `FAIL:` with both sides); a broken "
+           "one also fails the drawing call by name; a declaration still pending when the script ends FAILS the verdict."},
+          [k](Call &c) -> Value {
+              View *v = k.view(c, c[0]);
+              if (!v) return Value();
+              Scene *s = v->scene();
+              if (!s) return c.fail("the view draws no scene: bind one (engine.view.setScene) before declaring its route");
+              DeclaredRoutes d;
+              d.view = v;
+              d.scene = s;
+              d.words.gather = c[1]["gather"].asBool();
+              d.words.integrate = c[1]["integrate"].asBool();
+              d.words.reflection = c[1]["reflection"].asBool();
+              d.words.field = c[1]["field"].asBool();
+              d.words.cards = c[1]["cards"].asBool();
+              d.words.store = c[1]["store"].asBool();
+              d.words.paused = c[1]["paused"].asBool();
+              k.st->declared.push_back(d);
+              return Value();
+          });
+    // THE PENDING DECLARATIONS, JUDGED AT THE VERDICT (enginetesthelpers.h's failPendingRoutes): a declaration no frame
+    // asserted is a row that measured nothing it said - a FAIL by name, never a silent green
+    host.atVerdict([st]() {
+        for (const DeclaredRoutes &d : st->declared)
+            st->host->law(false, "ROUTES view '" + d.view->name() + "': declared {" + routeWordsText(d.words) +
+                                     "} and no frame asserted it before the script ended (URGENT #146)");
+        st->declared.clear();
+    });
     r.add({"engine.view.readPixels",
            {{object("request", {arg("view", Kind::Int), arg("eyes", Kind::String, Value("left")),
                                 arg("content", Kind::String, Value("display")),
@@ -423,7 +511,7 @@ void registerEngineCommands(Registry &r, Engine *engine, std::string bootError, 
                   return c.fail("content '" + c[0]["content"].asString() + "' is not served (display only, until PICTURE-REQUEST-1)");
               if (c[0]["when"].asString() != "nextFrame")
                   return c.fail("when '" + c[0]["when"].asString() + "' is not served (nextFrame only, until PICTURE-REQUEST-1)");
-              k.frame();
+              if (!k.frame(c)) return Value();
               Image img;
               if (!v->readPixels(img)) return c.refuse(k.st->engine->lastError());
               return Value(Value::Object{{"width", Value(img.width)}, {"height", Value(img.height)},
