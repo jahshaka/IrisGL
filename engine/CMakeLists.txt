@@ -111,8 +111,8 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 # THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1; include/jahshaka/engine/Script.h): the value and the registry, the host,
-# and the ONE file that names the JavaScript engine (js_quickjs.cpp: source.script_neutral). COMPILED INTO THE LIBRARY
-# BUT OUTSIDE THE ENGINE BUILD ID (2a a3; _build_id_inputs below): a command is a HOST of the engine - it calls only the
+# and the ONE file that names the JavaScript engine (js_quickjs.cpp: source.script_neutral). ITS OWN ARCHIVE,
+# JahshakaScript (below; 2b), AND OUTSIDE THE ENGINE BUILD ID (2a a3; _build_id_inputs below): a command is a HOST of the engine - it calls only the
 # public API (jahshaka/engine/*.h: source.script_build_id holds its includes), so no edit of it can change what a
 # shader permutation means, what the texture cache keys or what the warm-up tops up; hashing it re-keyed those caches
 # on every command edit.
@@ -924,7 +924,7 @@ set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/Stillness.cpp
 # the frame after a stop (ReadbackDecode.h).
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/ReadbackDecode.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>")
-add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_SCRIPT_SOURCES})
+add_library(JahshakaEngine STATIC ${JAHSHAKA_ENGINE_SOURCES})
 add_dependencies(JahshakaEngine JahshakaEngineBuildId)
 jahshaka_engine_generated_deps(JahshakaEngine)
 jahshaka_engine_ray_query(JahshakaEngine)
@@ -940,8 +940,6 @@ target_include_directories(JahshakaEngine
 target_include_directories(JahshakaEngine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
-# The script host's JavaScript engine (SCRIPT-IN-ENGINE-1; irisgl/CMakeLists.txt): PRIVATE, read by src/script/js_quickjs.cpp alone.
-target_link_libraries(JahshakaEngine PRIVATE qjs)
 if(UNIX AND NOT APPLE)
     # Vulkan's XCB windowing path needs a Display* (SDL2x11 param) — backend detail.
     find_package(X11 REQUIRED)
@@ -951,9 +949,21 @@ set_target_properties(JahshakaEngine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # No Qt in here, ever; the root enables AUTOMOC globally.
 set_target_properties(JahshakaEngine PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 
+# JahshakaScript (SCRIPT-IN-ENGINE-1 2b, the lead's ruling; DOCS/traps/engine/build-media-and-bake.md "AN ARCHIVE MEMBER
+# THAT DEFINES A WEAK STANDARD-LIBRARY SYMBOL"): THE SCRIPT HOST IS AN ARCHIVE OF ITS OWN - its sources
+# (JAHSHAKA_ENGINE_SCRIPT_SOURCES) over the engine's PUBLIC API, the JavaScript engine (qjs) PRIVATE to it. Linked by
+# its clients ON PURPOSE - jahengine, JahshakaEngineMcp, the lab (LAB-SCRIPTS-1), their tests - and NEVER by the app
+# until STUDIO-CLIENT-1 makes it one: the engine archive then holds no script object a link could pull out by a weak
+# std symbol (source.script_neutral N6 the proof). Still "inside the engine": its tree, its laws, outside the build ID.
+add_library(JahshakaScript STATIC ${JAHSHAKA_ENGINE_SCRIPT_SOURCES})
+target_include_directories(JahshakaScript PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(JahshakaScript PUBLIC JahshakaEngine PRIVATE qjs)
+set_target_properties(JahshakaScript PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
+                                                POSITION_INDEPENDENT_CODE ON)
+
 # jahengine (SCRIPT-IN-ENGINE-1): THE ENGINE, SCRIPTED, WITH NO STUDIO AND NO QT — `jahengine --script f.js [--test-doors]`
-# (jahengine/main.cpp says the rest). It links the engine library and nothing else of ours: source.script_neutral reads
-# its NEEDED list for Qt. Beside the app in bin/, its plugins and media the build's (the fixtures' two directories).
+# (jahengine/main.cpp says the rest). It links the script host (JahshakaScript, over the engine) and nothing else of
+# ours: source.script_neutral reads its NEEDED list for Qt. Beside the app in bin/, its plugins and media the build's (the fixtures' two directories).
 add_executable(jahengine ${CMAKE_CURRENT_SOURCE_DIR}/jahengine/main.cpp)
 set_target_properties(jahengine PROPERTIES
     AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
@@ -964,7 +974,7 @@ set_target_properties(jahengine PROPERTIES
 target_compile_definitions(jahengine PRIVATE
     JAHENGINE_OGRE_PLUGIN_DIR="${OGRE_NEXT_PLUGIN_DIR}"
     JAHENGINE_MEDIA_DIR="${JAHSHAKA_MEDIA_DIR}/")
-target_link_libraries(jahengine PRIVATE JahshakaEngine)
+target_link_libraries(jahengine PRIVATE JahshakaScript)
 add_dependencies(jahengine JahshakaEngineMedia)
 
 # JahshakaEngineMcp (MCP-ON-HOST-1): THE MCP ADAPTER over the engine's script host - the standard library, Script.h and
@@ -973,7 +983,7 @@ add_dependencies(jahengine JahshakaEngineMedia)
 add_library(JahshakaEngineMcp STATIC ${CMAKE_CURRENT_SOURCE_DIR}/mcp/schema.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/schema.cpp)
 set_target_properties(JahshakaEngineMcp PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_include_directories(JahshakaEngineMcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(JahshakaEngineMcp PUBLIC JahshakaEngine)
+target_link_libraries(JahshakaEngineMcp PUBLIC JahshakaScript)
 
 # --- Runtime data: stage the Hlms shader templates next to the executable ----
 # The engine resolves `<exe dir>/media/Hlms/{Common,Pbs,Unlit}` at runtime; the
