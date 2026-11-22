@@ -156,11 +156,12 @@ Param handles(std::string name, std::string kind);
 /// conversion, and every caller of it states these - a command's arguments (Host::Options::callBounds), a script's
 /// completion value for an outside client (MCP-ON-HOST-1). Past any of them the conversion FAILS by name, and nothing
 /// is read or reserved from a length the script stated before it is judged (a JS `a.length = 4e9` costs the script
-/// nothing). A declared parameter's own count or maximum bounds its array as well (the smaller governs).
+/// nothing). A declared parameter's own count or maximum bounds its array as well (the smaller governs). NO DEFAULTS
+/// TO LEAN ON: each is 0 until its caller states it (0 carries no element, no nesting, no byte).
 struct ValueBounds {
-    std::size_t elements = std::size_t(1) << 20;   ///< the most elements one array may hold
-    int depth = 64;                                ///< the deepest nesting (the arguments themselves are depth 0)
-    std::size_t bytes = std::size_t(1) << 30;      ///< the most the converted value may hold: strings, bytes, elements, members
+    std::size_t elements = 0;   ///< the most elements one array may hold
+    int depth = 0;              ///< the deepest nesting (the arguments themselves are depth 0)
+    std::size_t bytes = 0;      ///< the most the converted value may hold: strings, bytes, elements, members
 };
 
 /// WHAT CALLING A COMMAND MAY DO (SCRIPT-IN-ENGINE-1 2a; MCP-ON-HOST-1's read-only surface): `Reads` changes nothing
@@ -319,10 +320,18 @@ public:
     struct Options {
         /// The bytes the live pictures may hold (engine.picture.*: a picture past it FAILS by name) - 512 MiB: fifteen
         /// 4K RGBA8 pictures, or three of PICTURE-REQUEST-1's 4K float radiance.
-        std::size_t pictureBytesCap = std::size_t(512) << 20;
-        /// THE BOUNDS OF ONE CALL's ARGUMENTS as a language converts them (ValueBounds; 1 GiB: a picture at the cap
-        /// with room). A call past one FAILS by name before its command is asked.
-        ValueBounds callBounds;
+        static constexpr std::size_t kPictureBytesCap = std::size_t(512) << 20;
+        std::size_t pictureBytesCap = kPictureBytesCap;
+        /// THE BOUNDS OF ONE CALL's ARGUMENTS as a language converts them (ValueBounds), each DERIVED from what a call
+        /// can legitimately carry - a call past one FAILS by name before its command is asked. A host for an OUTSIDE
+        /// client (MCP) states its own, smaller.
+        ///  - bytes: ONE PICTURE AT THE CAP (engine.picture.create's rgba, kPictureBytesCap: 512 MiB) PLUS AN EIGHTH OF
+        ///    IT (64 MiB) for everything else in the call - the largest other argument today, engine.node.setTransforms'
+        ///    full batch (65,536 nodes x 11 values, about 28 MiB as converted values), fits it twice. 576 MiB.
+        ///  - elements: 2^20, above every declared maximum (the largest, setTransforms' rotations, 262,144): a command's
+        ///    arrays are bounded by their declarations; this bounds only what no declaration reaches.
+        ///  - depth: 64, the registry's deepest declaration is 3 (an object of an array of objects).
+        ValueBounds callBounds{std::size_t(1) << 20, 64, kPictureBytesCap + kPictureBytesCap / 8};
         /// THE SCRIPT's RANDOM STREAM (no wall clock, no entropy: CODING_RULES § 5): Math.random is xorshift64* from
         /// this seed, reset at every run - the same sequence every run; a caller that wants another stream states it.
         std::uint64_t randomSeed = 0x9E3779B97F4A7C15ull;
