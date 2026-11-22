@@ -9574,6 +9574,26 @@ struct PublishedFrame {
     /// met a permutation still on the background compiler and was retried the next frame on its kept workspace. 0 = every
     /// convolution was a result at its first try (its permutations built, or the frame owed the whole picture).
     unsigned long long   iblConvolutionDeferrals = 0;
+    /// THE FRAME's COMPLETENESS (COLD-BOOT-1 item 3, the lead's ruling: THE REST LAW's INPUT IS A COMPLETE FRAME): the
+    /// scene's last drawn frame was INCOMPLETE when a view of it drew a PLACEHOLDER or SKIPPED a draw whose permutation is
+    /// still compiling, a CARD READER was refused by its ray build in flight, or a material wore a FALLBACK while its
+    /// texture loads. An incomplete scene is not at rest (GiStatus::giAtRest false, no rest decision of its cards), and
+    /// the frame in which it becomes complete is a change of what its readers read: the cards' demand window reopens and
+    /// the readers rest anew (a rest held over a placeholder picture was never the scene's rest). A failure is FINAL,
+    /// never pending: a failed permutation draws its placeholder as its answer, a failed reader build makes no reader, a
+    /// failed texture load is the fallback. The predicate a view needs to show only complete frames (SHADER-SYSTEM-1).
+    struct Completeness {
+        bool incomplete = false;
+        /// Its terms on that frame: bit 0 a placeholder drawn, 1 a pending draw skipped, 2 a card reader refused by its
+        /// ray build, 3 a material awaiting its texture.
+        unsigned terms = 0u;
+        /// The drawn frames it has been incomplete IN A ROW (0 = complete): a scene stuck incomplete shows here (and on
+        /// the startup gate's card line) instead of as a silent never-rest.
+        unsigned long long incompleteFrames = 0ull;
+        /// Its incomplete -> complete edges over the scene's life (the cards' demand change; the readers' rest keys).
+        unsigned long long completionSerial = 0ull;
+    };
+    Completeness         completeness;
     unsigned             cloudClearDeferredReads = 0;
     CloudStatus          clouds;
     AtmosphereStatus     atmosphereStatus;
@@ -9713,6 +9733,10 @@ struct MonitorRecord {
     /// Program loads failed with a compile error, the process's running total at this frame's end
     /// (AsyncShaderStats::compileErrors): any value above 0 is a dead shader in the running app.
     unsigned long long shaderCompileErrors = 0;
+    /// THE SCENES WHOSE FRAME WAS INCOMPLETE (PublishedFrame::Completeness, COLD-BOOT-1 item 3): how many of the scenes this
+    /// frame drew, and the longest run of incomplete frames among them - a scene stuck incomplete (never at rest) shows here.
+    unsigned    incompleteScenes = 0;
+    unsigned long long incompleteFramesMax = 0;
     /// Was the render system COUNTING while this frame rendered? Recording is
     /// off in Ogre until something asks for `renderStats()`, and a frame
     /// rendered with it off reports zeros for every geometry counter — a fact

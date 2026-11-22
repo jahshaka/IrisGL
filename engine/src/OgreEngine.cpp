@@ -1542,6 +1542,13 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                             // candidate walk over every item runs here every frame, and
                             // scale.cpu_walks reads it as a number rather than an A/B.
                             monitor::Stage cardStage("engine.cards");
+                            // THE FRAME's COMPLETENESS first (PublishedFrame::Completeness): the cards' plan reads it
+                            s->noteFrameCompleteness();
+                            if (monitor::live() && s->frameIncomplete()) {
+                                MonitorRecord &rec = monitor::gMonitor->current();
+                                ++rec.incompleteScenes;
+                                rec.incompleteFramesMax = std::max(rec.incompleteFramesMax, s->incompleteFrames());
+                            }
                             s->updateSurfaceCache();
                             // THE PHOTON VIEW's scene half (PHOTON-VIEW-1), after the cache
                             // planned its frame (the Cards picture reads its table) and the

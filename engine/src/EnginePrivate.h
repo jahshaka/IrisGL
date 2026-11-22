@@ -5143,9 +5143,6 @@ public:
     /// A card reader of this scene waits on a ray build in flight (RayQueryTier::cardReaderBuildPending; COLD-BOOT-1 item
     /// 3): its cards will still arrive - giAtRest is false. No ray tier: false.
     bool cardReaderBuildPending() const;
-    /// The landed ray builds that had refused a card reader of this scene (RayQueryTier::cardReaderLandings): a change of
-    /// the cards' demand when it moves. No ray tier: 0.
-    unsigned long long cardReaderLandings() const;
     /// THE REFLECTION's REST PAST ITS HAND-OVER (RayQueryTier::reflectRestPastHandOver; GiStatus::giAtRest's term,
     /// PHOTON-7 stage 10-3 carrier 2). True without a ray tier.
     bool reflectRestPastHandOver() const;
@@ -6612,6 +6609,13 @@ public:
     /// window's resize ran six that drew no view of it, and the readers timed on Ogre's frame count read as gone).
     void noteDrawn() { ++mDrawSerial; }
     uint32_t drawSerial() const { return mDrawSerial; }
+    /// THE FRAME's COMPLETENESS (PublishedFrame::Completeness, the one law): noted once an engine frame that draws the
+    /// scene, after noteDrawn and before its cards plan - of the frame just drawn (its views' placeholder draws and pending
+    /// skips, the capture's apart), the card readers' builds and the textures as they stand.
+    void noteFrameCompleteness();
+    bool frameIncomplete() const { return mCompleteness.incomplete; }
+    unsigned long long completionSerial() const { return mCompleteness.completionSerial; }
+    unsigned long long incompleteFrames() const { return mCompleteness.incompleteFrames; }
     bool boxesCurrent() const { return mBoxesCurrent; }
     void updateForwardPlusRanges(const Ogre::Camera *cam) { return mPhoton.updateForwardPlusRanges(cam); }
     void forwardPlusLightCensus(unsigned &lights, unsigned &budget) const { return mPhoton.forwardPlusLightCensus(lights, budget); }
@@ -7430,6 +7434,8 @@ private:
     std::vector<Node *> mGeomSigTake;   ///< the signature's read of the name list (scratch)
     bool mBoxesCurrent = false;
     uint32_t mDrawSerial = 0u;   ///< noteDrawn: the engine frames that drew this scene
+    PublishedFrame::Completeness mCompleteness;   ///< noteFrameCompleteness
+    unsigned long long mIncompleteDrawsSeen[2] = { 0ull, 0ull };   ///< the views' placeholders and skips at the last note
     struct GiPlanStash {
         bool owed = false, pushed = false, materialPreview = false;
         std::optional<unsigned long long> refreshSerial;

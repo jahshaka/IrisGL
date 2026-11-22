@@ -1255,9 +1255,9 @@ GiStatus PhotonComponent::giStatus() const {
         // rest like any other (scripting.e2e.paused_shot).
         if (st.giAtRest && !mScene.reflectRestPastHandOver()) st.giAtRest = false;
         if (st.giAtRest && !mScene.gatherRestPastHandOver()) st.giAtRest = false;
-        // ...AND NO CARD READER WAITS ON ITS BUILD (COLD-BOOT-1 item 3): a reader refused by a ray build in flight still
-        // reads the cards once it lands - the scene is not at rest while its cards will still arrive
-        if (st.giAtRest && mScene.cardReaderBuildPending()) st.giAtRest = false;
+        // ...AND THE FRAME IS COMPLETE (COLD-BOOT-1 item 3, PublishedFrame::Completeness): a scene that drew a placeholder,
+        // skipped a pending draw, had a card reader refused by its build or wore a fallback texture is not at rest
+        if (st.giAtRest && mScene.frameIncomplete()) st.giAtRest = false;
     } JAH_CATCH(mError, st);
     return st;
 }
@@ -9352,14 +9352,14 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
     // reference pose (the poses at the last change) by more than one card texel (1/64 m: the residency's own density)
     // or TURNED by more than one pixel's angle of its projection, per eye (a tracked head never repeats a pose bit for
     // bit: a pose test would never close in VR), geometry (an Edit, a Mover or its shadow, a change with no box), the
-    // cache's build, or A CARD READER's BUILD LANDING after it refused the reader (COLD-BOOT-1 item 3: the reader runs from
-    // then on, its first stamps a window of their own - OgreScene::cardReaderLandings). Lighting is not a change of what is hit (a Lamp, a sky or sun overflow), nor are the caches'
+    // cache's build, or THE FRAME THAT BECOMES COMPLETE (COLD-BOOT-1 item 3, PublishedFrame::Completeness: the readers read
+    // the scene's own picture from then on - no placeholder, no refused reader, no fallback texture). Lighting is not a change of what is hit (a Lamp, a sky or sun overflow), nor are the caches'
     // own regions. TRAP: the readers sample by direction alone today; if they ever sample by RADIANCE (the
     // optimisation list's radiance importance sampling), a lighting change moves what they hit and must reopen it.
     {
-        const unsigned long long landings = mScene.cardReaderLandings();
+        const unsigned long long completion = mScene.completionSerial();
         bool hitChanged = built || (overflow & kGiRegionOverflowSomewhere) != 0u ||
-                          mGiEyeCount != mCardDemandRefCount || landings != mCardDemandRefLandings;
+                          mGiEyeCount != mCardDemandRefCount || completion != mCardDemandRefCompletion;
         for (GiRegionKind k : lateKinds)
             hitChanged = hitChanged || k == GiRegionKind::Edit || k == GiRegionKind::Mover || k == GiRegionKind::MoverShadow;
         hitChanged = hitChanged || eyesLeft(mCardDemandRef, mCardDemandRefCount);
@@ -9368,12 +9368,14 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
                          e.kind == GiRegionKind::MoverShadow;
         if (hitChanged) {
             mCardDemandRefCount = mGiEyeCount;
-            mCardDemandRefLandings = landings;
+            mCardDemandRefCompletion = completion;
             for (unsigned k = 0; k < mGiEyeCount; ++k) mCardDemandRef[k] = mGiEyes[k];
         }
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
-        view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames, view.readerActive);
+        // (and NO REST DECISION ON AN INCOMPLETE FRAME: COLD-BOOT-1 item 3 - its readers read a picture still to come)
+        view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames, view.readerActive) &&
+                                   !mScene.frameIncomplete();
     }
     mSurfaceCache->takeDemand(mCardSlots, view);
     // THE TEST DOOR cards.force (+): a card held resident ARRIVES WHATEVER ITS DEMAND (SurfaceCache::refreshResidency) -

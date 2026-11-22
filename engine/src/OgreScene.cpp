@@ -729,6 +729,7 @@ void OgreScene::publishFrame(unsigned long long frame, unsigned long long serial
     back.environmentPending = environmentPending();
     back.skyShDeferredReads = mSkyShDeferredReads;
     back.iblConvolutionDeferrals = mIblDeferrals;
+    back.completeness = mCompleteness;   // (noteFrameCompleteness, below)
     back.cloudClearDeferredReads = mCloudClearDeferredReads;
     back.clouds = cloudStatus();
     back.atmosphereStatus = atmosphereStatus();
@@ -2542,6 +2543,34 @@ bool PhotonComponent::dumpCardAtlas(const std::string &prefix, std::string &err)
 
 namespace jahshaka { namespace engine { namespace detail {
 void OgreScene::bindEngine(OgreEngine *e) { mEngine = e; mIdentityEngine = e; }
+// THE REST LAW's INPUT IS A COMPLETE FRAME (COLD-BOOT-1 item 3, the lead's ruling; PublishedFrame::Completeness): the frame
+// just drawn was INCOMPLETE when its views drew a placeholder or skipped a pending draw (the render queue's counts since the
+// last note, the surface cache's capture apart - a capture that met a pending shader is discarded on its own), a card
+// reader was refused by its ray build in flight, or a material awaits its texture. Each term ends at a result: a landed or
+// FAILED permutation (the fork counts neither: a failure is final), a landed or failed reader build (joinAhead), a texture
+// resident or its load failed (the loader's fallback). The edge to complete bumps the serial (the demand change).
+void OgreScene::noteFrameCompleteness() {
+    unsigned long long counts[2] = { 0ull, 0ull };
+    if (mSceneMgr) {
+        const Ogre::RenderQueue *rq = mSceneMgr->getRenderQueue();
+        unsigned long long capPh = 0ull, capSkip = 0ull;
+        surfaceCacheAsyncDraws(mSceneMgr, capPh, capSkip);
+        counts[0] = rq->getNumPlaceholderDraws() - capPh;
+        counts[1] = rq->getNumPendingSkips() - capSkip;
+    }
+    unsigned terms = 0u;
+    terms |= counts[0] != mIncompleteDrawsSeen[0] ? 1u : 0u;
+    terms |= counts[1] != mIncompleteDrawsSeen[1] ? 2u : 0u;
+    terms |= cardReaderBuildPending() ? 4u : 0u;
+    terms |= mPhoton.materialsAwaitingTexture() > 0u ? 8u : 0u;
+    mIncompleteDrawsSeen[0] = counts[0];
+    mIncompleteDrawsSeen[1] = counts[1];
+    const bool incomplete = terms != 0u;
+    if (mCompleteness.incomplete && !incomplete) ++mCompleteness.completionSerial;
+    mCompleteness.incompleteFrames = incomplete ? mCompleteness.incompleteFrames + 1ull : 0ull;
+    mCompleteness.incomplete = incomplete;
+    mCompleteness.terms = terms;
+}
 }}}   // namespace jahshaka::engine::detail
 
 namespace jahshaka { namespace engine { namespace inspect {
