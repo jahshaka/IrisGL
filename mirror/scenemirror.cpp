@@ -7505,11 +7505,20 @@ void SceneMirror::buildViewEnvironment(FrameInputView &part, View *view, const i
     if (cut) part.resetExposure = true;
 }
 
-void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record, bool offscreenChain)
+SceneMirror::WindowPass SceneMirror::windowPass(const iris::Scene &doc)
 {
+    WindowPass p;
     // SHADOWS ARE ALWAYS ON (PHOTON-7 10-4 fix round, F7: the World panel's switch is deleted - turning every map off
     // let every light through every wall). A view's shadows stay the engine's door for tests (View::setShadows).
-    part.shadows = true;
+    p.shadows = true;
+    p.samples = unsigned(qBound(1, doc.antiAliasing, 16));
+    return p;
+}
+
+void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record, bool offscreenChain)
+{
+    const WindowPass pass = windowPass(*mSource);
+    part.shadows = pass.shadows;
     // World-panel Anti-Aliasing: per-scene MSAA sample count. Safe to push per
     // frame — the engine ignores a repeat of the value already REQUESTED (the
     // achieved count may be clamped lower by the driver, so comparing against
@@ -7524,7 +7533,7 @@ void SceneMirror::buildViewPostFx(FrameInputView &part, View *view, bool record,
     // (View::presentsAsWindow: a PRESENTED STAND-IN - the headless host's editor view - takes the window's count, the
     // picture it stands in for; TEST-STREAMLINE-1 3a item 2b)
     if (view->presentsAsWindow())
-        part.sampleCount = unsigned(qBound(1, mSource->antiAliasing, 16));
+        part.sampleCount = pass.samples;
     // World panel post-processing chain (POST_CHAIN_SPEC.md §§3-7). Safe to push
     // per frame: the engine ignores a repeat of the value already set, and only
     // a change to an ENABLE flag rebuilds a workspace. Offscreen views (this

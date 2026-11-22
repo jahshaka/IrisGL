@@ -8223,6 +8223,9 @@ public:
     /// on-screen views from EngineConfig::sampleCount; offscreen views start
     /// at 1 (pixel-asserted readbacks stay exact unless a test opts in).
     unsigned mRequestedSamples = 1;
+    /// AN OFFSCREEN TARGET's PIXEL FORMAT (Engine::createOffscreenView's `format`; RGBA8 by default): set at birth,
+    /// before the view's first target, and every rebuilt target keeps it (rebuildRtt, the stereo re-shape).
+    Ogre::PixelFormatGpu mTargetFormat = Ogre::PFG_RGBA8_UNORM;
     /// The engine that made this view. Set right after construction by
     /// OgreEngine::createView/createOffscreenView; never null for a view a host
     /// can reach. chainDesc() reads the MACHINE's answers through it (ray
@@ -8913,14 +8916,17 @@ public:
                      const Colour &background) override;
 
     View *createOffscreenView(const std::string &name, unsigned width, unsigned height,
-                              const Colour &background, OffscreenContract contract) override;
+                              const Colour &background, OffscreenContract contract,
+                              TargetFormat format = TargetFormat::Rgba8Unorm) override;
+    bool windowTargetShape(NativeWindowHandle window, unsigned requestedSamples, WindowTargetShape &out) override;
     /// THE VR SESSION'S EYE PAIR (LAYERED-STEREO-1): an offscreen view whose target
     /// is BORN a two-layer array (one eye per layer, `eyeW` x `eyeH`), so the
     /// session's setStereo has nothing to re-create. Its width() is the pair's.
     OgreView *createStereoPairView(const std::string &name, unsigned eyeW, unsigned eyeH,
                                    const Colour &background);
     OgreView *createOffscreen(const std::string &name, unsigned width, unsigned height,
-                              const Colour &background, unsigned layers, OffscreenContract contract);
+                              const Colour &background, unsigned layers, OffscreenContract contract,
+                              Ogre::PixelFormatGpu format = Ogre::PFG_RGBA8_UNORM);
 
     void destroyView(View *view) override;
 

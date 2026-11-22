@@ -200,4 +200,7 @@ struct EnvironmentConeQuery;
 struct EnvironmentConeAnswer;
 struct ViewFrames;
 
+enum class TargetFormat;
+struct WindowTargetShape;
+
 }}  // namespace jahshaka::engine

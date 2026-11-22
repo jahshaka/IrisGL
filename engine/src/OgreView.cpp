@@ -1143,7 +1143,7 @@ void OgreView::setStereo(bool on, const std::string &cullCamera) {
         if (mTexture && mTexture->getNumSlices() != stereoTargetLayers(mStereo)) {
             mRoot->getRenderSystem()->getTextureGpuManager()->destroyTexture(mTexture);
             mTexture = createRtt(mRoot, processUniqueName("rtt"), mWidth, mHeight,
-                                 mRequestedSamples, stereoTargetLayers(mStereo));
+                                 mRequestedSamples, stereoTargetLayers(mStereo), mTargetFormat);
         }
         rebuildDetachedWorkspaceDef();
         if (hadWorkspace) attachWorkspace();
@@ -1751,7 +1751,7 @@ void OgreView::rebuildRtt(unsigned w, unsigned h) {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     tm->destroyTexture(mTexture);
     mTexture = createRtt(mRoot, processUniqueName("rtt"), w, h, mRequestedSamples,
-                         mStereo ? 2u : 1u);
+                         mStereo ? 2u : 1u, mTargetFormat);
     // A NEW SAMPLE COUNT CAN MOVE THE SHAPE (ChainDesc::atomDraw: the passthrough
     // shape carries the id pass at 1x only), and the old definition's passes would
     // throw building their render pass against the new target — re-derived before
@@ -1819,6 +1819,10 @@ bool OgreView::readPixels(Image &out) {
             t->unmap();
         }
         tm->destroyAsyncTextureTicket(t);
+        // RGBA IN EVERY FORMAT (Engine::createOffscreenView's `format`): a BGRA target's bytes are swapped back.
+        const Ogre::PixelFormatGpu pf = mTexture->getPixelFormat();
+        if (pf == Ogre::PFG_BGRA8_UNORM || pf == Ogre::PFG_BGRA8_UNORM_SRGB)
+            for (size_t i = 0; i + 3u < out.rgba.size(); i += 4u) std::swap(out.rgba[i], out.rgba[i + 2u]);
         return true;
     } JAH_CATCH(mError, false);
 }

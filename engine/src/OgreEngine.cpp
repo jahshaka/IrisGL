@@ -25,6 +25,9 @@
 // is, which is every Linux build.
 #include "OgreVulkanDevice.h"
 #include "OgreVulkanRenderSystem.h"
+#if defined(__linux__)
+#include "OgreVulkanXcbWindow.h"   // windowTargetShape: the window's own format and sample choices (fork statics)
+#endif
 #endif
 
 #include <cctype>
@@ -722,6 +725,11 @@ View *OgreEngine::createView(const std::string &name,
         params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
         noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
+        // THE WINDOW's SHAPE, said (windowTargetShape's answer for the same window is read against it).
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka view '" + name + "': its window target is " +
+            std::string(Ogre::PixelFormatGpuUtils::toString(window->getTexture()->getPixelFormat())) + ", " +
+            std::to_string(unsigned(window->getTexture()->getSampleDescription().getColourSamples())) + " sample(s)");
         // THE PRESENTED FRAME CAN BE READ BACK (CLOSE-SHOT-2, View::requestFrameCapture):
         // Ogre's own switch (OgreWindow.h) — TRANSFER_SRC on the swapchain images (on
         // Metal, a layer that is not framebufferOnly). Set before setVSync so the
@@ -764,6 +772,11 @@ View *OgreEngine::createView(const std::string &name,
             p["vsync_method"] = "Lowest Latency";
             p["FSAA"] = Ogre::StringConverter::toString(samples);
             Ogre::Window *win = root->createRenderWindow(name + "/" + processUniqueName("resize"), w, h, false, &p);
+            Ogre::LogManager::getSingleton().logMessage(
+                "Jahshaka view '" + name + "': its window target is " +
+                std::string(Ogre::PixelFormatGpuUtils::toString(win->getTexture()->getPixelFormat())) + ", " +
+                std::to_string(unsigned(win->getTexture()->getSampleDescription().getColourSamples())) +
+                " sample(s) (recreated)");
             win->setWantsToDownload(true);   // the same capture switch as the first window
             win->setVSync(mVsync, 1u | kLowestLatencyVSync);
             return win;
@@ -774,8 +787,21 @@ View *OgreEngine::createView(const std::string &name,
 #endif  // !__linux__ && !__APPLE__
 }
 
+namespace {
+/// The engine's TargetFormat <-> Ogre's: the four a surface can be given (VulkanWindowSwapChainBased::chooseSurfaceFormat).
+Ogre::PixelFormatGpu ogreTargetFormat(TargetFormat f) {
+    switch (f) {
+    case TargetFormat::Bgra8Unorm:     return Ogre::PFG_BGRA8_UNORM;
+    case TargetFormat::Rgba8UnormSrgb: return Ogre::PFG_RGBA8_UNORM_SRGB;
+    case TargetFormat::Bgra8UnormSrgb: return Ogre::PFG_BGRA8_UNORM_SRGB;
+    case TargetFormat::Rgba8Unorm:     break;
+    }
+    return Ogre::PFG_RGBA8_UNORM;
+}
+}  // namespace
+
 View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, unsigned height,
-                                      const Colour &background, OffscreenContract contract) {
+                                      const Colour &background, OffscreenContract contract, TargetFormat format) {
     // THE HOST'S CREATE IS A MESSAGE (U3 stage 4a, decision 39 b): the view is the host's handle at once (its id, name,
     // size); its target and chain are made at the drain (adoptOffscreenView), before the view's own record part.
     if (hostPosts()) {
@@ -793,10 +819,60 @@ View *OgreEngine::createOffscreenView(const std::string &name, unsigned width, u
         // THE CONTRACT BEFORE THE ADOPTION (PHOTON-7 stage 10-3): the view is the render thread's from the message
         // below, and no frame may see it without its contract (a setter's value would arrive as a later frame field).
         raw->initOffscreenContract(contract);
+        raw->mTargetFormat = ogreTargetFormat(format);   // the same: before its first target (adoptOffscreenView)
         postedAsMessage([holder](OgreEngine &e) { return e.adoptOffscreenView(std::move(*holder)); });
         return raw;
     }
-    return createOffscreen(name, width, height, background, 1u, contract);
+    return createOffscreen(name, width, height, background, 1u, contract, ogreTargetFormat(format));
+}
+
+bool OgreEngine::windowTargetShape(NativeWindowHandle window, unsigned requestedSamples, WindowTargetShape &out) {
+    // A JOIN on the render thread, as createView is (the device is the render thread's).
+    if (hostPosts()) {
+        bool ok = false;
+        mRenderThread.runOn([&] {
+            EngineSideScope engineSide;
+            ok = windowTargetShape(window, requestedSamples, out);
+            moveErrorToHost();
+        });
+        return ok;
+    }
+    EngineSideScope engineSide;
+    if (mHeadless) {
+        mLastError = "windowTargetShape: this engine is headless (NULL render system) - it has no window system";
+        return false;
+    }
+#if JAH_RAY_QUERY && defined(__linux__)
+    if (!mDisplay || !window) { mLastError = "windowTargetShape: host must supply its X display and the window"; return false; }
+    if (!mHlmsRegistered && !prepareDevice()) return false;   // the device the window will be drawn with
+    JAH_TRY {
+        auto *rs = static_cast<Ogre::VulkanRenderSystem *>(mRoot->getRenderSystem());
+        Ogre::PixelFormatGpu format = Ogre::PFG_UNKNOWN;
+        Ogre::SampleDescription samples;
+        // hwGamma FALSE: createView passes no "gamma" to the Vulkan window (only the non-Vulkan branch does, above), and
+        // VulkanXcbWindow::_initialize starts it false - the swapchain's own argument.
+        Ogre::VulkanXcbWindow::querySurfaceShape(
+            rs->getVulkanDevice(), mDisplay, (unsigned long)window, false,
+            Ogre::SampleDescription(static_cast<Ogre::uint8>(OgreView::sanitizeSamples(requestedSamples))), format,
+            samples);
+        switch (format) {
+        case Ogre::PFG_BGRA8_UNORM:      out.format = TargetFormat::Bgra8Unorm; break;
+        case Ogre::PFG_RGBA8_UNORM_SRGB: out.format = TargetFormat::Rgba8UnormSrgb; break;
+        case Ogre::PFG_BGRA8_UNORM_SRGB: out.format = TargetFormat::Bgra8UnormSrgb; break;
+        default:                         out.format = TargetFormat::Rgba8Unorm; break;
+        }
+        out.samples = std::max(1u, unsigned(samples.getColourSamples()));
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: a window's target shape (a temporary surface): " +
+            std::string(Ogre::PixelFormatGpuUtils::toString(format)) + ", " + std::to_string(out.samples) +
+            " sample(s) for " + std::to_string(requestedSamples) + " asked");
+        return true;
+    } JAH_CATCH(mLastError, false);
+#else
+    (void)window; (void)requestedSamples; (void)out;
+    mLastError = "windowTargetShape: not on this platform yet (the X11 window's query is the one built)";
+    return false;
+#endif
 }
 
 bool OgreEngine::adoptOffscreenView(std::unique_ptr<OgreView> view) {
@@ -808,7 +884,8 @@ bool OgreEngine::adoptOffscreenView(std::unique_ptr<OgreView> view) {
             noteDevice();
         }
         ensureHlms();
-        Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), view->width(), view->height(), 1u, 1u);
+        Ogre::TextureGpu *rtt = OgreView::createRtt(mRoot, processUniqueName("rtt"), view->width(), view->height(), 1u, 1u,
+                                                    view->mTargetFormat);
         view->adoptTarget(rtt);
         mViews.emplace_back(std::move(view));
         syncHostViews();
@@ -824,7 +901,8 @@ OgreView *OgreEngine::createStereoPairView(const std::string &name, unsigned eye
 /// `width` is the view's (for a layered pair, the PAIR's); `layers` > 1 makes the
 /// target a Type2DArray of width / layers per layer (OgreView::createRtt).
 OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, unsigned height,
-                                      const Colour &background, unsigned layers, OffscreenContract contract) {
+                                      const Colour &background, unsigned layers, OffscreenContract contract,
+                                      Ogre::PixelFormatGpu format) {
     if (viewNameTaken(name)) return nullptr;
     if (!width || !height) { mLastError = "createOffscreenView: zero size"; return nullptr; }
     if (mHeadless) {
@@ -850,9 +928,10 @@ OgreView *OgreEngine::createOffscreen(const std::string &name, unsigned width, u
         }
         ensureHlms();   // retried on every call until it succeeds (e.g. bad media dir)
         Ogre::TextureGpu *rtt =
-            OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height, 1u, layers);
+            OgreView::createRtt(mRoot, processUniqueName("rtt"), width, height, 1u, layers, format);
         mViews.emplace_back(new OgreView(mRoot, nullptr, rtt, name, width, height,
                                          background, mLastError));
+        mViews.back()->mTargetFormat = format;
         syncHostViews();
         mViews.back()->mEngine = this;
         // (the engine's own thread: no frame runs between these lines; the contract's graph shape, applied at once)

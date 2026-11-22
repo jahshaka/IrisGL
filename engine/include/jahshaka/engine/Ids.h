@@ -50,6 +50,18 @@ using NativeWindowHandle = unsigned long long;
 /// no behaviour difference. Recorded, deliberately not smuggled in.
 using NativeDisplayHandle = unsigned long long;
 
+/// THE PIXEL FORMAT OF A VIEW's FINAL TARGET (SHADER-SYSTEM-1 stage 7a, R4 (A)): the four a window's surface can be given
+/// (the swapchain's one choice, Engine::windowTargetShape). An offscreen view is RGBA8 unless it is created with another
+/// (Engine::createOffscreenView's `format`); the passes that write the final target key their pipelines on it.
+enum class TargetFormat { Rgba8Unorm, Bgra8Unorm, Rgba8UnormSrgb, Bgra8UnormSrgb };
+
+/// WHAT A HOST WINDOW's FINAL TARGET IS (Engine::windowTargetShape): its format and the sample count its swapchain
+/// validates a request to - the two terms of a final pass's pipeline a window decides.
+struct WindowTargetShape {
+    TargetFormat format = TargetFormat::Rgba8Unorm;
+    unsigned samples = 1u;
+};
+
 /// A node's id: THE DOCUMENT'S, ONE PROCESS-WIDE SPACE (ENGINE-UPGRADE-U3 stage 3, F6): 64 bits, 1-based (0 is
 /// "none"), never reused, so a stale id is harmless. reserveNodeId() hands out the next one — to the document
 /// (iris::SceneNode), to the mirror's own helper nodes and to every Scene::createNode alike, so the record can name a

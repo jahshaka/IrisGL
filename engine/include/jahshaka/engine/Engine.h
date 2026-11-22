@@ -2025,9 +2025,21 @@ public:
     /// frame (PHOTON-7 stage 10-3: the view is adopted by the render thread through a MESSAGE and a later setter's
     /// value travels as a frame FIELD, so a frame could draw the view between the two on a thread race - its meter
     /// then started with the wrong history).
+    /// `format`: the target's pixel format (RGBA8 by default) - a host drawing what a WINDOW will draw gives the
+    /// window's (windowTargetShape), so the final passes' pipelines it builds are the window's. readPixels answers
+    /// RGBA in every format.
     virtual View  *createOffscreenView(const std::string &name,
                                        unsigned width, unsigned height,
-                                       const Colour &background, OffscreenContract contract) = 0;
+                                       const Colour &background, OffscreenContract contract,
+                                       TargetFormat format = TargetFormat::Rgba8Unorm) = 0;
+    /// THE SHAPE A WINDOW's FINAL TARGET WILL HAVE, before any view is created on it (SHADER-SYSTEM-1 stage 7a, R4
+    /// (A)): a TEMPORARY surface on `window` (the host's display connection, the one createView uses), the
+    /// swapchain's own choice of format and its own validation of `requestedSamples` applied to it, the surface
+    /// destroyed before the call returns. The startup gate draws its final-target frames into an offscreen target of
+    /// this shape, so the editor's window builds no final-pass pipeline of its own. False + lastError() when there is
+    /// no such window here (headless, no display, a platform without the query yet).
+    virtual bool   windowTargetShape(NativeWindowHandle window, unsigned requestedSamples,
+                                     WindowTargetShape &out) = 0;
     /// Releases the View's window/texture and camera. Any Scene it showed survives.
     /// Null or unknown pointers are ignored.
     virtual void   destroyView(View *) = 0;

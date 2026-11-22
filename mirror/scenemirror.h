@@ -392,6 +392,13 @@ public:
     /// The name of the last one, for the message a host shows.
     QString lastMobilityMiss() const { return mLastMobilityMiss; }
 
+    /// THE PASS SHAPE A WINDOW VIEW TAKES FROM ITS DOCUMENT (SHADER-SYSTEM-1 stage 7a): every setting of the editor's
+    /// window view that enters a permutation's properties - its MSAA sample count (the World panel's Anti-Aliasing,
+    /// pushed only to a view that presentsAsWindow) and its shadows (always on). buildViewPostFx pushes it and the
+    /// startup gate draws its warm-up with it: ONE source, so the gate draws what the editor draws at THIS launch.
+    struct WindowPass { unsigned samples = 1u; bool shadows = true; };
+    static WindowPass windowPass(const iris::Scene &doc);
+
     /// Converts a document mesh to engine MeshData. Public so importers and tests
     /// can use the same conversion. Returns false if the mesh has no geometry.
     static bool toMeshData(iris::Mesh *mesh, jahshaka::engine::MeshData &out);
