@@ -1936,7 +1936,11 @@ void initSsao(Ogre::Root *root);
 void destroySsao(Ogre::Root *root);
 void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
                 float kernelRadius, float powerScale);
-void initSmaa(Ogre::Root *root, int preset);
+/// THE SMAA PRESETS' FOUR SETS (SHADER-SYSTEM-1 7a, R3): every preset's materials and program twins, the defines fixed
+/// at creation, made once where the engine parses the materials; a preset change selects a set, nothing reloads.
+void createSmaaPresets(Ogre::Root *root);
+/// The material of an SMAA pass (`base` = "SMAA/EdgeDetection", ...) in the set of `preset` (0-3).
+std::string smaaMaterial(const char *base, int preset);
 /// The SSR march's per-frame uniforms: the camera's linearization constants and
 /// the left-handed view→texture-space matrix the ray march projects with, plus
 /// the tuning the description carries. Built exactly like Ogre's own
@@ -1950,29 +1954,14 @@ struct SsrReprojection;
 /// `scene` is the view's (its fog law re-fogs a screen hit; null = no medium).
 void updateSsr(Ogre::Camera *camera, const ChainDesc &desc, const float shot[4],
                SsrReprojection &reprojection, OgreScene *scene);
-// ---- The per-frame push, in two halves (CAMERA_LENS_SPEC §4) ---------------
+// ---- The per-frame push, per VIEW (CAMERA_LENS_SPEC §4) ------------------------
 //
-// This was ONE function, `applyGlobals`, called once a frame from the primary
-// on-screen view. It is two because the halves have DIFFERENT NATURAL SCOPES,
-// and pretending
-// otherwise was two defects at once (POST_CHAIN_SPEC §7.4's "the first enabled
-// on-screen view owns the globals, then break"):
-//
-//   * the RECOMPILE half — the MSAA resolve weights and the SMAA preset — is a
-//     shader reload. It cannot be per view without hitching on every camera cut
-//     and every page switch, so it stays exactly where it was: pushed once a
-//     frame from the primary on-screen view, debounced on "did the value
-//     change" inside each helper. That is a DECISION, recorded, not a
-//     limitation to engineer around.
-//
-//   * the CHEAP half — exposure, the bloom threshold, the AO kernel's camera
-//     terms, the SSR march's matrices — is a handful of setNamedConstant
-//     writes, and every one of them is a property of the view being drawn. Run
-//     from a per-View CompositorWorkspaceListener's workspacePreUpdate it takes
-//     effect for THAT workspace's passes in the same frame (spike R1, measured
-//     on screen and offscreen), which fixes two pre-existing defects outright:
-//     two on-screen views no longer fight over one exposure, and SSAO no longer
-//     marches the FIRST view's projection in the second view's frame.
+// Exposure, the bloom threshold, the AO kernel's camera terms, the SSR march's matrices: a handful of setNamedConstant
+// writes, every one a property of the view being drawn, run from a per-View CompositorWorkspaceListener's
+// workspacePreUpdate so it takes effect for THAT workspace's passes in the same frame (spike R1): two on-screen views
+// never fight over one exposure, and SSAO never marches the first view's projection in the second view's frame.
+// (There is no process-wide "recompile half" any more: its one effect, the SMAA preset's program reload, is a choice of
+// one of four sets made up front - createSmaaPresets.)
 /// Pushes the dither's diagnostic off switch onto the tonemap material
 /// (ChainDesc::ditherOff, ORed with the once-read JAHSHAKA_NO_DITHER). Called
 /// from applyViewGlobals; separate only so its teardown twin has a name.
@@ -1994,7 +1983,6 @@ void forgetTonemapParams();
 /// constants this build pushes (a build error — FORWARD-ONLY-1). A pipeline
 /// with no tonemap quad passes.
 void verifyTonemapMedia();
-void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc);
 /// WHERE A VIEW'S PICTURE WAS ONE FRAME AGO (PAN-SMEAR-1): the world-to-image
 /// matrix the view's last frame was drawn with — image = (u, v, the depth
 /// buffer's own value). The screen-space reflection resolve reads the PREVIOUS

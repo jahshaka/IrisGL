@@ -46,9 +46,9 @@ namespace iris
 // WHAT IS DELIBERATELY MISSING, and why:
 //   * exposure / exposureMin / exposureMax — the camera has a §4 exposure BLOCK
 //     with a mode, in stops. Two dials for one value is worse than one.
-//   * antiAliasing (MSAA) and the SMAA PRESET — both are shader recompiles
-//     (chain::initHdrMsaa / initSmaa), i.e. a hitch, and a per-camera value
-//     would hitch on every cut. A camera may still turn SMAA OFF, which is
+//   * antiAliasing (MSAA) and the SMAA PRESET — both rebuild the view's chain
+//     (the preset selects one of four program sets, chain::createSmaaPresets),
+//     and a per-camera value would rebuild on every cut. A camera may still turn SMAA OFF, which is
 //     compositor shape and free, so `smaa` is here as an Enum that accepts only
 //     the off value; the preset stays world-level by decision, not by omission.
 //   * `ssr` is here, and inert until the world row that owns it reports

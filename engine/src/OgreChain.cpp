@@ -1422,6 +1422,49 @@ void maskOutHelpers(Ogre::CompositorNodeDef *n, Ogre::uint32 drop) {
     }
 }
 
+/// A PROGRAM's TWIN with other defines (a stereo quad's /Multiview, an SMAA preset's set): the same source file and
+/// parameters as `hl` under `name`, its preprocessor defines replaced by `defines`, loaded; made once (an existing
+/// `name` is kept).
+void programTwin(Ogre::HighLevelGpuProgram *hl, const std::string &name, Ogre::GpuProgramType type,
+                 const std::string &defines) {
+    Ogre::HighLevelGpuProgramManager &pm = Ogre::HighLevelGpuProgramManager::getSingleton();
+    if (pm.resourceExists(name)) return;
+    Ogre::HighLevelGpuProgramPtr prog = pm.createProgram(
+        // The SYNTAX code ("glslvk"), not getLanguage(): the Vulkan
+        // program reports "glsl" as its language, which names the GL
+        // factory and a syntax this render system does not run.
+        name, hl->getGroup(), hl->getSyntaxCode(), type);
+    // What the script translator gives every program it creates
+    // (OgreScriptTranslator.cpp, GpuProgramTranslator): the STANDARD
+    // root layout — every quad of ours is declared with it (none names a
+    // `root_layout`, and the prefab cannot be read back from a program to be
+    // copied) — and the version macro.
+    prog->setMorphAnimationIncluded(false);
+    prog->setPoseAnimationIncluded(0);
+    prog->setSkeletalAnimationIncluded(false);
+    prog->setVertexTextureFetchRequired(false);
+    prog->setPrefabRootLayout(Ogre::PrefabRootLayout::Standard);
+    prog->setReplaceVersionMacro(true);
+    // ...then every parameter the original carries (its include switch,
+    // its defines, its reflection flags). The dictionary is shared by
+    // every program type and only a vertex program takes num_clip_distances
+    // (GpuProgram::setNumClipDistances throws, and logs, for any other), so
+    // it is not offered to another type; the root layout is the prefab above.
+    for (const Ogre::ParameterDef &d : hl->getParameters()) {
+        if (d.name == "root_layout") continue;
+        if (d.name == "num_clip_distances" && type != Ogre::GPT_VERTEX_PROGRAM) continue;
+        try {
+            prog->setParameter(d.name, hl->getParameter(d.name));
+        } catch (const Ogre::Exception &) {
+        }
+    }
+    prog->setParameter("preprocessor_defines", defines);
+    prog->setSourceFile(hl->getSourceFile());
+    prog->load();
+    if (hl->hasDefaultParameters() && prog->hasDefaultParameters())
+        prog->getDefaultParameters()->copyMatchingNamedConstantsFrom(*hl->getDefaultParameters());
+}
+
 /// THE MULTIVIEW TWIN OF A QUAD MATERIAL (LAYERED-STEREO-1), by name: "<name>/Multiview",
 /// made once per process and kept for its lifetime (MaterialManager owns it, the way
 /// it owns the original). The twin is the original's clone with every fragment
@@ -1475,45 +1518,9 @@ std::string multiviewMaterial(const std::string &name) {
                             "material '" + name + "': its fragment program is not high-level",
                             "chain::multiviewMaterial");
             const std::string progName = hl->getName() + "/Multiview";
-            if (!pm.resourceExists(progName)) {
-                Ogre::HighLevelGpuProgramPtr prog = pm.createProgram(
-                    // The SYNTAX code ("glslvk"), not getLanguage(): the Vulkan
-                    // program reports "glsl" as its language, which names the GL
-                    // factory and a syntax this render system does not run.
-                    progName, hl->getGroup(), hl->getSyntaxCode(), Ogre::GPT_FRAGMENT_PROGRAM);
-                // What the script translator gives every program it creates
-                // (OgreScriptTranslator.cpp, GpuProgramTranslator): the STANDARD
-                // root layout — every quad a stereo chain builds is declared with
-                // it (none names a `root_layout`, and the prefab cannot be read
-                // back from a program to be copied) — and the version macro.
-                prog->setMorphAnimationIncluded(false);
-                prog->setPoseAnimationIncluded(0);
-                prog->setSkeletalAnimationIncluded(false);
-                prog->setVertexTextureFetchRequired(false);
-                prog->setPrefabRootLayout(Ogre::PrefabRootLayout::Standard);
-                prog->setReplaceVersionMacro(true);
-                // ...then every parameter the original carries (its include switch,
-                // its defines, its reflection flags). The dictionary is shared by
-                // every program type and a fragment program REFUSES the vertex-only
-                // setters (num_clip_distances throws), so those are skipped; the
-                // root layout is the prefab above.
-                for (const Ogre::ParameterDef &d : hl->getParameters()) {
-                    if (d.name == "root_layout") continue;
-                    try {
-                        prog->setParameter(d.name, hl->getParameter(d.name));
-                    } catch (const Ogre::Exception &) {
-                    }
-                }
-                const std::string defines = hl->getParameter("preprocessor_defines");
-                prog->setParameter("preprocessor_defines",
-                                   defines.empty() ? std::string("JAH_MULTIVIEW=1")
-                                                   : defines + ",JAH_MULTIVIEW=1");
-                prog->setSourceFile(hl->getSourceFile());
-                prog->load();
-                if (hl->hasDefaultParameters() && prog->hasDefaultParameters())
-                    prog->getDefaultParameters()->copyMatchingNamedConstantsFrom(
-                        *hl->getDefaultParameters());
-            }
+            const std::string defines = hl->getParameter("preprocessor_defines");
+            programTwin(hl, progName, Ogre::GPT_FRAGMENT_PROGRAM,
+                        defines.empty() ? std::string("JAH_MULTIVIEW=1") : defines + ",JAH_MULTIVIEW=1");
             const Ogre::GpuProgramParametersSharedPtr old = pass->getFragmentProgramParameters();
             pass->setFragmentProgram(progName);
             pass->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(*old);
@@ -3267,7 +3274,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             st->mStencilRef = 1u;
             st->mProfilingId = "Jahshaka SMAA stencil write";
             auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
-            q->mMaterialName = "SMAA/EdgeDetection";
+            q->mMaterialName = smaaMaterial("SMAA/EdgeDetection", desc.smaaPreset);
             q->addQuadTextureSource(0, kLdr);
             q->setAllLoadActions(Ogre::LoadAction::Clear);
             q->setAllClearColours(Ogre::ColourValue(0, 0, 0, 0));
@@ -3289,7 +3296,7 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             st->mStencilRef = 1u;
             st->mProfilingId = "Jahshaka SMAA stencil test";
             auto *q = static_cast<Ogre::CompositorPassQuadDef *>(t->addPass(Ogre::PASS_QUAD));
-            q->mMaterialName = "SMAA/BlendingWeightCalculation";
+            q->mMaterialName = smaaMaterial("SMAA/BlendingWeightCalculation", desc.smaaPreset);
             q->addQuadTextureSource(0, kSmaaEdges);
             q->mLoadActionColour[0] = Ogre::LoadAction::Clear;
             q->mClearColour[0] = Ogre::ColourValue(0, 0, 0, 0);
@@ -3302,7 +3309,8 @@ void build(Ogre::CompositorManager2 *cm, const std::string &workspaceDef,
             off->mProfilingId = "Jahshaka SMAA stencil off";
         }
         {
-            auto *q = addQuad(n, aaTarget, "SMAA/NeighborhoodBlending", "Jahshaka SMAA blend");
+            auto *q = addQuad(n, aaTarget, smaaMaterial("SMAA/NeighborhoodBlending", desc.smaaPreset).c_str(),
+                              "Jahshaka SMAA blend");
             q->addQuadTextureSource(0, kLdr);
             q->addQuadTextureSource(1, kSmaaBlend);
             q->mStoreActionColour[0] = Ogre::StoreAction::Store;
@@ -4324,7 +4332,6 @@ void setDither(bool off) {
 namespace {
 Ogre::TextureGpu *gSsaoNoise = nullptr;
 bool gSsaoInitialised = false;
-int  gSmaaPreset = -1;
 
 /// THE KERNEL'S OWN GENERATOR, SEEDED (SSAO-DOUBLE-1): the hemisphere kernel and the
 /// rotation tile used to come from std::rand — the process's GLOBAL stream — so the AO's
@@ -4442,7 +4449,6 @@ void destroySsao(Ogre::Root *root) {
     Ogre::TextureGpu *noise = gSsaoNoise;
     gSsaoNoise = nullptr;
     gSsaoInitialised = false;
-    gSmaaPreset = -1;
     forgetTonemapParams();   // the tonemap params are a SharedPtr into a dying material
     if (!noise || !root) return;
     try {
@@ -4514,50 +4520,75 @@ void updateSsao(Ogre::Camera *camera, unsigned aoWidth, unsigned aoHeight,
 }
 
 // ---- SMAA -----------------------------------------------------------------
-void initSmaa(Ogre::Root *root, int preset) {
-    if (preset < 0 || preset == gSmaaPreset) return;
-    const Ogre::RenderSystemCapabilities *caps =
-        root->getRenderSystem()->getCapabilities();
-    std::string defines = "SMAA_INITIALIZED=1,";
-    switch (preset) {
-    case 0: defines += "SMAA_PRESET_LOW=1,";    break;
-    case 1: defines += "SMAA_PRESET_MEDIUM=1,"; break;
-    case 2: defines += "SMAA_PRESET_HIGH=1,";   break;
-    default: defines += "SMAA_PRESET_ULTRA=1,"; break;
-    }
+namespace {
+const char *const kSmaaMaterials[] = { "SMAA/EdgeDetection", "SMAA/BlendingWeightCalculation",
+                                       "SMAA/NeighborhoodBlending" };
+}   // namespace
+
+std::string smaaMaterial(const char *base, int preset) {
+    return std::string(base) + "/P" + std::to_string(std::clamp(preset, 0, 3));
+}
+
+// FOUR SETS, A PRESET SELECTS ONE, NO RELOAD (SHADER-SYSTEM-1 7a, R3). A preset's defines drive both programs (the vertex
+// shader's edge offsets and the fragment thresholds), so each preset is its own material with its own program twins,
+// the defines fixed at creation; the chain's SMAA passes name the preset's set (smaaMaterial) and a preset change is the
+// workspace rebuild the chain's shape already makes (ChainDesc::smaaPreset). Nothing is ever reloaded: a reload is what
+// left a quad drawing the old code (the low-level key held no program identity before the fork's content key).
+void createSmaaPresets(Ogre::Root *root) {
+    const Ogre::RenderSystemCapabilities *caps = root->getRenderSystem()->getCapabilities();
+    std::string common;
     // Luma, not Colour: cheaper, and EdgeDetectionDepth throws ERR_NOT_IMPLEMENTED
     // upstream (SmaaUtils.cpp:43-45), so only two of the three modes are real.
-    defines += "SMAA_EDGE_DETECTION_MODE=1,";
+    common += "SMAA_EDGE_DETECTION_MODE=1";
     if (caps->isShaderProfileSupported("glslvk") || caps->isShaderProfileSupported("glsl410"))
-        defines += "SMAA_GLSL_4=1,";
+        common += ",SMAA_GLSL_4=1";
     else if (caps->isShaderProfileSupported("glsl330"))
-        defines += "SMAA_GLSL_3=1,";
-
-    static const char *materials[] = { "SMAA/EdgeDetection", "SMAA/BlendingWeightCalculation",
-                                       "SMAA/NeighborhoodBlending" };
-    for (const char *name : materials) {
-        Ogre::Pass *pass = materialPass(name);
-        if (!pass) continue;
-        // BOTH programs: the preset macros drive the vertex shader's edge
-        // offsets as well as the fragment thresholds.
-        if (pass->hasVertexProgram()) {
-            Ogre::GpuProgramParametersSharedPtr old = pass->getVertexProgramParameters();
-            if (Ogre::GpuProgram *sh = pass->getVertexProgram()->_getBindingDelegate()) {
-                sh->setParameter("preprocessor_defines", defines);
-                pass->getVertexProgram()->reload();
-                pass->getVertexProgramParameters()->copyConstantsFrom(*old);
-            }
-        }
-        if (pass->hasFragmentProgram()) {
-            Ogre::GpuProgramParametersSharedPtr old = pass->getFragmentProgramParameters();
-            if (Ogre::GpuProgram *sh = pass->getFragmentProgram()->_getBindingDelegate()) {
-                sh->setParameter("preprocessor_defines", defines);
-                pass->getFragmentProgram()->reload();
-                pass->getFragmentProgramParameters()->copyConstantsFrom(*old);
-            }
+        common += ",SMAA_GLSL_3=1";
+    static const char *const presetDefine[4] = { "SMAA_PRESET_LOW=1", "SMAA_PRESET_MEDIUM=1", "SMAA_PRESET_HIGH=1",
+                                                 "SMAA_PRESET_ULTRA=1" };
+    Ogre::MaterialManager &mm = Ogre::MaterialManager::getSingleton();
+    for (const char *name : kSmaaMaterials) {
+        Ogre::MaterialPtr base = std::static_pointer_cast<Ogre::Material>(
+            mm.getByName(name, Ogre::ResourceGroupManager::AUTODETECT_RESOURCE_GROUP_NAME));
+        if (!base) continue;
+        // LOADED FIRST (multiviewMaterial's order): a program's binding delegate - the high-level program the twin copies -
+        // exists only once the program has loaded.
+        base->load();
+        if (!base->getTechnique(0) || !base->getTechnique(0)->getPass(0)) continue;
+        Ogre::Pass *basePass = base->getTechnique(0)->getPass(0);
+        for (int preset = 0; preset < 4; ++preset) {
+            const std::string setName = smaaMaterial(name, preset);
+            if (mm.resourceExists(setName)) continue;
+            const std::string defines = std::string("SMAA_INITIALIZED=1,") + presetDefine[preset] + "," + common;
+            Ogre::MaterialPtr set = base->clone(setName);
+            Ogre::Pass *pass = set->getTechnique(0)->getPass(0);
+            const auto twin = [&](bool vertex) {
+                const bool has = vertex ? basePass->hasVertexProgram() : basePass->hasFragmentProgram();
+                if (!has) return;
+                const Ogre::GpuProgramPtr &unified =
+                    vertex ? basePass->getVertexProgram() : basePass->getFragmentProgram();
+                auto *hl = dynamic_cast<Ogre::HighLevelGpuProgram *>(unified->_getBindingDelegate());
+                if (!hl)
+                    OGRE_EXCEPT(Ogre::Exception::ERR_INVALIDPARAMS,
+                                std::string("SMAA material '") + name + "': its program is not high-level",
+                                "chain::createSmaaPresets");
+                const std::string progName = hl->getName() + "/P" + std::to_string(preset);
+                programTwin(hl, progName, vertex ? Ogre::GPT_VERTEX_PROGRAM : Ogre::GPT_FRAGMENT_PROGRAM, defines);
+                const Ogre::GpuProgramParametersSharedPtr old =
+                    vertex ? pass->getVertexProgramParameters() : pass->getFragmentProgramParameters();
+                if (vertex) {
+                    pass->setVertexProgram(progName);
+                    pass->getVertexProgramParameters()->copyMatchingNamedConstantsFrom(*old);
+                } else {
+                    pass->setFragmentProgram(progName);
+                    pass->getFragmentProgramParameters()->copyMatchingNamedConstantsFrom(*old);
+                }
+            };
+            twin(true);
+            twin(false);
+            set->load();
         }
     }
-    gSmaaPreset = preset;
 }
 
 // ---- SSR ------------------------------------------------------------------
@@ -4775,12 +4806,7 @@ void updateLooks(const ChainDesc &desc, double sceneSeconds) {
     }
 }
 
-// ---- The per-frame push, in its two halves --------------------------------
-// See the declarations in EnginePrivate.h for why the split exists at all.
-
-void applyRecompileGlobals(Ogre::Root *root, const ChainDesc &desc) {
-    if (desc.smaaPreset >= 0) initSmaa(root, desc.smaaPreset);
-}
+// ---- The per-frame push, per view (EnginePrivate.h) --------------------------
 
 float applyViewGlobals(Ogre::Root *root, Ogre::Camera *camera, const ChainDesc &desc,
                        unsigned viewWidth, unsigned viewHeight, SsrReprojection &reprojection,

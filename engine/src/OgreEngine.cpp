@@ -1579,33 +1579,6 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                             // follow the arms). Free when the view is Off and nothing is up.
                             s->syncPhotonView();
                         }
-                    // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
-                    // applyGlobals in two). The SMAA preset is a RELOAD of six programs
-                    // (every preset compiled where the engine parsed the materials, so a
-                    // reload is six microcode-cache hits: registerCommonMaterials), process-
-                    // wide, so it cannot be per view without reloading on every camera cut
-                    // and every page switch. It keeps the
-                    // rule POST_CHAIN_SPEC §7.4 wrote: "the primary on-screen view owns the
-                    // globals", i.e. the first enabled view whose chain has effects, and
-                    // each helper debounces on "did the value actually change".
-                    //
-                    // Everything CHEAP that used to ride along here — exposure, the bloom
-                    // threshold, the AO kernel's camera terms, the SSR march's matrices —
-                    // is now pushed per view by chain::ViewGlobalsListener, from that
-                    // view's own workspacePreUpdate. That is what ended the two defects
-                    // this loop used to cause: two on-screen views fighting over one
-                    // exposure, and SSAO marching the first view's projection in the
-                    // second view's frame.
-                    //
-                    // Offscreen views never qualify — their chainDesc() has every effect
-                    // off by construction unless the caller deliberately opted in.
-                    for (auto &v : mViews) {
-                        if (!v->isEnabled()) continue;
-                        const ChainDesc d = v->chainDesc();
-                        if (!d.anyEffect()) continue;
-                        chain::applyRecompileGlobals(mRoot, d);
-                        break;
-                    }
                     // THE PROBE CACHE'S FRAME COUNTER (ENGINE_CACHE_POLICY_SPEC P1): after
                     // the budget spent itself (updateGi) and any flush rebuilt (applyPendingGi),
                     // and before the frame renders the dirty probes.
@@ -4725,16 +4698,14 @@ void OgreEngine::registerCommonMaterials() {
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: common material scripts not registered: " + e.getFullDescription());
     }
-    // EVERY SMAA PRESET'S PROGRAMS, HERE, WHERE THE MATERIALS ARE PARSED (SHADER-SYSTEM-1 7a). The preset is a
-    // DOCUMENT's (iris::Scene::smaaPreset), unknown until a world opens, and chain::initSmaa applies one by reloading the
-    // six SMAA programs with its defines at the top of a frame (applyRecompileGlobals) - a program not in the microcode
-    // cache is six glslang compiles inside that frame. The microcode key carries the defines (OgreVulkanProgram's
-    // mSource + "_" + the preamble), so compiling all four here makes any later preset's reload six cache hits. The
-    // programs are left at preset 3; a frame asking it reloads nothing. Engine tests: engine.smaa_up_front.
+    // EVERY SMAA PRESET's SET, HERE, WHERE THE MATERIALS ARE PARSED (SHADER-SYSTEM-1 7a, R3). The preset is a
+    // DOCUMENT's (iris::Scene::smaaPreset), unknown until a world opens: each preset is its own material set with its
+    // defines fixed at creation (chain::createSmaaPresets), so a preset asked later selects a set and compiles nothing.
+    // Engine tests: engine.smaa_up_front, engine.smaa_preset_picture.
     {
         const Ogre::RenderSystem::JahCompileCosts before = Ogre::RenderSystem::getJahCompileCosts();
         const auto t0 = std::chrono::steady_clock::now();
-        for (int preset = 0; preset < 4; ++preset) chain::initSmaa(mRoot, preset);
+        chain::createSmaaPresets(mRoot);
         const double ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         const Ogre::RenderSystem::JahCompileCosts after = Ogre::RenderSystem::getJahCompileCosts();
