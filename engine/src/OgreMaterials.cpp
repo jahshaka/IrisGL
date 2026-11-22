@@ -1322,6 +1322,7 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // chain's overlay pass, refractive items in its refraction pass, and
         // everything else stays on Ogre's default queue.
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
+        fileSubGroup(n, tit->second);   // the stated draw order survives the rebuilt Item (GIZMO-ORDER-1)
         n.node->attachObject(n.item);
         // A NODE THAT IS HIDDEN STAYS HIDDEN when it is given geometry:
         // SceneNode::setVisible only walks the objects attached AT THE TIME, so
@@ -1399,6 +1400,7 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
         n.item->setVisibilityFlags(itemVisibilityFlags(n, rec.unlit, rec.distortion));
         nameForGeomSig(n);   // its GI channel may have changed: the signature re-reads it (U4 stage 3)
         n.item->setRenderQueueGroup(renderQueueFor(rec));
+        fileSubGroup(n, rec);   // on-top or not, blended or not: the new material decides (GIZMO-ORDER-1)
         markGpuSlotDirty(n);   // its flags word and its queue just changed
         n.materialRef = matId;
         if (!rec.unlit) {
@@ -1456,6 +1458,7 @@ bool OgreScene::setNodeDrawOrder(NodeId id, unsigned order) {
         return false;
     }
     n.drawOrder = static_cast<Ogre::uint8>(order);
+    fileSubGroup(n, mit->second);
     return true;
 }
 
@@ -2619,6 +2622,11 @@ bool OgreScene::setUnlitMaterial(MaterialId id, const Colour &c) {
                 db->setMacroblock(macro);
             }
             it->second.blended = wantBlend;
+            // ...AND ITS SUB-GROUP (GIZMO-ORDER-1): an on-top part that starts or stops blending moves between
+            // its stated order and the blended parts' sub-group, which keeps it after every opaque one.
+            if (it->second.onTop)
+                for (auto &kv : mNodes)
+                    if (kv.second.materialRef == id && kv.second.item) fileSubGroup(kv.second, it->second);
         }
         db->setColour(toOgre(c));
         return true;

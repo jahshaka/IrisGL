@@ -323,6 +323,7 @@ bool OgreScene::attachSkinnedMesh(NodeId id, MeshId meshId, MaterialId matId,
         // Item is born casting (Scene::setNodeCastShadow).
         applyNodeCasterBit(n);   // castShadow AND a caster channel (SHADOW-FIT-1)
         n.item->setRenderQueueGroup(renderQueueFor(tit->second));
+        fileSubGroup(n, tit->second);   // the stated draw order survives the rebuilt Item (GIZMO-ORDER-1)
         n.gpuMeshSlot = acquireGpuMesh(mit->second);   // the GPU scene's mesh table
         markGpuSlotDirty(n);
         // A SKINNED item is never static (rule 3, the document's isStaticEligible): a document node the document
