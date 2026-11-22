@@ -13,9 +13,10 @@
 //
 // THE CONVERSIONS. JS -> Value: undefined and null -> null (a trailing undefined argument is an absent one); a boolean;
 // a number -> Int when it is integral, not -0 and of magnitude <= 2^53, else Number; a BigInt -> Int (outside int64 an
-// error); a string -> UTF-8; an Array -> array; an ArrayBuffer or a Uint8Array -> bytes; any other object -> an object of
-// its own enumerable string keys in their order (a member holding undefined is absent). A function or a symbol is an
-// error. Value -> JS: an Int of magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a Uint8Array; the rest
+// error); a string -> UTF-8; an Array -> array; an ArrayBuffer or a Uint8Array -> bytes; any other typed array, a
+// DataView, a String object and an arguments object -> an error, at any place (refusedClass: quickjs would list their
+// indices before a bound is judged); any other object -> an object of its own enumerable string keys in their order (a
+// member holding undefined is absent). A function or a symbol is an error. Value -> JS: an Int of magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a Uint8Array; the rest
 // by kind.
 //
 // THE ONE BOUNDED CONVERSION, JS -> Value (SCRIPT-IN-ENGINE-1 2b; the 2a final read's L1: a script's `a.length = 4e9`
@@ -140,6 +141,38 @@ struct Budget {
 
 bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Value &out, std::string &why, int depth);
 
+/// THE CLASSES NO PLACE CARRIES (2b's final read, D1), by their class name - "" for any other value. quickjs lists
+/// every INDEX of a typed array, an arguments object and a String object as an own key (8 bytes an index, allocated
+/// and filled, quickjs.c:9575-9612) before a caller could judge a single bound: `new Int8Array(0x7fffffff)` costs the
+/// script a lazy 2 GiB and its listing ~16 GiB, a String over a rope of 2^30 units a few nodes and 8 GiB. So every
+/// typed array but the one carried kind (a Uint8Array is bytes: taken before this is asked), every arguments object
+/// (mapped and strict), the String object, and a DataView (else carried silently as an empty object) cannot be
+/// carried. The String and Arguments class ids are read from the runtime BY NAME, never copied from quickjs's private
+/// enum: quickjs's own classes carry the same ids in every runtime (JS_NewRuntime registers its one table in order,
+/// quickjs.c:2351), so the first runtime's reading serves the process.
+std::string refusedClass(JSContext *ctx, JSValueConst v)
+{
+    const JSClassID id = JS_GetClassID(v);
+    if (id == JS_INVALID_CLASS_ID) return std::string();
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    const auto nameOf = [ctx, rt](JSClassID c) {
+        const JSAtom a = JS_GetClassName(rt, c);
+        if (a == JS_ATOM_NULL) return std::string();
+        const OwnedCString s{ctx, JS_AtomToCString(ctx, a)};
+        JS_FreeAtomRT(rt, a);
+        return s.s ? std::string(s.s) : std::string();
+    };
+    static const std::vector<JSClassID> indexed = [&nameOf, rt] {
+        std::vector<JSClassID> ids;
+        for (JSClassID c = 1; c < 256; ++c)
+            if (JS_IsRegisteredClass(rt, c) && (nameOf(c) == "String" || nameOf(c) == "Arguments")) ids.push_back(c);
+        return ids;
+    }();
+    bool refused = JS_GetTypedArrayType(v) >= 0 || JS_IsDataView(v);
+    for (const JSClassID c : indexed) refused = refused || c == id;
+    return refused ? nameOf(id) : std::string();
+}
+
 bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Value &out, std::string &why,
                   int depth)
 {
@@ -231,6 +264,12 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Val
         if (!budget.spend(p ? n : 0, at, why)) return false;
         out = Value::bytes(Value::Bytes(p, p + (p ? n : 0)));
         return true;
+    }
+    // THE LAW AT THE DOOR (D1): before any branch that could list an own key, at every place, declared or not
+    if (const std::string cls = refusedClass(ctx, v); !cls.empty()) {
+        why = placeText(at) + " cannot be carried: its class is " + cls +
+              " (bytes are a Uint8Array or an ArrayBuffer)";
+        return false;
     }
     if (JS_IsArray(v)) {
         if (!at.open && (!at.p || at.kind != Kind::Array)) {   // no array is declared here: carried empty, never read
