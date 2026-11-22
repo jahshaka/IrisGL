@@ -279,10 +279,25 @@ public:
     void setConsole(ConsoleSink sink);
     /// Where a command call runs (default: inline, on the script's thread).
     void setExecutor(Executor executor);
-    /// Runs JavaScript `source`, `name` its file name in errors, TO ITS END: the script, then every job it queued (the
-    /// code after an `await`, a promise's reactions) until none is left. Failed carries an uncaught error's text and
-    /// its stack (the script's line), or a rejected promise no handler took ("an unhandled promise rejection: ...");
-    /// a command's Failed is a thrown error the script may catch.
+    /// A SCRIPT LANGUAGE (the lead's S5): one small interface, each language's binding ONE file of the engine that
+    /// converts its values to Value, installs the registry's commands as its functions and calls Host::call. The
+    /// built-in languages are THE LANGUAGE TABLE (src/script/LanguageTable.inc: an extension and a maker a line);
+    /// addLanguage adds another (a test's, an embedder's).
+    class Language {
+    public:
+        virtual ~Language() = default;
+        /// Runs `source` to its end (`name` its file name in errors): Result as Host::run says.
+        virtual Result run(const std::string &source, const std::string &name) = 0;
+    };
+    using LanguageMaker = std::function<std::unique_ptr<Language>(Host &host)>;
+    /// The language that reads scripts named `*<extension>` (".js"): made the first time a script needs it.
+    void addLanguage(std::string extension, LanguageMaker make);
+
+    /// Runs the script `source` in THE LANGUAGE OF ITS NAME's EXTENSION (`name` its file name in errors; no language
+    /// for it: Failed, naming the extensions this host reads), TO ITS END - in JavaScript: the script, then every job it
+    /// queued (the code after an `await`, a promise's reactions) until none is left. Failed carries an uncaught error's
+    /// text and its stack (the script's line), or a rejected promise no handler took ("an unhandled promise rejection:
+    /// ..."); a command's Failed is a thrown error the script may catch.
     Result run(const std::string &source, const std::string &name);
     /// The host.check calls that ran, and those that failed, over every run.
     int checksRun() const { return mChecksRun; }
@@ -303,8 +318,6 @@ public:
     Result call(const std::string &name, const Value::Array &args);
     void print(const std::string &line);
 
-    class Language;   // a script language's binding (private to the engine)
-
 private:
     Registry mRegistry;
     ConsoleSink mConsole;
@@ -312,7 +325,8 @@ private:
     int mChecksRun = 0;
     int mChecksFailed = 0;
     std::vector<std::function<void()>> mJudges;
-    std::unique_ptr<Language> mJs;
+    struct LanguageEntry { std::string extension; LanguageMaker make; std::unique_ptr<Language> made; };
+    std::vector<LanguageEntry> mLanguages;
 };
 
 }  // namespace script

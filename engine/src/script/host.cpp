@@ -8,6 +8,10 @@ namespace jahshaka { namespace engine { namespace script {
 
 Host::Host()
 {
+    // THE LANGUAGE TABLE (LanguageTable.inc): one addLanguage a line
+#define JAH_SCRIPT_LANGUAGE(extension, maker) addLanguage(extension, &detail::maker);
+#include "script/LanguageTable.inc"
+#undef JAH_SCRIPT_LANGUAGE
     mRegistry.add({"host.check", {{object("law", {arg("ok", Kind::Bool), arg("what", Kind::String)})}, Kind::Bool},
                    "One law of a test script, {ok, what}: prints `ok:   <what>` or `FAIL: <what>` and counts a failure "
                    "(the host's verdict). Answers `ok`."},
@@ -19,6 +23,17 @@ Host::Host()
 }
 
 Host::~Host() = default;
+
+void Host::addLanguage(std::string extension, LanguageMaker make)
+{
+    for (LanguageEntry &e : mLanguages)
+        if (e.extension == extension) {
+            e.make = std::move(make);
+            e.made.reset();
+            return;
+        }
+    mLanguages.push_back(LanguageEntry{std::move(extension), std::move(make), nullptr});
+}
 
 void Host::setConsole(ConsoleSink sink) { mConsole = std::move(sink); }
 
@@ -34,8 +49,20 @@ Result Host::run(const std::string &source, const std::string &name)
         for (const std::string &f : faults) r.message += "\n  " + f;
         return r;
     }
-    if (!mJs) mJs = detail::makeJavaScript(*this);
-    return mJs->run(source, name);
+    // THE LANGUAGE OF THE NAME's EXTENSION (the table, LanguageTable.inc, and any addLanguage)
+    const size_t dot = name.rfind('.');
+    const std::string ext = dot == std::string::npos || name.find('/', dot) != std::string::npos ? "" : name.substr(dot);
+    for (LanguageEntry &e : mLanguages) {
+        if (e.extension != ext) continue;
+        if (!e.made) e.made = e.make(*this);
+        return e.made->run(source, name);
+    }
+    Result r;
+    r.status = Status::Failed;
+    r.message = "no script language reads '" + name + "' (this host reads:";
+    for (const LanguageEntry &e : mLanguages) r.message += " *" + e.extension;
+    r.message += ")";
+    return r;
 }
 
 bool Host::law(bool ok, const std::string &what)

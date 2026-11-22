@@ -113,6 +113,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/host.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/LanguageTable.inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/RouteDeclaration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/js_quickjs.cpp
     # the engine's commands, ONE FILE PER FAMILY over commands.h (commands_engine.cpp registers them)
