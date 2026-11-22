@@ -122,6 +122,7 @@ public:
         // A FIELD SET WHERE ITS KIND HAS NO FORM: named, never dropped
         if (!array && p.count) unmapped(where, "count", p.kind);
         if (!array && p.maxCount) unmapped(where, "maxCount", p.kind);
+        if (array && p.count && p.maxCount) fault(where, "its 'maxCount' beside a fixed count has no schema form");
         if (p.minExclusive && !p.min) unmapped(where, "minExclusive", k);
         if (!array && p.element != Param().element) unmapped(where, "element", p.kind);
         if (array && (k == Kind::Array || k == Kind::Null)) unmapped(where, "element", k);

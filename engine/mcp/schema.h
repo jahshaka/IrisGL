@@ -22,7 +22,7 @@
 //   * an object -> "properties", "required" and "additionalProperties":false the same way, nested;
 //   * a default -> "default", the checked default as it is (the codec writes it).
 // A FIELD THE GENERATOR CANNOT CARRY - one set where its kind has no form for it (choices on an integer, a count on a
-// scalar, an array of arrays), or a name a client refuses (not 1-64 of [A-Za-z0-9_.-]) - is a NAMED FAULT, never dropped.
+// scalar, a maximum beside a fixed count, an array of arrays), or a name a client refuses (not 1-64 of [A-Za-z0-9_.-]) - is a NAMED FAULT, never dropped.
 // A field ADDED to Param or Signature is held by mcp.schema's census: kParamFieldsMapped / kSignatureFieldsMapped equal
 // the structs' own field counts, so a new field is given its form here before that row is green again.
 
