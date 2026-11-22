@@ -26,6 +26,14 @@ void Host::setExecutor(Executor executor) { mExecutor = std::move(executor); }
 
 Result Host::run(const std::string &source, const std::string &name)
 {
+    // THE HOST STARTS ONLY WHOLE (the final read's W4): a command its registry refused is a named start failure
+    if (const std::vector<std::string> faults = mRegistry.validate(); !faults.empty()) {
+        Result r;
+        r.status = Status::Failed;
+        r.message = "the host did not start: its registry refused what was offered (" + std::to_string(faults.size()) + " fault(s)):";
+        for (const std::string &f : faults) r.message += "\n  " + f;
+        return r;
+    }
     if (!mJs) mJs = detail::makeJavaScript(*this);
     return mJs->run(source, name);
 }

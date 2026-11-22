@@ -161,25 +161,31 @@ struct Result {
     std::string message;    ///< Failed / Refused: why, beginning with the command's name
 };
 
-/// The commands, by name, in registration order.
+/// The commands, by name, in registration order. THE REGISTRY ENFORCES ITSELF (the final read's W4): a command that
+/// breaks validate's rules, or a second command of one name, is never added - add() answers false AND keeps the fault,
+/// and a Host whose registry holds a fault refuses every run by name (a refusal can never be ignored); a C++ exception
+/// a command throws is caught at the call and is a Failed call naming it (it never unwinds through a language's C).
 class Registry {
 public:
-    /// False (and nothing added) when the name is already registered.
+    /// False (nothing added, the fault kept: validate()) when the name is already registered or the command breaks
+    /// validate's rules.
     bool add(CommandInfo info, CommandFn fn);
     const CommandInfo *find(const std::string &name) const;
     std::vector<const CommandInfo *> commands() const;
-    /// The call by name: the arguments checked against the signature (the laws above), then the command run.
+    /// The call by name: the arguments checked against the signature (the laws above), then the command run (an
+    /// exception it throws: Failed, "<name>: threw: <what>").
     Result call(const std::string &name, const Value::Array &args);
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
-    /// One line per command that lacks a name, a doc, or a name on any parameter or member, or breaks the shape rule (a
-    /// target after a non-target, or more than one non-target parameter): empty when every command is documented and
-    /// shaped.
-    std::vector<std::string> validate() const;
+    /// One line per add() refused: a command that lacks a name, a doc, a function or a name on any parameter or
+    /// member, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
+    /// a name. Empty when every command offered was documented, shaped and new.
+    std::vector<std::string> validate() const { return mFaults; }
 
 private:
     struct Entry { CommandInfo info; CommandFn fn; };
     std::vector<Entry> mEntries;
+    std::vector<std::string> mFaults;
     std::string mLastError;
 };
 

@@ -3,6 +3,7 @@
 #include "jahshaka/engine/Script.h"
 
 #include <cmath>
+#include <exception>
 
 namespace jahshaka { namespace engine { namespace script {
 
@@ -277,7 +278,25 @@ Value Call::refuse(std::string message)
 
 bool Registry::add(CommandInfo info, CommandFn fn)
 {
-    if (find(info.name)) return false;
+    std::vector<std::string> faults;
+    if (info.name.empty()) faults.push_back("a command has no name");
+    else if (find(info.name))
+        faults.push_back(info.name + ": registered twice (the second refused: one host's commands serve one engine)");
+    if (info.doc.empty()) faults.push_back(info.name + ": no doc");
+    if (!fn) faults.push_back(info.name + ": no function");
+    namesMissing(info.name, info.signature.params, faults);
+    int named = 0;
+    for (const Param &p : info.signature.params) {
+        if (p.target && named) faults.push_back(info.name + ": the target '" + p.name + "' follows a named parameter");
+        if (!p.target) ++named;
+    }
+    if (named > 1)
+        faults.push_back(info.name + ": " + std::to_string(named) + " positional parameters are not targets (one at "
+                         "most: the rest are members of one options object)");
+    if (!faults.empty()) {
+        mFaults.insert(mFaults.end(), faults.begin(), faults.end());
+        return false;
+    }
     mEntries.push_back(Entry{std::move(info), std::move(fn)});
     return true;
 }
@@ -327,35 +346,23 @@ Result Registry::call(const std::string &name, const Value::Array &args)
         checked.push_back(std::move(v));
     }
     Call call(entry->info, std::move(checked));
-    r.value = entry->fn(call);
-    r.status = call.status();
-    r.message = call.message();
+    try {
+        r.value = entry->fn(call);
+        r.status = call.status();
+        r.message = call.message();
+    } catch (const std::exception &e) {
+        r.status = Status::Failed;
+        r.message = name + ": threw: " + e.what();
+    } catch (...) {
+        r.status = Status::Failed;
+        r.message = name + ": threw an exception that is not a std::exception";
+    }
     if (r.status == Status::Failed) r.value = Value();
     if (r.status == Status::Refused) {
         r.value = falsy(entry->info.signature.returns);
         mLastError = r.message;
     }
     return r;
-}
-
-std::vector<std::string> Registry::validate() const
-{
-    std::vector<std::string> out;
-    for (const Entry &e : mEntries) {
-        if (e.info.name.empty()) out.push_back("a command has no name");
-        if (e.info.doc.empty()) out.push_back(e.info.name + ": no doc");
-        if (!e.fn) out.push_back(e.info.name + ": no function");
-        namesMissing(e.info.name, e.info.signature.params, out);
-        int named = 0;
-        for (const Param &p : e.info.signature.params) {
-            if (p.target && named) out.push_back(e.info.name + ": the target '" + p.name + "' follows a named parameter");
-            if (!p.target) ++named;
-        }
-        if (named > 1)
-            out.push_back(e.info.name + ": " + std::to_string(named) + " positional parameters are not targets (one at "
-                          "most: the rest are members of one options object)");
-    }
-    return out;
 }
 
 }}}  // namespace jahshaka::engine::script
