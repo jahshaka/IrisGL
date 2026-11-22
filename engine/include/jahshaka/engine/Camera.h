@@ -236,7 +236,9 @@ struct ViewPipDesc {
 /// target that STANDS IN FOR A PRESENTED VIEW: every branch that tells a presented view from an offscreen one reads it
 /// as presented (View::presentsAsWindow, the one predicate), so a host's verbs see the picture the editor's window
 /// shows - only the target is a texture. Declared at creation and fixed for the view's life (setOffscreenContract
-/// refuses it, both ways); no product view declares it (the host's createOffscreenEditorViewport is its one caller).
+/// refuses it, both ways). TWO declarers, both standing in for the editor's window: the headless host
+/// (createOffscreenEditorViewport) and the startup gate's warm view (src/app/shaderbuildgate.cpp: it warms the route,
+/// the chain and the pass the window draws - SHADER-SYSTEM-1 stage 7a).
 enum class OffscreenContract { StillPicture, Live, PresentedStandIn };
 
 /// Where a view's one-shot readback of its own presented frame stands
