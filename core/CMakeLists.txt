@@ -1,8 +1,9 @@
 # IrisCore (NOQT-CORE-1, V2 plan 0.12): THE Qt-FREE BOTTOM of everything below the editor's UI - the standard library only,
 # ONE SHARED library (the lead's ruling 2026-11-22: a static archive pulled into two images keeps two copies of a stateful
 # symbol - the temp serial, the guid engine, the log sink - wherever the platform does not interpose, Windows always: one
-# shared object makes ONE copy by construction), which the document library (IrisGL, PUBLIC) links. Its sources join
-# it as they lose Qt (NOQT-CORE-1 stages 1-4); trianglebvh.cpp joins with trimesh.cpp in stage 2 (its trimesh.h includes
+# shared object makes ONE copy by construction), which the document library (IrisGL, PUBLIC) and the engine
+# (JahshakaEngine, PRIVATE: its caches' file I/O) link. Its sources join it as they lose Qt (NOQT-CORE-1 stages 1-4);
+# trianglebvh.cpp joins with trimesh.cpp in stage 2 (its trimesh.h includes
 # <QList> today). It declares C++17 itself (no Qt usage requirement gives it one) and runs no Qt code generator.
 # tests/hygiene/no_qt_below.py holds it: no Qt include directory, define or generator on its compile lines, no Qt symbol
 # in it, no include outside core/ and the standard library, and no other image defines its stateful symbols.

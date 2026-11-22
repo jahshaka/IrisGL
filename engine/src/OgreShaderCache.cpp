@@ -38,7 +38,12 @@
 #include <Hash/MurmurHash3.h>
 
 #include <atomic>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <ctime>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -57,18 +62,15 @@
 #include <OgreResourceGroupManager.h>
 
 #include "core/threadbudget.h"   // the boot apply's width (THREADING-1)
+#include "core/files.h"          // the caches' file I/O (NOQT-CORE-1)
 
 namespace jahshaka { namespace engine {
 namespace detail {
 
-// The shared on-disk-cache primitives are DEFINED at the bottom of this file
-// (`namespace cachefile`) and declared in EnginePrivate.h; pulled in here so the
-// rest of the file reads exactly as it did when they were file statics.
+// The caches' content hash is DEFINED at the bottom of this file (`namespace cachefile`) and declared in
+// EnginePrivate.h; pulled in here so the rest of the file reads as it did when it was a file static.
 using cachefile::hex128;
 using cachefile::hexOf;
-using cachefile::mkpath;
-using cachefile::readWholeFile;
-using cachefile::writeAtomic;
 
 namespace {
 /// Milliseconds with three decimals (the copy steps are sub-millisecond: an int would print 0).
@@ -212,9 +214,7 @@ private:
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// The shared on-disk-cache primitives (EnginePrivate.h `namespace cachefile`).
-// They were file statics here until the texture cache became the second caller
-// (THREADING_ADOPTION_SPEC.md P2); nothing about them changed but the linkage.
+// The caches' content hash (EnginePrivate.h `namespace cachefile`); their file I/O is iris::files.
 namespace cachefile {
 
 std::string hex128(const void *data, size_t len) {
@@ -224,52 +224,6 @@ std::string hex128(const void *data, size_t len) {
     std::snprintf(buf, sizeof(buf), "%016llx%016llx",
                   static_cast<unsigned long long>(out[0]), static_cast<unsigned long long>(out[1]));
     return std::string(buf);
-}
-
-bool readWholeFile(const std::string &p, std::vector<char> &out) {
-    std::ifstream f(p, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    const std::streamoff n = f.tellg();
-    if (n < 0) return false;
-    out.resize(static_cast<size_t>(n));
-    f.seekg(0);
-    if (n && !f.read(out.data(), n)) return false;
-    return true;
-}
-
-bool mkpath(const std::string &dir) {
-    if (dir.empty()) return false;
-    std::string acc;
-    size_t i = 0;
-    if (dir[0] == '/') { acc = "/"; i = 1; }
-    while (i <= dir.size()) {
-        const size_t slash = dir.find('/', i);
-        const std::string part = dir.substr(i, slash == std::string::npos ? std::string::npos : slash - i);
-        if (!part.empty()) {
-            acc += part;
-            if (::mkdir(acc.c_str(), 0755) != 0 && errno != EEXIST) return false;
-            acc += "/";
-        }
-        if (slash == std::string::npos) break;
-        i = slash + 1;
-    }
-    return true;
-}
-
-bool writeAtomic(const std::string &dir, const std::string &name,
-                 const void *data, size_t len) {
-    const std::string tmp = dir + "/" + name + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        if (len && !f.write(static_cast<const char *>(data), static_cast<std::streamsize>(len))) return false;
-        f.flush();
-        if (!f) return false;
-    }
-    const int fd = ::open(tmp.c_str(), O_RDONLY);
-    if (fd >= 0) { ::fsync(fd); ::close(fd); }
-    if (::rename(tmp.c_str(), (dir + "/" + name).c_str()) != 0) { ::unlink(tmp.c_str()); return false; }
-    return true;
 }
 
 }   // namespace cachefile
@@ -693,13 +647,17 @@ bool ShaderCache::writeManifest(const std::vector<Entry> &files, unsigned shader
     for (const Entry &e : files)
         o << "file " << e.name << " " << e.bytes << " " << e.hash << " " << e.key << "\n";
     const std::string s = o.str();
-    return writeAtomic(mDir, kManifest, s.data(), s.size());
+    return iris::files::writeAtomic(iris::files::path(path(kManifest)), s);
 }
 
-bool ShaderCache::readVerified(const Entry &e, std::vector<char> &out) const { return readVerifiedAt(mDir, e, out); }
+bool ShaderCache::readVerified(const Entry &e, std::string &out) const { return readVerifiedAt(mDir, e, out); }
 
-bool ShaderCache::readVerifiedAt(const std::string &dir, const Entry &e, std::vector<char> &out) {
-    if (!readWholeFile(dir + "/" + e.name, out)) return false;
+// ONE COPY OF THE BLOB, the read itself (the owner's fast start: a pipeline blob is tens of MB): readAll's string is
+// MOVED into `out`, verified in place, swapped into its layer by load() and wrapped by a MemoryDataStream that owns nothing.
+bool ShaderCache::readVerifiedAt(const std::string &dir, const Entry &e, std::string &out) {
+    std::optional<std::string> bytes = iris::files::readAll(iris::files::path(dir + "/" + e.name));
+    if (!bytes) return false;
+    out = std::move(*bytes);
     if (out.size() != e.bytes) {
         logLine(dir + "/" + e.name + ": length " + std::to_string(out.size()) + " != manifest " +
                 std::to_string(e.bytes));
@@ -799,7 +757,7 @@ bool ShaderCache::clear() {
 // stand guard over it. READ-ONLY BY CONSTRUCTION: nothing here opens it for writing, and the wipe, the lock and the
 // saves all name mDir alone. The session's map begins as the seed, so the directory's first saved microcode layer
 // holds the seed's entries and every later launch reads that one instead.
-bool ShaderCache::readSeed(std::vector<char> &out) {
+bool ShaderCache::readSeed(std::string &out) {
     out.clear();
     mSeedEntries = 0;
     if (mSeedDir.empty()) { mSeedState = "off"; return false; }
@@ -836,7 +794,7 @@ bool ShaderCache::readSeed(std::vector<char> &out) {
 }
 
 void ShaderCache::loadSeed() {
-    std::vector<char> bytes;
+    std::string bytes;
     if (!readSeed(bytes)) return;
     try {
         Ogre::DataStreamPtr s(OGRE_NEW Ogre::MemoryDataStream(mSeedDir + "/microcode.cache", bytes.data(),
@@ -911,8 +869,44 @@ void ShaderCache::load(Ogre::Root *root) {
         applyLayerKeys();
     }
 
-    if (!mkpath(mDir)) { logLine("cannot create " + mDir + " — cache disabled"); mEnabled = false; return; }
+    if (!iris::files::makeDirs(iris::files::path(mDir))) {
+        logLine("cannot create " + mDir + " — cache disabled");
+        mEnabled = false;
+        return;
+    }
     acquireLock();
+
+    // A KILLED WRITE's TEMP IS SWEPT HERE, BY THE WRITER (NOQT-CORE-1): every write into this directory - the shader
+    // cache's and the texture cache's, which shares it - stages "<name>.tmp-<pid>-<serial>" (iris::files::stagingTempPath)
+    // and a write killed before its rename leaves it for ever, outside the manifest and the size cap. One is removed
+    // when its writer cannot be alive: its pid names no process (kill: ESRCH), or it was last written before this boot.
+    // A live pid keeps its temp whatever its age - a slow write in flight in another process (the texture cache writes
+    // without the lock) - and a reused pid only delays the sweep to a later open. Nothing else here is touched.
+    if (mWriter) {
+        timespec now {}, up {};
+        ::clock_gettime(CLOCK_REALTIME, &now);
+        ::clock_gettime(CLOCK_BOOTTIME, &up);
+        const time_t bootStart = now.tv_sec - up.tv_sec;
+        unsigned swept = 0;
+        if (DIR *d = opendir(mDir.c_str())) {
+            while (dirent *e = readdir(d)) {
+                const std::string name = e->d_name;
+                const size_t at = name.rfind(".tmp-");
+                if (at == std::string::npos || at == 0) continue;
+                const char *digits = name.c_str() + at + 5;
+                char *dash = nullptr;
+                const long pid = std::isdigit(static_cast<unsigned char>(*digits)) ? std::strtol(digits, &dash, 10) : 0;
+                if (pid <= 0 || *dash != '-' || !dash[1] || std::strspn(dash + 1, "0123456789") != std::strlen(dash + 1))
+                    continue;
+                struct stat st {};
+                if (::stat(path(name).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+                const bool dead = ::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH;
+                if ((dead || st.st_mtime < bootStart) && ::unlink(path(name).c_str()) == 0) ++swept;
+            }
+            closedir(d);
+        }
+        if (swept) logLine("swept " + std::to_string(swept) + " temp(s) a killed write left");
+    }
 
     // THE LAST-USED STAMPS AND THE LAUNCH COUNTER (EntryUses.h): read whole and checked, or none at all - a missing,
     // damaged or older table stamps every entry with this launch (nothing is evictable) and is rebuilt by its first write.
@@ -920,9 +914,9 @@ void ShaderCache::load(Ogre::Root *root) {
         mUses.clear();
         mUsesSignalAt = kNoUsesJob;
         std::uint32_t written = 0u;
-        std::vector<char> bytes;
-        if (!readWholeFile(path(kEntryUses), bytes)) mUsesState = "absent";
-        else if (readUseTable(bytes.data(), bytes.size(), mUses, written)) mUsesState = "loaded";
+        const std::optional<std::string> bytes = iris::files::readAll(iris::files::path(path(kEntryUses)));
+        if (!bytes) mUsesState = "absent";
+        else if (readUseTable(bytes->data(), bytes->size(), mUses, written)) mUsesState = "loaded";
         else {
             mUses.clear();
             mUsesState = "damaged";
@@ -967,10 +961,10 @@ void ShaderCache::load(Ogre::Root *root) {
     // Read and VERIFY everything before handing a single byte to Ogre. If any
     // file is short, corrupt or missing, the whole generation goes: a cache that
     // is half-valid is exactly the state the microcode loader cannot survive.
-    std::vector<char> pipeline, microcode, compute;
-    std::vector<std::pair<int, std::vector<char>>> hlms;
+    std::string pipeline, microcode, compute;
+    std::vector<std::pair<int, std::string>> hlms;
     for (const Entry &e : files) {
-        std::vector<char> bytes;
+        std::string bytes;
         if (!readVerified(e, bytes)) {
             if (mayWipe()) wipe();
             logLine("verification failed — starting cold");
@@ -1108,7 +1102,7 @@ void ShaderCache::load(Ogre::Root *root) {
 // THE COMPUTE LAYER's READ (COLD-BOOT-1 stage 3). The file's checksum was verified with the others; here its records
 // are parsed (a record whose source does not hash to its program key is rejected: readComputeLayer) and kept for
 // prewarmCompute, which drops the STALE ones. A file that is no compute layer is dropped alone, the other layers stand.
-void ShaderCache::loadCompute(const std::vector<char> &bytes) {
+void ShaderCache::loadCompute(const std::string &bytes) {
     ComputeLayerRead read = readComputeLayer(bytes.data(), bytes.size());
     if (!read.ok) {
         logLine("compute.bin: not a compute layer - dropped, the other layers stand");
@@ -1234,7 +1228,7 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         ~Reentry() { flag = false; }
     } reentry(mSaving);
     // THE MESSAGE'S WHOLE SPAN (the read's item 3): from the entry — the write check, the lock's open and fcntl,
-    // dirty(), mkpath — to the dispatch.
+    // dirty(), the directory — to the dispatch.
     const auto stepStart = std::chrono::steady_clock::now();
     mStepMark = true;
     Ogre::RenderSystem *rs = root->getRenderSystem();
@@ -1270,7 +1264,10 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
         // recursively), and the clean-quit save that follows has to be able to write the session's shaders back
         // into it. Found by shadercache.app, whose run 2 was silently cold because every write in run 1's final
         // save failed against a missing directory.
-        if (!mkpath(mDir)) { logLine("cannot recreate " + mDir + " — nothing saved"); return false; }
+        if (!iris::files::makeDirs(iris::files::path(mDir))) {
+            logLine("cannot recreate " + mDir + " — nothing saved");
+            return false;
+        }
         mCopyMask = 0u;
         mCopyDirtyMask = 0u;
         // (F10) Every job copies EVERY Hlms (incrementally: only what is new since the last copy, and the use flags):
@@ -1410,7 +1407,7 @@ bool ShaderCache::saveStep(Ogre::Root *root, size_t entryBudget) {
 // and which waits behind whatever else the filesystem's journal is holding —
 // 17 ms on an idle disk against 403 ms measured with a stream of dirty pages in
 // front of it, on the UI thread, in the middle of an archive the user was
-// watching. The contract does not move: bytes to a sibling `.tmp`, flushed,
+// watching. The contract does not move: bytes to a sibling temp, flushed,
 // renamed over the target, manifest last, so a crash at any instant leaves the
 // previous generation or the new one. Only the thread that waits moves.
 bool ShaderCache::runWrite(PendingWrite &job) {
@@ -1568,7 +1565,8 @@ bool ShaderCache::runWrite(PendingWrite &job) {
             " ms (off the render thread)");
     std::vector<Entry> files;
     for (const auto &o : out) {
-        if (!writeAtomic(mDir, o.first, o.second.data(), o.second.size())) {
+        const std::string_view bytes(o.second.data(), o.second.size());
+        if (!iris::files::writeAtomic(iris::files::path(path(o.first)), bytes)) {
             logLine("could not write " + o.first);
             continue;
         }
@@ -1606,7 +1604,8 @@ bool ShaderCache::runWrite(PendingWrite &job) {
     // evicted nothing. Self-checked, outside the manifest, the launch counter in it.
     if (next != job.uses) {
         const std::vector<char> table = writeUseTable(next, job.launch);
-        if (writeAtomic(mDir, kEntryUses, table.data(), table.size())) mUses = next;
+        if (iris::files::writeAtomic(iris::files::path(path(kEntryUses)), std::string_view(table.data(), table.size())))
+            mUses = next;
         else logLine(std::string("could not write ") + kEntryUses);
     }
     if (evicted)

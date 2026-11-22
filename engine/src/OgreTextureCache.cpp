@@ -19,6 +19,8 @@
 #include "EnginePrivate.h"
 #include "jahshaka_engine_build_id.h"
 
+#include "core/files.h"
+
 #include <OgreLogManager.h>
 #include <OgreRenderSystem.h>
 #include <OgreRoot.h>
@@ -125,9 +127,9 @@ void TextureCache::configure(const std::string &dir) {
 //     file <name> <bytes> <hash>
 bool TextureCache::readManifest(std::vector<FileRec> &out) const {
     out.clear();
-    std::vector<char> bytes;
-    if (!cachefile::readWholeFile(path(kManifestFile), bytes)) return false;
-    std::istringstream in(std::string(bytes.data(), bytes.size()));
+    const std::optional<std::string> bytes = iris::files::readAll(iris::files::path(path(kManifestFile)));
+    if (!bytes) return false;
+    std::istringstream in(*bytes);
     std::string tag;
     int version = 0;
     if (!(in >> tag >> version) || tag != "jahshaka-texture-cache" ||
@@ -169,17 +171,16 @@ void TextureCache::load(Ogre::Root *root) {
     // Every file the manifest names must be present, the right size and the
     // right hash. Anything else and the whole container goes: two files that
     // disagree about which run wrote them are worse than none.
-    std::map<std::string, std::vector<char>> contents;
+    std::map<std::string, std::string> contents;
     for (const FileRec &f : manifest) {
-        std::vector<char> bytes;
-        if (!cachefile::readWholeFile(path(f.name), bytes) ||
-            bytes.size() != size_t(f.bytes) ||
-            cachefile::hex128(bytes.data(), bytes.size()) != f.hash) {
+        std::optional<std::string> bytes = iris::files::readAll(iris::files::path(path(f.name)));
+        if (!bytes || bytes->size() != size_t(f.bytes) ||
+            cachefile::hex128(bytes->data(), bytes->size()) != f.hash) {
             logLine("manifest does not match " + f.name + " — starting cold");
             wipe();
             return;
         }
-        contents[f.name] = std::move(bytes);
+        contents[f.name] = std::move(*bytes);
     }
 
     // ---- Ogre's half. bCreateReservedPools=false, deliberately: we never call
@@ -188,7 +189,7 @@ void TextureCache::load(Ogre::Root *root) {
     // could change how textures are BATCHED rather than just how fast they load.
     auto meta = contents.find(kMetaFile);
     if (meta != contents.end() && !meta->second.empty()) {
-        const std::string json(meta->second.data(), meta->second.size());
+        const std::string &json = meta->second;
         try {
             tm->importTextureMetadataCache(kMetaFile, json.c_str(), false);
         } catch (const Ogre::Exception &e) {
@@ -205,7 +206,7 @@ void TextureCache::load(Ogre::Root *root) {
     // than fatal — the worst case is a probe we could have avoided.
     auto ch = contents.find(kChannelFile);
     if (ch != contents.end()) {
-        std::istringstream in(std::string(ch->second.data(), ch->second.size()));
+        std::istringstream in(ch->second);
         std::string line;
         while (std::getline(in, line)) {
             if (line.empty()) continue;
@@ -273,9 +274,8 @@ bool TextureCache::save(Ogre::Root *root,
     // writes again instead of believing the disk has these bytes.
     auto write = [this, both, dir, key, json = std::string(json), channels = std::move(channels),
                   metaHash, channelHash]() {
-        if (!cachefile::mkpath(dir)) return;
-        if (!cachefile::writeAtomic(dir, kMetaFile, json.data(), json.size())) return;
-        if (!cachefile::writeAtomic(dir, kChannelFile, channels.data(), channels.size())) return;
+        if (!iris::files::writeAtomic(iris::files::path(dir + "/" + kMetaFile), json)) return;   // makes the directory
+        if (!iris::files::writeAtomic(iris::files::path(dir + "/" + kChannelFile), channels)) return;
         // The manifest LAST, always: it is the thing that makes the other two
         // readable, so a crash between the two writes leaves a container that
         // fails its own check and starts cold, never one that half-loads.
@@ -285,7 +285,7 @@ bool TextureCache::save(Ogre::Root *root,
         m << "file " << kMetaFile << " " << json.size() << " " << metaHash << "\n";
         m << "file " << kChannelFile << " " << channels.size() << " " << channelHash << "\n";
         const std::string text = m.str();
-        if (!cachefile::writeAtomic(dir, kManifestFile, text.data(), text.size())) return;
+        if (!iris::files::writeAtomic(iris::files::path(dir + "/" + kManifestFile), text)) return;
         std::lock_guard<std::mutex> lock(mLastWrittenMutex);
         mLastWritten = both;
     };

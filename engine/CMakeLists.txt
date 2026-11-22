@@ -936,10 +936,10 @@ target_compile_definitions(JahshakaEngine PRIVATE
 target_include_directories(JahshakaEngine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})
-# THE ONE CORE BUDGET (THREADING-1): the engine sizes its pools (the texture multiload, the shader cache's boot apply)
-# from IrisGL's header-only, Ogre- and Qt-free core/threadbudget.h — by include alone, PRIVATE; the engine still links no
-# IrisGL and includes nothing else of it.
-target_include_directories(JahshakaEngine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# THE Qt-FREE CORE (NOQT-CORE-1): the engine links IrisCore, the ONE shared library below the editor (irisgl/core), for
+# its caches' file I/O (core/files.h) and the one core budget (core/threadbudget.h, THREADING-1); its include root comes
+# with it. The engine still links no IrisGL (the document library) and includes nothing else of irisgl.
+target_link_libraries(JahshakaEngine PRIVATE IrisCore)
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
 if(UNIX AND NOT APPLE)
@@ -964,8 +964,9 @@ set_target_properties(JahshakaScript PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC 
                                                 POSITION_INDEPENDENT_CODE ON)
 
 # jahengine (SCRIPT-IN-ENGINE-1): THE ENGINE, SCRIPTED, WITH NO STUDIO AND NO QT — `jahengine --script f.js [--test-doors]`
-# (jahengine/main.cpp says the rest). It links the script host (JahshakaScript, over the engine) and nothing else of
-# ours: source.script_neutral reads its NEEDED list for Qt. Beside the app in bin/, its plugins and media the build's (the fixtures' two directories).
+# (jahengine/main.cpp says the rest). It links the script host (JahshakaScript, over the engine) and, through the engine,
+# IrisCore (the Qt-free core) - nothing else of ours: source.script_neutral reads its NEEDED list for Qt. Beside the app in
+# bin/, its plugins and media the build's (the fixtures' two directories).
 add_executable(jahengine ${CMAKE_CURRENT_SOURCE_DIR}/jahengine/main.cpp)
 set_target_properties(jahengine PROPERTIES
     AUTOMOC OFF AUTOUIC OFF AUTORCC OFF

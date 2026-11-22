@@ -3058,18 +3058,6 @@ void destroySystem();
 bool available();
 }   // namespace hud
 
-// ---------------------------------------------------------------------------
-// Small on-disk-cache primitives, shared by the TWO caches this engine keeps
-// (the shader cache and the texture cache). Defined once in OgreShaderCache.cpp,
-// where they were born as file statics; they moved into a named namespace when
-// the texture cache (THREADING_ADOPTION_SPEC.md P2) became the second caller,
-// because a second copy of "write it atomically" is a second place to get the
-// rename wrong.
-//
-// Deliberately POSIX and deliberately not <filesystem>: the engine targets C++17
-// on toolchains where <filesystem> still needs an extra link library on some
-// hosts, and every one of these is a handful of lines.
-// ---------------------------------------------------------------------------
 /// WAIT FOR ONE TEXTURE TO BE RESIDENT (THREADING_ADOPTION_SPEC.md P2).
 ///
 /// Since P2, `OgreScene::loadTexture` only SCHEDULES the load and the frame edge
@@ -3101,16 +3089,10 @@ void waitForTextureResident(Ogre::TextureGpu *tex);
 /// recovery hatch, not a preference.
 bool syncTextureLoads();
 
+// The content hash of the TWO caches this engine keeps (the shader cache and the texture cache), defined once in
+// OgreShaderCache.cpp. Their file I/O - the whole read, the directory, the ATOMIC write (a staged sibling temp, flushed,
+// renamed over the target) - is iris::files (irisgl/core/files.h, NOQT-CORE-1): one writer below the editor.
 namespace cachefile {
-/// mkdir -p. False only when a component could not be created.
-bool mkpath(const std::string &dir);
-/// Whole-file read. False when the file does not exist or could not be read.
-bool readWholeFile(const std::string &path, std::vector<char> &out);
-/// ATOMIC write: `<name>.tmp` in the SAME directory, flushed to the platform,
-/// then renamed over the target. A crash mid-write leaves the previous good file
-/// or no file — never half of one. (Ogre's Archive::create gives neither.)
-bool writeAtomic(const std::string &dir, const std::string &name,
-                 const void *data, size_t len);
 /// 128-bit content hash as printable hex — Murmur3, which ships with Ogre.
 /// NOT a cryptographic hash and not used as one: it detects corruption and
 /// staleness, not tampering.
@@ -3255,7 +3237,8 @@ TextureCache &textureCache();
 //      fails its checksum deletes the directory and starts cold. A cold start
 //      costs seconds; a bad SPIR-V blob costs a GPU hang.
 //   2. WE checksum every file, because layer 2 does not.
-//   3. Every write is atomic: *.tmp in the same directory, flushed, renamed.
+//   3. Every write is atomic (iris::files::writeAtomic): a staged temp in the same
+//      directory, flushed, renamed; the writer's open sweeps a dead writer's temps.
 //   4. One writer. A second process gets a READ-ONLY cache, never a failed run.
 //   5. Load order is upstream's, not ours: pipeline cache -> setSaveMicrocodes
 //      ToCache(true) then microcode -> Hlms disk caches. Placed inside
@@ -3473,11 +3456,11 @@ private:
     bool  writeManifest(const std::vector<Entry> &files, unsigned shaders) const;
     /// Reads `name`, checks it against the manifest entry, and returns the bytes.
     /// Empty on any mismatch — the caller then wipes.
-    bool  readVerified(const Entry &e, std::vector<char> &out) const;
-    static bool readVerifiedAt(const std::string &dir, const Entry &e, std::vector<char> &out);
+    bool  readVerified(const Entry &e, std::string &out) const;
+    static bool readVerifiedAt(const std::string &dir, const Entry &e, std::string &out);
     /// THE SEED'S MICROCODE, read and verified (rule 8): true with the bytes when the seed holds a microcode layer
     /// at this build's key; sets mSeedState either way. Never throws, never writes into the seed's directory.
-    bool  readSeed(std::vector<char> &out);
+    bool  readSeed(std::string &out);
     /// ...and handed to Ogre's microcode cache (rule 5's microcode slot). Never throws, never wipes.
     void  loadSeed();
     void  wipe() const;
@@ -3521,7 +3504,7 @@ private:
     /// trustworthy stamps a launch over the cap evicts nothing and says so (the lead's ruling on the fix pass).
     bool                           mStampsTrusted = false;
     /// load()'s half for compute.bin: parse, reject, keep the rest for prewarmCompute (which prunes the stale).
-    void loadCompute(const std::vector<char> &bytes);
+    void loadCompute(const std::string &bytes);
     void composeFingerprint();
     /// The current key (hex) of the layer `name` belongs to; empty for a file
     /// that is no layer of ours.
