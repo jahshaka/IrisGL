@@ -958,6 +958,14 @@ target_compile_definitions(jahengine PRIVATE
 target_link_libraries(jahengine PRIVATE JahshakaEngine)
 add_dependencies(jahengine JahshakaEngineMedia)
 
+# JahshakaEngineMcp (MCP-ON-HOST-1): THE MCP ADAPTER over the engine's script host - the standard library, Script.h and
+# ScriptJson.h, no Qt and no other engine header; it is linked into jahengine only (never Jahshaka, jahlab or IrisGL).
+# Stage 1: the schema of a signature (mcp/schema.h). Its includes are "mcp/<file>.h", from this directory.
+add_library(JahshakaEngineMcp STATIC ${CMAKE_CURRENT_SOURCE_DIR}/mcp/schema.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/schema.cpp)
+set_target_properties(JahshakaEngineMcp PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(JahshakaEngineMcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(JahshakaEngineMcp PUBLIC JahshakaEngine)
+
 # --- Runtime data: stage the Hlms shader templates next to the executable ----
 # The engine resolves `<exe dir>/media/Hlms/{Common,Pbs,Unlit}` at runtime; the
 # build-machine path is only a fallback default. ~600K, copied when stale.
