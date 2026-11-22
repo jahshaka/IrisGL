@@ -108,6 +108,7 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     st->engine = engine;
     st->bootError = std::move(bootError);
     st->testDoors = testDoors;
+    st->pictureBytesCap = host.options().pictureBytesCap;
     const Commands k(st);
     registerSceneCommands(host, k);
     registerViewCommands(host, k);

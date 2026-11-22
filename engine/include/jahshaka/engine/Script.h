@@ -269,7 +269,16 @@ class Host {
 public:
     using ConsoleSink = std::function<void(const std::string &line)>;
     using Executor = std::function<void(const std::function<void()> &call)>;
-    Host();
+    /// THE HOST's OPTIONS, fixed at its construction (no environment variable, no script command changes them): each
+    /// caller - jahengine, the MCP adapter - passes its own.
+    struct Options {
+        /// The bytes the live pictures may hold (engine.picture.*: a picture past it FAILS by name) - 512 MiB: fifteen
+        /// 4K RGBA8 pictures, or three of PICTURE-REQUEST-1's 4K float radiance.
+        std::size_t pictureBytesCap = std::size_t(512) << 20;
+    };
+    Host();   // the default options
+    explicit Host(Options options);
+    const Options &options() const { return mOptions; }
     ~Host();
     Host(const Host &) = delete;
     Host &operator=(const Host &) = delete;
@@ -319,6 +328,7 @@ public:
     void print(const std::string &line);
 
 private:
+    Options mOptions;
     Registry mRegistry;
     ConsoleSink mConsole;
     Executor mExecutor;

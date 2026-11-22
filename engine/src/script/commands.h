@@ -27,7 +27,8 @@ struct EngineState {
     std::string bootError;
     bool testDoors = false;
     std::vector<DeclaredRoutes> declared;
-    std::size_t pictureBytes = 0;   // the live pictures' bytes (commands_picture.cpp: THE CAP)
+    std::size_t pictureBytes = 0;      // the live pictures' bytes (commands_picture.cpp: THE CAP)
+    std::size_t pictureBytesCap = 0;   // the cap: the host's option (Host::Options::pictureBytesCap)
 };
 
 inline Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }

@@ -6,7 +6,9 @@
 
 namespace jahshaka { namespace engine { namespace script {
 
-Host::Host()
+Host::Host() : Host(Options()) {}
+
+Host::Host(Options options) : mOptions(options)
 {
     // THE LANGUAGE TABLE (LanguageTable.inc): one addLanguage a line
 #define JAH_SCRIPT_LANGUAGE(extension, maker) addLanguage(extension, &detail::maker);

@@ -60,7 +60,7 @@ int main(int argc, char **argv)
     std::string bootError;
     std::unique_ptr<Engine> engine = Engine::create(cfg, bootError);
 
-    script::Host host;
+    script::Host host(script::Host::Options{});   // its options stated: the 512 MiB picture cap
     script::registerEngineCommands(host, engine.get(), bootError, testDoors);
     int failures = host.verdict(host.run(source.str(), scriptPath));
     host.registry().releaseScoped();   // the script's pictures, released at its end (they live across calls until then)

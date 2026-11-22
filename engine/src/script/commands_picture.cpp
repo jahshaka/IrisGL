@@ -3,8 +3,8 @@
 // (hash, columnStep, mean) read it in place - the script language is an interpreter, a pixel loop is never a script's,
 // and no picture crosses into the script unless engine.picture.bytes asks (one copy, then). A picture LIVES ACROSS
 // CALLS until engine.picture.release (MCP-ON-HOST-1: a session drives the host call by call); jahengine releases every
-// one at its script's end. THE CAP: the live pictures hold at most kPictureBytesCap bytes - a picture past it FAILS by
-// name (release one first).
+// one at its script's end. THE CAP: the live pictures hold at most the host's Options::pictureBytesCap (512 MiB unless
+// its caller says otherwise) - a picture past it FAILS by name (release one first).
 #include "script/commands.h"
 
 #include <cmath>
@@ -13,10 +13,6 @@
 namespace jahshaka { namespace engine { namespace script {
 
 namespace {
-
-/// THE LIVE PICTURES' CAP (stated by the builder, 2026-11-22): 512 MiB - fifteen 4K RGBA8 pictures (33 MB each), or
-/// three of PICTURE-REQUEST-1's 4K float radiance (133 MB each).
-constexpr std::size_t kPictureBytesCap = std::size_t(512) << 20;
 
 /// The checked picture's byte at (x, y, channel); the caller has bounded x and y.
 inline int byteAt(const Image &p, std::int64_t x, std::int64_t y, int c)
@@ -30,9 +26,9 @@ inline int byteAt(const Image &p, std::int64_t x, std::int64_t y, int c)
 /// cap. The picture's bytes are counted while it lives (its deleter gives them back).
 bool Commands::roomForPicture(Call &c, std::size_t bytes) const
 {
-    if (st->pictureBytes + bytes <= kPictureBytesCap) return true;
-    c.fail("the live pictures would hold " + std::to_string(st->pictureBytes + bytes) + " bytes, over the cap " +
-           std::to_string(kPictureBytesCap) + " (512 MiB): release one first (engine.picture.release)");
+    if (st->pictureBytes + bytes <= st->pictureBytesCap) return true;
+    c.fail("the live pictures would hold " + std::to_string(st->pictureBytes + bytes) + " bytes, over the host's cap " +
+           std::to_string(st->pictureBytesCap) + ": release one first (engine.picture.release)");
     return false;
 }
 
