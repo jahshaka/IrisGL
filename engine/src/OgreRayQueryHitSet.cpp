@@ -229,6 +229,9 @@ void hitSetParams(const HitSetSources &src, unsigned geomSlots, HitSetParams &ou
     }
     out.counts[1] = src.sky ? 1.0f : 0.0f;
     out.counts[2] = float(geomSlots);
+    // THE LOOP WORD (jah_rq_alpha.glsl THE BOUND): its bits, never a number - both doors 0 shipped
+    const uint32_t loop = rayLoopWord(src.stepsPublishFrom, src.stepBound);
+    std::memcpy(&out.counts[3], &loop, sizeof(loop));
     // the flat environment with no cube (jah_rq_hit.glsl's JAH_SKY_COLOUR contract)
     for (int i = 0; i < 3; ++i) out.skyColour[i] = std::max(0.0f, src.skyColour[i]);
     out.cards[0] = src.cardsBound() ? float(src.cardSlots) : 0.0f;

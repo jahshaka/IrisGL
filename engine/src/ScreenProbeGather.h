@@ -277,8 +277,13 @@ struct HitSetSources {
     /// THE ALPHA TABLE's device address (REFLECT-MOVERS-2, jah_rq_alpha.glsl): a cut-out's candidates; 0 = none.
     uint64_t alphaTable = 0u;
     /// THE TIER'S COUNTERS' device address (jah_rq_alpha.glsl's JahTierCounters: [0] the reading rays' pane-list
-    /// overflows - the one read's F4); 0 = none.
+    /// overflows - the one read's F4; [1] the deepest ray query loop published - THE BOUND); 0 = none.
     uint64_t tierCounters = 0u;
+    /// THE RAY QUERY LOOPS' TEST DOORS (jah_rq_alpha.glsl THE BOUND, GATHER-HANG-1 stage 2; both 0 shipped): the publishing
+    /// threshold (0 = the law; rayquery.proceedPublishAll makes it 1) and a lowered bound (0 = kRayQueryStepBound;
+    /// rayquery.stepBound) - packed into the loop word, HitSetParams::counts[3]'s bits (rayLoopWord).
+    uint32_t stepsPublishFrom = 0u;
+    uint32_t stepBound = 0u;
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
     /// (the reflection's and the gather's); `on` false binds the stand-ins and appends nothing.
     HitListBinding hit;
@@ -290,7 +295,7 @@ struct HitSetSources {
 struct HitSetParams {
     float voxelOrigin[kGatherMaxCascades][4] = {};
     float voxelInvSize[kGatherMaxCascades][4] = {};
-    float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, unused
+    float counts[4] = {};      ///< the cascades, the sky cube on, the per-slot geometry rows, the LOOP WORD's bits
     float skyColour[4] = {};
     float cards[4] = {};       ///< the card slots, the card records, the reader's demand stamps on (z; its demand span)
     float hitList[4] = {};     ///< the list's capacity, width, instance entries, on
@@ -306,6 +311,16 @@ struct HitSetParams {
     float worldMax[4] = {};    ///< ...its far corner (xyz)
 };
 static_assert(sizeof(HitSetParams) == 25u * 16u, "JahHitParams is twenty-five vec4s");
+/// THE BOUND OF THE RAY QUERY LOOPS (GATHER-HANG-1 stage 2): jah_rq_alpha.glsl's kJahRqStepLaw and kJahRqStepBound, mirrored
+/// for the host's reading of the counter (source.ray_loops_bounded holds the two equal)
+constexpr uint32_t kRayQueryStepLaw = 1024u;
+constexpr uint32_t kRayQueryStepBound = 4u * kRayQueryStepLaw;
+/// THE LOOP WORD (jah_rq_alpha.glsl): bits 0-12 the publishing threshold, bits 13-25 a lowered bound, each clamped to the
+/// bound; 0 = the shipped picture. Its float bits ride HitSetParams::counts[3] (never read as a number).
+constexpr uint32_t rayLoopWord(uint32_t publishFrom, uint32_t bound) {
+    return (publishFrom < kRayQueryStepBound ? publishFrom : kRayQueryStepBound) |
+           ((bound < kRayQueryStepBound ? bound : kRayQueryStepBound) << 13u);
+}
 /// WHO READS THE HITS (PHOTON-7 stage 10-3, the lead's ruling on the teleport window): the level a hit is read at.
 ///  - View: a VIEW reader (the gather, the reflection) reads the level by the GI CAMERA (10-2e): its picture may depend
 ///    on its pose, and two placements the engine can reach at one pose read one level (levelCam.w = 1; 0 without a

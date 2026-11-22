@@ -1334,6 +1334,16 @@ constexpr ArmDef kArms[] = {
       "Refit the top-level structure when the traced SET is unchanged, instead of rebuilding "
       "it (the rebuild is the default: the better tree, 0.21-0.35 ms at 8,001 instances). "
       "far_blas_measure --tlas. Was JAH_RQ_REFIT (read once per process)." },
+    { ArmId::ProceedPublishAll, 0.0, 0.0, 1.0,
+      "A TEST DOOR (GATHER-HANG-1 stage 2, gi.pane_stack): 1 = every ray query loop of the jobs with the hit params "
+      "publishes its trips into the tier's counter [1] (threshold 1, not the law 1024): the counter then reads the "
+      "deepest loop's true small count - THE BOUND's negative control (jah_rq_alpha.glsl). 0 = shipped.",
+      true },
+    { ArmId::StepBound, 0.0, 0.0, 4096.0,
+      "A TEST DOOR (GATHER-HANG-1 stage 2, gi.pane_stack): N = the ray query loops of the jobs with the hit params are "
+      "CUT at N trips instead of kRayQueryStepBound (4096; never above it): a loop that reaches the bound terminates "
+      "its query, the frame ends, and the counter [1] reads N - the bound proved to fire. 0 = shipped.",
+      true },
     { ArmId::GatherTemporal, 1.0, 0.0, 1.0,
       "The screen-probe gather's pixel history (PHOTON-GATHER-1c). 0 = each frame's estimate alone, "
       "no history read or written (the measurement lever: gi.gather, gi.gather_temporal, "

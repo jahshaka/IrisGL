@@ -1837,9 +1837,7 @@ void main()
 			JahRq idq;
 			jahRqInit( idq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
 								   dist * 1.01 );
-			while( jahRqProceed( idq ) )
-			{
-			}
+			JAH_RQ_PROCEED_OPAQUE( idq )
 			if( jahRqType( idq, true ) == JAH_RQ_HIT_TRIANGLE )
 			{
 				const uint idSlot = uint( jahRqCustomIndex( idq, true ) );

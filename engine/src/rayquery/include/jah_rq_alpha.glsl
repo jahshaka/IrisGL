@@ -118,12 +118,87 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 	return jahMaskSolidAt( masks, rec, uv );
 }
 
+/// THE BOUND OF EVERY RAY QUERY LOOP (GATHER-HANG-1 stage 2; CODING_RULES section 2: every data-driven GPU loop is bounded
+/// in the shader, its count clamped at its law). A loop's trip count is not ours: jahRqProceed hands back one CANDIDATE a
+/// trip, and a candidate is one non-opaque triangle (a cut-out's or a pane's: every bottom level is opaque, only a
+/// FORCE_NO_OPAQUE instance makes one) that the ray crosses inside its live interval - an opaque triangle commits inside
+/// the hardware and never reaches the shader. NO STRUCTURE BOUNDS IT: a mesh may stack any number of cut-out quads along
+/// one ray, and a pane is never committed, so every pane crossed is a trip. THE LAW IS THEREFORE A BUDGET,
+/// kJahRqStepLaw = 1024 trips: sixteen times the deepest harness scene's 64 (stage 0 measured 14 at most over 3.3 M loops a
+/// frame); THE BOUND is four times it, kJahRqStepBound = 4096, about 4096 mask tests for one ray - far below a TDR. A loop
+/// that reaches the bound TERMINATES its query, which then answers what it has committed so far: A CUT IS A BIAS (a missed
+/// nearer cut-out, panes left out of a transmittance), and the counter exists to make it VISIBLE, never silent.
+/// PUBLISHED by the five jobs with the hit params (the probe gather, the reflection, the glass escape, the cards' gather,
+/// the voxel sides; the others are bounded the same and publish nothing - a named residue): a loop whose trips reach the
+/// threshold atomicMax-es them into the tier's counter [1]. In every real scene no loop reaches 1024, so the cost is one
+/// compare a loop and no write: the counter reads 0 = no loop reached the law, 1024 to 4095 how deep the worst went, the
+/// bound = a loop was CUT (RayQueryStatus::proceedStepsMax; the tier's close logs it). The bound and the counter are per
+/// query: order-free across views and eyes.
+/// THE LOOP WORD (JAH_HIT_PARAMS.counts.w, its float bits; ScreenProbeGather.h HitSetSources): bits 0-12 the publishing
+/// threshold (0 = the law), bits 13-25 a lowered bound (0 = kJahRqStepBound; never above it). Both are 0 in the shipped
+/// picture; the test arms rayquery.proceedPublishAll (threshold 1: every loop publishes its true small maximum - the
+/// negative control) and rayquery.stepBound (the bound lowered: a loop is cut on purpose) set them. The threshold never
+/// exceeds the bound, so a cut is always published.
+const uint kJahRqStepLaw = 1024u;
+const uint kJahRqStepBound = 4u * kJahRqStepLaw;
+#if defined( JAH_HIT_PARAMS ) && defined( GL_EXT_buffer_reference )
+/// THE TIER'S COUNTERS (the hit set's surface.zw: a host-visible buffer's address, OgreRayQuery.cpp mTierCounters):
+/// [0] the reading rays' pane-list overflows; [1] the deepest ray query loop published (THE BOUND, above)
+layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer JahTierCounters { uint c[]; };
+void jahPanesOverflowCount()
+{
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) != 0u )
+		atomicAdd( JahTierCounters( a ).c[0], 1u );
+}
+uint jahRqLoopWord() { return floatBitsToUint( JAH_HIT_PARAMS.counts.w ); }
+uint jahRqStepBoundNow()
+{
+	const uint b = ( jahRqLoopWord() >> 13u ) & 8191u;
+	return b == 0u ? kJahRqStepBound : min( b, kJahRqStepBound );
+}
+void jahRqStepsPublish( uint n, uint bound )
+{
+	const uint t = jahRqLoopWord() & 8191u;
+	if( n < min( t == 0u ? kJahRqStepLaw : t, bound ) )
+		return;
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) != 0u )
+		atomicMax( JahTierCounters( a ).c[1], n );
+}
+#else
+void jahPanesOverflowCount() {}
+uint jahRqStepBoundNow() { return kJahRqStepBound; }
+void jahRqStepsPublish( uint n, uint bound ) {}
+#endif
+/// ...the loop's head (a trip counted; at the bound the query terminated) and its end (the trips published)
+#define JAH_RQ_LOOP_BEGIN_( q )                                                                   \
+	{                                                                                             \
+		const uint jahRqBound_ = jahRqStepBoundNow();                                             \
+		uint jahRqTrips_ = 0u;                                                                    \
+		while( jahRqProceed( q ) )                                                                \
+		{                                                                                         \
+			if( ++jahRqTrips_ >= jahRqBound_ )                                                    \
+			{                                                                                     \
+				jahRqTerminate( q );                                                              \
+				break;                                                                            \
+			}
+#define JAH_RQ_LOOP_END_                                                                          \
+		}                                                                                         \
+		jahRqStepsPublish( jahRqTrips_, jahRqBound_ );                                            \
+	}
+
+/// THE LOOP of an OPAQUE query (JAH_RQ_FLAGS_OPAQUE: the hardware commits every triangle, so it hands back no candidate)
+/// - bounded like every other.
+#define JAH_RQ_PROCEED_OPAQUE( q )                                                                \
+	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
+	JAH_RQ_LOOP_END_
+
 /// THE LOOP every ray query runs in place of `while( jahRqProceed( q ) ) {}`:
 /// a triangle candidate (only an alpha-tested instance makes one) is confirmed
 /// where its mask is solid.
 #define JAH_RQ_PROCEED( q )                                                                       \
-	while( jahRqProceed( q ) )                                                                    \
-	{                                                                                             \
+	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
 		if( jahRqType( q, false ) == JAH_RQ_CANDIDATE_TRIANGLE &&                                        \
 			jahAlphaSolid( uint( jahRqCustomIndex( q, false ) ),                                    \
 						   uint( jahRqInstanceId( q, false ) ),                                     \
@@ -131,7 +206,7 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 						   uint( jahRqPrimitive( q, false ) ),                                      \
 						   jahRqBary( q, false ) ) )                                                \
 			jahRqConfirm( q );                                                                    \
-	}
+	JAH_RQ_LOOP_END_
 
 /// THE PANES (PHOTON-7 10-4 R7; L9: a transparent surface transmits a ray, attenuated by its material). A blended
 /// item's TLAS instance is FORCE_NO_OPAQUE and carries its PANE WORD in its shader-binding-table offset
@@ -170,19 +245,6 @@ struct JahPanes
 float jahPaneT( uint word ) { return float( word & 2047u ) * ( 1.0 / 2047.0 ); }
 float jahPaneOwn( uint word ) { return float( ( word >> 11u ) & 2047u ) * ( 1.0 / 2047.0 ); }
 
-#if defined( JAH_HIT_PARAMS ) && defined( GL_EXT_buffer_reference )
-/// THE TIER'S COUNTERS (the hit set's surface.zw: a host-visible buffer's address, OgreRayQuery.cpp mTierCounters):
-/// [0] the reading rays' pane-list overflows
-layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer JahTierCounters { uint c[]; };
-void jahPanesOverflowCount()
-{
-	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
-	if( ( a.x | a.y ) != 0u )
-		atomicAdd( JahTierCounters( a ).c[0], 1u );
-}
-#else
-void jahPanesOverflowCount() {}
-#endif
 /// ...a pane to the overflow
 void jahPanesOverflow( inout JahPanes p, float t, uint w )
 {
@@ -233,8 +295,7 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 /// pane's T multiplied as it is met into the float `T` (order-free: no list, no cap); an alpha-tested candidate
 /// confirmed where its mask is solid. The caller answers 0 on an opaque commit, else T.
 #define JAH_RQ_PROCEED_TRANSMIT( q, T )                                                               \
-	while( jahRqProceed( q ) )                                                                        \
-	{                                                                                                 \
+	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
 		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
 		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \
@@ -249,13 +310,12 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 								uint( jahRqPrimitive( q, false ) ),                                   \
 								jahRqBary( q, false ) ) )                                             \
 			jahRqConfirm( q );                                                                        \
-	}
+	JAH_RQ_LOOP_END_
 
 /// THE LOOP of a ray that CROSSES panes (the caches' gathers, the screen gather, the reflection; R8 the light rays):
 /// JAH_RQ_PROCEED's, with the pane branch first. `panes` must be a JahPanes with n = 0.
 #define JAH_RQ_PROCEED_PANES( q, panes )                                                              \
-	while( jahRqProceed( q ) )                                                                        \
-	{                                                                                                 \
+	JAH_RQ_LOOP_BEGIN_( q )                                                                       \
 		if( jahRqType( q, false ) != JAH_RQ_CANDIDATE_TRIANGLE )                                        \
 			continue;                                                                                 \
 		const uint w_ = uint( jahRqPaneWord( q, false ) );                                                    \
@@ -267,7 +327,7 @@ void jahPanesOverflow( inout JahPanes p, float t, uint w )
 								uint( jahRqPrimitive( q, false ) ),                                   \
 								jahRqBary( q, false ) ) )                                             \
 			jahRqConfirm( q );                                                                        \
-	}
+	JAH_RQ_LOOP_END_
 
 JahPanes jahPanesNone()
 {
