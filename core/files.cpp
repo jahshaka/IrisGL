@@ -103,7 +103,8 @@ bool atomicRename(const std::filesystem::path &from, const std::filesystem::path
     return true;
 }
 
-bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability, std::string *error)
+bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability, std::string *error,
+                 Access access)
 {
     const std::filesystem::path dir = target.parent_path();
     if (!dir.empty() && !makeDirs(dir)) {
@@ -113,6 +114,18 @@ bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Du
     const std::filesystem::path tmp = stagingTempPath(target);
     std::error_code ignored;
     std::filesystem::remove(tmp, ignored);   // a leftover of a dead run that had our pid
+#if defined(IRIS_FILES_POSIX)
+    if (access == Access::OwnerOnly) {   // created 0600 HERE, empty: the stream below opens it and keeps its mode
+        const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        if (fd < 0) {
+            if (error) *error = "cannot create " + utf8(tmp) + " owner-only";
+            return false;
+        }
+        ::close(fd);
+    }
+#else
+    (void)access;
+#endif
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (out) out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));

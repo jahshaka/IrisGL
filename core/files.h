@@ -1,5 +1,6 @@
 // iris::files - THE ONE ATOMIC FILE WRITE, AND THE FILE PRIMITIVES BELOW THE EDITOR (NOQT-CORE-1 stage 1; V2 plan 0.12).
-// It replaces the two writers that each had one law (Studio's FileWrite, the engine's cachefile::writeAtomic).
+// It replaces the three writers that each had one law (Studio's FileWrite, the engine's cachefile::writeAtomic, the Claude
+// launch config's in-place "writeFileAtomic").
 //
 // A file written in place LIES about its content between the truncate and the last byte: fatal for a content-addressed
 // object (its name is a sha256 claim nobody re-hashes on read), a corrupt artifact that survives for ever for a sidecar,
@@ -38,6 +39,15 @@ enum class Durability
     Derived    ///< a projection of durable state: atomic rename, no wait
 };
 
+/// Who may read the written file. OwnerOnly (a token, a session id): on POSIX the temp is CREATED 0600 - before a byte is
+/// in it, so the file never exists with a wider mode - and the rename publishes that mode. Elsewhere the platform's default
+/// (a Windows user profile is the user's own).
+enum class Access
+{
+    Default,   ///< the process's umask decides, as for any new file
+    OwnerOnly  ///< 0600 from the temp's creation on (POSIX)
+};
+
 /// UTF-8 text <-> a path, the same on every platform.
 IRIS_CORE_API std::filesystem::path path(std::string_view utf8);
 IRIS_CORE_API std::string utf8(const std::filesystem::path &p);
@@ -61,7 +71,7 @@ IRIS_CORE_API std::filesystem::path stagingTempPath(const std::filesystem::path 
 /// rename replaces it. False with `error` said when anything failed - a Flush write whose fsync failed included - the target
 /// is then untouched and no temp is left.
 IRIS_CORE_API bool writeAtomic(const std::filesystem::path &target, std::string_view bytes, Durability durability = Durability::Flush,
-                 std::string *error = nullptr);
+                 std::string *error = nullptr, Access access = Access::Default);
 
 }   // namespace files
 }   // namespace iris
