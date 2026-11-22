@@ -1076,6 +1076,9 @@ private:
     bool eyesLeft(const GiEyePose *ref, unsigned refCount) const;
     GiEyePose mCardDemandRef[2];
     unsigned mCardDemandRefCount = 0u;
+    /// ...and the scene's landed card-reader builds then (OgreScene::cardReaderLandings: a reader's build landing after it
+    /// refused the reader is a change, COLD-BOOT-1 item 3).
+    unsigned long long mCardDemandRefLandings = 0ull;
     /// The closed region list the cards' plan last took (its engine frame): each is taken once.
     unsigned long long mCardsClosedTaken = ~0ull;
     Ogre::PhotonVoxelMaterial *mVctMaterialStore = nullptr;

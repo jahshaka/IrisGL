@@ -5137,6 +5137,12 @@ public:
     /// The cards' view readers have finished their rest sample sequences (RayQueryTier::cardReadersRestComplete; no
     /// ray tier: true), and each reader's rest length so far (the demand's index: 0 the reflection, 1 the gather).
     bool cardReadersRestComplete(unsigned restFrames[2], bool active[2]) const;
+    /// A card reader of this scene waits on a ray build in flight (RayQueryTier::cardReaderBuildPending; COLD-BOOT-1 item
+    /// 3): its cards will still arrive - giAtRest is false. No ray tier: false.
+    bool cardReaderBuildPending() const;
+    /// The landed ray builds that had refused a card reader of this scene (RayQueryTier::cardReaderLandings): a change of
+    /// the cards' demand when it moves. No ray tier: 0.
+    unsigned long long cardReaderLandings() const;
     /// THE REFLECTION's REST PAST ITS HAND-OVER (RayQueryTier::reflectRestPastHandOver; GiStatus::giAtRest's term,
     /// PHOTON-7 stage 10-3 carrier 2). True without a ray tier.
     bool reflectRestPastHandOver() const;

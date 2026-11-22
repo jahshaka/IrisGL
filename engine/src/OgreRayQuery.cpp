@@ -976,6 +976,11 @@ private:
         std::thread th;
         bool started = false, joined = false, ok = false;
         uint32_t launchFrame = 0u;         // frameNow() at the launch (the test door rays.buildHold counts from it)
+        /// A CARD READER WHOSE BUILD IS IN FLIGHT IS A READER (COLD-BOOT-1 item 3, the lead's ruling): the scenes (their
+        /// historyIds) whose card reader this build REFUSED (aheadReady's "not this frame") - each one's rest demand is not
+        /// complete and its GI not at rest until the build lands (cardReaderBuildPending); the landing (joinAhead, its one
+        /// site) is each one's demand change (cardReaderLandings) and empties the list.
+        std::vector<NodeId> refusedBy;
         std::atomic<bool> done{ false };   // the worker's last write (the render thread joins a finished build at once)
         std::string err;
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
@@ -1000,6 +1005,11 @@ private:
     /// THE TEST DOOR rays.buildHold (+ rays.buildHoldIds): build `id` counts as in flight for the arm's N frames after its
     /// launch, finished or not (aheadReady refuses it in a background-compiling scene, harvestAhead leaves it unjoined).
     bool aheadHeld(AheadId id) const;
+    /// The builds whose consumers read the cards (JAH_CARD_DEMAND: the reflection, the glass escape, the probe gather).
+    static bool cardReaderBuild(AheadId id) { return id == kAheadReflect || id == kAheadGather || id == kAheadGlassEscape; }
+    /// Each scene's count of landed card-reader builds that had refused its reader (by historyId: joinAhead bumps it,
+    /// forgetScene erases it).
+    std::unordered_map<NodeId, unsigned long long> mReaderLandings;
     /// The gather's build, on its worker (kAheadGather): the gather object is made on the render thread at the launch.
     bool makeGatherPipelinesNow(std::string &err);
 public:
@@ -1017,6 +1027,10 @@ public:
     /// The builds started and not joined: AsyncShaderStats::pending counts them.
     unsigned aheadInFlight() const;
     unsigned long long joinedWaiting() const { return mJoinedWaiting; }
+    /// A card reader of `scene` was refused by a build still in flight (Ahead::refusedBy): its cards will still arrive.
+    bool cardReaderBuildPending(const OgreScene *scene) const;
+    /// The scene's landed card-reader builds that had refused its reader (PhotonGi's demand change compares it).
+    unsigned long long cardReaderLandings(const OgreScene *scene) const;
     /// THE JOIN-FREE EXIT (the lead's ruling, COLD-BOOT-1 stage 4): only in the exit-only teardown (processExitMarked).
     /// Every build still in flight is DETACHED and the tier is never destroyed (OgreEngine keeps it, as it keeps Root): one
     /// uninterruptible driver call (a cold rq_reflect: ~50 s) no longer holds the process's end. True when any was.
@@ -2902,9 +2916,28 @@ bool RayQueryTier::aheadReady(AheadId id, const OgreScene *scene) {
     if (!a.started || a.joined) return true;
     // IN FLIGHT: the scene's ONE async-shader rule decides - not this frame where it compiles in the background,
     // the frame waits for it everywhere else
-    if ((!a.done.load(std::memory_order_acquire) || aheadHeld(id)) && scene && scene->compilesInBackground()) return false;
+    if ((!a.done.load(std::memory_order_acquire) || aheadHeld(id)) && scene && scene->compilesInBackground()) {
+        // ...AND A CARD READER REFUSED IS STILL A READER (COLD-BOOT-1 item 3): its scene noted until the build lands
+        if (cardReaderBuild(id) && std::find(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()) == a.refusedBy.end())
+            a.refusedBy.push_back(scene->historyId());
+        return false;
+    }
     joinAhead(id);
     return true;
+}
+
+bool RayQueryTier::cardReaderBuildPending(const OgreScene *scene) const {
+    for (const AheadId id : { kAheadReflect, kAheadGather, kAheadGlassEscape }) {
+        const Ahead &a = mAhead[id];
+        if (!a.joined && std::find(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()) != a.refusedBy.end())
+            return true;
+    }
+    return false;
+}
+
+unsigned long long RayQueryTier::cardReaderLandings(const OgreScene *scene) const {
+    const auto it = mReaderLandings.find(scene->historyId());
+    return it == mReaderLandings.end() ? 0ull : it->second;
 }
 
 bool RayQueryTier::aheadHeld(AheadId id) const {
@@ -2935,6 +2968,10 @@ void RayQueryTier::joinAhead(AheadId id, bool counted) {
     const auto t0 = std::chrono::steady_clock::now();
     if (a.th.joinable()) a.th.join();
     a.joined = true;
+    // THE LANDING OF A BUILD THAT REFUSED A CARD READER (COLD-BOOT-1 item 3; the one site): a change of each such scene's
+    // demand (PhotonGi's hitChanged reopens its window: the reader's first stamps are admitted) and its "pending" ends
+    for (const NodeId s : a.refusedBy) ++mReaderLandings[s];
+    a.refusedBy.clear();
     const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     // ITS BUILDS' LINES, in the order they were made, as the render thread would have written them
     for (const RayAheadNote &n : a.notes) {
@@ -3354,6 +3391,9 @@ void RayQueryTier::forgetScene(OgreScene *scene) {
     // structures of its own kept them, and a new scene allocated at its address inherited its cards and voxel sides -
     // another scene's lighting. source.scene_maps holds every such map to an erase here, ahead of the first return.
     mForgottenReflects.erase(scene);   // (the shot-view fold's entries die with their scene)
+    mReaderLandings.erase(scene->historyId());   // (a refused reader's scene: its count and its marks die with it)
+    for (Ahead &a : mAhead) a.refusedBy.erase(std::remove(a.refusedBy.begin(), a.refusedBy.end(), scene->historyId()),
+                                              a.refusedBy.end());
     if (mGather) mGather->forgetScene(scene);
     forgetCardMovers(scene);
     forgetCardGather(scene);
@@ -9582,6 +9622,10 @@ bool RayQueryTier::cardReadersRestComplete(const OgreScene *scene, unsigned rest
     if (mGather) complete = mGather->restDemandComplete(scene, restFrames[1], n, due, active[1]);
     else n = ScreenProbeGather::shippedRestLength();
     mDemandSpan = n + due;
+    // A CARD READER WHOSE BUILD IS IN FLIGHT IS A READER (COLD-BOOT-1 item 3, the lead's ruling): a reader that could not yet
+    // run makes the demand incomplete - no rest decision is taken on it (it was read as no reader: the decision taken on an
+    // empty demand, the cards never admitted - the startup gate's cold Basic world)
+    if (cardReaderBuildPending(scene)) complete = false;
     for (const auto &kv : mReflects) {
         const ReflectView &rv = kv.second;
         if (rv.sceneId != scene->historyId()) continue;   // (a stale view of a dead scene at this address is not its reader)
@@ -14109,6 +14153,14 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
     return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->cardReadersRestComplete(this, restFrames, active);
 }
 
+bool OgreScene::cardReaderBuildPending() const {
+    return mEngine && mEngine->mRayTier && mEngine->mRayTier->cardReaderBuildPending(this);
+}
+
+unsigned long long OgreScene::cardReaderLandings() const {
+    return mEngine && mEngine->mRayTier ? mEngine->mRayTier->cardReaderLandings(this) : 0ull;
+}
+
 bool OgreScene::reflectRestPastHandOver() const {
     return !mEngine || !mEngine->mRayTier || mEngine->mRayTier->reflectRestPastHandOver(this);
 }
@@ -14395,6 +14447,8 @@ bool OgreScene::cardReadersRestComplete(unsigned restFrames[2], bool active[2]) 
     return true;
 }
 bool OgreScene::reflectRestPastHandOver() const { return true; }
+bool OgreScene::cardReaderBuildPending() const { return false; }
+unsigned long long OgreScene::cardReaderLandings() const { return 0ull; }
 bool OgreScene::gatherRestPastHandOver() const { return true; }
 void PhotonComponent::setSunContact(const SunContactDesc &d) { mSunContact = d; }
 bool PhotonComponent::sunContactWanted() const { return false; }
