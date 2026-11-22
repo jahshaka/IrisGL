@@ -902,6 +902,11 @@ constexpr unsigned kParticleQuotaBuckets[] = { 256u, 1024u, 4096u, 16000u };
 // inside the single range the old one-pass workspace drew.)
 constexpr Ogre::uint8 kRefractiveRenderQueue = 200;
 constexpr Ogre::uint8 kOverlayRenderQueue    = 210;
+/// THE OVERLAY QUEUE's SUB-GROUPS (GIZMO-ORDER-1): a stated draw order of an opaque on-top part takes
+/// 0..kMaxNodeDrawOrder; a blended on-top part is filed at kOverlayBlendedSubGroup, the field's top (3 bits,
+/// OgreRenderQueue.cpp:66), so it still draws after every opaque one as the transparency bit alone did.
+constexpr Ogre::uint8 kMaxNodeDrawOrder       = 6;
+constexpr Ogre::uint8 kOverlayBlendedSubGroup = 7;
 /// BLENDED (alpha) surfaces (REFLECT-FIX-1): after the opaque queues, the selection
 /// outline (10, a helper channel) and the grid (13, OgreGrid.cpp), before the particles
 /// (15) — so every depth-tested helper is seen through a pane of glass, on every tier.
@@ -4812,6 +4817,7 @@ public:
     std::string dumpMaterial(MaterialId id) const override;
     bool attachMesh(NodeId id, MeshId meshId, MaterialId matId) override;
     bool setNodeMaterial(NodeId, MaterialId) override;
+    bool setNodeDrawOrder(NodeId id, unsigned order) override;
     bool detachMesh(NodeId id) override;
     size_t itemCount(NodeId id) const override;
 
@@ -5786,6 +5792,9 @@ private:
         /// Ogre's own default (MovableObject::msDefaultLightMask, and it is
         /// genuinely consulted at OgreObjectDataArrayMemoryManager.cpp:138).
         Ogre::uint32              lightMask = 0xFFFFFFFFu;
+        /// THE STATED DRAW ORDER among coincident on-top parts (Scene::setNodeDrawOrder, 0..6). Kept here for
+        /// the light mask's reason: every attach rebuilds the Item, and a pooled gizmo slot is re-attached.
+        Ogre::uint8               drawOrder = 0;
         /// PER-OBJECT SHADOW CASTING (Scene::setNodeCastShadow). Remembered
         /// here for the same two reasons the light mask is: an Item is REBUILT
         /// on every attach, and a host may say "this never casts" before the
@@ -6232,6 +6241,15 @@ public:
 private:
     /// The render queue an item using this material belongs in.
     static Ogre::uint8 renderQueueFor(const MaterialRec &m);
+    /// THE SUB-GROUP AN ITEM IS FILED AT inside its queue (GIZMO-ORDER-1; the top field of Ogre's sort key,
+    /// OgreRenderQueue.cpp:316). An on-top opaque part: its node's stated draw order (Scene::setNodeDrawOrder).
+    /// An on-top BLENDED part: kOverlayBlendedSubGroup, after every stated order - the sub-group sits ABOVE the
+    /// key's transparency bit, so without it a blended part at 0 would draw before an ordered opaque one; at 7
+    /// the blended parts keep their mutual order (depth, back to front) bit for bit. Every other item: 0, as
+    /// Ogre's default, so no key outside the overlay queue changes.
+    static Ogre::uint8 subGroupFor(const Node &n, const MaterialRec &m);
+    /// subGroupFor written to every SubItem of the node's Item (none: nothing to file).
+    static void fileSubGroup(Node &n, const MaterialRec &m);
     /// A mode that BLENDS over what is behind it (every mode but Opaque and Cutout): its surface is drawn after the
     /// opaque ones, in the blended queue, and occludes nothing.
     static bool isBlendedMode(PbrAlphaMode m) { return m != PbrAlphaMode::Opaque && m != PbrAlphaMode::Cutout; }

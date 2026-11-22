@@ -417,6 +417,16 @@ public:
     /// binds a normal map the mesh has no tangents for — attachMesh is the
     /// answer to every refusal. Idempotent for the material already worn.
     virtual bool        setNodeMaterial(NodeId, MaterialId) = 0;
+    /// THE STATED DRAW ORDER OF COINCIDENT ON-TOP PARTS (GIZMO-ORDER-1). Two on-top parts
+    /// at the same depth (a gizmo's shared legs) show the one drawn LAST, and without
+    /// this the draw order is the allocator's (a count of every vertex array the process
+    /// made), so the picture would depend on what was created before it. `order` 0..6:
+    /// the higher draws later and wins a tie; it outlives a re-attach. Its scope is the
+    /// ON-TOP parts (an unlit material made with depthTest false) and it widens when
+    /// another queue needs a stated order. A blended on-top part is ordered by depth,
+    /// after every opaque one. False, with lastError(), for an unknown node, an order
+    /// past 6, a node that carries no on-top part, and a blended one.
+    virtual bool        setNodeDrawOrder(NodeId, unsigned order) = 0;
     virtual bool        detachMesh(NodeId) = 0;
     /// How many renderables this node actually carries right now.
     ///

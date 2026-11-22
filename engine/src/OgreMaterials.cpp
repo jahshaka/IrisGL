@@ -1415,6 +1415,50 @@ bool OgreScene::setNodeMaterial(NodeId id, MaterialId matId) {
     } JAH_CATCH(mError, false);
 }
 
+// THE STATED DRAW ORDER (GIZMO-ORDER-1). Two on-top parts at one depth pass the
+// overlay pass's LESS_EQUAL test both, so the one drawn last shows; inside a queue
+// Ogre draws in its sort key's order, and for two parts of one material family that
+// key differs first in the VAO's render-queue id, a count of every vertex array the
+// process made (OgreVulkanVaoManager.cpp:1989-1997). The sub-group is the key's top
+// field and the engine's one ordering tool (the sky's, OgreSky.cpp:1470): a stated
+// order put there decides the tie, whatever was created before.
+Ogre::uint8 OgreScene::subGroupFor(const Node &n, const MaterialRec &m) {
+    if (!m.onTop) return 0;
+    return m.blended ? kOverlayBlendedSubGroup : n.drawOrder;
+}
+
+void OgreScene::fileSubGroup(Node &n, const MaterialRec &m) {
+    if (!n.item) return;
+    const Ogre::uint8 sub = subGroupFor(n, m);
+    for (size_t i = 0, e = n.item->getNumSubItems(); i < e; ++i)
+        n.item->getSubItem(i)->setRenderQueueSubGroup(sub);
+}
+
+bool OgreScene::setNodeDrawOrder(NodeId id, unsigned order) {
+    if (postScene([=](OgreScene &s) { return s.setNodeDrawOrder(id, order); })) return true;   // U3 4a: a message
+    JAH_HOST_CALL("Scene::setNodeDrawOrder");
+    auto nit = mNodes.find(id);
+    if (nit == mNodes.end()) { mError = "setNodeDrawOrder: unknown node " + std::to_string(id); return false; }
+    if (order > kMaxNodeDrawOrder) {
+        mError = "setNodeDrawOrder: order " + std::to_string(order) + " is past " + std::to_string(kMaxNodeDrawOrder) +
+                 " (the sub-group above it is the blended on-top parts')";
+        return false;
+    }
+    Node &n = nit->second;
+    auto mit = n.item ? mMaterials.find(n.materialRef) : mMaterials.end();
+    if (mit == mMaterials.end() || !mit->second.onTop) {
+        mError = "setNodeDrawOrder: node " + std::to_string(id) +
+                 " carries no on-top part (a stated draw order is a law of on-top parts)";
+        return false;
+    }
+    if (mit->second.blended) {
+        mError = "setNodeDrawOrder: node " + std::to_string(id) + " is blended (a blended item is ordered by depth)";
+        return false;
+    }
+    n.drawOrder = static_cast<Ogre::uint8>(order);
+    return true;
+}
+
 bool OgreScene::detachMesh(NodeId id) {
     if (postScene([=](OgreScene &s) { return s.detachMesh(id); })) return true;   // U3 4a: a message
     JAH_HOST_CALL("Scene::detachMesh");
