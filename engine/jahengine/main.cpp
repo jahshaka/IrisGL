@@ -13,7 +13,8 @@
 // every one held, and every shader program compiled, else 1. Its LAST LINE is
 // `<name>: PASSED` or `<name>: FAILED (<n>)` - <name> the row's (--name; the script's stem without it). --test-doors opens
 // the engine's TEST arms (ArmInfo::test). --list boots nothing: it prints every command the host serves - its signature
-// (the declared kinds, choices, ranges and units) and its doc, the seed of the generated documentation - and exits 0.
+// (the declared kinds, choices, ranges and units, then its access: [reads] | [changes] | [files] | [test]) and its doc,
+// the seed of the generated documentation - and exits 0, or 1 after a FAULT line per command the registry refused.
 // The process ends at its engine's death: the exit-only teardown (ProcessExit.h), then _Exit with the verdict.
 #include "jahshaka/engine/Engine.h"
 #include "jahshaka/engine/EngineInspect.h"

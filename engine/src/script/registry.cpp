@@ -24,6 +24,18 @@ const char *kindName(Kind k)
     return "?";
 }
 
+const char *accessName(Access a)
+{
+    switch (a) {
+    case Access::Unset:   return "unset";
+    case Access::Reads:   return "reads";
+    case Access::Changes: return "changes";
+    case Access::Files:   return "files";
+    case Access::Test:    return "test";
+    }
+    return "?";
+}
+
 Value Value::bytes(Bytes b)
 {
     Value v;
@@ -548,7 +560,8 @@ std::string signatureText(const CommandInfo &c)
     std::string t = c.name + "(";
     for (size_t i = 0; i < c.signature.params.size(); ++i) t += (i ? ", " : "") + paramText(c.signature.params[i]);
     return t + ") -> " + (c.signature.returnsHandle.empty() ? std::string(kindName(c.signature.returns))
-                                                           : c.signature.returnsHandle + " handle");
+                                                           : c.signature.returnsHandle + " handle") +
+           " [" + accessName(c.signature.access) + "]";
 }
 
 Value Call::fail(std::string message)
@@ -572,6 +585,7 @@ bool Registry::add(CommandInfo info, CommandFn fn)
     else if (find(info.name))
         faults.push_back(info.name + ": registered twice (the second refused: one host's commands serve one engine)");
     if (info.doc.empty()) faults.push_back(info.name + ": no doc");
+    if (info.signature.access == Access::Unset) faults.push_back(info.name + ": no access tag");
     if (!fn) faults.push_back(info.name + ": no function");
     namesMissing(info.name, info.signature.params, faults);
     int named = 0;

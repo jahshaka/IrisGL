@@ -53,7 +53,8 @@ void registerPictureCommands(Host &host, const Commands &k)
     Registry &r = host.registry();
     const Param pic = target(handle("picture", kPicture));
     r.add({"engine.picture.create",
-           {{object("picture", {arg("width", Kind::Int).range(1, 16384).in("px"), arg("height", Kind::Int).range(1, 16384).in("px"),
+           {Access::Changes,
+            {object("picture", {arg("width", Kind::Int).range(1, 16384).in("px"), arg("height", Kind::Int).range(1, 16384).in("px"),
                                 arg("rgba", Kind::Bytes)})},
             Kind::Object},
            "A picture from the script's bytes (a reference it built): {width, height, rgba: width x height x 4 bytes, "
@@ -70,14 +71,14 @@ void registerPictureCommands(Host &host, const Commands &k)
               img.rgba.assign(c[0]["rgba"].asBytes().begin(), c[0]["rgba"].asBytes().end());
               return k.holdPicture(c, std::move(img));
           });
-    r.add({"engine.picture.bytes", {{pic}, Kind::Bytes},
+    r.add({"engine.picture.bytes", {Access::Reads, {pic}, Kind::Bytes},
            "The picture's RGBA bytes, copied into the script (width x height x 4, row-major, top-left origin): for a "
            "script that truly needs the pixels - a reduction is a native command."},
           [](Call &c) -> Value { return Value::bytes(c.object<Image>(c[0])->rgba); });
-    r.add({"engine.picture.release", {{pic}, Kind::Bool},
+    r.add({"engine.picture.release", {Access::Changes, {pic}, Kind::Bool},
            "Releases the picture: its handle is stale from here on, its bytes leave the live pictures' cap."},
           [](Call &c) -> Value { return Value(c.registry().release(c[0].asInt())); });
-    r.add({"engine.picture.hash", {{pic}, Kind::String},
+    r.add({"engine.picture.hash", {Access::Reads, {pic}, Kind::String},
            "The picture's FNV-1a 64 over its RGBA bytes, as 16 hex digits."},
           [](Call &c) -> Value {
               unsigned long long h = 14695981039346656037ull;
@@ -90,7 +91,8 @@ void registerPictureCommands(Host &host, const Commands &k)
               return Value(text);
           });
     r.add({"engine.picture.columnStep",
-           {{pic, object("span", {arg("axis", Kind::String).oneOf({"column", "row"}), arg("a", Kind::Int).in("px"),
+           {Access::Reads,
+            {pic, object("span", {arg("axis", Kind::String).oneOf({"column", "row"}), arg("a", Kind::Int).in("px"),
                                   arg("b", Kind::Int).in("px"), arg("from", Kind::Int).in("px"), arg("to", Kind::Int).in("px")})},
             Kind::Number},
            "The mean absolute step, in codes over R, G and B, between column (axis \"column\") or row (\"row\") a and b, "
@@ -112,7 +114,8 @@ void registerPictureCommands(Host &host, const Commands &k)
               return Value(n ? s / n : 0.0);
           });
     r.add({"engine.picture.mean",
-           {{pic, object("rect", {arg("x0", Kind::Int).in("px"), arg("y0", Kind::Int).in("px"), arg("x1", Kind::Int).in("px"),
+           {Access::Reads,
+            {pic, object("rect", {arg("x0", Kind::Int).in("px"), arg("y0", Kind::Int).in("px"), arg("x1", Kind::Int).in("px"),
                                   arg("y1", Kind::Int).in("px")})},
             Kind::Array},
            "The mean of each channel, in codes, over the rectangle [x0, x1) x [y0, y1): [r, g, b, a]."},

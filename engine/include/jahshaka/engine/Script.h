@@ -141,9 +141,17 @@ Param objects(std::string name, std::vector<Param> fields);
 /// A required handle of `kind` (target(handle(...)) when it is what the command acts on).
 Param handle(std::string name, std::string kind);
 
-/// A command's signature: its parameters and its answer. (A struct of named fields, extended by a field: stage 2 adds
-/// the command's ACCESS tag here - MCP-ON-HOST-1's "every command declares its access" - and validate() requires it.)
+/// WHAT CALLING A COMMAND MAY DO (SCRIPT-IN-ENGINE-1 2a; MCP-ON-HOST-1's read-only surface): `Reads` changes nothing
+/// the engine holds (a read, a reduction, an assertion); `Changes` changes the engine's state (an object made or
+/// released, a value set, a frame drawn); `Files` reads or writes a file; `Test` is a test door (registered only behind
+/// --test-doors). A command takes the HIGHEST any of its arguments reaches - Test > Files > Changes > Reads: a path
+/// anywhere is Files. `Unset` is no tag: Registry::add refuses it.
+enum class Access { Unset, Reads, Changes, Files, Test };
+const char *accessName(Access);
+
+/// A command's signature: its access, its parameters and its answer.
 struct Signature {
+    Access access = Access::Unset;
     std::vector<Param> params;
     Kind returns = Kind::Null;
     /// The kind of handle the command answers ("-> scene handle"); empty = none.
@@ -155,7 +163,7 @@ struct CommandInfo {
     Signature   signature;
     std::string doc;         ///< one or two sentences: the help, and the generated documentation
 };
-/// "engine.frames(n: int = 1) -> null" — the signature as text (the help's line).
+/// "engine.frames(n: int >= 0 frames) -> null [changes]" — the signature as text (the help's line), its access last.
 std::string signatureText(const CommandInfo &);
 
 enum class Status { Ok, Failed, Refused };
@@ -230,8 +238,8 @@ public:
     Result callAt(std::size_t index, Value::Array args);
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
-    /// One line per add() refused: a command that lacks a name, a doc, a function or a name on any parameter or
-    /// member, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
+    /// One line per add() refused: a command that lacks a name, a doc, a function, its access tag or a name on any
+    /// parameter or member, breaks the shape rule (a target after a non-target, or more than one non-target parameter), or repeats
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
 

@@ -14,11 +14,12 @@ Host::Host(Options options) : mOptions(options)
 #define JAH_SCRIPT_LANGUAGE(extension, maker) addLanguage(extension, &detail::maker);
 #include "script/LanguageTable.inc"
 #undef JAH_SCRIPT_LANGUAGE
-    mRegistry.add({"host.check", {{object("law", {arg("ok", Kind::Bool), arg("what", Kind::String)})}, Kind::Bool},
+    mRegistry.add({"host.check", {Access::Reads,
+                                  {object("law", {arg("ok", Kind::Bool), arg("what", Kind::String)})}, Kind::Bool},
                    "One law of a test script, {ok, what}: prints `ok:   <what>` or `FAIL: <what>` and counts a failure "
                    "(the host's verdict). Answers `ok`."},
                   [this](Call &c) { return Value(law(c[0]["ok"].asBool(), c[0]["what"].asString())); });
-    mRegistry.add({"host.lastError", {{}, Kind::String},
+    mRegistry.add({"host.lastError", {Access::Reads, {}, Kind::String},
                    "The last refusal's message: a command that was called correctly but could not act answers falsy "
                    "and says why here (\"\" before any)."},
                   [this](Call &) { return Value(mRegistry.lastError()); });

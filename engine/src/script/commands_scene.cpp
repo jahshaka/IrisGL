@@ -34,7 +34,7 @@ void registerSceneCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
     const PbrParams pbr;
-    r.add({"engine.scene.create", {{arg("name", Kind::String)}, Kind::Int, kScene},
+    r.add({"engine.scene.create", {Access::Changes, {arg("name", Kind::String)}, Kind::Int, kScene},
            "A new scene, empty; answers -> scene handle."},
           [k](Call &c) -> Value {
               Engine *e = k.engine(c);
@@ -44,13 +44,14 @@ void registerSceneCommands(Host &host, const Commands &k)
               return c.hold(kScene, unowned(s));
           });
     r.add({"engine.scene.setAmbient",
-           {{target(handle("scene", kScene)), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
+           {Access::Changes,
+            {target(handle("scene", kScene)), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
            "The scene's hemisphere ambient, {upper, lower}: the upper and the lower colour (linear RGB)."},
           [k](Call &c) -> Value {
               if (Scene *s = k.scene(c, c[0])) s->setAmbient(toColour(c[1]["upper"]), toColour(c[1]["lower"]));
               return Value();
           });
-    r.add({"engine.mesh.unitCube", {{target(handle("scene", kScene))}, Kind::Int, kMesh},
+    r.add({"engine.mesh.unitCube", {Access::Changes, {target(handle("scene", kScene))}, Kind::Int, kMesh},
            "A unit cube mesh in the scene (24 vertices, positions and per-face normals, no uvs); answers -> mesh id."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
@@ -60,7 +61,7 @@ void registerSceneCommands(Host &host, const Commands &k)
               return c.name(kMesh, id);
           });
     r.add({"engine.material.createPbr",
-           {{target(handle("scene", kScene)),
+           {Access::Changes, {target(handle("scene", kScene)),
              object("params", {numbers("albedo", 3, rgb(pbr.albedo)), arg("metalness", Kind::Number, Value(double(pbr.metalness))).range(0, 1),
                                arg("roughness", Kind::Number, Value(double(pbr.roughness))).range(0, 1),
                                numbers("emissive", 3, rgb(pbr.emissive))})},

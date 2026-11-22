@@ -10,7 +10,7 @@ void registerGiCommands(Host &host, const Commands &k)
     static const char *const kModes[] = {"off", "vct", "vctPccHybrid"};
     static const char *const kQualities[] = {"low", "medium", "high", "epic"};
     r.add({"engine.gi.set",
-           {{target(handle("scene", kScene)),
+           {Access::Changes, {target(handle("scene", kScene)),
              object("params", {arg("mode", Kind::String).oneOf({kModes[0], kModes[1], kModes[2]}),
                                arg("quality", Kind::String, Value(kQualities[int(gi.quality)]))
                                    .oneOf({kQualities[0], kQualities[1], kQualities[2], kQualities[3]}),

@@ -6,7 +6,7 @@ namespace jahshaka { namespace engine { namespace script {
 void registerNodeCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
-    r.add({"engine.node.create", {{target(handle("scene", kScene))}, Kind::Int, kNode},
+    r.add({"engine.node.create", {Access::Changes, {target(handle("scene", kScene))}, Kind::Int, kNode},
            "A node at the scene's root, at the identity transform; answers -> node id."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
@@ -16,7 +16,7 @@ void registerNodeCommands(Host &host, const Commands &k)
               return c.name(kNode, id);
           });
     r.add({"engine.node.attachMesh",
-           {{target(handle("scene", kScene)), target(handle("node", kNode)),
+           {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode)),
              object("draw", {handle("mesh", kMesh), handle("material", kMaterial)})},
             Kind::Bool},
            "Draws {mesh: mesh id, material: material id} at the node."},
@@ -29,7 +29,7 @@ void registerNodeCommands(Host &host, const Commands &k)
               return Value(true);
           });
     r.add({"engine.node.setTransform",
-           {{target(handle("scene", kScene)), target(handle("node", kNode)),
+           {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode)),
              object("transform", {numbers("position", 3, vec(Vec3(0, 0, 0))),
                                   numbers("rotation", 4, Value(Value::Array{Value(0.0), Value(0.0), Value(0.0), Value(1.0)})),
                                   numbers("scale", 3, vec(Vec3(1, 1, 1)))})},

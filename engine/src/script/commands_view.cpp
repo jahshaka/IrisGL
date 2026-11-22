@@ -47,7 +47,7 @@ void registerViewCommands(Host &host, const Commands &k)
     Registry &r = host.registry();
     const PostFxDesc fx;
     r.add({"engine.view.createOffscreen",
-           {{object("desc", {arg("name", Kind::String), arg("width", Kind::Int).range(1, 16384).in("px"),
+           {Access::Changes, {object("desc", {arg("name", Kind::String), arg("width", Kind::Int).range(1, 16384).in("px"),
                              arg("height", Kind::Int).range(1, 16384).in("px"),
                              numbers("background", 3, Value(Value::Array{Value(0.0), Value(0.0), Value(0.0)}))})},
             Kind::Int, kView},
@@ -62,7 +62,8 @@ void registerViewCommands(Host &host, const Commands &k)
               if (!v) return c.refuse(e->lastError());
               return c.hold(kView, unowned(v));
           });
-    r.add({"engine.view.setScene", {{target(handle("view", kView)), object("bind", {handle("scene", kScene)})}, Kind::Bool},
+    r.add({"engine.view.setScene", {Access::Changes,
+                                    {target(handle("view", kView)), object("bind", {handle("scene", kScene)})}, Kind::Bool},
            "The scene the view draws: {scene: scene handle}."},
           [k](Call &c) -> Value {
               View *v = k.view(c, c[0]);
@@ -72,7 +73,8 @@ void registerViewCommands(Host &host, const Commands &k)
               return Value(true);
           });
     r.add({"engine.view.setPostFx",
-           {{target(handle("view", kView)), object("desc", {arg("allowOffscreen", Kind::Bool, Value(fx.allowOffscreen)),
+           {Access::Changes,
+            {target(handle("view", kView)), object("desc", {arg("allowOffscreen", Kind::Bool, Value(fx.allowOffscreen)),
                                                      arg("ssr", Kind::Int, Value(fx.ssr)).range(0, 2)})},
             Kind::Null},
            "The view's post chain: allowOffscreen (an offscreen view runs the chain: display-encoded bytes) and ssr "
@@ -86,7 +88,8 @@ void registerViewCommands(Host &host, const Commands &k)
               v->setPostFx(d);
               return Value();
           });
-    r.add({"engine.view.lookAt", {{target(handle("view", kView)), object("pose", {numbers("eye", 3), numbers("target", 3)})},
+    r.add({"engine.view.lookAt", {Access::Changes,
+                                  {target(handle("view", kView)), object("pose", {numbers("eye", 3), numbers("target", 3)})},
                                   Kind::Null},
            "The view's camera, {eye, target}: at `eye` looking at `target`, +Y up, the default projection (45 degrees "
            "vertical)."},
@@ -104,7 +107,7 @@ void registerViewCommands(Host &host, const Commands &k)
               v->setCamera(d);
               return Value();
           });
-    r.add({"engine.view.routes", {{target(handle("view", kView))}, Kind::Object},
+    r.add({"engine.view.routes", {Access::Reads, {target(handle("view", kView))}, Kind::Object},
            "What the view and its scene ran on the last frame: the view's chain as built (gather, integrate, "
            "reflection: the published record), the scene's products (field, cards, store: live) and paused (GI's "
            "update budget 0)."},
@@ -122,7 +125,7 @@ void registerViewCommands(Host &host, const Commands &k)
                                          {"paused", Value(echo && echo->giUpdateBudget() == 0)}});
           });
     r.add({"engine.view.declareRoutes",
-           {{target(handle("view", kView)),
+           {Access::Reads, {target(handle("view", kView)),
              object("routes", {arg("gather", Kind::Bool, Value(false)), arg("integrate", Kind::Bool, Value(false)),
                                arg("reflection", Kind::Bool, Value(false)), arg("field", Kind::Bool, Value(false)),
                                arg("cards", Kind::Bool, Value(false)), arg("store", Kind::Bool, Value(false)),
@@ -162,7 +165,8 @@ void registerViewCommands(Host &host, const Commands &k)
     // THE PENDING DECLARATIONS, JUDGED AT THE VERDICT (enginetesthelpers.h's failPendingRoutes): a declaration no frame
     // asserted is a row that measured nothing it said - a FAIL by name, never a silent green
     r.add({"engine.view.readPixels",
-           {{object("request", {handle("view", kView), arg("eyes", Kind::String, Value("left")).oneOf({"left", "right", "both"}),
+           {Access::Changes,
+            {object("request", {handle("view", kView), arg("eyes", Kind::String, Value("left")).oneOf({"left", "right", "both"}),
                                 arg("content", Kind::String, Value("display")).oneOf({"display", "radiance"}),
                                 arg("when", Kind::String, Value("nextFrame")).oneOf({"nextFrame", "settled"})})},
             Kind::Object},

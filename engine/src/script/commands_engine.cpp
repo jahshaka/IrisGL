@@ -71,7 +71,8 @@ bool Commands::frame(Call &c) const
 void registerFrameCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
-    r.add({"engine.arm", {{object("arm", {arg("name", Kind::String), arg("value", Kind::Number)})}, Kind::Bool},
+    r.add({"engine.arm", {Access::Changes,
+                          {object("arm", {arg("name", Kind::String), arg("value", Kind::Number)})}, Kind::Bool},
            "Sets the engine's measuring arm {name, value} (Engine::arms). A TEST arm opens only in a host started with "
            "--test-doors."},
           [k](Call &c) -> Value {
@@ -89,7 +90,7 @@ void registerFrameCommands(Host &host, const Commands &k)
               if (!ok) return c.refuse(e->lastError());
               return Value(true);
           });
-    r.add({"engine.frames", {{arg("n", Kind::Int).atLeast(0).in("frames")}, Kind::Null},
+    r.add({"engine.frames", {Access::Changes, {arg("n", Kind::Int).atLeast(0).in("frames")}, Kind::Null},
            "Draws n frames in lockstep, each one grid step (1/60 s) of every scene no host stamps; returns when the "
            "n-th frame is drawn and published."},
           [k](Call &c) -> Value {
