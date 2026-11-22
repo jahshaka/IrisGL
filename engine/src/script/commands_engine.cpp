@@ -111,6 +111,14 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     st->testDoors = testDoors;
     st->pictureBytesCap = host.options().pictureBytesCap;
     const Commands k(st);
+    // THE KINDS BOUND AT REGISTRATION (one kind, one type - never "whoever holds first"): what each held kind's handle
+    // names, and the kinds that carry the engine's own ids
+    host.registry().bindKind<Scene>(kScene);
+    host.registry().bindKind<View>(kView);
+    host.registry().bindKind<Image>(kPicture);
+    host.registry().nameKind(kNode);
+    host.registry().nameKind(kMesh);
+    host.registry().nameKind(kMaterial);
     registerSceneCommands(host, k);
     registerViewCommands(host, k);
     registerNodeCommands(host, k);

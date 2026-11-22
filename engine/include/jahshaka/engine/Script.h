@@ -272,17 +272,24 @@ public:
     /// a name. Empty when every command offered was documented, shaped and new.
     std::vector<std::string> validate() const { return mFaults; }
 
+    /// A HELD KIND IS BOUND TO ONE C++ TYPE (SCRIPT-IN-ENGINE-1 2b): a kind whose type is known at registration is
+    /// bound THERE (registerEngineCommands binds scene, view and picture), so no hold - whoever makes it, in whatever
+    /// order - can claim it for another type; a kind with none (a test's own) binds at its first hold. A kind bound
+    /// before to another type is a registry FAULT (the host refuses every run). nameKind marks a NAMED kind (the
+    /// engine's own ids: node, mesh, material): it holds no object.
+    template <class T> void bindKind(const std::string &kind) { bindAs(kind, &typeid(T)); }
+    void nameKind(const std::string &kind) { bindAs(kind, nullptr); }
     /// A held object's new handle; `scoped`: released by releaseScoped - NOT at a run's end: a held object lives across
-    /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call). A HELD KIND IS BOUND
-    /// TO ONE C++ TYPE (SCRIPT-IN-ENGINE-1 2b): its first hold binds it to T, and holding another type under it answers
-    /// 0 with `why` (a scene handle can never name something that is not a Scene). 0 also when the table is full.
+    /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call). 0, with `why`,
+    /// for a kind bound to another type or a named kind, and when the table is full.
     template <class T>
     std::int64_t hold(const std::string &kind, std::shared_ptr<T> object, bool scoped = false, std::string *why = nullptr)
     {
         return holdAs(kind, typeid(T), std::shared_ptr<void>(std::move(object)), scoped, why);
     }
-    /// A handle of the NAMED kind `kind` carrying `id` (< 2^32; the caller has checked it).
-    std::int64_t name(const std::string &kind, std::uint32_t id);
+    /// A handle of the NAMED kind `kind` carrying `id` (< 2^32; the caller has checked it). A HANDLE IS MINTED ONLY BY
+    /// THE DOOR THAT OWNS ITS KIND: 0 for a HELD kind (an id there would name a slot of the table - a forged handle).
+    std::int64_t name(const std::string &kind, std::uint32_t id, std::string *why = nullptr);
     /// Releases a held handle: false when it names no live held object of this registry.
     bool release(std::int64_t handle);
     /// Releases every scoped handle: the caller's at ITS end (jahengine, at its script's end). Host::run never calls it.
@@ -310,11 +317,13 @@ private:
     std::int64_t holdAs(const std::string &kind, const std::type_info &type, std::shared_ptr<void> object, bool scoped,
                         std::string *why);
     void *objectAs(std::int64_t handle, const std::type_info &type) const;
+    void bindAs(const std::string &kind, const std::type_info *type);
     bool judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const;
     std::uint64_t mSerial = 0;
     std::vector<std::string> mKinds;   // index - 1
     std::vector<bool> mKindHeld;       // index - 1: a held kind (a table slot) or a named one (the engine's id)
     std::vector<const std::type_info *> mKindType;   // index - 1: the C++ type a held kind is bound to (null: none yet)
+    std::vector<bool> mKindNamed;      // index - 1: a NAMED kind (nameKind): it holds no object
     std::vector<HandleCheck> mChecks;  // index - 1
     std::vector<Held> mHeld;           // slot - 1
 };

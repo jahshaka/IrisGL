@@ -225,6 +225,7 @@ unsigned Registry::kindIndex(const std::string &kind)
     mKinds.push_back(kind);
     mKindHeld.push_back(false);
     mKindType.push_back(nullptr);
+    mKindNamed.push_back(false);
     mChecks.emplace_back();
     return unsigned(mKinds.size());
 }
@@ -239,6 +240,8 @@ std::int64_t Registry::holdAs(const std::string &kind, const std::type_info &typ
     };
     if (!k) return refuse("no handle kind is left for '" + kind + "' (255 at most)");
     if (!object) return refuse("the " + kind + " is no object (a null pointer cannot be held)");
+    if (mKindNamed[k - 1])
+        return refuse("the " + kind + " kind names the engine's own ids: it holds no object");
     if (mKindType[k - 1] && *mKindType[k - 1] != type)
         return refuse("the " + kind + " kind is bound to another C++ type (one kind, one type: a " + kind +
                       " handle names only what its first hold named)");
@@ -249,10 +252,16 @@ std::int64_t Registry::holdAs(const std::string &kind, const std::type_info &typ
     return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(mHeld.size()));
 }
 
-std::int64_t Registry::name(const std::string &kind, std::uint32_t id)
+std::int64_t Registry::name(const std::string &kind, std::uint32_t id, std::string *why)
 {
     const unsigned k = kindIndex(kind);
-    if (!k) return 0;
+    if (!k || mKindHeld[k - 1]) {   // (a held kind's value is a slot of the table: never minted from an id)
+        if (why)
+            *why = !k ? "no handle kind is left for '" + kind + "' (255 at most)"
+                      : "the " + kind + " kind is HELD: its handles are made by holding a " + kind + ", never minted "
+                        "from an id";
+        return 0;
+    }
     return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(id));
 }
 
@@ -310,6 +319,28 @@ bool Registry::checkHandle(std::int64_t h, const std::string &kind, const std::s
     return true;
 }
 
+void Registry::bindAs(const std::string &kind, const std::type_info *type)
+{
+    const unsigned k = kindIndex(kind);
+    if (!k) {
+        mFaults.push_back(kind + ": no handle kind is left to bind (255 at most)");
+        return;
+    }
+    const bool held = mKindHeld[k - 1], conflict = type ? (mKindNamed[k - 1] || (mKindType[k - 1] && *mKindType[k - 1] != *type))
+                                                        : held;
+    if (conflict) {
+        mFaults.push_back(kind + ": the kind is bound to another C++ type (or holds objects) before its registration "
+                          "binds it - one kind, one type");
+        return;
+    }
+    if (type) {
+        mKindType[k - 1] = type;
+        mKindHeld[k - 1] = true;
+    } else {
+        mKindNamed[k - 1] = true;
+    }
+}
+
 void Registry::checkKind(const std::string &kind, HandleCheck check)
 {
     const unsigned k = kindIndex(kind);
@@ -352,8 +383,9 @@ bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, st
 Value Call::name(const std::string &kind, unsigned long long id)
 {
     if (!id || id > kValueMask) return fail("the " + kind + " id " + std::to_string(id) + " does not fit a handle's 32 bits");
-    const std::int64_t h = mRegistry.name(kind, std::uint32_t(id));
-    return h ? Value(h) : fail("no handle kind is left for '" + kind + "' (255 at most)");
+    std::string why;
+    const std::int64_t h = mRegistry.name(kind, std::uint32_t(id), &why);
+    return h ? Value(h) : fail(why);
 }
 
 
