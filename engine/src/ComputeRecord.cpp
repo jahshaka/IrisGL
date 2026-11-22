@@ -255,6 +255,12 @@ public:
         }
         mConverted.swap(kept);
     }
+    void usedKeys(std::vector<ComputeKey128> &out) const override {
+        Ogre::vector<std::pair<Ogre::uint64, Ogre::uint64>>::type keys;
+        mCompute->getJahUsedRecordKeys(keys);
+        out.clear();
+        for (const auto &k : keys) out.push_back(ComputeKey128{ { k.first, k.second } });
+    }
     void prewarm(std::vector<ComputeCodeRecord> &&records) override {
         Ogre::vector<ForkRecord>::type in;
         in.reserve(records.size());

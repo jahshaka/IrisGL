@@ -113,6 +113,8 @@ public:
     virtual void snapshot(std::vector<ComputeRecordPtr> &out) const = 0;
     /// The records a launch read: filed, and their code compiled on the async compiler (code only: no job, no PSO).
     virtual void prewarm(std::vector<ComputeCodeRecord> &&records) = 0;
+    /// The input keys of the records USED this launch - hit or built; a prewarm alone is no use (SHADER-SYSTEM-1 F10).
+    virtual void usedKeys(std::vector<ComputeKey128> &out) const = 0;
 };
 
 /// THE FORK's HlmsCompute AS THE STORE (P6; SHADER-SYSTEM-1 stage 3F (c)): its records (HlmsCompute::JahCodeRecord) in
