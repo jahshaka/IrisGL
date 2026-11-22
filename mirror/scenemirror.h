@@ -29,6 +29,7 @@
 #include <utility>
 #include <set>
 #include <vector>
+#include <cstdint>
 #include "irisgl/irisglfwd.h"
 #include "irisgl/mirror/scenecommands.h"
 #include "irisgl/document/animation/clipextractor.h"
@@ -104,7 +105,7 @@ public:
     int sync(const FrameViews &views = FrameViews());
     /// How many syncs this mirror has run: 0 = never, its engine scene holds nothing of the document yet (no light,
     /// mesh or sky) - a frame of it then draws a picture nobody keeps.
-    quint32 syncs() const { return mSyncStamp; }
+    std::uint32_t syncs() const { return mSyncStamp; }
 
     /// THE NEXT sync()'S MESH BUDGET, BY COST (BISTRO-ENGINE-1 stage 5, finding
     /// 9): new engine meshes are built until `vertices` of their vertices or
