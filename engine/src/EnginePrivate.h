@@ -1462,7 +1462,7 @@ struct ChainDesc {
     /// `rayReflect` is.
     bool  probeGather = false;
     /// THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6; L4 on every chain): a view whose scene's GI is on and
-    /// which does NOT gather - no ray device, the project's ray row off, a Live or undeclared offscreen view - carries
+    /// which does NOT gather - its scene does not trace: no ray device, the project's ray row off (ROUTE-ROWS-1: never a view's kind) - carries
     /// the prepass and the compute pass "Jahshaka screen integrate" (Jahshaka/ScreenIntegrate) between it and the
     /// opaque passes, which writes the SAME screen products the gather does - the diffuse (the irradiance field and its
     /// fallbacks, the cones beyond it) and the cone's specular with its hit distance - so the opaque passes bind no world
