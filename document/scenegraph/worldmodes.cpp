@@ -375,8 +375,8 @@ QVector<Row> buildRows()
         // preset simply climbs with the tier instead. Low has no chain and no AA.
         r.tier[0] = -1; r.tier[1] = 1; r.tier[2] = 2; r.tier[3] = 3;
         r.cost = QStringLiteral("Edge anti-aliasing after tonemapping, at a fixed cost per pixel "
-                                "instead of MSAA's per-sample memory. Changing the preset "
-                                "recompiles three shaders — a brief hitch, not a per-frame cost.");
+                                "instead of MSAA's per-sample memory. Every preset is compiled "
+                                "when the app starts: changing it compiles nothing.");
         r.get = [](const iris::ScenePtr &s) { return s->smaaPreset; };
         r.set = [](const iris::ScenePtr &s, int v) { s->smaaPreset = v; };
         out.append(r);

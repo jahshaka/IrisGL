@@ -1579,9 +1579,11 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                             s->syncPhotonView();
                         }
                     // THE RECOMPILE HALF ONLY (CAMERA_LENS_SPEC §4 split the old
-                    // applyGlobals in two). The MSAA resolve weights and the SMAA preset
-                    // are SHADER RELOADS — a hitch — so they cannot be per view without
-                    // hitching on every camera cut and every page switch. They keep the
+                    // applyGlobals in two). The SMAA preset is a RELOAD of six programs
+                    // (every preset compiled where the engine parsed the materials, so a
+                    // reload is six microcode-cache hits: registerCommonMaterials), process-
+                    // wide, so it cannot be per view without reloading on every camera cut
+                    // and every page switch. It keeps the
                     // rule POST_CHAIN_SPEC §7.4 wrote: "the primary on-screen view owns the
                     // globals", i.e. the first enabled view whose chain has effects, and
                     // each helper debounces on "did the value actually change".
@@ -4717,6 +4719,23 @@ void OgreEngine::registerCommonMaterials() {
         rgm.initialiseAllResourceGroups(true);
     } catch (Ogre::Exception &e) {
         Ogre::LogManager::getSingleton().logMessage("Jahshaka: common material scripts not registered: " + e.getFullDescription());
+    }
+    // EVERY SMAA PRESET'S PROGRAMS, HERE, WHERE THE MATERIALS ARE PARSED (SHADER-SYSTEM-1 7a). The preset is a
+    // DOCUMENT's (iris::Scene::smaaPreset), unknown until a world opens, and chain::initSmaa applies one by reloading the
+    // six SMAA programs with its defines at the top of a frame (applyRecompileGlobals) - a program not in the microcode
+    // cache is six glslang compiles inside that frame. The microcode key carries the defines (OgreVulkanProgram's
+    // mSource + "_" + the preamble), so compiling all four here makes any later preset's reload six cache hits. The
+    // programs are left at preset 3; a frame asking it reloads nothing. Engine tests: engine.smaa_up_front.
+    {
+        const Ogre::RenderSystem::JahCompileCosts before = Ogre::RenderSystem::getJahCompileCosts();
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int preset = 0; preset < 4; ++preset) chain::initSmaa(mRoot, preset);
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const Ogre::RenderSystem::JahCompileCosts after = Ogre::RenderSystem::getJahCompileCosts();
+        Ogre::LogManager::getSingleton().logMessage(
+            "Jahshaka: SMAA presets 0-3 prepared up front in " + std::to_string(ms) + " ms (" +
+            std::to_string(after.shaderCompiles - before.shaderCompiles) + " compiled, the rest from the microcode cache)");
     }
 }
 

@@ -3966,21 +3966,6 @@ Ogre::Pass *materialPass(const char *name) {
     return mat->getTechnique(0)->getPass(0);
 }
 
-/// Recompiles a material's fragment program with new preprocessor defines,
-/// preserving its parameters. This is how Ogre's own samples switch the MSAA
-/// sample count and the SMAA preset — a program reload, i.e. a hitch, so every
-/// caller here debounces on "did the value actually change".
-void recompile(const char *material, const std::string &defines) {
-    Ogre::Pass *pass = materialPass(material);
-    if (!pass || !pass->hasFragmentProgram()) return;
-    Ogre::GpuProgramParametersSharedPtr oldParams = pass->getFragmentProgramParameters();
-    Ogre::GpuProgram *shader = pass->getFragmentProgram()->_getBindingDelegate();
-    if (!shader) return;
-    shader->setParameter("preprocessor_defines", defines);
-    pass->getFragmentProgram()->reload();
-    pass->getFragmentProgramParameters()->copyConstantsFrom(*oldParams);
-}
-
 }   // namespace
 
 namespace {
