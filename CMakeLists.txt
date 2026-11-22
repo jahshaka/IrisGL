@@ -470,8 +470,8 @@ endif()
 #      term of MeshBake::producerId) — hand-bumped. It covers the DOCUMENT-side
 #      layout and MEANING of what the bake serializes: the vertex layout, the
 #      skeleton, the material fields and the colour space they are recorded in.
-#      A change in document/assets/mesh.{cpp,h}, document/assets/skeleton.*,
-#      document/scenegraph/meshnode.cpp or core/geometry/trimesh.cpp that
+#      A change in document/assets/mesh.{cpp,h}, document/assets/skeleton.* or
+#      core/geometry/trimesh.cpp that
 #      really does move a baked byte is declared by bumping that constant —
 #      which is exactly what v2, v4 and v5 already were.
 #   2. THIS HASH, over the files that WRITE the bake and whose text change
@@ -505,10 +505,11 @@ endif()
 #   import/materialhelper.h — declarations only: no inline bodies, no
 #       constants. A behaviour change there cannot avoid editing the .cpp.
 #   document/assets/mesh.{cpp,h}, document/assets/skeleton.{cpp,h},
-#   document/scenegraph/meshnode.cpp, core/geometry/trimesh.cpp — the
-#       version's job (part 1), guarded by the lint (part 3). meshnode.cpp, the
-#       biggest churner of the twelve, does not write a bake at all: it
-#       CONSUMES one (MeshBake::buildFragment builds MeshNodes).
+#   core/geometry/trimesh.cpp — the version's job (part 1), guarded by the
+#       lint (part 3). document/scenegraph/meshnode.cpp is in NEITHER half
+#       (NOQT-DOCUMENT-1 stage 1 moved its import builders to
+#       import/scenebuilder.cpp): it does not write a bake at all, it CONSUMES
+#       one (MeshBake::buildFragment builds MeshNodes).
 #
 # The list is exported to the compiler as well, so the suite can prove that
 # what this file hashes is what MeshBake::hashedSources() reports and that the
@@ -534,7 +535,7 @@ endif()
 #       spheres) besides the simplifier; indexgenerator.cpp is NOT here: its
 #       position remap is an equality test with one answer.
 #   import/scenebuilder.{h,cpp} — ADDED by NOQT-DOCUMENT-1 stage 1 (2026-11-22): the import side of the document moved
-#       out of document/assets/mesh.{cpp,h} and document/scenegraph/meshnode.cpp (watched) into its own files: the
+#       out of document/assets/mesh.{cpp,h} (watched) and document/scenegraph/meshnode.cpp into its own files: the
 #       aiMesh -> Mesh build, the skeleton and clip extraction and MeshMaterialData's fields and defaults are what
 #       MeshBake::buildFromScene writes, so they are producers of baked bytes like meshbake.cpp.
 #       import/meshmaterial.{h,cpp} is DELIBERATELY NOT HASHED: materialFromMeshData READS a MeshMaterialData when a
@@ -623,8 +624,8 @@ target_include_directories(IrisGL PUBLIC
 
 # assimp is PRIVATE (ENGINEERING_DEBT L4 part 3, 2026-09-10): no public IrisGL
 # header includes it, and no consumer of libIrisGL links or includes it. The
-# import-side TUs (document/assets/mesh.cpp, document/scenegraph/meshnode.cpp,
-# import/*.cpp) are the only ones that see its headers; everything a consumer
+# import-side TUs (import/*.cpp: the importer, the bake and import/scenebuilder.cpp,
+# which builds document objects from a parse) are the only ones that see its headers; everything a consumer
 # needs from a parse crosses as plain data (import/modelsceneinfo.h,
 # import/clipfileinfo.h) or as the opaque import/scenesource.h. A translation
 # unit outside this library that includes an assimp header fails to compile —
