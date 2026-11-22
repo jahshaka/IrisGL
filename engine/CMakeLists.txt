@@ -721,8 +721,11 @@ endfunction()
 # --- Shader-cache fingerprint terms (SHADER_CACHE_SPEC.md §4.2) --------------
 # Two things no hash inside Ogre can see, baked in at configure time:
 #
-#  * JAHSHAKA_OGRE_FORK_COMMIT — the ogre-next submodule's HEAD sha. Since the
-#    fork (2026-09-22) that ONE value is the whole identity of the engine source:
+#  * JAHSHAKA_OGRE_FORK_COMMIT — the ogre-next submodule's HEAD sha: the TEXTURE cache's term (OgreTextureCache.cpp).
+#    NO SHADER CACHE LAYER keys on it any more (SHADER-SYSTEM-1 stage 5): those key on the CONTENT of the fork's
+#    compile-path files (irisgl/cmake/ShaderCompilePath.txt, hashed in EngineBuildId.cmake), so a fork commit that
+#    changes no producer drops no shader. Its history: since the
+#    fork (2026-09-22) that ONE value was the whole identity of the engine source:
 #    our changes are commits on github.com/jahshaka/ogre-next `jahshaka`, media and
 #    C++ alike, so a different engine is a different sha and nothing else can vary.
 #    It replaces the old JAHSHAKA_OGRE_PATCH_SERIES (a fold of the 88 patch files'
@@ -799,6 +802,18 @@ set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADE
 set(JAHSHAKA_SHADER_CACHE_CODE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreShaderCache.cpp
                                        ${CMAKE_CURRENT_SOURCE_DIR}/src/ComputeRecord.cpp)
 string(REPLACE ";" "|" _cache_id_inputs_arg "${JAHSHAKA_SHADER_CACHE_CODE_SOURCES}")
+# THE SHADER COMPILE PATH (SHADER-SYSTEM-1 stage 5): the fork's producer files, three groups, one list
+# (irisgl/cmake/ShaderCompilePath.txt says why); their contents are the custom command's inputs, the list a configure
+# input (a file added to it re-lists the dependencies).
+set(_compile_path_list "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/ShaderCompilePath.txt")
+set(_compile_path_root "${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/ogre-next")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_compile_path_list}")
+file(STRINGS "${_compile_path_list}" _cp_lines REGEX "^[A-Za-z]")
+set(_compile_path_files "")
+foreach(_l IN LISTS _cp_lines)
+    string(STRIP "${_l}" _l)
+    list(APPEND _compile_path_files "${_compile_path_root}/${_l}")
+endforeach()
 set(JAHSHAKA_ENGINE_BUILD_ID_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 set(_build_id_header "${JAHSHAKA_ENGINE_BUILD_ID_DIR}/jahshaka_engine_build_id.h")
 file(MAKE_DIRECTORY "${JAHSHAKA_ENGINE_BUILD_ID_DIR}")
@@ -808,9 +823,12 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND}
             "-DJAH_BUILD_ID_SOURCES=${_build_id_inputs_arg}"
             "-DJAH_BUILD_ID_CACHE_SOURCES=${_cache_id_inputs_arg}"
+            "-DJAH_COMPILE_PATH_LIST=${_compile_path_list}"
+            "-DJAH_COMPILE_PATH_ROOT=${_compile_path_root}"
             "-DJAH_BUILD_ID_OUT=${_build_id_header}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
-    DEPENDS ${_build_id_inputs} "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
+    DEPENDS ${_build_id_inputs} ${_compile_path_files} "${_compile_path_list}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EngineBuildId.cmake"
     COMMENT "Hashing the engine sources for the shader-cache fingerprint"
     VERBATIM)
 add_custom_target(JahshakaEngineBuildId DEPENDS "${_build_id_header}")

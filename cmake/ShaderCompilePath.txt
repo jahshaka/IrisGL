@@ -1,0 +1,36 @@
+# THE SHADER COMPILE PATH: the fork's files that PRODUCE a cached shader byte (SHADER-SYSTEM-1 stage 5; the lead's rulings
+# 1-3 and the start preflight's F3). Paths are relative to irisgl/thirdparty/ogre-next. irisgl/cmake/EngineBuildId.cmake
+# hashes each group's files' CONTENT (never a commit, never a path) into one id the shader cache's keys take, so only a
+# change to a producer drops or re-parses a layer; a fork commit that touches none of these costs no compile anywhere.
+# source.shader_cache_key holds the list complete: every fork file of the built render system and OgreMain that calls
+# glslang's API or writes a microcode frame is in [microcode], and the compute set-up's files are in [compute].
+#
+# [microcode]    the SPIR-V layer's producer (its key): the glslang call, the program's microcode cache name and frame,
+#                the map's save and load.
+# [preprocessor] the Hlms template preprocessor and the disk cache that stores its output: hashed into the salt of every
+#                Hlms' template checksum (Hlms::setJahTemplateSalt), so a change RE-PARSES the saved recipes (Ogre's
+#                "templates have changed") instead of dropping them; also a term of the compute layer's key (a compute
+#                record's hit skips the parse).
+# [compute]      the compute layer's producer: the parse's property set-up and the root layout a record stores.
+
+[microcode]
+OgreMain/include/OgreGpuProgramManager.h
+OgreMain/src/OgreGpuProgramManager.cpp
+RenderSystems/Vulkan/CMakeLists.txt
+RenderSystems/Vulkan/include/OgreVulkanProgram.h
+RenderSystems/Vulkan/src/OgreVulkanProgram.cpp
+RenderSystems/Vulkan/src/OgreVulkanProgramFactory.cpp
+
+[preprocessor]
+OgreMain/include/OgreHlms.h
+OgreMain/src/OgreHlms.cpp
+OgreMain/include/OgreHlmsDiskCache.h
+OgreMain/src/OgreHlmsDiskCache.cpp
+
+[compute]
+OgreMain/include/OgreHlmsCompute.h
+OgreMain/src/OgreHlmsCompute.cpp
+OgreMain/include/OgreHlmsComputeJob.h
+OgreMain/src/OgreHlmsComputeJob.cpp
+OgreMain/include/OgreRootLayout.h
+OgreMain/src/OgreRootLayout.cpp

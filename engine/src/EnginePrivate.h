@@ -34,6 +34,7 @@
 #include "SceneLightList.h"
 #include "RenderThread.h"   // the render loop the frame belongs to (ENGINE-UPGRADE-U3)
 #include "ComputeRecord.h"   // the compute layer's records (COLD-BOOT-1 stage 3)
+#include "ShaderCacheKeys.h"   // the layer keys' one function (SHADER-SYSTEM-1 stage 5)
 
 #include <cmath>
 #include <OgreRoot.h>
@@ -3238,12 +3239,12 @@ bool processExitMarked();
 
 class ShaderCache {
 public:
-    /// Resolves the directory and computes the fingerprint. No I/O beyond
-    /// hashing the staged Hlms media tree. An empty `dir` leaves the cache off
+    /// Resolves the directory and composes the layer keys (SHADER-SYSTEM-1 stage 5: no I/O - no media tree is a
+    /// term any more). An empty `dir` leaves the cache off
     /// (but the compile COUNTERS still run — the startup progress display and
     /// the tests need them whether or not anything is persisted).
     /// `seedDir`: EngineConfig::shaderCacheSeedDir (empty = no seed; ignored when `dir` is empty).
-    void configure(const std::string &dir, const std::string &seedDir, const std::string &mediaDir,
+    void configure(const std::string &dir, const std::string &seedDir,
                    unsigned long long maxBytes = 256ull * 1024ull * 1024ull);
 
     /// Starts counting compiles. Call as soon as the log exists (i.e. right
@@ -3442,7 +3443,7 @@ private:
     void  releaseLock();
     std::string path(const std::string &name) const;
 
-    std::string mDir, mFingerprint, mMediaDir;
+    std::string mDir, mFingerprint;
     /// The seed (rule 8): its directory, what the load did with it, and the entries it held.
     std::string mSeedDir;
     std::string mSeedState = "off";
@@ -3452,6 +3453,9 @@ private:
     /// Hlms, compute (COLD-BOOT-1) — see configure(). `mFingerprint` is the four composed, for the
     /// status readout only.
     std::string mLayerKey[4];
+    /// Their inputs (SHADER-SYSTEM-1 stage 5: composeLayerKeys, ShaderCacheKeys.h) - the GPU terms added by load().
+    LayerKeyInputs mKeyInputs;
+    void applyLayerKeys();
     /// THE COMPUTE LAYER: the store, the records load() kept for prewarmCompute, what the load did, and the store's
     /// generation the last successful write made true (the writer publishes it; dirty() compares).
     ComputeCodeStore              *mComputeStore = nullptr;

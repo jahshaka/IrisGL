@@ -15,6 +15,7 @@
 //    generation instead of maintaining an LRU we would have to get right.
 //  * survive doubt. Every failure path ends in "delete the directory, run cold".
 #include "EnginePrivate.h"
+#include "ShaderCacheKeys.h"
 
 #include <OgreHlmsAsyncCompiler.h>
 #include <mutex>
@@ -119,41 +120,6 @@ constexpr unsigned kWriteWaitMs = 30000u;
 long long nowUnixMs() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
-
-/// Hash of the staged Hlms template tree. Belt-and-braces: Ogre's own
-/// getTemplateChecksum already covers layer 1 correctly, but layer 2's file has
-/// no version field of any kind. 83 files / 624 KB on this tree — ~5 ms.
-/// Names are hashed alongside contents so a RENAME counts as a change.
-std::string hashTree(const std::string &dir) {
-    std::vector<std::string> names;
-    // Iterative walk; no <filesystem> because the engine still targets C++17 on
-    // toolchains where <filesystem> needs an extra link library on some hosts.
-    std::vector<std::string> pending{dir};
-    while (!pending.empty()) {
-        const std::string cur = pending.back();
-        pending.pop_back();
-        DIR *d = opendir(cur.c_str());
-        if (!d) continue;
-        while (dirent *e = readdir(d)) {
-            const std::string name = e->d_name;
-            if (name == "." || name == "..") continue;
-            const std::string full = cur + "/" + name;
-            struct stat st {};
-            if (::stat(full.c_str(), &st) != 0) continue;
-            if (S_ISDIR(st.st_mode)) pending.push_back(full);
-            else                     names.push_back(full);
-        }
-        closedir(d);
-    }
-    std::sort(names.begin(), names.end());   // readdir order is not stable
-    std::string blob;
-    for (const std::string &n : names) {
-        blob += n.substr(dir.size());
-        std::vector<char> bytes;
-        if (readWholeFile(n, bytes)) blob.append(bytes.data(), bytes.size());
-    }
-    return hexOf(blob);
 }
 
 unsigned long long dirBytes(const std::string &dir, unsigned *fileCount) {
@@ -418,11 +384,9 @@ ShaderCache::~ShaderCache() {
 }
 
 // ---------------------------------------------------------------------------
-void ShaderCache::configure(const std::string &dir, const std::string &seedDir, const std::string &mediaDir,
-                            unsigned long long maxBytes) {
+void ShaderCache::configure(const std::string &dir, const std::string &seedDir, unsigned long long maxBytes) {
     mMaxBytes = maxBytes;
     mDir = dir;
-    mMediaDir = mediaDir;
     mEnabled = !dir.empty();
     // THE SEED RIDES THE CACHE (rule 8): a cache that is off reads nothing, the seed included.
     mSeedDir = mEnabled ? seedDir : std::string();
@@ -432,75 +396,74 @@ void ShaderCache::configure(const std::string &dir, const std::string &seedDir, 
     if (!mEnabled) return;
     while (!mDir.empty() && mDir.back() == '/') mDir.pop_back();
 
-    // ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1; §4.2's terms, each on the
-    // layer whose bytes it can change). One key over all three used to throw
-    // the whole directory away whenever ANY term moved — and its `app=` term
-    // (the Studio commit) moved on every Studio build, while no Studio change
-    // can make a cached byte wrong:
-    //   * pipeline.cache is validated by the driver and by Ogre (its header
-    //     names vendor, device, driver and UUID); it needs only the container
-    //     format and the GPU terms load() appends;
-    //   * microcode.cache is CONTENT-ADDRESSED — an entry's key is a hash of the
-    //     generated source (fork OgreGpuProgramManager) — so a different source
-    //     is a different entry, never a stale one. What can make an entry wrong
-    //     is the PRODUCER: the fork's compile path (ogre=), the SPIR-V compiler it
-    //     links (glslang=), the build type, and the render system (load());
-    //   * hlms.N.bin is the template parse and the property sets: the fork, the
-    //     staged templates and Photon's media, this container's own code (code=),
-    //     and the IdString/hash layout terms — plus the GPU (load()), whose caps
-    //     are properties. The engine's C++ and Studio reach Hlms only through
-    //     property and piece VALUES, which are the entry's key (taken after every
-    //     C++ hook, OgreHlms.cpp createShaderCacheEntry; the root layout and the
-    //     PSOs are made fresh at every compile): a new set is a new entry, never a
-    //     wrong one (TEST-STREAMLINE-1 1a; the engine's full build id was a term
-    //     here and re-keyed every cache at every engine edit).
-    const std::string format = "format=" + std::to_string(kCacheFormat);
-    const std::string build =
+    // ONE KEY PER LAYER (SPEED-CPU, perf audit CS-1), EACH NAMING ONLY ITS PRODUCER (SHADER-SYSTEM-1 stage 5: the terms
+    // and their reasons are composeLayerKeys', below). The fork's commit and the staged media trees are no term of any
+    // layer any more: a fork commit or a media edit that changes no producer drops nothing - an entry is named by the
+    // content it was made from (SPIR-V by its source, a recipe by its properties and pieces under Ogre's template
+    // checksum, a compute record by its input key).
+    mKeyInputs = LayerKeyInputs();
+    mKeyInputs.format = kCacheFormat;
+    mKeyInputs.code = JAHSHAKA_SHADER_CACHE_CODE_ID;
+    mKeyInputs.microcodePath = JAHSHAKA_COMPILE_PATH_MICROCODE_ID;
+    mKeyInputs.preprocessorPath = JAHSHAKA_COMPILE_PATH_PREPROCESSOR_ID;
+    mKeyInputs.computePath = JAHSHAKA_COMPILE_PATH_COMPUTE_ID;
+    mKeyInputs.glslang = JAH_GLSLANG_VERSION_TERM;
 #if OGRE_DEBUG_MODE
-        "|build=debug";
-#else
-        "|build=release";
+    mKeyInputs.debugBuild = true;
 #endif
-    mLayerKey[0] = format;
-    mLayerKey[1] = format + "|ogre=" + JAHSHAKA_OGRE_FORK_COMMIT +
-                   "|glslang=" + JAH_GLSLANG_VERSION_TERM + build;
-    std::ostringstream h;
-    h << format
-      // The container's own code (what writes these bytes), and the commit of our
-      // Ogre fork that produced the .so and staged the media: a fork-side change to
-      // a shader piece changes SHADER BEHAVIOUR while leaving every Ogre-side hash
-      // untouched — without ogre=, re-running build-ogre.sh on a new fork commit
-      // leaves a cache Ogre considers perfect.
-      << "|code=" << JAHSHAKA_SHADER_CACHE_CODE_ID
-      << "|ogre=" << JAHSHAKA_OGRE_FORK_COMMIT
-      // Belt and braces over the staged templates (see hashTree).
-      << "|media=" << hashTree(mMediaDir + "Hlms")
-      // PHOTON'S OWN MEDIA BY ITS OWN CONTENT (OWN-GI-1, audit K11): the voxel and
-      // field compute jobs and their PBS pieces live in irisgl (media/Photon), so an
-      // edit to them is an irisgl edit that moves neither the fork commit above nor
-      // any Ogre-side hash of a compute job.
-      << "|photon=" << hashTree(mMediaDir + "Photon")
-      // Ogre rejects an Hlms cache across these anyway; failing here is faster.
 #ifdef OGRE_DEBUG_STR_SIZE
-      << "|dbgstr=" << OGRE_DEBUG_STR_SIZE
+    mKeyInputs.dbgstr = std::to_string(OGRE_DEBUG_STR_SIZE);
 #else
-      // Undefined in a Release-built Ogre: IdString then carries no readable
-      // string and HlmsDiskCache writes 0 for it. The Debug/Release asymmetry
-      // OgreHlmsDiskCache.h:65-70 warns about lives exactly here — a Release
-      // cache cannot load into Debug — so the term must appear either way.
-      << "|dbgstr=0"
+    // Undefined in a Release-built Ogre: IdString then carries no readable string and HlmsDiskCache writes 0 for it. The
+    // Debug/Release asymmetry OgreHlmsDiskCache.h:65-70 warns about lives exactly here - a Release cache cannot load into
+    // Debug - so the term must appear either way.
+    mKeyInputs.dbgstr = "0";
 #endif
-      << "|hashbits=" << OGRE_HASH_BITS << build;
-    mLayerKey[2] = h.str();
-    // THE COMPUTE LAYER (COLD-BOOT-1 stage 3; the lead's rulings P2-P3): its key is the PRODUCER only - this container's
-    // code (it writes the records' bytes), the fork (its compile path and the RootLayout bytes a record stores), the
-    // SPIR-V compiler and the build type, plus the render system (load()) - never the media: each RECORD carries its
-    // own content (its input key, its files' hashes; ComputeRecord.h), so a changed source drops exactly its records.
-    mLayerKey[3] = format + "|code=" + JAHSHAKA_SHADER_CACHE_CODE_ID + "|ogre=" + JAHSHAKA_OGRE_FORK_COMMIT +
-                   "|glslang=" + JAH_GLSLANG_VERSION_TERM + build;
-    // The GPU terms are appended by load(): mDeviceProperties does not exist
-    // until the render system has a device, and configure() runs earlier.
+    mKeyInputs.hashBits = OGRE_HASH_BITS;
+    applyLayerKeys();
+    // The GPU terms are added by load(): the render system has no device until then, and configure() runs earlier.
+}
+
+void ShaderCache::applyLayerKeys() {
+    const LayerKeys k = composeLayerKeys(mKeyInputs);
+    mLayerKey[0] = k.pipeline;
+    mLayerKey[1] = k.microcode;
+    mLayerKey[2] = k.hlms;
+    mLayerKey[3] = k.compute;
     composeFingerprint();
+}
+
+// THE FOUR KEYS (SHADER-SYSTEM-1 stage 5; ShaderCacheKeys.h). Per layer, what can make one of its bytes WRONG:
+//   * pipeline.cache is validated by the driver and by Ogre (its header names vendor, device, driver and UUID): the
+//     container format and the GPU terms. ITS TEXT IS BYTE-IDENTICAL TO THE KEY IT REPLACED (F5: a changed text would
+//     drop the 56-MB blob the driver validates; engine.shader_cache_keys holds the golden case).
+//   * microcode.cache is CONTENT-ADDRESSED (an entry's key is a hash of the generated source + preamble, fork
+//     OgreVulkanProgram.cpp): what makes an entry wrong is its PRODUCER - the compile path's microcode group (ruling 1:
+//     the content of the fork's files that call glslang and frame the microcode, irisgl/cmake/ShaderCompilePath.txt),
+//     the SPIR-V compiler, the build type and the render system.
+//   * hlms.N.bin holds the recipes (properties + pieces after every C++ hook) and their processed source: this
+//     container's own code (ruling 3), the IdString/hash layout terms and the GPU (its caps are properties). A changed
+//     TEMPLATE or a changed PREPROCESSOR is not a term: Ogre's template checksum (salted with the preprocessor group,
+//     ruling 2: Hlms::setJahTemplateSalt) makes it RE-PARSE the recipes, never drop them.
+//   * compute.bin holds the records (each its own content key, ComputeRecord.h): this container's code, the compile
+//     path's compute group and preprocessor group (F3: a record's hit skips the parse, so a change to the parse's
+//     property set-up, the preprocessor or the root layout's bytes must drop them), glslang, the build and the RS.
+LayerKeys composeLayerKeys(const LayerKeyInputs &in) {
+    LayerKeys k;
+    const std::string format = "format=" + std::to_string(in.format);
+    const std::string build = in.debugBuild ? "|build=debug" : "|build=release";
+    std::string gpu, rs;
+    if (in.haveGpu) {
+        gpu = "|rs=" + in.rs + "|vendor=" + in.vendor + "|device=" + in.device + "|driver=" + in.driver;
+        rs = "|rs=" + in.rs;
+    }
+    k.pipeline = format + gpu;
+    k.microcode = format + "|microcode=" + in.microcodePath + "|glslang=" + in.glslang + build + rs;
+    k.hlms = format + "|code=" + in.code + "|dbgstr=" + in.dbgstr + "|hashbits=" + std::to_string(in.hashBits) + build +
+             gpu;
+    k.compute = format + "|code=" + in.code + "|compute=" + in.computePath + "|preprocessor=" + in.preprocessorPath +
+                "|glslang=" + in.glslang + build + rs;
+    return k;
 }
 
 void ShaderCache::composeFingerprint() {
@@ -794,7 +757,7 @@ bool ShaderCache::readSeed(std::vector<char> &out) {
     // A KEY MISMATCH IS A MISS: the seed was made by another producer, so not one of its blobs is read.
     if (micro->key != layerKeyFor(micro->name)) {
         mSeedState = "stale";
-        logLine("seed " + mSeedDir + ": made at another microcode key (another fork commit, glslang, build type or "
+        logLine("seed " + mSeedDir + ": made at another microcode key (another compile path, glslang, build type or "
                 "render system) — not read; every shader this launch needs compiles");
         return false;
     }
@@ -850,6 +813,16 @@ void ShaderCache::load(Ogre::Root *root) {
             } catch (...) {}
         }
     } primeChecksums{ root };
+    // THE PREPROCESSOR's SALT (SHADER-SYSTEM-1 stage 5, the lead's ruling 2): every Hlms' template checksum is seeded with
+    // the compile path's preprocessor group (irisgl/cmake/ShaderCompilePath.txt), before anything asks for it - so a
+    // changed preprocessor makes Ogre RE-PARSE the saved recipes; the hlms layer's key holds no fork commit to drop them.
+    if (Ogre::HlmsManager *hm = root ? root->getHlmsManager() : nullptr) {
+        const std::string id = JAHSHAKA_COMPILE_PATH_PREPROCESSOR_ID;
+        const Ogre::uint64 salt[2] = { std::stoull(id.substr(0, 16), nullptr, 16),
+                                       std::stoull(id.substr(16, 16), nullptr, 16) };
+        for (int i = Ogre::HLMS_LOW_LEVEL + 1; i < Ogre::HLMS_MAX; ++i)
+            if (Ogre::Hlms *h = hm->getHlms(static_cast<Ogre::HlmsTypes>(i))) h->setJahTemplateSalt(salt);
+    }
     if (!mEnabled || !root) return;
     Ogre::RenderSystem *rs = root->getRenderSystem();
     if (!rs) return;
@@ -865,16 +838,12 @@ void ShaderCache::load(Ogre::Root *root) {
     // which is what Ogre folds into its own microcode keys — SPIR-V is not a
     // property of the device.
     if (const Ogre::RenderSystemCapabilities *caps = rs->getCapabilities()) {
-        std::ostringstream g;
-        g << "|rs=" << rs->getName()
-          << "|vendor=" << static_cast<int>(caps->getVendor())
-          << "|device=" << caps->getDeviceName()
-          << "|driver=" << caps->getDriverVersion().toString();
-        mLayerKey[0] += g.str();
-        mLayerKey[1] += "|rs=" + rs->getName();
-        mLayerKey[2] += g.str();
-        mLayerKey[3] += "|rs=" + rs->getName();
-        composeFingerprint();
+        mKeyInputs.haveGpu = true;
+        mKeyInputs.rs = rs->getName();
+        mKeyInputs.vendor = std::to_string(static_cast<int>(caps->getVendor()));
+        mKeyInputs.device = caps->getDeviceName();
+        mKeyInputs.driver = caps->getDriverVersion().toString();
+        applyLayerKeys();
     }
 
     if (!mkpath(mDir)) { logLine("cannot create " + mDir + " — cache disabled"); mEnabled = false; return; }
