@@ -9643,8 +9643,8 @@ private:
     /// Frames closed (closeRenderFrame), the PublishedFrame::frame stamp.
     unsigned long long mPublishedFrames = 0;
     /// The background shader compiler's thread count (ASYNC-SHADERS-1;
-    /// EngineConfig::asyncShaderThreads, JAH_ASYNC_SHADER_THREADS).
-    unsigned        mAsyncShaderThreads = 2;
+    /// EngineConfig::asyncShaderThreads - the thread budget's compile tier by default -, JAH_ASYNC_SHADER_THREADS).
+    unsigned        mAsyncShaderThreads = 0;
     /// Placeholder draws / pending skips of scenes already destroyed (asyncShaderStats).
     unsigned long long mRetiredPlaceholderDraws = 0;
     unsigned long long mRetiredPendingSkips = 0;

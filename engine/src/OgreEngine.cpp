@@ -159,7 +159,8 @@ bool OgreEngine::init(const EngineConfig &cfg, std::string &error) {
     mIdentityHeadless = mHeadless;
     // THE BACKGROUND SHADER COMPILER (ASYNC-SHADERS-1). JAH_ASYNC_SHADER_THREADS overrides
     // the host's count (0 = none) for A/B measurement without a rebuild.
-    mAsyncShaderThreads = cfg.asyncShaderThreads;
+    mAsyncShaderThreads = cfg.asyncShaderThreads < 0 ? unsigned(iris::threadBudget().compile)
+                                                     : unsigned(std::min(cfg.asyncShaderThreads, 8));
     if (const char *forced = std::getenv("JAH_ASYNC_SHADER_THREADS"))
         mAsyncShaderThreads = unsigned(std::max(0l, std::min(8l, std::strtol(forced, nullptr, 10))));
     // The shader cache's fingerprint hashes the staged Hlms tree, so it is

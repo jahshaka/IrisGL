@@ -83,9 +83,10 @@ struct EngineConfig {
     /// one (the fingerprint does not name the render system).
     /// THE BACKGROUND SHADER COMPILE SERVICE's thread count (ASYNC-SHADERS-1;
     /// AsyncShaderStats, View::setAsyncShaders). The threads run at a lowered priority
-    /// so a compile never competes with the frame's own workers. 0 = no service: every
-    /// view compiles inside its frame. Ignored headless.
-    unsigned    asyncShaderThreads = 2;
+    /// so a compile never competes with the frame's own workers. -1 = the thread budget's tier
+    /// (irisgl/core/threadbudget.h, ThreadBudget::compile); 0 = no service: every view compiles
+    /// inside its frame. Ignored headless.
+    int         asyncShaderThreads = -1;
     bool        headless = false;
     /// Directory holding the render-system plugins (RenderSystem_Vulkan.so ...).
     std::string pluginDir;

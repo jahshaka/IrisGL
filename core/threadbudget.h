@@ -23,8 +23,11 @@
 //               [6] = min(6, max(2, hardware / 2)), the ray tier's pipeline builders [8] = min(8, max(1, hardware / 2))
 //               (COLD-BOOT-1 stage 4: one per ray pipeline group at the startup gate's start, each one uninterruptible
 //               driver compile; at a LOWER priority than the render thread and the scene workers, so a build in a live
-//               session - a headset on - never takes a frame's time). BURSTY, NOT PER-FRAME (a texture load, a cache
-//               write, a cold pipeline): sized as they are and NOT subtracted from the frame's set.
+//               session - a headset on - never takes a frame's time), the background shader compile service [2] (the
+//               fork's HlmsAsyncCompiler: the permutations and compute pipelines an asynchronous view puts off, niced
+//               10; 2 at rest, its width measured by SHADER-SYSTEM-1's acceptance before it moves). BURSTY, NOT
+//               PER-FRAME (a texture load, a cache write, a cold pipeline): sized as they are and NOT subtracted from
+//               the frame's set.
 //   background  each below-normal pool's width [4] = hardware - the active set, at least 2: Qt's global pool (the 28
 //               QtConcurrent sites: parses, bakes, encodes, file I/O), the bake pool's workers (nice 19), the tile
 //               cache's and the bake store's own pools (min(theirs, it)).
@@ -57,9 +60,10 @@ struct ThreadBudget
     int streaming = 1;    ///< Ogre's texture streaming thread
     int multiload = 0;    ///< Ogre's texture multiload pool
     int rayBuilds = 1;    ///< the ray tier's pipeline builders running at once (COLD-BOOT-1 stage 4)
+    int compile = 2;      ///< the background shader compile service's threads (EngineConfig::asyncShaderThreads)
     int background = 2;   ///< each below-normal pool's width (Qt's global pool, the bake pool's workers)
 
-    int dedicated() const { return writer + streaming + multiload + rayBuilds; }
+    int dedicated() const { return writer + streaming + multiload + rayBuilds + compile; }
     /// Bullet's scheduler threads: the game thread + its workers (btITaskScheduler::getNumThreads).
     int bulletThreads() const { return game + foreground; }
     /// The per-frame active set: the law's left side (the dedicated set is bursty and not in it).
@@ -70,6 +74,9 @@ struct ThreadBudget
 
 /// Bullet's measured best, as a ceiling of workers beside the game thread (7 threads in all; see the header's tiers).
 constexpr int kBudgetForegroundCap = 6;
+/// The shader compile service at rest (SHADER-SYSTEM-1 7a: the service's width as the tier it always was; a wider
+/// service during the startup gate is a candidate measured before it is built).
+constexpr int kBudgetCompileAtRest = 2;
 /// The background tier's floor: a parse and a bake progress side by side however full the box is.
 constexpr int kBudgetBackgroundFloor = 2;
 
@@ -82,6 +89,7 @@ inline ThreadBudget threadBudgetFor(int hardware, int sceneThreads = -1, int mul
     b.ogrePool = sceneThreads > 0 ? std::clamp(sceneThreads, 1, 32) : std::clamp(b.hardware, 2, 8);
     b.multiload = multiload >= 0 ? std::clamp(multiload, 0, 32) : std::min(6, std::max(2, b.hardware / 2));
     b.rayBuilds = std::min(8, std::max(1, b.hardware / 2));
+    b.compile = kBudgetCompileAtRest;
     if (physicsThreads > 0)
         b.foreground = std::clamp(physicsThreads, 1, 32) - b.game;
     else
