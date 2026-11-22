@@ -107,7 +107,9 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp
+    # THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1): the value and the registry (include/jahshaka/engine/Script.h).
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
