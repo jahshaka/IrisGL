@@ -48,6 +48,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include "jahshaka/engine/FrameInput.h"
+#include "jahshaka/engine/Ids.h"
+#include "jahshaka/engine/Pictures.h"
 
 namespace jahshaka { namespace engine { namespace script {
 

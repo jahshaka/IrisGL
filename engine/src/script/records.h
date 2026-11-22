@@ -24,7 +24,7 @@
 // a subject's header declares its records with JAH_RECORD_COUNT and its enums with JAH_ENUM_NAMES. The commands that
 // take or answer a record use Table::param / toValue / fromValue.
 #include "jahshaka/engine/Script.h"
-#include "jahshaka/engine/Types.h"
+#include "jahshaka/engine/Math.h"
 
 #include <algorithm>
 #include <array>
