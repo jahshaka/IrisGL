@@ -326,6 +326,11 @@ struct StreamingWork {
     /// arm run in that frame", which the stage counter above cannot give: a
     /// `Complete` frame builds the WHOLE arm and never touches a stage.
     unsigned long long giRebuilds = 0;
+    /// THE FRAME HEAD's TEXTURE DRAINS (SHADER-SYSTEM-1 7a), running totals: the frames whose head WAITED for the
+    /// process's texture stream (a frame on the Complete pace drains it; a Streaming frame only collects, never waits)
+    /// and the textures that landed inside those waits. Differenced across frames: 0 = no frame waited for a decode.
+    unsigned long long textureDrains = 0;
+    unsigned long long textureDrainLanded = 0;
 };
 
 /// EVERYTHING ONE `renderOneFrame` DID. One of these per frame while a capture

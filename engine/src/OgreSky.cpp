@@ -1736,6 +1736,10 @@ void OgreScene::applyPendingIbl() {
 
 void OgreScene::convolvePendingIbl() {
     if (!mIblSourceTex || !mReflPendingTex) return;
+    // ITS OWN SOURCE, RESIDENT (SHADER-SYSTEM-1 7a): the convolution reads its source's pixels, so it waits for that
+    // one texture - never the process's whole stream at the frame head. (Today's one source is the sky's capture, a
+    // render target: resident at once, the wait a no-op.)
+    waitForTextureResident(mIblSourceTex);
     Ogre::TextureGpu *const target = mReflPendingTex;
     // The source (the capture) is scratch: once the convolution has read it, its
     // (mipped, full-size) VRAM is dead weight until the next sky change.

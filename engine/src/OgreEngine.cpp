@@ -1156,16 +1156,13 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // still holds the arm back until the albedo it voxelises is resident —
         // skipping the drain makes that wait last a frame or two longer, never
         // less careful.
-        // ...AND ONLY WHEN NOTHING DEFERRED IS ABOUT TO READ A TEXTURE'S PIXELS.
-        // `applyPendingIbl` convolves the sky's source cube and is a LATCH — it
-        // clears its flag on entry — so handing it a cube that has not streamed
-        // in is a wrong reflection for the life of that sky, not a slow frame.
-        // The GI arm asks the same question for itself (BOOTVOX-1) and is safe
-        // either way.
-        bool streamTextures = (pace == FramePace::Streaming);
-        if (streamTextures)
-            for (auto &sc : mScenes)
-                if (sc->iblReadPending()) { streamTextures = false; break; }
+        // A STREAMING FRAME NEVER DRAINS THE PROCESS's STREAM (SHADER-SYSTEM-1 7a, the texture wait's case (b)): it
+        // used to drain every scene's textures whenever any scene had a convolution pending ("a cube that has not
+        // streamed in"; ~957 ms of the gate's Basic world, twelve presets' textures in one frame). The convolution's
+        // only source is the sky's capture (buildReflectionCubemapFrom's one caller), and it awaits ITS OWN source
+        // (convolvePendingIbl, waitForTextureResident) as the sky awaits its sources: no process-wide wait for it.
+        // (A Complete frame's drain below is stage 7's: one pace rule with the ray builds.)
+        const bool streamTextures = (pace == FramePace::Streaming);
         if (streamTextures) {
             // COLLECT WITHOUT WAITING: one pass of the same `_update(true)` the
             // drain's loop makes, so every texture that HAS landed becomes
@@ -1187,6 +1184,7 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
             drainTextureStreaming(&ms);
             monitor::noteTextureWait(float(ms));
             const size_t after = (before && tm) ? countPendingTextures(tm, nullptr) : 0u;
+            noteTextureDrain(ms, before, after);
             // ONLY WHEN SOMETHING ACTUALLY HAPPENED (lane MON-P1b's finding,
             // fixed by the lead 2026-09-13). `before` alone is "a texture is
             // pending", which is TRUE EVERY FRAME for a manual texture that
@@ -1203,7 +1201,13 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
                                        unsigned(before > after ? before - after : 0u), float(ms));
             }
         } else {
-            drainTextureStreaming();
+            // (the drain's count only when the stream has work: the pending walk is never paid by an idle frame)
+            Ogre::TextureGpuManager *tm =
+                mRoot && mRoot->getRenderSystem() ? mRoot->getRenderSystem()->getTextureGpuManager() : nullptr;
+            const size_t before = tm && !tm->isDoneStreaming() ? countPendingTextures(tm, nullptr) : 0u;
+            double ms = 0.0;
+            drainTextureStreaming(&ms);
+            noteTextureDrain(ms, before, before ? countPendingTextures(tm, nullptr) : 0u);
         }
         // A TEXTURE THAT ARRIVED IS A PROBE INPUT (clean-2 lane, 2026-09-13).
         // The drain above is where a load becomes visible at all — Ogre has no
@@ -2648,6 +2652,14 @@ void OgreEngine::collectTextureStreaming() {
     Ogre::TextureGpuManager *tm = textureManagerOf(mRoot);
     if (!tm) return;
     try { tm->_update(true); } catch (...) {}
+}
+
+// THE FRAME HEAD's DRAINS, COUNTED (StreamingWork::textureDrains): a drain that waited (its time above 0) and the
+// textures that landed inside it.
+void OgreEngine::noteTextureDrain(double ms, size_t before, size_t after) {
+    if (!(ms > 0.0)) return;
+    ++mTextureDrains;
+    mTextureDrainLanded += before > after ? before - after : 0u;
 }
 
 bool OgreEngine::drainTextureStreaming(double *msSpent) {

@@ -1943,6 +1943,8 @@ StreamingWork OgreEngine::streamingWork() const
     }
     unsigned fromCache = 0u, expected = 0u;
     mShaderCache.progress(out.shadersCompiled, fromCache, expected);
+    out.textureDrains = mTextureDrains;
+    out.textureDrainLanded = mTextureDrainLanded;
     return out;
 }
 

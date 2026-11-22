@@ -6635,7 +6635,6 @@ public:
     /// Is a deferred read of a texture's PIXELS owed this frame? True while the
     /// sky's IBL convolution is pending — the one piece of per-frame work that
     /// reads texture contents and cannot be asked twice (OPEN_COVER_SPEC §2 E).
-    bool iblReadPending() const { return mIblPending; }
     void latchProbeCaptures(bool drawn) { return mPhoton.latchProbeCaptures(drawn); }
     void updateGiTracking(const Ogre::Vector3 &camPos, bool driverStereo) { return mPhoton.updateGiTracking(camPos, driverStereo); }
     void noteGiCamera(const Ogre::Vector3 &camPos, bool driverStereo, bool still, const GiEyePose *eyes,
@@ -9845,6 +9844,9 @@ private:
     /// queues really did empty; false when the no-progress budget expired, in
     /// which case it has already logged the pending textures by name.
     bool drainTextureStreaming(double *msSpent = nullptr);
+    /// The frame head's drain that waited (`ms` > 0), counted with the textures that landed in it (StreamingWork).
+    void noteTextureDrain(double ms, size_t before, size_t after);
+    unsigned long long mTextureDrains = 0, mTextureDrainLanded = 0;
     /// THE DRAIN'S STATE between its steps (WAIT-TEXTURE-LOADS-1): drainTextureStreaming keeps one on its stack, the
     /// host's wait (pumpTextureLoads) one across its calls.
     struct TextureDrain {
