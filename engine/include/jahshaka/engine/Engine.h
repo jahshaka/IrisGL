@@ -3053,7 +3053,8 @@ public:
 
     /// Reads `view`'s VISIBILITY-BUFFER ID IMAGE back (ATOM-OCCLUSION-1): two words a
     /// pixel, row-major — the id pass's x (slot | the cluster's depth << 24) and y
-    /// (cluster << 8 | triangle), 0xFFFFFFFF where it drew nothing. A MEASUREMENT (a
+    /// (cluster << 8 | triangle); where it drew nothing x = 0xFFFFFFFF (AtomId::kEmpty)
+    /// and y = 0 (so coverage is read from x: a y of 0 is also cluster 0's triangle 0). A MEASUREMENT (a
     /// flush and a stall, like readHzbLevel): the occlusion's pixel-exact proofs compare
     /// it with the door open and shut. False when the view's chain carries no id pass.
     virtual bool readAtomIds(View *view, std::vector<uint32_t> &words, unsigned &width, unsigned &height) = 0;

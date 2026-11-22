@@ -233,13 +233,14 @@ inline size_t lodLevelForWorldError(const std::vector<float> &bounds, float allo
 // WHY IT IS ONE CUT: the bake makes every group's error at least every child
 // group's, and every group's sphere contain every child group's — so a group
 // that is affordable has only affordable children, and the drawn clusters are
-// exactly one frontier through the DAG. `engine.lod_rule_parity` asserts it of
-// the device's cut over the shipped meshes (no drawn cluster under a drawn one,
-// every level-0 triangle covered once).
+// exactly one frontier through the DAG. `atom.cut_partition` asserts it of
+// `clusterCut` over the harness meshes (no drawn cluster under a drawn one,
+// every level-0 triangle covered once); `engine.lod_rule_parity` holds the
+// device's cut equal to `clusterCut`'s.
 //
 // THE GLSL TWIN is media/Hlms/Jahshaka/JahClusterCut.glsl (`jahClusterGroupAllowed`,
 // `jahClusterDrawn`); `engine.lod_rule_parity`'s fourth copy runs it on the device
-// over the shipped meshes' DAGs and compares the drawn set with `clusterCut`'s.
+// over the harness meshes' DAGs and compares the drawn set with `clusterCut`'s.
 // A change here that is not made there fails that suite.
 
 /// One cluster of a mesh's DAG. `firstIndex`/`indexCount` are the cluster's
