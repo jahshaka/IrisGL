@@ -30,6 +30,7 @@ For more information see the LICENSE file
 #include <cmath>
 #include <algorithm>
 #include <QSet>
+#include "core/guid.h"
 
 
 namespace iris
@@ -507,7 +508,7 @@ Scene::Scene()
 	gradientBot = QColor(0, 0, 255);
 	gradientOffset = .5f;
 
-	skyGuid = IrisUtils::generateGUID();
+	skyGuid = QString::fromStdString(iris::newGuid());
 
 	QJsonObject singleColourBlock;
 	singleColourBlock.insert("skyColor", iris::colorToJson(skyColor));
@@ -804,7 +805,7 @@ void Scene::addNode(SceneNodePtr node)
 		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = node.staticCast<iris::MeshNode>();
 		if (meshes.contains(node->getGUID()))
-			mesh->setGUID(IrisUtils::generateGUID());
+			mesh->setGUID(QString::fromStdString(iris::newGuid()));
 		meshes.insert(node->getGUID(), mesh);
 		pickTable.add(mesh.data());
     }

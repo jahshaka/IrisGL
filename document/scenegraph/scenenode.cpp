@@ -35,7 +35,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/meshnode.h"
 
 #include <QDebug>
-#include <QUuid>
+#include "core/guid.h"
 
 
 namespace iris
@@ -66,7 +66,7 @@ SceneNode::SceneNode()
     // THE OWNER TABLE the write journal resolves this node's id through (nodegraph.h).
     graph::registerNode(this);
 
-	setGUID(IrisUtils::generateGUID());
+	setGUID(QString::fromStdString(iris::newGuid()));
 }
 
 void SceneNode::noteDocumentWrite()
@@ -1130,9 +1130,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		if (anim == this->animation) node->setAnimation(copy);
 	}
 
-    auto id = QUuid::createUuid();
-    auto guid = id.toString().remove(0, 1);
-    guid.chop(1);
+    const QString guid = QString::fromStdString(iris::newGuid());
     node->setGUID(guid);
     guidMap.insert(this->getGUID(), guid);
 
