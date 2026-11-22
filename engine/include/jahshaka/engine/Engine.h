@@ -1681,23 +1681,22 @@ public:
     /// view is created. Ignored on an on-screen view, which has the band anyway.
     virtual void setLodHysteresisOffscreen(bool) = 0;
 
-    /// WHAT AN OFFSCREEN VIEW'S PICTURE IS FOR (PHOTON-GATHER-1d fix round) — and
-    /// so whether the screen-probe gather runs in it. At a gather tier the
-    /// gather is the diffuse GI, but it costs a prepass and four compute jobs a
-    /// frame and its first frames are the raw estimate (up to 9/255 of noise),
-    /// so an offscreen view DECLARES one of two contracts, and there is no third:
-    ///   * StillPicture — a screenshot, a thumbnail, a stored preview shot: the
-    ///     gather runs, and the CALLER waits for GiStatus::giAtRest before it
+    /// WHAT AN OFFSCREEN VIEW'S PICTURE IS: whether it has a HISTORY. An
+    /// offscreen view DECLARES one of two contracts, and there is no third:
+    ///   * StillPicture — a screenshot, a thumbnail, a stored preview shot: a
+    ///     picture alone - the exposure meter keys on the frame alone (no
+    ///     history), and the CALLER waits for GiStatus::giAtRest before it
     ///     reads the pixels (the screenshot verbs' rule, one predicate);
     ///   * Live — a view drawn every frame for a person (a preview widget, an
     ///     eye control), or any picture that is not a settled still (a test's
-    ///     fixed-frame render): the gather is pinned OFF and the view takes the
-    ///     field's (or the cones') answer, the price of a live frame unchanged.
-    /// It is declared at creation (Engine::createOffscreenView's required
-    /// parameter); this setter CHANGES it - a view that switches purpose, and the
-    /// host's posted value applied by the render thread's drain. Ignored on an
-    /// on-screen view, which always gathers where its scene does. Graph shape
-    /// (the prepass): a change rebuilds the view's workspace.
+    ///     fixed-frame render): a frame of a sequence, the meter adapting over
+    ///     the presented time.
+    /// It never decides the GI route (ROUTE-ROWS-1 stage 0): every view of a
+    /// ray scene gathers, one diffuse producer per world. It is declared at
+    /// creation (Engine::createOffscreenView's required parameter); this setter
+    /// CHANGES it - a view that switches purpose, and the host's posted value
+    /// applied by the render thread's drain. Ignored on an on-screen view. No
+    /// graph shape follows it.
     virtual void setOffscreenContract(OffscreenContract) = 0;
 
     /// WHAT THIS VIEW'S AUTOMATIC EXPOSURE HAS ACTUALLY CONVERGED ON, as the
@@ -2024,8 +2023,8 @@ public:
     /// handle, so it works headless. Used for thumbnails, asset previews and tests.
     /// `contract` (View::setOffscreenContract: StillPicture or Live) is REQUIRED and is the view's from its first
     /// frame (PHOTON-7 stage 10-3: the view is adopted by the render thread through a MESSAGE and a later setter's
-    /// value travels as a frame FIELD, so a frame could draw the view between the two, refusing the gather, on a
-    /// thread race - a screenshot's history then started differently).
+    /// value travels as a frame FIELD, so a frame could draw the view between the two on a thread race - its meter
+    /// then started with the wrong history).
     virtual View  *createOffscreenView(const std::string &name,
                                        unsigned width, unsigned height,
                                        const Colour &background, OffscreenContract contract) = 0;

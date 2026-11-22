@@ -2,6 +2,7 @@
 // camera that draw a scene into it.
 #include "EnginePrivate.h"
 #include "HlmsAtom.h"
+#include "GiChainRules.h"
 #include "ReflectChainRules.h"
 
 // The inset's letterbox rectangle is written straight onto its scene pass'
@@ -214,24 +215,23 @@ ChainDesc OgreView::chainDesc() const {
     // ...AND IN A STEREO VIEW TOO (PHOTON-GA-VR): the Component gathers a two-eye
     // target per eye, each eye's layer its own grid; the row itself (the tier
     // table's VR column) decides whether a headset runs it.
-    // ...AND AN OFFSCREEN VIEW BY ITS DECLARED CONTRACT (the fix round;
-    // View::setOffscreenContract; declared at creation, Engine::createOffscreenView): a still picture gathers and
-    // its caller waits for giAtRest; a live one takes the field's answer - there is no undeclared view (PHOTON-7
-    // stage 10-3: one could draw a frame before its contract landed). A VIEW THAT PRESENTS TO A PERSON — a window, or
-    // the headset's eye pair (a stereo view: an offscreen target only because
-    // the runtime's swapchains take a copy of it) — declares nothing and
-    // gathers by its row: the contract is a property of the pictures an editor
-    // makes offscreen, and the wearer's picture is not one of them.
-    const bool wantsGather = mScene && mScene->probeGatherWanted();
-    const bool presents = presentsAsWindow() || mStereo;   // a presented stand-in gathers by its row, as a window does
-    bool contractAllows = presents || mOffscreenContract == OffscreenContract::StillPicture;
-    d.probeGather    = wantsGather && contractAllows;
-    // ...AND WHERE IT DOES NOT, THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6): the same screen products
-    // from the irradiance field and the cones, so a view's opaque passes read no world cache whatever the machine, the
-    // ray row or the offscreen contract. Above the early-out for the gather's reason (it is how a surface is lit).
-    // Mono only (a stereo view keeps the pixel's own cones: stage 9's).
-    d.screenIntegrate = !d.probeGather && !mStereo && mScene && mScene->screenIntegrateWanted() &&
-                        !(mEngine && mEngine->armRegistry().on(ArmId::GiScreenIntegrateOff));
+    // ...AND IN EVERY OFFSCREEN VIEW, A LIVE ONE INCLUDED (ROUTE-ROWS-1 stage 0; CODING_RULES §1, physics is the
+    // rule): one world, one diffuse producer per view - a preview widget, the startup warm-up, a test's fixed-frame
+    // render, a screenshot and the window draw the same diffuse. The offscreen contract (View::setOffscreenContract)
+    // is no input of the GI route: it says only whether a picture has a history (the exposure meter's rule,
+    // OgreEngine::meterSecondsFor). A still's caller waits for giAtRest (the screenshot verbs' rule).
+    // ...AND WHERE THE SCENE DOES NOT TRACE, THE NO-RAY ROUTE'S SCREEN INTEGRATE (PHOTON-7 stage 7, 7-6): the same
+    // screen products from the irradiance field and the cones, so a view's opaque passes read no world cache whatever
+    // the machine or the ray row. Above the early-out for the gather's reason (it is how a surface is lit). Mono only
+    // (a stereo view keeps the pixel's own cones: stage 9's). The rule is detail::chainGiRoutes (GiChainRules.h,
+    // engine.chain_gi_routes): of the view's kind it reads only `stereo`, for the integrate half.
+    {
+        const detail::ChainGiRoutes gi = detail::chainGiRoutes(
+            mScene && mScene->probeGatherWanted(), mScene && mScene->screenIntegrateWanted(), mStereo,
+            mEngine && mEngine->armRegistry().on(ArmId::GiScreenIntegrateOff));
+        d.probeGather = gi.probeGather;
+        d.screenIntegrate = gi.screenIntegrate;
+    }
     // THE offscreen guarantee, in ONE place (POST_CHAIN_SPEC.md §7.3): an
     // offscreen view never gets the post chain, whatever the host pushed.
     // Thumbnails, material previews, the asset viewer, the avatar preview and
@@ -1617,10 +1617,8 @@ void OgreView::setOffscreenContract(OffscreenContract c) {
         return;
     }
     if (postedAsField([&](FrameInputView &p) { p.offscreenContract = c; })) return;   // the host's: a field (U3 4a)
-    if (c == mOffscreenContract) return;
+    // No graph shape follows it (ROUTE-ROWS-1 stage 0: the GI route reads no contract); the meter reads it each frame.
     mOffscreenContract = c;
-    // The gather decides the prepass: graph shape, like the flags above.
-    rebuildWorkspaceDef();
 }
 
 // THE HOST'S SETTER (ENGINE-UPGRADE-U3 stage 2): what it pushed is kept on its side of the boundary

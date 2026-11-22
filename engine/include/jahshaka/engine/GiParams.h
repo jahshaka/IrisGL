@@ -264,7 +264,7 @@ struct GiParams {
     bool      dragMoverChannel = false;
 
     // THE SCREEN-PROBE GATHER HAS NO ROW (PHOTON-7 stage 7, 7-5; "never turn core stages off"): wherever the
-    // machine traces and the GI mode is on it IS the diffuse of every view that presents (and of a still picture),
+    // machine traces and the GI mode is on it IS the diffuse of every view that draws the scene (ROUTE-ROWS-1),
     // at the tier table's density (giQualityFacts(...).gather) - no toggle turns it off, because on a ray chain
     // nothing else produces the diffuse the opaque passes read (they bind no world cache).
     // ---- SURFACE-CACHE phase 2: the card cache's three knobs ---------------

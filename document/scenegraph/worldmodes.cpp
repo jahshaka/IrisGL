@@ -1762,11 +1762,11 @@ const QVector<OffscreenPicture> &offscreenPictures()
         { QStringLiteral("screenshot.scene"), true, QString() },
         { QStringLiteral("screenshot.viewport"), true, QString() },
         // THE TEST PICTURE: no post chain. Its GI is the tier's — the voxel chain, the
-        // field, and the screen-probe gather (a StillPicture offscreen view gathers,
-        // View::setOffscreenContract) — but none of the chain-borne terms.
+        // field, and the screen-probe gather (every view of a ray scene gathers) — but
+        // none of the chain-borne terms.
         { QStringLiteral("screenshot.plain"), false,
-          QStringLiteral("the tier's GI (the voxel chain, the irradiance field and, as a still "
-                         "picture, the screen-probe gather) with NO post chain: no screen "
+          QStringLiteral("the tier's GI (the voxel chain, the irradiance field and the "
+                         "screen-probe gather) with NO post chain: no screen "
                          "march, no traced reflections, no sun contact, no SSAO, no grade — the "
                          "exactly reproducible instrument every pixel suite asserts") },
         { QStringLiteral("screenshot.tonemap"), false,
@@ -1776,11 +1776,6 @@ const QVector<OffscreenPicture> &offscreenPictures()
         // on purpose, and declared so.
         { QStringLiteral("projectTile"), false,
           QStringLiteral("the tonemap grade (screenshot.tonemap) at tile size") },
-        // A view drawn every frame for a person (a preview widget, an eye control):
-        // the engine's Live contract pins the gather off.
-        { QStringLiteral("liveOffscreen"), false,
-          QStringLiteral("the field's (or the cones') diffuse instead of the screen-probe gather, "
-                         "the price of a live frame unchanged (View's Live contract)") },
         // A reflection probe is a photograph for the SPECULAR term; a chain inside it
         // would count the screen-space and traced terms twice.
         { QStringLiteral("probeCapture"), false,

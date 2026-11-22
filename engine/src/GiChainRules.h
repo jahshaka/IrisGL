@@ -14,9 +14,10 @@ struct ChainGiRoutes {
 /// ONE PRODUCER FOR EVERY VIEW OF A RAY SCENE (ROUTE-ROWS-1 stage 0; CODING_RULES §1, physics is the rule): wherever the
 /// scene's GI is on and the scene traces (`gatherWanted` = OgreScene::probeGatherWanted) the gather IS the diffuse of
 /// every view that draws it - a window, the headless host's presented stand-in, a stereo pair, and every offscreen
-/// picture alike (a screenshot, a thumbnail, a preview widget, a test's fixed-frame render). The view's kind is not an
-/// input: the Live/StillPicture contract that pinned a live offscreen view off the gather (a second producer, a
-/// different picture of the same world) is deleted. Where the scene does NOT trace and its GI is on (`giOn` =
+/// picture alike (a screenshot, a thumbnail, a preview widget, the startup warm-up, a test's fixed-frame render). The
+/// view's kind is not an input: the Live/StillPicture contract's GI meaning, which pinned a live offscreen view off the
+/// gather (a second producer, a different picture of the same world), is deleted - the contract itself stays, read by
+/// the exposure meter alone (OgreEngine::meterSecondsFor). Where the scene does NOT trace and its GI is on (`giOn` =
 /// OgreScene::screenIntegrateWanted), a MONO view takes the screen integrate (the same screen products from the field
 /// and the cones; NO-RAY-CUT-1 removes it after the close); a stereo view keeps the pixel's own cones there (neither).
 /// `integrateArmOff` is the measuring arm ArmId::GiScreenIntegrateOff.

@@ -229,7 +229,9 @@ struct ViewPipDesc {
 };
 
 /// An offscreen view's declared contract, a REQUIRED parameter of Engine::createOffscreenView (PHOTON-7 stage 10-3: no
-/// frame ever sees an offscreen view without one; View::setOffscreenContract changes it later). See the setter.
+/// frame ever sees an offscreen view without one; View::setOffscreenContract changes it later): whether its picture has
+/// a HISTORY (Live: a frame of a sequence; StillPicture: a picture alone - the exposure meter's rule). It never decides
+/// the GI route (ROUTE-ROWS-1 stage 0: every view of a ray scene gathers). See the setter.
 /// PresentedStandIn (TEST-STREAMLINE-1 stage 3a, item 2b): THE SCRIPTABLE HEADLESS HOST's editor view - an offscreen
 /// target that STANDS IN FOR A PRESENTED VIEW: every branch that tells a presented view from an offscreen one reads it
 /// as presented (View::presentsAsWindow, the one predicate), so a host's verbs see the picture the editor's window

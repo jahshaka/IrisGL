@@ -4724,9 +4724,9 @@ bool VrSession::eyeScreenshot(unsigned eye, Image &out, std::string &error) {
     View *v = mEngine->createOffscreenView("jahshaka-vr-eye", mEyeWidth, mEyeHeight,
                                            Colour{ 0.0f, 0.0f, 0.0f, 1.0f }, OffscreenContract::StillPicture);
     if (!v) { error = "vrEyeScreenshot: " + mEngine->lastError(); return false; }
-    // A STILL PICTURE: the control is compared with the eyes, and the eyes gather
-    // wherever the scene's row resolves on (the tier table's VR column,
-    // PHOTON-GA-VR) — so the control gathers by the same row and at the same
+    // A STILL PICTURE (no meter history): the control is compared with the eyes, and
+    // every view gathers wherever the scene's row resolves on (the tier table's VR
+    // column, PHOTON-GA-VR) — so the control gathers by the same row and at the same
     // density (the ray tier reads the VR column while the headset drives GI),
     // and is read once it stops moving.
     OgreView *control = static_cast<OgreView *>(v);
