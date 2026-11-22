@@ -42,7 +42,13 @@ struct EngineState {
     /// the commands made (owned: destroyed at their release or the host's end - every other held one was handed in);
     /// and whether the host's end found its engine gone (then nothing calls into it).
     std::vector<MadeId> made;
-    std::vector<const Scene *> ownedScenes;
+    /// A scene a command made, and its clock: the serial of the grid steps this host stamped (THE FRAME's PUBLIC DOOR,
+    /// Commands::frame: +1 a frame, the scene's one clock writer).
+    struct OwnedScene {
+        Scene *scene = nullptr;
+        unsigned long long stepSerial = 0;
+    };
+    std::vector<OwnedScene> ownedScenes;
     std::vector<const View *> ownedViews;
     bool engineGone = false;
 };
@@ -74,7 +80,8 @@ public:
     /// the engine is absent (the call FAILED saying why).
     Scene *scene(Call &c, const Value &h) const { return engine(c) ? c.object<Scene>(h) : nullptr; }
     View *view(Call &c, const Value &h) const { return engine(c) ? c.object<View>(h) : nullptr; }
-    /// One lockstep frame: the harness's grid step (commands_engine.cpp says why), then the frame; then EVERY PENDING
+    /// One lockstep frame: one grid step of every scene this host made, through its FrameInput part (commands_engine.cpp:
+    /// THE FRAME's PUBLIC DOOR), then the frame; then EVERY PENDING
     /// ROUTE DECLARATION JUDGED on it (RouteDeclaration.h: held or broken, each a law of the host's verdict; a product
     /// not live yet waits). False, the call FAILED naming the first broken declaration, when one broke.
     bool frame(Call &c) const;

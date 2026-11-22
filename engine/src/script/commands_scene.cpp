@@ -52,7 +52,8 @@ void registerSceneCommands(Host &host, const Commands &k)
           [k](Call &c) -> Value {
               const Scene *s = k.scene(c, c[0]);
               if (!s) return Value();
-              if (std::find(k.st->ownedScenes.begin(), k.st->ownedScenes.end(), s) == k.st->ownedScenes.end())
+              if (std::none_of(k.st->ownedScenes.begin(), k.st->ownedScenes.end(),
+                               [s](const EngineState::OwnedScene &o) { return o.scene == s; }))
                   return c.fail("the scene '" + s->name() + "' was handed in by the host's owner: not the script's to destroy");
               return Value(c.registry().release(c[0].asInt()));   // (its deleter destroys it in the engine)
           });

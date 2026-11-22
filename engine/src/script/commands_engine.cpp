@@ -16,14 +16,16 @@
 // and materials naming the engine's own ids, their existence asked of the engine at every call. A picture is the request shape of PICTURE-REQUEST-1 (view, eyes, content, when); its reductions are
 // NATIVE commands (the script language is an interpreter: a pixel loop is never a script's).
 //
-// THREE READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these, because the C++ fixtures' harness has
-// no public equivalent and a script row must give the same picture and the same route judgement as the fixture it
-// replaces: (1) THE HARNESS's GRID — engine.frames steps every scene no host ever stamped by one grid step before each
-// frame (inspect::EngineEcho::harnessStep, enginetest::frames' law "a frame is one grid step"): an engine-only script's
-// scenes have no document, so nothing else gives them time; (2) THE PAUSE in engine.view.routes and the route
-// judgement (inspect::SceneEcho::giUpdateBudget() == 0), the one route word the published record does not carry;
-// (3) THE ENGINE's OWN CHAIN RECORD (inspect::ViewEcho::routes) that engine.view.declareRoutes' judgement holds the
-// published row against (the two doors agree: requireRoutes' law). R11 (source.testing_rules) bars that header from
+// THE FRAME's PUBLIC DOOR (2b b3; ruling 6): a frame steps every scene THIS HOST MADE by one grid step through the
+// product's own door - its FrameInputScene part's stepSerial (+1 a frame) handed over by Engine::submitFrame before
+// renderOneFrame: a script's scenes have no document, so the host that made them is their clock's ONE writer
+// (ONE-FRAME-1). A scene the host's owner handed in keeps its owner's clock: this host never stamps it.
+//
+// TWO READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these, because the C++ fixtures' harness has
+// no public equivalent and a script row must give the same route judgement as the fixture it replaces: (1) THE PAUSE
+// in engine.view.routes and the route judgement (inspect::SceneEcho::giUpdateBudget() == 0), the one route word the
+// published record does not carry (2e publishes it); (2) THE ENGINE's OWN CHAIN RECORD (inspect::ViewEcho::routes)
+// that engine.view.declareRoutes' judgement holds the published row against (the two doors agree: requireRoutes' law). R11 (source.testing_rules) bars that header from
 // Studio's src/ and irisgl/mirror, the hosts; this is the engine's own file.
 //
 // THE OWNERSHIP LAW (2b; the lead, for the lab's fresh host per Run): an engine object A COMMAND MADE is the host's -
@@ -61,10 +63,12 @@ bool engineLive(EngineState &st)
 
 std::shared_ptr<Scene> ownedScene(const std::shared_ptr<EngineState> &st, Scene *s)
 {
-    st->ownedScenes.push_back(s);
+    st->ownedScenes.push_back(EngineState::OwnedScene{s, 0});
     return std::shared_ptr<Scene>(s, [st](Scene *dead) {
         forgetScene(*st, dead);
-        st->ownedScenes.erase(std::remove(st->ownedScenes.begin(), st->ownedScenes.end(), dead), st->ownedScenes.end());
+        st->ownedScenes.erase(std::remove_if(st->ownedScenes.begin(), st->ownedScenes.end(),
+                                             [dead](const EngineState::OwnedScene &o) { return o.scene == dead; }),
+                              st->ownedScenes.end());
         st->declared.erase(std::remove_if(st->declared.begin(), st->declared.end(),
                                           [dead](const DeclaredRoutes &d) { return d.scene == dead; }),
                            st->declared.end());
@@ -101,8 +105,16 @@ void forgetScene(EngineState &st, const Scene *scene)
 
 bool Commands::frame(Call &c) const
 {
-    if (const inspect::EngineEcho *echo = inspect::engine(st->engine))
-        const_cast<inspect::EngineEcho *>(echo)->harnessStep(1);
+    if (!st->ownedScenes.empty()) {
+        FrameInput step = FrameInput::withCause(FrameCause::Scripted);
+        for (EngineState::OwnedScene &o : st->ownedScenes) {
+            FrameInputScene part;
+            part.scene = o.scene;
+            part.stepSerial = ++o.stepSerial;
+            step.scenes.push_back(std::move(part));
+        }
+        st->engine->submitFrame(std::move(step));
+    }
     st->engine->renderOneFrame();
     std::string broken;
     for (size_t i = 0; i < st->declared.size();) {
@@ -159,7 +171,7 @@ void registerFrameCommands(Host &host, const Commands &k)
               return Value(true);
           });
     r.add({"engine.frames", {Access::Changes, {arg("n", Kind::Int).atLeast(0).in("frames")}, Kind::Null},
-           "Draws n frames in lockstep, each one grid step (1/60 s) of every scene no host stamps; returns when the "
+           "Draws n frames in lockstep, each one grid step (1/60 s) of every scene this host made; returns when the "
            "n-th frame is drawn and published."},
           [k](Call &c) -> Value {
               if (!k.engine(c)) return Value();
