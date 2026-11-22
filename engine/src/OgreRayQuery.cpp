@@ -975,6 +975,7 @@ private:
     struct Ahead {
         std::thread th;
         bool started = false, joined = false, ok = false;
+        uint32_t launchFrame = 0u;         // frameNow() at the launch (the test door rays.buildHold counts from it)
         std::atomic<bool> done{ false };   // the worker's last write (the render thread joins a finished build at once)
         std::string err;
         std::vector<RayAheadNote> notes;   // the worker's own, read after the join
@@ -996,6 +997,9 @@ private:
     /// samplers refused, or it was built on the render thread already): the consumer's make*Pipeline builds now.
     bool launchAhead(AheadId id);
     void joinAhead(AheadId id, bool counted = true);
+    /// THE TEST DOOR rays.buildHold (+ rays.buildHoldIds): build `id` counts as in flight for the arm's N frames after its
+    /// launch, finished or not (aheadReady refuses it in a background-compiling scene, harvestAhead leaves it unjoined).
+    bool aheadHeld(AheadId id) const;
     /// The gather's build, on its worker (kAheadGather): the gather object is made on the render thread at the launch.
     bool makeGatherPipelinesNow(std::string &err);
 public:
@@ -2877,6 +2881,7 @@ bool RayQueryTier::launchAhead(AheadId id) {
     // only its pipelines.
     if (id == kAheadGather && !mGather) mGather = new ScreenProbeGather(*this);
     a.started = true;
+    a.launchFrame = frameNow();
     a.th = std::thread([this, &a, make]() {
         lowerBuilderPriority();
         mSlots.take();   // a slot of the tier's width, waited for here, on this thread
@@ -2897,15 +2902,23 @@ bool RayQueryTier::aheadReady(AheadId id, const OgreScene *scene) {
     if (!a.started || a.joined) return true;
     // IN FLIGHT: the scene's ONE async-shader rule decides - not this frame where it compiles in the background,
     // the frame waits for it everywhere else
-    if (!a.done.load(std::memory_order_acquire) && scene && scene->compilesInBackground()) return false;
+    if ((!a.done.load(std::memory_order_acquire) || aheadHeld(id)) && scene && scene->compilesInBackground()) return false;
     joinAhead(id);
     return true;
+}
+
+bool RayQueryTier::aheadHeld(AheadId id) const {
+    const double n = armValue(ArmId::RayBuildHold);
+    if (n <= 0.0) return false;
+    const unsigned ids = unsigned(armValue(ArmId::RayBuildHoldIds));
+    if (ids && !(ids & (1u << unsigned(id)))) return false;
+    return double(uint32_t(frameNow() - mAhead[id].launchFrame)) < n;
 }
 
 void RayQueryTier::harvestAhead() {
     for (unsigned i = 0; i < kAheadCount; ++i) {
         const Ahead &a = mAhead[i];
-        if (a.started && !a.joined && a.done.load(std::memory_order_acquire)) joinAhead(AheadId(i));
+        if (a.started && !a.joined && a.done.load(std::memory_order_acquire) && !aheadHeld(AheadId(i))) joinAhead(AheadId(i));
     }
 }
 

@@ -1737,6 +1737,16 @@ constexpr ArmDef kArms[] = {
       "sides' gather (rq_voxel_sides.comp) at N fixed cosine rays a texel / side instead of the tier's - the same "
       "estimators' high-sample limit, the truth a card and a voxel answer are held against. Read at the GI's build. "
       "0 = shipped." },
+    { ArmId::RayBuildHold, 0.0, 0.0, 100000.0,
+      "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late): while set to N, a ray pipeline build launched at frame f counts "
+      "as IN FLIGHT until frame f + N, finished or not - a consumer in a scene that compiles in the background takes its "
+      "'not this frame' path and the frame's harvest leaves it unjoined; a consumer that joins in its frame, and a wait "
+      "for the background compiles, land it at once (a hold is never a wait). A late driver compile on a warm cache. "
+      "0 = shipped." },
+    { ArmId::RayBuildHoldIds, 0.0, 0.0, 63.0,
+      "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late): the builds rays.buildHold holds, bit k for RayQueryTier's "
+      "AheadId k (1 the reflection, 2 the cards' gather, 4 the card movers, 8 the voxel sides, 16 the glass escape, 32 "
+      "the screen-probe gather). 0 = every build." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");
