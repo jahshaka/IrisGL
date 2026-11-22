@@ -75,7 +75,9 @@ Result Host::run(const std::string &source, const std::string &name)
     for (LanguageEntry &e : mLanguages) {
         if (e.extension != ext) continue;
         if (!e.made) e.made = e.make(*this);
-        return e.made->run(source, name);
+        Result r = e.made->run(source, name);
+        if (mOptions.freshRealmPerRun) e.made.reset();
+        return r;
     }
     Result r;
     r.status = Status::Failed;
