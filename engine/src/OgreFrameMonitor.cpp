@@ -1759,6 +1759,11 @@ constexpr ArmDef kArms[] = {
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's texture case): 1 = every texture bound to a material while on "
       "is AWAITED as if its pixels had not landed (PhotonComponent's awaiting list), and nothing on the list settles "
       "while on - a material wearing a texture still loading, held. 0 = shipped (the list settles the next frame)." },
+    { ArmId::FrameIncompleteHold, 0.0, 0.0, 1.0,
+      "A TEST DOOR (SHADER-SYSTEM-1, COLD-BOOT-1's leftover L2; gi.card_build_late.window): 1 = every scene's drawn frame "
+      "is noted INCOMPLETE (PublishedFrame::Completeness term bit 4, the door's own) - a frame that turns incomplete with "
+      "NO demand change, as an object entering the view under a sub-pixel turn while its permutation compiles. Read at "
+      "each frame's completeness note. 0 = shipped." },
 };
 static_assert(sizeof(kArms) / sizeof(kArms[0]) == unsigned(ArmId::Count),
               "ArmId grew: give the new arm its row in kArms, in the same order");

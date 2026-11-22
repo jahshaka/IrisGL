@@ -9373,9 +9373,11 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         }
         view.demandChanged = hitChanged;
         view.demandSettleFrames = facts.cardDemandSettleFrames;
-        // (and NO REST DECISION ON AN INCOMPLETE FRAME: COLD-BOOT-1 item 3 - its readers read a picture still to come)
+        // (and NO REST DECISION ON AN INCOMPLETE FRAME: COLD-BOOT-1 item 3 - its readers read a picture still to come;
+        // neither scheduled nor fired: CardSceneView::frameIncomplete)
+        view.frameIncomplete = mScene.frameIncomplete();
         view.readersRestComplete = mScene.cardReadersRestComplete(view.readerRestFrames, view.readerActive) &&
-                                   !mScene.frameIncomplete();
+                                   !view.frameIncomplete;
     }
     mSurfaceCache->takeDemand(mCardSlots, view);
     // THE TEST DOOR cards.force (+): a card held resident ARRIVES WHATEVER ITS DEMAND (SurfaceCache::refreshResidency) -

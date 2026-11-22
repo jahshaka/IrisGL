@@ -9589,7 +9589,8 @@ struct PublishedFrame {
     struct Completeness {
         bool incomplete = false;
         /// Its terms on that frame: bit 0 a placeholder drawn, 1 a pending draw skipped, 2 a card reader refused by its
-        /// ray build, 3 a material awaiting its texture.
+        /// ray build, 3 a material awaiting its texture; 4 a TEST term (the door frames.incompleteHold, never set in the
+        /// app: a frame incomplete with no demand change, gi.card_build_late.window).
         unsigned terms = 0u;
         /// The drawn frames it has been incomplete IN A ROW (0 = complete): a scene stuck incomplete shows here (and on
         /// the startup gate's card line) instead of as a silent never-rest.

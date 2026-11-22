@@ -2327,7 +2327,8 @@ private:
     X(RayBuildHoldIds, "rays.buildHoldIds") /* the builds rays.buildHold holds, a bit per AheadId (0 = every build; a test door, gi.card_build_late) */ \
     X(RayBuildFail, "rays.buildFail") /* the ray builds named (a bit per AheadId) FAIL on their workers (a test door, gi.card_build_late) */ \
     X(ShaderAsyncFail, "shaders.asyncFail") /* every object's own graphics permutation fails at its request (the fork's _jahFailRequests; a test door, gi.card_build_late) */ \
-    X(TextureResidencyHold, "textures.residencyHold") /* every texture bind awaits its pixels while on (a test door, gi.card_build_late) */
+    X(TextureResidencyHold, "textures.residencyHold") /* every texture bind awaits its pixels while on (a test door, gi.card_build_late) */ \
+    X(FrameIncompleteHold, "frames.incompleteHold") /* every scene's drawn frame is noted INCOMPLETE while on, term bit 4 (a test door, gi.card_build_late.window) */
 
 enum class ArmId : unsigned {
 #define JAH_ARM_ENUM(e, n) e,

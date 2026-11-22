@@ -1321,7 +1321,10 @@ void SurfaceCache::refreshResidency(const CardSceneView &view) {
         mRestDue = mFrame + demandDueFrames();
         mDecisionReaders = (view.readerActive[0] ? 1u : 0u) | (view.readerActive[1] ? 2u : 0u);
     }
-    const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided;
+    // (NOR FIRES ON AN INCOMPLETE FRAME: one that turns incomplete inside the due takes no decision - the frame that becomes
+    // complete is a demand change and reopens the window; gi.card_build_late.window)
+    const bool decide = mRestDue && mFrame >= mRestDue && !demandOpen && !view.demandChanged && !mRestDecided &&
+                        !view.frameIncomplete;
     if (decide) {
         mRestDecided = true;
         ++mRestDecisions;

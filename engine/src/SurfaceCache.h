@@ -302,6 +302,10 @@ struct CardSceneView {
     /// reader of the cards that can rest has finished its rest sample sequence (a frame late). With the demand closed
     /// the cache takes its rest's ONE residency decision then - once per change.
     bool readersRestComplete = true;
+    /// THE FRAME IS INCOMPLETE (OgreScene::frameIncomplete, PublishedFrame::Completeness): no rest decision is SCHEDULED
+    /// (readersRestComplete holds it) nor FIRES on it - a frame that turns incomplete inside the due takes none; the frame
+    /// that becomes complete is a demand change, which reopens the window (COLD-BOOT-1's leftover L2).
+    bool frameIncomplete = false;
     /// ...and each reader's rest length so far, reader frames (0 the reflection, 1 the gather; 0: it has no rest): its
     /// rest sequence's start, whose stamps the decision reads.
     unsigned readerRestFrames[2] = { 0u, 0u };
