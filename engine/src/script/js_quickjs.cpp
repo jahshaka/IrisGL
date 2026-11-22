@@ -14,18 +14,22 @@
 // THE CONVERSIONS. JS -> Value: undefined and null -> null (a trailing undefined argument is an absent one); a boolean;
 // a number -> Int when it is integral, not -0 and of magnitude <= 2^53, else Number; a BigInt -> Int (outside int64 an
 // error); a string -> UTF-8; an Array -> array; an ArrayBuffer or a Uint8Array -> bytes; any other object -> an object of
-// its own enumerable string keys in their order (a member holding undefined is absent). A function, a symbol or a nesting
-// deeper than 64 is an error. Value -> JS: an Int of magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a
-// Uint8Array; the rest by kind.
+// its own enumerable string keys in their order (a member holding undefined is absent). A function or a symbol is an
+// error. Value -> JS: an Int of magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a Uint8Array; the rest
+// by kind.
 //
-// THE CONVERSION WALKS THE DECLARATION (SCRIPT-IN-ENGINE-1 2b; the 2a final read's L1): a script's `a.length = 4e9` costs
-// it nothing and would cost the host 4e9 values. So an array's length is judged against the parameter's declared count
-// or maximum (Registry::add refuses an array that declares neither) BEFORE any element is read or any room reserved -
-// past it, the call FAILS by name with the registry's own words; and an array or object where the declaration takes
-// none (an argument too many, an undeclared member, another kind) is carried EMPTY: the registry's verdict there (a
-// surplus argument, an undeclared member, a wrong kind) never reads its contents. NO C++ EXCEPTION CROSSES quickjs's C:
-// every callback below (a command, a namespace's miss, the rejection tracker, console.log) catches its own - a call's
-// is a thrown error naming the command, the host lives on.
+// THE ONE BOUNDED CONVERSION, JS -> Value (SCRIPT-IN-ENGINE-1 2b; the 2a final read's L1: a script's `a.length = 4e9`
+// costs it nothing and would cost the host 4e9 values): `convert` is the only door, and its caller states its
+// ValueBounds (Script.h) - the most elements an array may hold, the deepest nesting, the most bytes the converted value
+// may hold. Each is judged BEFORE the thing it bounds is read or reserved (an array's length before its first element,
+// a string's length before its bytes are copied, a level before it is entered), and past any the conversion FAILS by
+// name. A command's arguments (Host::Options::callBounds) also WALK THE DECLARATION: an array's declared count or
+// maximum bounds it too (Registry::add refuses an array that declares neither), and an array or object where the
+// declaration takes none (an argument too many, an undeclared member, another kind) is carried EMPTY - the registry's
+// verdict there never reads its contents. An OPEN conversion (no declaration: a script's completion value for an outside
+// client) converts everything, inside its bounds. NO C++ EXCEPTION CROSSES quickjs's C: every callback below (a command,
+// a namespace's miss, the rejection tracker, console.log) catches its own - a call's is a thrown error naming the
+// command, the host lives on.
 #include "script/Language.h"
 
 #include "quickjs.h"
@@ -43,7 +47,6 @@ namespace jahshaka { namespace engine { namespace script {
 namespace {
 
 constexpr double kExactInt = 9007199254740992.0;   // 2^53: every integer up to it is exact in a double
-constexpr int kMaxDepth = 64;
 
 /// A JSValue this frame owns, freed however the frame is left: a C++ exception between its making and its free would
 /// leak it (and quickjs asserts at its runtime's end that every object was freed).
@@ -86,13 +89,15 @@ std::string takeException(JSContext *ctx)
     return text;
 }
 
-/// WHAT THE DECLARATION TAKES AT ONE PLACE of an argument: `p` the parameter or member declared there and `kind` what
-/// it takes there - p->kind, or for an array's element the element kind (p then the array's own parameter: an element
-/// object's members are its fields, as the registry reads them) - and the place itself ("transforms.nodes", "o.v[2]"),
-/// a chain on the stack made text only on a failure. p null: the declaration takes nothing here.
+/// WHAT THE DECLARATION TAKES AT ONE PLACE of a value: `p` the parameter or member declared there and `kind` what it
+/// takes there - p->kind, or for an array's element the element kind (p then the array's own parameter: an element
+/// object's members are its fields, as the registry reads them); p null: nothing is declared here - taken whole when
+/// the conversion is `open`, else carried empty. And the place itself ("transforms.nodes", "o.v[2]"), a chain on the
+/// stack made text only on a failure.
 struct Place {
     const Param *p = nullptr;
     Kind kind = Kind::Null;
+    bool open = false;
     const Place *up = nullptr;
     const std::string *name = nullptr;   // a parameter or a member
     long index = -1;                     // an array's element
@@ -101,13 +106,42 @@ std::string placeText(const Place &w)
 {
     std::string t = w.up ? placeText(*w.up) : std::string();
     if (w.name) t += (t.empty() ? "" : ".") + *w.name;
-    else t += "[" + std::to_string(w.index) + "]";
-    return t;
+    else if (w.index >= 0) t += "[" + std::to_string(w.index) + "]";
+    return t.empty() ? std::string("the value") : t;
 }
 
-bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Value &out, std::string &why, int depth);
+/// A child place of `at`: the member `name` (declared by `f`, or none) or the element `index`.
+Place member(const Place &at, const Param *f, const std::string *name)
+{
+    Place m;
+    m.p = f;
+    m.kind = f ? f->kind : Kind::Null;
+    m.open = at.open;
+    m.up = &at;
+    m.name = name;
+    return m;
+}
 
-bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Value &out, std::string &why, int depth)
+/// One conversion's bounds and what it has spent of their bytes.
+struct Budget {
+    const ValueBounds &bounds;
+    std::size_t spent = 0;
+    /// `n` more bytes for `at`, or false with `why` when they would pass the bound.
+    bool spend(std::size_t n, const Place &at, std::string &why)
+    {
+        if (n > bounds.bytes - spent) {
+            why = placeText(at) + " would take the value past its " + std::to_string(bounds.bytes) + " bytes";
+            return false;
+        }
+        spent += n;
+        return true;
+    }
+};
+
+bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Value &out, std::string &why, int depth);
+
+bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Value &out, std::string &why,
+                  int depth)
 {
     JSPropertyEnum *props = nullptr;
     uint32_t n = 0;
@@ -121,6 +155,8 @@ bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Value &out, s
         uint32_t n = 0;
         ~Free() { JS_FreePropertyEnum(c, p, n); }
     } free{ctx, props, n};
+    static const std::vector<Param> none;
+    const std::vector<Param> &fields = at.p ? at.p->fields : none;   // (an open object's members: none declared)
     Value::Object o;
     for (uint32_t i = 0; i < n; ++i) {
         const Owned m(ctx, JS_GetProperty(ctx, v, props[i].atom));
@@ -131,27 +167,23 @@ bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Value &out, s
         if (JS_IsUndefined(m.get())) continue;
         const OwnedCString name{ctx, JS_AtomToCString(ctx, props[i].atom)};
         const std::string key = name.s ? name.s : "";
-        Place member;   // its declaration: the member of that name, or none (the registry FAILS it, unread)
-        member.up = &at;
-        for (const Param &f : at.p->fields)
-            if (f.name == key) {
-                member.p = &f;
-                member.kind = f.kind;
-                member.name = &f.name;
-            }
-        if (!member.p) member.name = &key;
+        const Param *declared = nullptr;   // the member of that name, or none (open: taken; else the registry FAILS it)
+        for (const Param &f : fields)
+            if (f.name == key) declared = &f;
+        const Place place = member(at, declared, declared ? &declared->name : &key);
+        if (!budget.spend(sizeof(Value::Member) + key.size(), place, why)) return false;
         Value mv;
-        if (!fromJs(ctx, m.get(), member, mv, why, depth + 1)) return false;
+        if (!fromJs(ctx, m.get(), place, budget, mv, why, depth + 1)) return false;
         o.emplace_back(key, std::move(mv));
     }
     out = Value(std::move(o));
     return true;
 }
 
-bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Value &out, std::string &why, int depth)
+bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Value &out, std::string &why, int depth)
 {
-    if (depth > kMaxDepth) {
-        why = "a value nested deeper than 64 (a cycle?) cannot be carried";
+    if (depth > budget.bounds.depth) {
+        why = placeText(at) + " is nested deeper than " + std::to_string(budget.bounds.depth);
         return false;
     }
     if (JS_IsUndefined(v) || JS_IsNull(v)) { out = Value(); return true; }
@@ -175,43 +207,58 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Value &out, std::st
         out = Value(static_cast<std::int64_t>(i));
         return true;
     }
-    if (JS_IsString(v)) { out = Value(toUtf8(ctx, v)); return true; }
+    if (JS_IsString(v)) {   // its length judged before its bytes are made (a code unit is at least one byte of UTF-8)
+        int64_t units = 0;
+        if (JS_GetLength(ctx, v, &units) < 0) {
+            why = takeException(ctx);
+            return false;
+        }
+        if (!budget.spend(std::size_t(units), at, why)) return false;
+        std::string text = toUtf8(ctx, v);
+        const std::size_t extra = text.size() > std::size_t(units) ? text.size() - std::size_t(units) : 0;
+        if (!budget.spend(extra, at, why)) return false;   // (UTF-8's bytes past one a unit)
+        out = Value(std::move(text));
+        return true;
+    }
     if (JS_IsSymbol(v) || JS_IsFunction(ctx, v)) {
         why = std::string("a ") + (JS_IsSymbol(v) ? "symbol" : "function") + " cannot be carried";
         return false;
     }
-    if (JS_IsArrayBuffer(v)) {
+    const bool buffer = JS_IsArrayBuffer(v);
+    if (buffer || JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
         size_t n = 0;
-        const uint8_t *p = JS_GetArrayBuffer(ctx, &n, v);
-        out = Value::bytes(Value::Bytes(p, p + (p ? n : 0)));
-        return true;
-    }
-    if (JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
-        size_t n = 0;
-        const uint8_t *p = JS_GetUint8Array(ctx, &n, v);
+        const uint8_t *p = buffer ? JS_GetArrayBuffer(ctx, &n, v) : JS_GetUint8Array(ctx, &n, v);
+        if (!budget.spend(p ? n : 0, at, why)) return false;
         out = Value::bytes(Value::Bytes(p, p + (p ? n : 0)));
         return true;
     }
     if (JS_IsArray(v)) {
-        if (!at.p || at.kind != Kind::Array) {   // no array is declared here: carried empty, never read
+        if (!at.open && (!at.p || at.kind != Kind::Array)) {   // no array is declared here: carried empty, never read
             out = Value(Value::Array{});
             return true;
         }
-        // THE LENGTH JUDGED FIRST, in the registry's own words: nothing is read or reserved past the declaration
-        const Param &p = *at.p;
+        // THE LENGTH JUDGED FIRST - against the bound, and a declared array's count or maximum in the registry's own
+        // words: nothing is read or reserved past them
         int64_t n = 0;
         if (JS_GetLength(ctx, v, &n) < 0) {
             why = takeException(ctx);
             return false;
         }
-        if (p.count && n > int64_t(p.count)) {
-            why = placeText(at) + " must hold " + std::to_string(p.count) + " elements (it holds " + std::to_string(n) + ")";
+        const Param *p = at.p && at.kind == Kind::Array ? at.p : nullptr;
+        if (p && p->count && n > int64_t(p->count)) {
+            why = placeText(at) + " must hold " + std::to_string(p->count) + " elements (it holds " + std::to_string(n) + ")";
             return false;
         }
-        if (!p.count && n > int64_t(p.maxCount)) {   // (a declared array has a count or a maximum: Registry::add)
-            why = placeText(at) + " holds " + std::to_string(n) + " elements, at most " + std::to_string(p.maxCount);
+        if (p && !p->count && n > int64_t(p->maxCount)) {   // (a declared array has a count or a maximum: Registry::add)
+            why = placeText(at) + " holds " + std::to_string(n) + " elements, at most " + std::to_string(p->maxCount);
             return false;
         }
+        if (n > int64_t(budget.bounds.elements)) {
+            why = placeText(at) + " holds " + std::to_string(n) + " elements, past the " +
+                  std::to_string(budget.bounds.elements) + " one array may hold";
+            return false;
+        }
+        if (!budget.spend(std::size_t(n) * sizeof(Value), at, why)) return false;
         Value::Array a;
         a.reserve(size_t(n));
         for (int64_t i = 0; i < n; ++i) {
@@ -220,27 +267,50 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Value &out, std::st
                 why = takeException(ctx);
                 return false;
             }
-            Place element;
-            element.p = &p;
-            element.kind = p.element;
-            element.up = &at;
+            Place element = member(at, p, nullptr);
+            element.kind = p ? p->element : Kind::Null;
             element.index = long(i);
             Value ev;
-            if (!fromJs(ctx, e.get(), element, ev, why, depth + 1)) return false;
+            if (!fromJs(ctx, e.get(), element, budget, ev, why, depth + 1)) return false;
             a.push_back(std::move(ev));
         }
         out = Value(std::move(a));
         return true;
     }
     if (JS_IsObject(v)) {
-        if (!at.p || at.kind != Kind::Object) {   // no object is declared here: carried empty, never read
+        if (!at.open && (!at.p || at.kind != Kind::Object)) {   // no object is declared here: carried empty, never read
             out = Value(Value::Object{});
             return true;
         }
-        return fromJsObject(ctx, v, at, out, why, depth);
+        return fromJsObject(ctx, v, at, budget, out, why, depth);
     }
     why = "a value of this type cannot be carried";
     return false;
+}
+
+/// THE ONE CONVERSION's DOOR: the values `args` of a command's arguments against its declared `params` (one budget
+/// for the whole call), each failure naming its argument. (A caller with no declaration - MCP-ON-HOST-1's completion
+/// value - converts one value with an open Place through the same fromJs and its own bounds.)
+bool convertArguments(JSContext *ctx, int argc, JSValueConst *argv, const std::vector<Param> &params,
+                      const ValueBounds &bounds, Value::Array &out, std::string &why)
+{
+    Budget budget{bounds};
+    out.reserve(size_t(argc));
+    for (int i = 0; i < argc; ++i) {
+        Place at;   // the parameter declared at this position (none past the last: the registry FAILS it)
+        if (size_t(i) < params.size()) {
+            at.p = &params[size_t(i)];
+            at.kind = at.p->kind;
+            at.name = &at.p->name;
+        }
+        Value a;
+        if (!fromJs(ctx, argv[i], at, budget, a, why, 0)) {
+            why = "argument " + std::to_string(i + 1) + ": " + why;
+            return false;
+        }
+        out.push_back(std::move(a));
+    }
+    return true;
 }
 
 JSValue toJs(JSContext *ctx, const Value &v)
@@ -426,22 +496,10 @@ private:
             const CommandInfo &info = *self->mHost.registry().commands()[index];   // (read at the call: never kept)
             name = info.name.c_str();
             while (argc > 0 && JS_IsUndefined(argv[argc - 1])) --argc;   // a trailing undefined is an absent argument
-            const std::vector<Param> &params = info.signature.params;
             Value::Array args;
-            args.reserve(size_t(argc));
-            for (int i = 0; i < argc; ++i) {
-                Place at;   // the parameter declared at this position (none past the last: the registry FAILS it)
-                if (size_t(i) < params.size()) {
-                    at.p = &params[size_t(i)];
-                    at.kind = at.p->kind;
-                    at.name = &at.p->name;
-                }
-                Value a;
-                std::string why;
-                if (!fromJs(ctx, argv[i], at, a, why, 0))
-                    return JS_ThrowTypeError(ctx, "%s: argument %d: %s", info.name.c_str(), i + 1, why.c_str());
-                args.push_back(std::move(a));
-            }
+            std::string why;
+            if (!convertArguments(ctx, argc, argv, info.signature.params, self->mHost.options().callBounds, args, why))
+                return JS_ThrowTypeError(ctx, "%s: %s", info.name.c_str(), why.c_str());
             const Result r = self->mHost.callAt(index, std::move(args));
             if (r.status == Status::Failed) return JS_ThrowPlainError(ctx, "%s", r.message.c_str());
             return toJs(ctx, r.value);

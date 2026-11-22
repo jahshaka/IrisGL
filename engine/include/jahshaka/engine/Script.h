@@ -152,6 +152,17 @@ Param handle(std::string name, std::string kind);
 /// owner and kind, and a named kind's existence asked of the engine - and a bad one FAILS naming it ("nodes[3]").
 Param handles(std::string name, std::string kind);
 
+/// THE BOUNDS OF ONE CONVERSION of a script's value into a Value (SCRIPT-IN-ENGINE-1 2b): a language binding has ONE
+/// conversion, and every caller of it states these - a command's arguments (Host::Options::callBounds), a script's
+/// completion value for an outside client (MCP-ON-HOST-1). Past any of them the conversion FAILS by name, and nothing
+/// is read or reserved from a length the script stated before it is judged (a JS `a.length = 4e9` costs the script
+/// nothing). A declared parameter's own count or maximum bounds its array as well (the smaller governs).
+struct ValueBounds {
+    std::size_t elements = std::size_t(1) << 20;   ///< the most elements one array may hold
+    int depth = 64;                                ///< the deepest nesting (the arguments themselves are depth 0)
+    std::size_t bytes = std::size_t(1) << 30;      ///< the most the converted value may hold: strings, bytes, elements, members
+};
+
 /// WHAT CALLING A COMMAND MAY DO (SCRIPT-IN-ENGINE-1 2a; MCP-ON-HOST-1's read-only surface): `Reads` changes nothing
 /// the engine holds (a read, a reduction, an assertion); `Changes` changes the engine's state (an object made or
 /// released, a value set, a frame drawn); `Files` reads or writes a file; `Test` is a test door (registered only behind
@@ -309,6 +320,9 @@ public:
         /// The bytes the live pictures may hold (engine.picture.*: a picture past it FAILS by name) - 512 MiB: fifteen
         /// 4K RGBA8 pictures, or three of PICTURE-REQUEST-1's 4K float radiance.
         std::size_t pictureBytesCap = std::size_t(512) << 20;
+        /// THE BOUNDS OF ONE CALL's ARGUMENTS as a language converts them (ValueBounds; 1 GiB: a picture at the cap
+        /// with room). A call past one FAILS by name before its command is asked.
+        ValueBounds callBounds;
         /// THE SCRIPT's RANDOM STREAM (no wall clock, no entropy: CODING_RULES § 5): Math.random is xorshift64* from
         /// this seed, reset at every run - the same sequence every run; a caller that wants another stream states it.
         std::uint64_t randomSeed = 0x9E3779B97F4A7C15ull;
