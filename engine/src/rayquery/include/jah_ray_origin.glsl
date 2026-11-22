@@ -112,7 +112,7 @@ bool jahRayOriginBuried( vec3 surface, vec3 geomN, vec3 origin, float pointError
 	const float behind = jahRayFloatBound( surface, 0.0 ) + max( pointError, 0.0 );
 	const float lift = length( origin - surface );
 	JahRq q;
-	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, surface - geomN * behind, 0.0, geomN,
+	JAH_RQ_INIT( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, surface - geomN * behind, 0.0, geomN,
 						   behind + lift );
 	bool cut;
 	JAH_RQ_PROCEED( q, cut )

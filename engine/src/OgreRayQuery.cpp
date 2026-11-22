@@ -1985,7 +1985,8 @@ private:
     /// THE TIER'S COUNTERS (jah_rq_alpha.glsl's JahTierCounters; host-visible, coherent; the shaders' atomics, read with
     /// no wait - a few frames late): [0] the reading rays whose pane list filled (the one read's F4), cumulative over
     /// the tier's life; [1] the deepest ray query loop published (THE BOUND, jah_rq_alpha.glsl: 0 = none reached the law,
-    /// kRayQueryStepBound = a loop was cut; logged at close()); never reset - a row reads the tier's lifetime value.
+    /// kRayQueryStepBound = a loop was cut); [2] the rays JAH_RQ_INIT refused for their inputs (0 in a healthy scene);
+    /// both logged at close(); never reset - a row reads the tier's lifetime value.
     /// Created at open() (the hit set's reads find it made), dropped at close().
     RawBuffer mTierCounters;
     uint64_t tierCountersAddress();
@@ -3187,9 +3188,11 @@ void RayQueryTier::close() {
     // reached the law, kRayQueryStepBound = a loop was CUT (a bias, said here rather than silent)
     if (mTierCounters.mapped) {
         const uint32_t deepest = static_cast<const volatile uint32_t *>(mTierCounters.mapped)[1];
+        const uint32_t refused = static_cast<const volatile uint32_t *>(mTierCounters.mapped)[2];
         Ogre::LogManager::getSingleton().logMessage("rayquery: proceed steps max " + std::to_string(deepest) + " of " +
                                                     std::to_string(kRayQueryStepBound) +
-                                                    (deepest >= kRayQueryStepBound ? " - A LOOP WAS CUT" : ""));
+                                                    (deepest >= kRayQueryStepBound ? " - A LOOP WAS CUT" : "") +
+                                                    "; rays refused for their inputs " + std::to_string(refused));
     }
     dropBuffer(mTierCounters);
     // THE SUN CONTACT's views (PHOTON-RAYS-1): each takes its registration
@@ -5514,6 +5517,7 @@ RayQueryStatus RayQueryTier::status(const OgreScene *scene) const {
     st.skinRefitMs = monitor::lastGpuMs("rq.skin.build", owner);
     st.panesOverflow = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[0] : 0u;
     st.proceedStepsMax = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[1] : 0u;
+    st.raysRefused = mTierCounters.mapped ? static_cast<const volatile uint32_t *>(mTierCounters.mapped)[2] : 0u;
     return st;
 }
 
@@ -9122,6 +9126,7 @@ void RayQueryTier::hitSetOf(OgreScene *scene, const SceneAs &sa, HitSetSources &
     out.tierCounters = tierCountersAddress();
     out.stepsPublishFrom = arm(ArmId::ProceedPublishAll, false) ? 1u : 0u;
     out.stepBound = unsigned(std::max(0L, std::lround(armValue(ArmId::StepBound))));
+    out.nanRay = arm(ArmId::NanRay, false);
 }
 
 uint64_t RayQueryTier::tierCountersAddress() {

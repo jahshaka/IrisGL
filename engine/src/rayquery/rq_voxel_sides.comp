@@ -160,7 +160,7 @@ vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out f
 		++c[kCountRays];
 		const float tMax = jahWorldExitT( origin, dir, p.knobs.y );   // a miss is an EXIT (10-3 R4)
 		JahRq rq;
-		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs.w ), origin, 0.0, dir,
+		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs.w ), origin, 0.0, dir,
 							   tMax );
 		JahPanes panes = jahPanesNone();
 		bool cut;

@@ -169,7 +169,7 @@ void main()
 			if( tStart < nearEnd )
 			{
 				JahRq rq;
-				jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask & 0x0Fu, origin, tStart, dir,
+				JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask & 0x0Fu, origin, tStart, dir,
 									   nearEnd );
 				JAH_RQ_PROCEED_PANES( rq, panes, cutNear )
 				if( !cutNear && jahRqType( rq, true ) == JAH_RQ_HIT_TRIANGLE )
@@ -188,7 +188,7 @@ void main()
 			if( !cutNear && !hit && farOn && farEnd > farFrom )
 			{
 				JahRq rqFar;
-				jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, farFrom, dir,
+				JAH_RQ_INIT( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, farFrom, dir,
 									   farEnd );
 				JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
 				if( !cutFar && jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
@@ -286,7 +286,7 @@ void main()
 		if( dist > 1e-3 && finite3( toPoint ) )
 		{
 			JahRq rqEye;
-			jahRqInit( rqEye, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
+			JAH_RQ_INIT( rqEye, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), uint( p.knobs3.z ) & 0x0Fu, eyeP,
 								   0.0, toPoint * ( 1.0 / dist ), dist * ( 1.0 - 1e-4 ) );
 			float front = 1.0;
 			JAH_RQ_PROCEED_TRANSMIT( rqEye, front )

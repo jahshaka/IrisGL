@@ -541,7 +541,7 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 		}
 		// THE TLAS ANSWERS what the chain cannot: from the surface to the world's exit
 		JahRq rq;
-		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, d,
+		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, d,
 							   jahWorldExitT( origin, d, 1.0e4 ) );
 		bool cut;
 		JAH_RQ_PROCEED( rq, cut )

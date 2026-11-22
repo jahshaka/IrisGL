@@ -409,7 +409,7 @@ void main()
 																	   placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		JahRq rq;
-		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, dir, maxT );
+		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, dir, maxT );
 		JahPanes panes = jahPanesNone();
 		bool cutNear = false, cutFar = false;
 		JAH_RQ_PROCEED_PANES( rq, panes, cutNear )
@@ -449,7 +449,7 @@ void main()
 		if( !cutNear && !hit && farT > maxT )
 		{
 			JahRq rqFar;
-			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin,
+			JAH_RQ_INIT( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin,
 								   p.plane.z, dir, farT );
 			JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
 			if( !cutFar && jahRqType( rqFar, true ) ==

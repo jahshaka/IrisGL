@@ -70,7 +70,7 @@ void main()
     const uint cull = ( asked & kNearField ) != 0u ? ( asked & kNearField ) : ( asked & kFar );
 
     JahRq rq;
-    jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), cull, ray.origin.xyz,
+    JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), cull, ray.origin.xyz,
                            ray.origin.w, ray.dir.xyz, ray.dir.w );
     // THE CANDIDATE LOOP (REFLECT-MOVERS-2): every BLAS is opaque, so an opaque
     // triangle commits inside the traversal; an alpha-tested item's instance is

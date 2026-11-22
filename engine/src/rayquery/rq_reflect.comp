@@ -998,7 +998,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		// (2) THE TLAS NEAR RAY from the origin above (lifted along the geometric normal by the float error and the
 		// drawn cut's error; tMin 0) - NEAR COPIES ONLY (0x0F, Types.h kRayMaskNearField): the meshes' level 0.
 		JahRq rq;
-		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, L, maxT );
+		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, L, maxT );
 		JahPanes panes = jahPanesNone();
 		JahPanes panesFar = jahPanesNone();
 		bool cutNear = false, cutFar = false;
@@ -1027,7 +1027,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 			// queries, and a coarse hit in that overlap is honest (the near query proved no fine surface lies there).
 			// A far hit names no near row and no card: the cascades answer it, else the decode.
 			JahRq rqFar;
-			jahRqInit( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, L,
+			JAH_RQ_INIT( rqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, L,
 								   p.screen2.w );
 			JAH_RQ_PROCEED_PANES( rqFar, panesFar, cutFar )
 			if( !cutFar && jahRqType( rqFar, true ) == JAH_RQ_HIT_TRIANGLE )
@@ -1207,7 +1207,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 	if( neeTrace && neeVouch < 1.0 )
 	{
 		JahRq nq;
-		jahRqInit( nq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, nee.L, maxT );
+		JAH_RQ_INIT( nq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, nee.L, maxT );
 		bool cutNee = false, cutNeeFar = false;
 		JAH_RQ_PROCEED( nq, cutNee )
 		vec3 El = vec3( 0.0 );
@@ -1234,7 +1234,7 @@ void reflectSampleAt( JahReflectTexel x, EyeImage thisEye, EyeImage before, ivec
 		{
 			// (a far copy's hit has no material row at the hit: E 0 - and the BRDF's far hit reads none either)
 			JahRq nqFar;
-			jahRqInit( nqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, nee.L,
+			JAH_RQ_INIT( nqFar, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x10u, origin, p.screen2.z, nee.L,
 								   p.screen2.w );
 			JAH_RQ_PROCEED( nqFar, cutNeeFar )
 			if( !cutNeeFar && jahRqType( nqFar, true ) == JAH_RQ_HIT_TRIANGLE )
@@ -1848,7 +1848,7 @@ void main()
 			// less than the lobe it averages.
 			const vec3 ray = thisEye.rayTL + thisEye.rayRight * localUv.x + thisEye.rayDown * localUv.y;
 			JahRq idq;
-			jahRqInit( idq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
+			JAH_RQ_INIT( idq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, thisEye.camPos, dist * 0.99, ray,
 								   dist * 1.01 );
 			bool cutId;
 			JAH_RQ_PROCEED_OPAQUE( idq, cutId )

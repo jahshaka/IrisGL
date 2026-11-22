@@ -5698,6 +5698,11 @@ struct RayQueryStatus {
     /// went; 4096 (the bound) = a loop was CUT, a bias made visible. Cumulative over the tier's life, read a few frames
     /// late. Under the test door rayquery.proceedPublishAll every loop publishes (the negative control).
     unsigned long long proceedStepsMax = 0;
+    /// THE RAY's INPUTS (GATHER-HANG-1 stage 2; jah_rq_alpha.glsl JAH_RQ_INIT): the rays of those five jobs refused for an
+    /// undefined input - a non-finite origin, direction, tMin or tMax (by the bits), tMin < 0 or tMin > tMax - each traced
+    /// as an empty query (a miss). 0 in a healthy scene: a non-zero count is a red UPSTREAM of the ray. Cumulative over
+    /// the tier's life, read a few frames late. The test door rayquery.nanRay makes it move.
+    unsigned long long raysRefused = 0;
     /// THE HIT LIST PER LIVE VIEW (PHOTON-7 stage 0's read R4): the sums above cannot say WHICH view's list held its
     /// own demand (hitCapacity is the largest view's: beside a desktop view it never shows a stereo list). One entry per
     /// live view of the scene (the same LIVE rule), in no fixed order: `eyes` (2 = a stereo view, whose two eyes append

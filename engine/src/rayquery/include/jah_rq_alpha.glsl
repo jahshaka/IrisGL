@@ -50,6 +50,7 @@
 #define JAH_RQ_ALPHA_GLSL
 
 #include "jah_rq.glsl"
+#include "jah_rq_finite.glsl"
 #include "jah_geom_rows.glsl"
 #include "jah_alpha_mask.glsl"
 
@@ -141,15 +142,16 @@ bool jahAlphaSolid( uint slot, uint instanceId, uint geom, uint prim, vec2 bary 
 /// bound = a loop was CUT (RayQueryStatus::proceedStepsMax; the tier's close logs it). The bound and the counter are per
 /// query: order-free across views and eyes.
 /// THE LOOP WORD (JAH_HIT_PARAMS.counts.w, its float bits; ScreenProbeGather.h HitSetSources): bits 0-12 the publishing
-/// threshold (0 = the law), bits 13-25 a lowered bound (0 = kJahRqStepBound; never above it). Both are 0 in the shipped
-/// picture; the test arms rayquery.proceedPublishAll (threshold 1: every loop publishes its true small maximum - the
-/// negative control) and rayquery.stepBound (the bound lowered: a loop is cut on purpose) set them. The threshold never
-/// exceeds the bound, so a cut is always published.
+/// threshold (0 = the law), bits 13-25 a lowered bound (0 = kJahRqStepBound; never above it), bit 26 the NaN door (THE
+/// RAY's INPUTS, below). All 0 in the shipped picture; the test arms rayquery.proceedPublishAll (threshold 1: every loop
+/// publishes its true small maximum - the negative control), rayquery.stepBound (the bound lowered: a loop is cut on
+/// purpose) and rayquery.nanRay set them. The threshold never exceeds the bound, so a cut is always published.
 const uint kJahRqStepLaw = 1024u;
 const uint kJahRqStepBound = 4u * kJahRqStepLaw;
 #if defined( JAH_HIT_PARAMS ) && defined( GL_EXT_buffer_reference )
 /// THE TIER'S COUNTERS (the hit set's surface.zw: a host-visible buffer's address, OgreRayQuery.cpp mTierCounters):
-/// [0] the reading rays' pane-list overflows; [1] the deepest ray query loop published (THE BOUND, above)
+/// [0] the reading rays' pane-list overflows; [1] the deepest ray query loop published (THE BOUND, above); [2] the rays
+/// refused for their inputs (THE RAY's INPUTS, below)
 layout( buffer_reference, std430, buffer_reference_align = 4 ) buffer JahTierCounters { uint c[]; };
 void jahPanesOverflowCount()
 {
@@ -172,11 +174,49 @@ void jahRqStepsPublish( uint n, uint bound )
 	if( ( a.x | a.y ) != 0u )
 		atomicMax( JahTierCounters( a ).c[1], n );
 }
+void jahRqRefusedCount()
+{
+	const uvec2 a = floatBitsToUint( JAH_HIT_PARAMS.surface.zw );
+	if( ( a.x | a.y ) != 0u )
+		atomicAdd( JahTierCounters( a ).c[2], 1u );
+}
+/// THE NaN DOOR (rayquery.nanRay, a TEST door): invocation 0 of the job traces its rays from a NaN origin (by its bits) -
+/// the guard below must refuse them; never an unguarded NaN ray (undefined in the API)
+vec3 jahRqDoorOrigin( vec3 o )
+{
+	return ( jahRqLoopWord() & ( 1u << 26u ) ) != 0u && gl_GlobalInvocationID == uvec3( 0u )
+			   ? vec3( uintBitsToFloat( 0x7FC00000u ) ) : o;
+}
 #else
 void jahPanesOverflowCount() {}
 uint jahRqStepBoundNow() { return kJahRqStepBound; }
 void jahRqStepsPublish( uint n, uint bound ) {}
+void jahRqRefusedCount() {}
+vec3 jahRqDoorOrigin( vec3 o ) { return o; }
 #endif
+/// THE RAY's INPUTS ARE DEFINED (GATHER-HANG-1 stage 2, the lead's calls 2-3; CODING_RULES section 2: a loop's float
+/// inputs bit-tested). The API leaves a ray with a non-finite origin, direction, tMin or tMax, a negative tMin or a tMin
+/// past its tMax UNDEFINED - the traversal's own loop is then not ours to bound. Every ray query starts through
+/// JAH_RQ_INIT, OUTSIDE the seam (a software tracer that replaces jah_rq.glsl must not drop it): an undefined ray (tested
+/// by the BITS, never x == x) initialises an EMPTY query instead - cull mask 0, from the origin along +z over [0, 0]: no
+/// instance can answer it, so it is a MISS - and is COUNTED in the tier's counter [2] (the jobs with the hit params;
+/// RayQueryStatus::raysRefused). A non-zero count in a healthy scene is a red UPSTREAM of the ray, never hidden here.
+bool jahRqRayDefined( vec3 origin, float tMin, vec3 dir, float tMax )
+{
+	return finite3( origin ) && finite3( dir ) && finite1( tMin ) && finite1( tMax ) && tMin >= 0.0 && tMin <= tMax;
+}
+#define JAH_RQ_INIT( q, tlas, flags, mask, origin, tMin, dir, tMax )                                         \
+	{                                                                                                         \
+		const vec3 jahRqO_ = jahRqDoorOrigin( origin );                                                       \
+		const vec3 jahRqD_ = ( dir );                                                                         \
+		const float jahRqT0_ = float( tMin );                                                                 \
+		const float jahRqT1_ = float( tMax );                                                                 \
+		const bool jahRqOk_ = jahRqRayDefined( jahRqO_, jahRqT0_, jahRqD_, jahRqT1_ );                        \
+		if( !jahRqOk_ )                                                                                       \
+			jahRqRefusedCount();                                                                              \
+		jahRqInit( q, tlas, flags, jahRqOk_ ? uint( mask ) : 0u, jahRqOk_ ? jahRqO_ : vec3( 0.0 ),            \
+				   jahRqOk_ ? jahRqT0_ : 0.0, jahRqOk_ ? jahRqD_ : vec3( 0.0, 0.0, 1.0 ), jahRqOk_ ? jahRqT1_ : 0.0 ); \
+	}
 /// ...the loop's head (a trip counted; at the bound the query terminated) and its end (the trips published)
 #define JAH_RQ_LOOP_BEGIN_( q, cut )                                                              \
 	{                                                                                             \

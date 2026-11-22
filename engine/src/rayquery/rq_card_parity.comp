@@ -97,7 +97,7 @@ void main()
 	if( q.facing.w > 0.5 )
 	{
 		JahRq rq;
-		jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, q.pos.xyz, 0.0,
+		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, q.pos.xyz, 0.0,
 							   normalize( q.facing.xyz ), 1000.0 );
 		bool cut;
 		JAH_RQ_PROCEED( rq, cut )

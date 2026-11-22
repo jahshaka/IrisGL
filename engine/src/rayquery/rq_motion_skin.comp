@@ -107,7 +107,7 @@ void main()
 	const vec3 ray = p.rayTL.xyz + p.rayRight.xyz * uv.x + p.rayDown.xyz * uv.y;
 	const vec3 world = p.camPos.xyz + ray * dist;
 	JahRq rq;
-	jahRqInit( rq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, p.camPos.xyz, dist * ( 1.0 - kSkinWindow ), ray,
+	JAH_RQ_INIT( rq, tlas, JAH_RQ_FLAGS_OPAQUE, 0x0Fu, p.camPos.xyz, dist * ( 1.0 - kSkinWindow ), ray,
 						   dist * ( 1.0 + kSkinWindow ) );
 	bool cut;
 	JAH_RQ_PROCEED_OPAQUE( rq, cut )

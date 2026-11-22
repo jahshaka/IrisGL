@@ -2240,6 +2240,7 @@ private:
     X(TlasRefit, "rayquery.tlasRefit") /* refit the TLAS instead of rebuilding it */ \
     X(ProceedPublishAll, "rayquery.proceedPublishAll") /* A TEST DOOR: every ray query loop publishes its trips (threshold 1): THE BOUND's negative control, GATHER-HANG-1 */ \
     X(StepBound, "rayquery.stepBound") /* A TEST DOOR: the ray query loops' bound lowered to N trips (0 = kRayQueryStepBound): a loop cut on purpose, GATHER-HANG-1 */ \
+    X(NanRay, "rayquery.nanRay") /* A TEST DOOR: invocation 0 of each job with the hit params traces from a NaN origin - the input guard refuses it, GATHER-HANG-1 */ \
     X(GatherTemporal, "gather.temporal") /* the screen-probe gather's pixel history */ \
     X(AtomDecode, "atom.decode") /* the screen decode armed (0: the Atom items drawn by nothing) */ \
     X(AtomClusterOcclusion, "atom.clusterOcclusion") /* the cut tests each cluster against depth and pixel centres (0: neither - the exactness A/B door, ATOM-8) */ \

@@ -285,6 +285,8 @@ struct HitSetSources {
     /// for both unless a test arm is set.
     uint32_t stepsPublishFrom = 0u;
     uint32_t stepBound = 0u;
+    /// ...and the NaN door (rayquery.nanRay: invocation 0 traces from a NaN origin, which JAH_RQ_INIT refuses)
+    bool nanRay = false;
     /// THE HIT LIST (PHOTON-HIT-SHADE-1): where a hit no cache can shade is appended for the decode - the job's own
     /// (the reflection's and the gather's); `on` false binds the stand-ins and appends nothing.
     HitListBinding hit;
@@ -318,11 +320,11 @@ static_assert(sizeof(HitSetParams) == 25u * 16u, "JahHitParams is twenty-five ve
 constexpr uint32_t kRayQueryStepLaw = 1024u;
 constexpr uint32_t kRayQueryStepBound = 4u * kRayQueryStepLaw;
 /// THE LOOP WORD (jah_rq_alpha.glsl): bits 0-12 the publishing threshold, bits 13-25 a lowered bound, each clamped to the
-/// bound; 0 = the shipped picture (the host writes 0 unless a test arm is set). Its bits ride HitSetParams::counts[3]:
-/// the shader reads it by floatBitsToUint, never as a float.
-constexpr uint32_t rayLoopWord(uint32_t publishFrom, uint32_t bound) {
+/// bound, bit 26 the NaN door; 0 = the shipped picture (the host writes 0 unless a test arm is set). Its bits ride
+/// HitSetParams::counts[3]: the shader reads it by floatBitsToUint, never as a float.
+constexpr uint32_t rayLoopWord(uint32_t publishFrom, uint32_t bound, bool nanRay) {
     return (publishFrom < kRayQueryStepBound ? publishFrom : kRayQueryStepBound) |
-           ((bound < kRayQueryStepBound ? bound : kRayQueryStepBound) << 13u);
+           ((bound < kRayQueryStepBound ? bound : kRayQueryStepBound) << 13u) | (nanRay ? 1u << 26u : 0u);
 }
 /// WHO READS THE HITS (PHOTON-7 stage 10-3, the lead's ruling on the teleport window): the level a hit is read at.
 ///  - View: a VIEW reader (the gather, the reflection) reads the level by the GI CAMERA (10-2e): its picture may depend

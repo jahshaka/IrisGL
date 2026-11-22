@@ -283,7 +283,7 @@ void main()
 				if( reach > 0.0 )
 				{
 					JahRq rq;
-					jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
+					JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 										   uint( p.knobs.x ), origin, 0.0, Lo, reach );
 					// THROUGH THE PANES (PHOTON-7 10-4 R8; the fix round's F3: a lamp reached through panes keeps its
 					// fraction - the transmitted mask's bit, its share in the transmitted lamps' visibility)
@@ -366,7 +366,7 @@ void main()
 													depth, r.rect.w )
 									: P;
 			JahRq rq;
-			jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
+			JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 								   uint( p.knobs.x ), origin, 0.0, L, p.toSun.w );
 			// THROUGH THE PANES (PHOTON-7 10-4 R8): the card's traced sun takes their transmittance
 			float T = 1.0;

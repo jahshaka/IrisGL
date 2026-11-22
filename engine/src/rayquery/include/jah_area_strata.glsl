@@ -106,7 +106,7 @@ float jahAreaStratum( vec3 P, vec3 N, vec3 Ncos, float lift, vec3 c0, vec3 eu, v
 	if( reachQ > 0.0 )
 	{
 		JahRq rqa;
-		jahRqInit( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), mask, originQ, 0.0, wq,
+		JAH_RQ_INIT( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), mask, originQ, 0.0, wq,
 							   reachQ );
 		// THROUGH THE PANES (PHOTON-7 10-4 R8)
 		float T = 1.0;

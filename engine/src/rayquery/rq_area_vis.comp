@@ -59,7 +59,7 @@ layout( set = 0, binding = 18 ) uniform sampler2D gBufShadowRoughness;
 float jahAreaRayVisible( vec3 originQ, vec3 wq, float reachQ )
 {
 	JahRq rqa;
-	jahRqInit( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), uint( p.knobs.z ), originQ,
+	JAH_RQ_INIT( rqa, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ), uint( p.knobs.z ), originQ,
 						   0.0, wq, reachQ );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8)
 	float T = 1.0;

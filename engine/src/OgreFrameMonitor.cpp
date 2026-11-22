@@ -1344,6 +1344,11 @@ constexpr ArmDef kArms[] = {
       "CUT at N trips instead of kRayQueryStepBound (4096; never above it): a loop that reaches the bound terminates "
       "its query, the frame ends, and the counter [1] reads N - the bound proved to fire. 0 = shipped.",
       true },
+    { ArmId::NanRay, 0.0, 0.0, 1.0,
+      "A TEST DOOR (GATHER-HANG-1 stage 2, gi.ray_nan_refused): 1 = invocation 0 of each ray job with the hit params "
+      "traces its rays from a NaN origin (by its bits, jah_rq_alpha.glsl): JAH_RQ_INIT must refuse every one (an "
+      "empty query, a miss) and count it in the tier's counter [2] - never an unguarded NaN ray. 0 = shipped.",
+      true },
     { ArmId::GatherTemporal, 1.0, 0.0, 1.0,
       "The screen-probe gather's pixel history (PHOTON-GATHER-1c). 0 = each frame's estimate alone, "
       "no history read or written (the measurement lever: gi.gather, gi.gather_temporal, "

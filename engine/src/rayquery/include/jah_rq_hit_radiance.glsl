@@ -135,7 +135,7 @@ vec3 jahHitMirrorContinue( vec3 P2, vec3 n2, vec3 L2, float footprint, out bool 
 	const vec3 L3 = reflect( L2, n2 );
 	const vec3 o3 = jahRayOrigin( P2, n2, carried, 0.0 );
 	JahRq q3;
-	jahRqInit( q3, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
+	JAH_RQ_INIT( q3, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o3, 0.0, L3,
 						   jahWorldExitT( o3, L3, 1.0e4 ) );
 	bool cut3;
 	JAH_RQ_PROCEED( q3, cut3 )
@@ -295,7 +295,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	const vec3 o = jahRayOrigin( P, N, carried, 0.0 );
 	JahRq q;
 	const float exitB = jahWorldExitT( o, L2, 1.0e4 );
-	jahRqInit( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
+	JAH_RQ_INIT( q, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, L2, exitB );
 	bool cutB;
 	JAH_RQ_PROCEED( q, cutB )
 	jahC2SegO = o;
@@ -375,7 +375,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	{
 		JahRq qn;
 		const float exitN = jahWorldExitT( o, sky.L, 1.0e4 );
-		jahRqInit( qn, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
+		JAH_RQ_INIT( qn, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, sky.L, exitN );
 		bool cutN;
 		JAH_RQ_PROCEED( qn, cutN )
 		jahC2Seg[1] = vec4( sky.L, jahRqType( qn, true ) == JAH_RQ_HIT_TRIANGLE
@@ -398,7 +398,7 @@ vec3 jahHitSpecularLobeTraced( vec3 P, vec3 N, vec3 V, float carried, float roug
 	{
 		JahRq qi;
 		const float exitI = jahWorldExitT( o, img.L, 1.0e4 );
-		jahRqInit( qi, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
+		JAH_RQ_INIT( qi, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), JAH_HIT_LOBE_MASK, o, 0.0, img.L, exitI );
 		bool cutI;
 		JAH_RQ_PROCEED( qi, cutI )
 		jahC2Seg[2] = vec4( img.L, jahRqType( qi, true ) == JAH_RQ_HIT_TRIANGLE

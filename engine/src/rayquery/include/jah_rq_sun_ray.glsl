@@ -33,7 +33,7 @@
 float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range )
 {
 	JahRq rq;
-	jahRqInit( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
+	JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_FIRST_HIT ),
 						   mask, origin, 0.0, toSun, hardEnd );
 	// THROUGH THE PANES (PHOTON-7 10-4 R8): a pane is crossed, its T multiplied (an opaque hit still answers 0; with none
 	// the traversal ran whole, so every pane on the way was met - the product has no cap)
@@ -44,7 +44,7 @@ float jahSunRay( vec3 origin, vec3 toSun, uint mask, float hardEnd, float range 
 	if( range > hardEnd && vis > 0.0 )
 	{
 		JahRq rqFade;
-		jahRqInit( rqFade, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, origin, hardEnd,
+		JAH_RQ_INIT( rqFade, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), mask, origin, hardEnd,
 							   toSun, range );
 		JahPanes panesFade = jahPanesNone();
 		bool cutFade;
