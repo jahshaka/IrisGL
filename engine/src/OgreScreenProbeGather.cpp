@@ -1647,8 +1647,8 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // overlay, the field's two atlases, the hit set - are made BEFORE any state this frame advances (the view's age, its rest, its
     // flip): a texture not resident or with no image refuses the dispatch, said once, counted, and the frame is
     // incomplete (PublishedFrame::Completeness bit 5). The cache answers the later lookups of the same views.
-    // The views are kept and bound below (no second lookup); its own images are made or the gather fails, and the
-    // stand-ins with them: never null below.
+    // The views are kept and bound below (no second lookup); its own three targets are checked once they are made
+    // (after ensureTargets, before the ring), and the stand-ins are made or the gather fails: never null below.
     const VkImageView normalsView = mHost.gatherView(in.normals, detail::RayViewKind::LayerSampled);
     const VkImageView depthView = mHost.gatherView(in.depth, detail::RayViewKind::LayerSampled);
     const VkImageView shadowRoughView = mHost.gatherView(in.shadowRough, detail::RayViewKind::LayerSampled);
@@ -1769,6 +1769,13 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         return;
     }
     mLastError.clear();
+    // ...AND ITS OWN THREE TARGETS' storage views (the final re-read's C1): made with the targets, checked by the guard
+    // BEFORE the frame's ring, the history and the rest move - a view the cache could not make (vkCreateImageView failed:
+    // it answers 0) is a refusal, never an empty storage image bound
+    const VkImageView irradianceView = mHost.gatherView(v.irradiance, detail::RayViewKind::LayerStorage);
+    const VkImageView roughSpecView = mHost.gatherView(v.roughSpec, detail::RayViewKind::LayerStorage);
+    const VkImageView skyVisView = mHost.gatherView(v.skyVis, detail::RayViewKind::LayerStorage);
+    if (!mHost.gatherInputsMade("the probe gather (its targets)", { irradianceView, roughSpecView, skyVisView })) return;
 
     // ---- THE PIXEL HISTORY'S INPUTS (PHOTON-GATHER-1c) -----------------------
     // THE MEASUREMENT LEVER (the arm "gather.temporal", latched per frame) so a suite
@@ -2220,7 +2227,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // it, and the trace's overlay binding stands it in for the photon overlay (never written there)
     // - one view, not a second one created and retired every traced frame.
     VkDescriptorImageInfo irradianceStore{};
-    irradianceStore.imageView = mHost.gatherView(v.irradiance, detail::RayViewKind::LayerStorage);
+    irradianceStore.imageView = irradianceView;
     irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     {   // the trace set: its own six, then THE HIT SET (the one writer, HitSetWrite: kTraceHitSlots)
         VkWriteDescriptorSet w[kTraceBindings] = {};
@@ -2366,7 +2373,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         w[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w[13].pImageInfo = &filteredRead;
         VkDescriptorImageInfo roughOut{};
-        roughOut.imageView = mHost.gatherView(v.roughSpec, detail::RayViewKind::LayerStorage);
+        roughOut.imageView = roughSpecView;
         roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[14].pImageInfo = &roughOut;
@@ -2391,7 +2398,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
             return;
         // THE SKY VISIBILITY (51, 10-4 R11)
         VkDescriptorImageInfo skyOut{};
-        skyOut.imageView = mHost.gatherView(v.skyVis, detail::RayViewKind::LayerStorage);
+        skyOut.imageView = skyVisView;
         skyOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         w[kIntegrateSkyVisBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kIntegrateSkyVisBinding].pImageInfo = &skyOut;
