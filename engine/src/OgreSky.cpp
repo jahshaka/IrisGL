@@ -23,6 +23,8 @@
 #include <OgreMaterialManager.h>
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
+#include <Compositor/OgreCompositorNode.h>
+#include <Compositor/Pass/PassIblSpecular/OgreCompositorPassIblSpecular.h>
 #include <OgreShaderParams.h>
 #include <OgreStagingTexture.h>
 #include <OgreAsyncTextureTicket.h>
@@ -1771,6 +1773,7 @@ void OgreScene::convolvePendingIbl() {
             return;
         }
         if (!mIblCamera) mIblCamera = mSceneMgr->createCamera(processUniqueName("iblcam"), false);
+        Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
         // A RETRY RE-RUNS THE KEPT WORKSPACE (mIblWorkspace): the same pass, the same job clones, so the requests a
         // deferred try made are the ones that land. Made here for a pending set's first try only; its externals are
         // this set's source and target, and every exit of the set removes it first (destroyPendingReflection).
@@ -1780,6 +1783,18 @@ void OgreScene::convolvePendingIbl() {
             externals.push_back(target);
             mIblWorkspace = cm->addWorkspace(mSceneMgr, externals, mIblCamera, Ogre::IdString(kIblWorkspace), false);
             monitor::watchWorkspace(mIblWorkspace);   // a convolution's workspace: its passes are monitor rows too
+            // THE CLONES' PIPELINES, REQUESTED AS A SET WHERE THE CLONES ARE MADE (SHADER-SYSTEM-1 7a R2): the pass
+            // clones a job per mip, each a pipeline of its own even when the code is known. A scene that compiles in the
+            // background sends them all to the service now, together; a Live frame then defers a dispatch whose
+            // pipeline has not landed (below), and a COMPLETE frame's dispatch JOINS its in-flight request
+            // (HlmsCompute::dispatch, counted: AsyncShaderStats::computeJoins) - never a second build in the frame.
+            if (mAsyncShaders && hc)
+                for (Ogre::CompositorNode *node : mIblWorkspace->getNodeSequence())
+                    for (Ogre::CompositorPass *pass : node->_getPasses())
+                        if (pass->getType() == Ogre::PASS_IBL_SPECULAR)
+                            for (Ogre::HlmsComputeJob *job :
+                                 static_cast<Ogre::CompositorPassIblSpecular *>(pass)->getComputeJobs())
+                                hc->requestAsync(job);
         }
         ws = mIblWorkspace;
         // AN ASYNCHRONOUS SCENE NEVER COMPILES ITS CONVOLUTION IN THE FRAME (ASYNC-SHADERS-1).
@@ -1790,8 +1805,8 @@ void OgreScene::convolvePendingIbl() {
         // compiler and its mip is skipped; the convolution is then not a result: the previous
         // reflection stays bound, the source AND THE WORKSPACE are kept and the convolution is
         // retried next frame. WHERE: the ONE async-shader rule (compilesInBackground) - a frame
-        // that owes the whole picture convolves in the frame, as every other consumer does.
-        Ogre::HlmsCompute *hc = mRoot->getHlmsManager()->getComputeHlms();
+        // that owes the whole picture convolves in the frame, as every other consumer does: its dispatches join the
+        // requests made above.
         const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;
         struct Deferral {
             Ogre::HlmsCompute *hc = nullptr;

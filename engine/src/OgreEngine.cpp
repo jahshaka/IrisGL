@@ -3649,6 +3649,8 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
         out.computePsoInFrame = hc->getJahPsoInFrame();
         out.computeDestroyWaits = hc->getJahDestroyWaits();
         out.computeDestroyWaitMs = double(hc->getJahDestroyWaitUs()) / 1000.0;
+        out.computeJoins = hc->getJahJoins();
+        out.computeJoinMs = double(hc->getJahJoinUs()) / 1000.0;
     }
     // ...and WHAT THE COMPILERS COST, every thread summed (the fork's render system).
     const Ogre::RenderSystem::JahCompileCosts costs = Ogre::RenderSystem::getJahCompileCosts();

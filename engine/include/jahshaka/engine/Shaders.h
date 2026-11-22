@@ -57,6 +57,9 @@ struct AsyncShaderStats {
     ///   computePsoInFrame    - compute pipelines built inside a frame, any path (a parse, a record's hit, a clone);
     ///   computeDestroyWaits / computeDestroyWaitMs - a compute job destroyed while its permutation was COMPILING: the
     ///                          frame waited for that compile to end (a clone's teardown), and how long in all;
+    ///   computeJoins / computeJoinMs - a compute dispatch that JOINED its permutation's in-flight background build
+    ///                          (a frame that owes its picture waited for the service's result: SHADER-SYSTEM-1 7a R2;
+    ///                          stage 7 brings the joins on the frame thread to 0), and how long in all;
     ///   glslangMs            - the time in glslang (source to SPIR-V), every thread summed, and its count;
     ///   graphicsPsoMs / computePsoMs - the time in the driver's pipeline creation (vkCreateGraphicsPipelines /
     ///                          vkCreateComputePipelines through Ogre), every thread summed, and their counts.
@@ -65,6 +68,8 @@ struct AsyncShaderStats {
     unsigned long long computePsoInFrame = 0;
     unsigned long long computeDestroyWaits = 0;
     double             computeDestroyWaitMs = 0.0;
+    unsigned long long computeJoins = 0;
+    double             computeJoinMs = 0.0;
     unsigned long long glslangCompiles = 0;
     double             glslangMs = 0.0;
     unsigned long long graphicsPsos = 0;
