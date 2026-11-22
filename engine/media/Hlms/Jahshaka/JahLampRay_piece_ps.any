@@ -21,6 +21,36 @@
 
 @property( jah_lamp_rays )
 @piece( JahLampRayView )
+/// THE VIEW's DRAWN TERM AT THIS FRAGMENT, PER EYE (GATHER-HANG-1 stage 3; jahViewRayOrigin's input for the two rays a
+/// rasterised fragment starts - the lamp's and the glass escape's record): the listener's footprint count and target
+/// height, and THE EYE THAT DRAWS THE FRAGMENT - inside one multiview pass both eyes shade in the left eye's view space,
+/// the right eye at passBuf.leftToRightView there (upstream's viewDir rule), with its own rayDown; a mono pass's eye is
+/// the view's origin. Its world position through the same view-to-world rows as the fragment's.
+JahViewDrawn jahLampViewDrawn()
+{
+	float3 eyeView = float3( 0.0, 0.0, 0.0 );
+	float rayDown = passBuf.jahLampDrawn.z;
+	@property( hlms_multiview )
+		if( gl_ViewIndex == 1 )
+		{
+			eyeView = passBuf.leftToRightView.xyz;
+			rayDown = passBuf.jahLampDrawn.w;
+		}
+	@end
+	JahViewDrawn d;
+	d.footprints = passBuf.jahLampDrawn.x;
+	d.eyePos = float3( dot( passBuf.jahLampInvView0.xyz, eyeView ) + passBuf.jahLampInvView0.w,
+					   dot( passBuf.jahLampInvView1.xyz, eyeView ) + passBuf.jahLampInvView1.w,
+					   dot( passBuf.jahLampInvView2.xyz, eyeView ) + passBuf.jahLampInvView2.w );
+	d.rayDown = float3( 0.0, rayDown, 0.0 );   // (jahViewDrawnBound reads its length alone)
+	d.height = passBuf.jahLampDrawn.y;
+	@property( hlms_ortho_camera )
+		d.perspective = false;
+	@else
+		d.perspective = true;
+	@end
+	return d;
+}
 float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
 {
 	const float3 wp = float3( dot( passBuf.jahLampInvView0.xyz, viewPos ) + passBuf.jahLampInvView0.w,
@@ -32,7 +62,7 @@ float jahLampRayView( float3 viewPos, float3 viewLamp, float3 viewGeomN )
 	const float3 wn = normalize( float3( dot( passBuf.jahLampInvView0.xyz, viewGeomN ),
 										 dot( passBuf.jahLampInvView1.xyz, viewGeomN ),
 										 dot( passBuf.jahLampInvView2.xyz, viewGeomN ) ) );
-	return jahLampRay( passBuf.jahLampAddr.xy, wp, wn, length( viewPos ), wl );
+	return jahLampRay( passBuf.jahLampAddr.xy, wp, wn, length( viewPos ), jahLampViewDrawn(), wl );
 }
 @end
 // (no ray where the term is already 0 - the same picture exactly: a lamp outside its reach or a spot's cone, or behind

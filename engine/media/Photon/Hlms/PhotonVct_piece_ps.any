@@ -195,7 +195,7 @@
 	// THE BLENDED PASSES' ESCAPES FOLLOW THE RAY (PHOTON-7 10-4 R4, the lead's design (D); L9). Past the voxel chain an
 	// open share is the environment's only past the WORLD: inside the world box the escape meets what the chain no longer
 	// holds. So at the ray tier a blended or refractive fragment appends its lobe's open share as a RECORD
-	// (rq_glass_escape.comp's layout) - the origin lifted on the lobe's side (jahRayOrigin, the one origin law), the lobe's
+	// (rq_glass_escape.comp's layout) - the origin lifted on the lobe's side (jahViewRayOrigin, a view ray's one law), the lobe's
 	// dominant direction, where the chain's read of the escapes ended (`openMetres`: the TLAS ray starts there), the eye's
 	// distance and the roughness - and lights NONE of the share itself: the job traces it on the TLAS after the pass and
 	// adds the answer into the pixel (rq_glass_escape_add.comp). The weight is completed after the body
@@ -226,7 +226,8 @@
 											 dot( passBuf.jahLampInvView1.xyz, viewDir ),
 											 dot( passBuf.jahLampInvView2.xyz, viewDir ) ) );
 		const float eye = length( viewPos );
-		const float3 origin = jahRayOrigin( wp, dot( wn, wd ) < 0.0f ? -wn : wn, eye, 0.0f );
+		// (a view ray: its origin carries the drawn surface's bound for the eye that drew it - GATHER-HANG-1 stage 3)
+		const float3 origin = jahViewRayOrigin( wp, dot( wn, wd ) < 0.0f ? -wn : wn, eye, 0.0f, jahLampViewDrawn() );
 		@property( hlms_multiview )
 			const uint layer = uint( gl_ViewIndex ) & 1u;
 		@else

@@ -1726,9 +1726,9 @@ void main()
 	const float pointError = jahDepthPointError( rawDepth, dist, p.projParams.y, perspective,
 												 perspective ? ( world - thisEye.camPos ) / dist : thisEye.fwd,
 												 thisEye.fwd, geomN, pixelSize, p.alpha.z );
-	const vec3 origin = jahRayOrigin( world, geomN, dist,
-									  pointError + jahViewDrawnBound( p.knobs2.y, world, thisEye.camPos, thisEye.rayDown,
-																	  float( fullRes.y ), perspective ) );
+	const vec3 origin = jahViewRayOrigin( world, geomN, dist, pointError,
+										  JahViewDrawn( p.knobs2.y, thisEye.camPos, thisEye.rayDown, float( fullRes.y ),
+														perspective ) );
 
 	// ---- AT REST, PER TEXEL (PHOTON-2 round 2: R1, G6; jah_reflect_rest.glsl) ----------------------------------
 	// knobs2.x = the rest frame k (1, 2, ...), 0 while moving, -1 on the frame that BREAKS a rest (the compose

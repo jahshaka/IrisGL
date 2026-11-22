@@ -381,11 +381,13 @@ void FogHlmsListener::setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu 
     if (SceneBinds *b = bindsOf(sm)) b->areaVis = visibility;
 }
 void FogHlmsListener::setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas,
-                                  unsigned long long alpha) {
+                                  unsigned long long alpha, float drawnTolerance, float drawnArm) {
     if (SceneBinds *b = bindsOf(sm)) {
         b->lampRaysOn = on;
         b->lampTlas = on ? tlas : 0ull;
         b->lampAlpha = b->lampTlas ? alpha : 0ull;
+        b->lampDrawnTolerance = on ? drawnTolerance : 0.0f;
+        b->lampDrawnArm = on ? drawnArm : 0.0f;
     }
 }
 void FogHlmsListener::setFogSkyVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *skyVis) {
@@ -973,14 +975,15 @@ Ogre::uint32 FogHlmsListener::getPassBufferSize(const Ogre::CompositorShadowNode
     // immediately before this extension — while it held them. Writing them first
     // here keeps every byte where the shader's struct (DeclVctUniform,
     // DeclIrradianceFieldUniform, then custom_passBuffer) has always put it.
-    // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): four float4 after the cloud block - the pass camera's
-    // view-to-world rows and the TLAS's and alpha table's device addresses - declared only by a pass that traces them
+    // Plus THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): five float4 after the cloud block - the pass camera's
+    // view-to-world rows, the TLAS's and alpha table's device addresses and the view's drawn term (GATHER-HANG-1
+    // stage 3) - declared only by a pass that traces them
     // or marches its voxel chain to them; and the chain (nine float4: kLampChainFloats) declared only by the latter.
     // Plus THE FOG'S IN-SCATTER (PHOTON-7 10-4 R11): one float4 after the chain (s, the sun's share).
     // Plus THE BLENDED PASSES' ESCAPE LIST (PHOTON-7 10-4 R4): one uint4 after it (the address, the capacity).
     // Plus THE COLOUR PICK (BUGS-8): two uint4 after it (the ring's address, the pixel, the slot; the target, the frame).
     return PhotonPassBinding::passBufferSize(casterPass, sceneManager) +
-           (56u + kLampChainFloats + 4u + 4u + 8u) * sizeof(float);
+           (60u + kLampChainFloats + 4u + 4u + 8u) * sizeof(float);
 }
 
 float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bool casterPass, bool,
@@ -1077,8 +1080,28 @@ float *FogHlmsListener::preparePassBuffer(const Ogre::CompositorShadowNode *, bo
                                             Ogre::uint32(alpha & 0xFFFFFFFFull), Ogre::uint32(alpha >> 32u) };
             std::memcpy(passBufferPtr, words, sizeof(words));
             passBufferPtr += 4;
+            // THE VIEW's DRAWN TERM (GATHER-HANG-1 stage 3; jahLampDrawn, JahLampRay_piece_ps.any's jahLampViewDrawn):
+            // the ray tier's drawnFootprintsOf at THIS pass's switch band (the chain writes ChainDesc::lodHysteresis
+            // into its scene passes), the viewport's height and EACH EYE's rayDown length - the projection's vertical
+            // extent at unit distance (perspective) or the window's height (orthographic), 2 / |P11| either way
+            float drawn[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            if (rays) {
+                const Ogre::CompositorPass *pass = sceneManager->getCurrentCompositorPass();
+                const float band = pass && pass->getType() == Ogre::PASS_SCENE
+                    ? float(static_cast<const Ogre::CompositorPassSceneDef *>(pass->getDefinition())->mLodHysteresis)
+                    : 0.0f;
+                const Ogre::Viewport *vp = sceneManager->getCurrentViewport0();
+                drawn[0] = b->lampDrawnArm * rayOriginDrawnFootprints(b->lampDrawnTolerance, band);
+                drawn[1] = vp ? float(vp->getActualHeight()) : 0.0f;
+                for (size_t eye = 0u; eye < 2u; ++eye) {
+                    const Ogre::Matrix4 proj = cam->getVrData() ? cam->getVrProjectionMatrix(eye) : cam->getProjectionMatrix();
+                    drawn[2u + eye] = std::fabs(proj[1][1]) > 0.0f ? float(2.0 / std::fabs(proj[1][1])) : 0.0f;
+                }
+            }
+            std::memcpy(passBufferPtr, drawn, sizeof(drawn));
+            passBufferPtr += 4;
         } else {
-            for (int i = 0; i < 16; ++i) *passBufferPtr++ = 0.0f;
+            for (int i = 0; i < 20; ++i) *passBufferPtr++ = 0.0f;
         }
         // THE CHAIN (jahLampChainOrigin[4], jahLampChainRes[4], jahLampChainCorner): zeros without one - a cell not
         // positive is no chain, and the march answers 1

@@ -83,6 +83,32 @@ vec3 jahRayOrigin( vec3 surface, vec3 geomN, float carried, float surfaceBound )
 	return surface + geomN * ( jahRayFloatBound( surface, carried ) + surfaceBound );
 }
 
+/// THE VIEW's DRAWN-SURFACE TERM's inputs (jahViewDrawnBound's): the host's footprint count, the eye that drew the
+/// point (per eye: a multiview pass's fragment takes its own eye), that eye's rayDown over the full target's height in
+/// pixels, and the projection's kind.
+struct JahViewDrawn
+{
+	float footprints;
+	vec3 eyePos;
+	vec3 rayDown;
+	float height;
+	bool perspective;
+};
+
+/// THE ORIGIN OF A VIEW RAY - EVERY RAY THAT STARTS ON A POINT THE VIEW DREW (GATHER-HANG-1 stage 3; the sun contact,
+/// the reflection, the gather's probes and its integrate, the Forward+ lamp's ray and the glass escape's record): the
+/// point lifted by its float bound, its own error beyond it (`pointError`: a depth-rebuilt point's jahDepthPointError, a
+/// probe's placement error; 0 for a RASTERISED point, which lies on its drawn triangle to its float bound) and the drawn
+/// surface's bound against level 0 (jahViewDrawnBound). Without the drawn term a ray from a large triangle hit that same
+/// triangle at t ~ 1e-6: the ray-triangle test rounds at the triangle's scale, not the point's (the black specks in a
+/// lamp's highlight: spikes/black-specks/DIAGNOSIS.md, lights.lamp_ray_origin). source.view_ray_origin holds that no view
+/// ray's origin is built any other way.
+vec3 jahViewRayOrigin( vec3 world, vec3 geomN, float carried, float pointError, JahViewDrawn d )
+{
+	return jahRayOrigin( world, geomN, carried,
+						 pointError + jahViewDrawnBound( d.footprints, world, d.eyePos, d.rayDown, d.height, d.perspective ) );
+}
+
 #endif   // JAH_RAY_ORIGIN_GLSL
 
 // THE BURIED ORIGIN (PHOTON-7 stage 10-3, the lead's ruling; L9: a surface with solid on its normal side receives no

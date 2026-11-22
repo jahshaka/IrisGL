@@ -3826,7 +3826,11 @@ public:
     static void setAreaVis(const Ogre::SceneManager *sm, Ogre::TextureGpu *visibility);
     /// THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): the scene's TLAS and alpha-table device addresses this frame
     /// (0, 0: none - its colour passes trace no lamp ray). JahLampRay_piece_ps.any reads them from the pass buffer.
-    static void setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas, unsigned long long alpha);
+    /// `drawnTolerance` (the scene's pixel tolerance x its LOD bias) and `drawnArm` (the arm rays.originCut, 1 shipped):
+    /// the drawn-surface term of a ray a fragment starts (GATHER-HANG-1 stage 3) - each pass makes its footprint count
+    /// from them at its own switch band, the ray tier's drawnFootprintsOf.
+    static void setLampRays(const Ogre::SceneManager *sm, bool on, unsigned long long tlas, unsigned long long alpha,
+                            float drawnTolerance, float drawnArm);
     /// ...whether the scene drawn through `sm` traces its lamps (setLampRays' `on`); false for a manager no scene holds.
     /// A scene that does not trace sees its Forward+ lamps through the voxel chain (PhotonPassBinding::lampVoxelsOf).
     static bool lampRaysOn(const Ogre::SceneManager *sm);
@@ -3941,6 +3945,8 @@ public:
         /// alpha table, this frame's (the ray tier's, OgreEngine::updateRayQuery); 0 = no TLAS - the pass is the
         /// one it was (no `jah_lamp_rays`).
         unsigned long long lampTlas = 0ull, lampAlpha = 0ull;
+        /// ...and the drawn-surface term's two scene numbers (setLampRays; 0 = no lift past the float bound)
+        float lampDrawnTolerance = 0.0f, lampDrawnArm = 0.0f;
         /// ...and whether the scene TRACES at all (the ray tier open, its ray row on): the pass property follows THIS,
         /// never the address, so a TLAS that comes and goes (an empty scene's first object) changes no permutation -
         /// a zero address answers 1 in the shader (the R8 stand-in's lesson: a compile-time property is stable).

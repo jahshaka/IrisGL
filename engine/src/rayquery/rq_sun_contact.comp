@@ -156,10 +156,9 @@ void main()
 			const float pointError = jahDepthPointError( rawDepth, dist, p.projParams.y, perspective,
 														 perspective ? ( world - p.camPos.xyz ) / dist : p.fwd.xyz,
 														 p.fwd.xyz, geomN, pixelSize, p.knobs.y );
-			const vec3 origin = jahRayOrigin( world, geomN, dist,
-											  pointError + jahViewDrawnBound( p.knobs.x, world, p.camPos.xyz,
-																			  p.rayDown.xyz, float( fullRes.y ),
-																			  perspective ) );
+			const vec3 origin = jahViewRayOrigin( world, geomN, dist, pointError,
+												  JahViewDrawn( p.knobs.x, p.camPos.xyz, p.rayDown.xyz,
+																float( fullRes.y ), perspective ) );
 			// THE FADE (the finisher of the range): the answer goes from the
 			// ray's to the map's over the last projParams.w of the range, so
 			// where a long low-sun shadow outruns the range the ray's exact edge

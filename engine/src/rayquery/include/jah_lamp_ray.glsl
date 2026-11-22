@@ -7,9 +7,11 @@
 // (the pass buffer carries it:
 // FogHlmsListener, OgreFog.cpp - no descriptor; the fork's Forward+ hook custom_ps_fwdplus_lamp multiplies the lamp's
 // attenuation by it). Only the shadow casters stop it (kRayMaskCaster), as every lamp's shadow ray (the cards' lamps).
-// The origin is lifted along the geometric normal on the lamp's side by its float bound (jahRayOrigin, ONE FORM AT EVERY
-// RAY) and the segment ends ON the lamp: a lamp inside an opaque fixture lights nothing outside it (a glass shade is a
-// pane and passes its 1 - alpha).
+// The origin is a VIEW RAY's (jahViewRayOrigin: the point drawn by the view, lifted along the geometric normal on the
+// lamp's side by its float bound AND the drawn surface's bound - GATHER-HANG-1 stage 3: with the float bound alone a
+// large triangle's own ray-triangle test hit it at t ~ 1e-6, black specks in the lamp's highlight) and the segment
+// ends ON the lamp: a lamp inside an opaque fixture lights nothing outside it (a glass shade is a pane and passes its
+// 1 - alpha).
 // Needs jah_rq_finite.glsl, jah_rq_alpha.glsl (with JAH_ALPHA_TABLE defined) and jah_ray_origin.glsl before it; as an
 // Hlms piece (JahLampRayLib) it is concatenated after them, its includes stripped. No Hlms directive mark in this file.
 
@@ -17,13 +19,14 @@
 #define JAH_LAMP_RAY_GLSL
 
 /// World space: what reaches `surface` of the lamp at `lamp`. `geomN` the surface's unit geometric normal (either side),
-/// `carried` the distance the point was reconstructed along (the eye's), `tlasAddress` the TLAS's device address.
-float jahLampRay( uvec2 tlasAddress, vec3 surface, vec3 geomN, float carried, vec3 lamp )
+/// `carried` the distance the point was reconstructed along (the eye's), `drawn` the view's drawn-surface term for the
+/// eye that drew it (a rasterised point: no error beyond its float bound), `tlasAddress` the TLAS's device address.
+float jahLampRay( uvec2 tlasAddress, vec3 surface, vec3 geomN, float carried, JahViewDrawn drawn, vec3 lamp )
 {
 	if( ( tlasAddress.x | tlasAddress.y ) == 0u || !finite3( surface ) || !finite3( lamp ) || !finite3( geomN ) )
 		return 1.0;
 	const vec3 n = dot( geomN, lamp - surface ) < 0.0 ? -geomN : geomN;
-	const vec3 origin = jahRayOrigin( surface, n, carried, 0.0 );
+	const vec3 origin = jahViewRayOrigin( surface, n, carried, 0.0, drawn );
 	const vec3 d = lamp - origin;
 	const float len = length( d );
 	if( !( len > 1e-4 ) )

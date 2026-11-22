@@ -507,10 +507,9 @@ vec3 fallbackRays( vec3 worldPos, vec3 worldNormal )
 	const float pointError = jahDepthPointError( gPixRaw, pdist, p.projParams.y, persp,
 												 persp ? ( worldPos - pe.camPos ) / max( pdist, 1e-6 ) : pe.fwd, pe.fwd,
 												 geomN, pixelSize, p.projParams.w );
-	const vec3 origin = jahRayOrigin( worldPos, geomN, jahViewDistanceOf( pe, worldPos ),
-									  ( finite1( pointError ) ? pointError : 0.0 ) +
-										  jahViewDrawnBound( p.knobs2.y, worldPos, pe.camPos, pe.rayDown, p.resolution.w,
-															 persp ) );
+	const vec3 origin = jahViewRayOrigin( worldPos, geomN, jahViewDistanceOf( pe, worldPos ),
+										  finite1( pointError ) ? pointError : 0.0,
+										  JahViewDrawn( p.knobs2.y, pe.camPos, pe.rayDown, p.resolution.w, persp ) );
 	vec3 sum = vec3( 0.0 );
 	float taken = 0.0;
 	for( int i = 0; i < kJahPixelDiffuseRays; ++i )

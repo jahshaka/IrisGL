@@ -403,10 +403,9 @@ void main()
 		const float maxT = p.knobs.y;
 		const float farT = p.knobs3.w;
 		const vec4 geomW = records.r[probe].geomW;   // the geometric normal, and the point's own error (placement's)
-		const vec3 origin = jahRayOrigin( posW.xyz, geomW.xyz, probeDist,
-										  geomW.w + jahViewDrawnBound( p.knobs2.y, posW.xyz, placedBy.camPos,
-																	   placedBy.rayDown, p.resolution.w,
-																	   placedBy.perspective > 0.5 ) );
+		const vec3 origin = jahViewRayOrigin( posW.xyz, geomW.xyz, probeDist, geomW.w,
+											  JahViewDrawn( p.knobs2.y, placedBy.camPos, placedBy.rayDown, p.resolution.w,
+															placedBy.perspective > 0.5 ) );
 		// THE NEAR QUERY: the near copies (Types.h kRayMaskNearField).
 		JahRq rq;
 		JAH_RQ_INIT( rq, tlas, jahAlphaRayFlags( JAH_RQ_FLAGS_NONE ), 0x0Fu, origin, 0.0, dir, maxT );

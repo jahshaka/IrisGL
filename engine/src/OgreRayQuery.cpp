@@ -14039,7 +14039,7 @@ void OgreEngine::ensureRayTier() {
 
 void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
     // (every scene's lamp rays off first: the traced ones are switched on below, after their TLAS is current)
-    for (auto &s : mScenes) FogHlmsListener::setLampRays(s->sceneManager(), false, 0ull, 0ull);
+    for (auto &s : mScenes) FogHlmsListener::setLampRays(s->sceneManager(), false, 0ull, 0ull, 0.0f, 0.0f);
     if (!mRayTracingWanted || mHeadless || !mRoot) return;
     ensureRayTier();
     if (!mRayTier) return;
@@ -14073,7 +14073,10 @@ void OgreEngine::updateRayQuery(const std::vector<OgreScene *> &drawn) {
         mRayTier->updateScene(s);
         // THE FORWARD+ LAMPS' SHADOW RAYS (PHOTON-7 10-4 R9): this frame's TLAS, after its build (the property follows
         // the scene's tracing, the address may be 0)
-        FogHlmsListener::setLampRays(s->sceneManager(), true, mRayTier->tlasAddressOf(s), mRayTier->alphaTableOf(s));
+        // ...and the drawn-surface term's scene numbers (the lamp ray's and the glass escape's origin: GATHER-HANG-1
+        // stage 3), the ray tier's drawnFootprintsOf's own
+        FogHlmsListener::setLampRays(s->sceneManager(), true, mRayTier->tlasAddressOf(s), mRayTier->alphaTableOf(s),
+                                     s->pixelTolerance() * s->lodBias(), float(armRegistry().value(ArmId::RaysOriginCut)));
         // THE COLOUR PICK (BUGS-8): the ring's slot for this frame's colour passes while the arm names a pixel
         mRayTier->registerColourPick(s, mPublishedFrames + 1ull);
     }
