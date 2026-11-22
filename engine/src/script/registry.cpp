@@ -284,10 +284,9 @@ bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, st
         for (const Param &f : p.fields)
             if (!judgeHandles(call, f, v[f.name], why)) return false;
     } else if (p.kind == Kind::Array && p.element == Kind::Object && v.kind() == Kind::Array) {
-        Param e = p;
-        e.kind = Kind::Object;
         for (const Value &x : v.asArray())
-            if (!judgeHandles(call, e, x, why)) return false;
+            for (const Param &f : p.fields)
+                if (!judgeHandles(call, f, x[f.name], why)) return false;
     }
     return true;
 }
@@ -342,15 +341,30 @@ std::string domainText(const Param &p)
     return t;
 }
 
+/// WHERE AN ARGUMENT SITS ("transform.position[0]"), as a chain on the stack: no string is built unless a check
+/// fails (S9: the argument paths were a quarter of a call's cost, built on the success path).
+struct Where {
+    const Where *up = nullptr;
+    const std::string *name = nullptr;   // a parameter or a member
+    long index = -1;                     // an array's element
+};
+std::string whereText(const Where &w)
+{
+    std::string t = w.up ? whereText(*w.up) : std::string();
+    if (w.name) t += (t.empty() ? "" : ".") + *w.name;
+    else t += "[" + std::to_string(w.index) + "]";
+    return t;
+}
+
 /// The value `v` (an Int or a Number, checked of its kind) inside `p`'s declared range and finite, else `why`.
-bool inDomain(const Param &p, double v, const std::string &where, std::string &why)
+bool inDomain(const Param &p, double v, const Where &where, std::string &why)
 {
     if (!p.nonFinite && nonFiniteBits(v)) {
-        why = where + " is not a finite number (" + numberText(v) + ")";
+        why = whereText(where) + " is not a finite number (" + numberText(v) + ")";
         return false;
     }
     if ((p.min && v < *p.min) || (p.max && v > *p.max)) {
-        why = where + " " + numberText(v) + " is outside" + domainText(p);
+        why = whereText(where) + " " + numberText(v) + " is outside" + domainText(p);
         return false;
     }
     return true;
@@ -378,10 +392,10 @@ std::string paramText(const Param &p)
 }
 
 /// THE ARGUMENT CHECK: `in` against `p`, the checked value into `out`; false with `why` (naming `where`) on a mistake.
-bool conform(const Registry &reg, const Param &p, const Value &in, const std::string &where, Value &out,
-             std::string &why);
+bool conform(const Registry &reg, const Param &p, const Value &in, const Where &where, Value &out, std::string &why);
 
-bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in, const std::string &where, Value &out,
+/// `in` as `kind` - p.kind, or an array's element kind with the array's own declarations (its range, its members).
+bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in, const Where &where, Value &out,
                  std::string &why)
 {
     const Kind k = in.kind();
@@ -394,11 +408,11 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
             // an integral number is an integer only while a script's number is exact: |d| <= 2^53 (above it, a
             // neighbouring integer reads the same: an Int value - a BigInt - says it exactly)
             if (nonFiniteBits(d) || std::trunc(d) != d) {
-                why = where + " must be an integer (" + numberText(d) + " is not; it is never truncated)";
+                why = whereText(where) + " must be an integer (" + numberText(d) + " is not; it is never truncated)";
                 return false;
             }
             if (std::fabs(d) > 9007199254740992.0) {
-                why = where + " " + numberText(d) + " is beyond 2^53, where a number is no longer an exact integer";
+                why = whereText(where) + " " + numberText(d) + " is beyond 2^53, where a number is no longer an exact integer";
                 return false;
             }
             out = Value(static_cast<std::int64_t>(d));
@@ -406,7 +420,11 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
             break;
         }
         if ((p.min || p.max) && !inDomain(p, double(out.asInt()), where, why)) return false;
-        return p.handle.empty() || reg.checkHandle(out.asInt(), p.handle, where, why);
+        if (!p.handle.empty() && !reg.checkHandle(out.asInt(), p.handle, std::string(), why)) {
+            why = whereText(where) + why;   // (checkHandle's text begins ": ")
+            return false;
+        }
+        return true;
     case Kind::Number:
         if (k == Kind::Int || k == Kind::Number) {
             out = Value(in.asNumber());
@@ -419,27 +437,26 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
             bool known = false;
             for (const std::string &c : p.choices) known = known || c == in.asString();
             if (!known) {
-                why = where + " '" + in.asString() + "' is not one of" + domainText(p);
+                why = whereText(where) + " '" + in.asString() + "' is not one of" + domainText(p);
                 return false;
             }
         }
         out = in;
         return true;
     case Kind::Array: {
-        if (k != Kind::Array) break;
+        if (k != Kind::Array || kind != p.kind) break;   // (no array of arrays is declared)
         const Value::Array &a = in.asArray();
         if (p.count && a.size() != p.count) {
-            why = where + " must hold " + std::to_string(p.count) + " elements (it holds " + std::to_string(a.size()) + ")";
+            why = whereText(where) + " must hold " + std::to_string(p.count) + " elements (it holds " +
+                  std::to_string(a.size()) + ")";
             return false;
         }
-        Param e = p;   // each element: the element kind, the same members
-        e.kind = p.element;
-        e.fallback.reset();
         Value::Array checked;
         checked.reserve(a.size());
         for (size_t i = 0; i < a.size(); ++i) {
             Value v;
-            if (!conformKind(reg, e.kind, e, a[i], where + "[" + std::to_string(i) + "]", v, why)) return false;
+            const Where element{&where, nullptr, long(i)};
+            if (!conformKind(reg, p.element, p, a[i], element, v, why)) return false;   // the element kind, p's declarations
             checked.push_back(std::move(v));
         }
         out = Value(std::move(checked));
@@ -452,14 +469,16 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
             bool known = false;
             for (const Param &f : p.fields) known = known || f.name == m.first;
             if (!known) {
-                why = where + " has no member '" + m.first + "'";
+                why = whereText(where) + " has no member '" + m.first + "'";
                 return false;
             }
         }
         Value::Object checked;
+        checked.reserve(p.fields.size());
         for (const Param &f : p.fields) {
             Value v;
-            if (!conform(reg, f, in[f.name], where + "." + f.name, v, why)) return false;
+            const Where member{&where, &f.name, -1};
+            if (!conform(reg, f, in[f.name], member, v, why)) return false;
             checked.emplace_back(f.name, std::move(v));
         }
         out = Value(std::move(checked));
@@ -469,17 +488,16 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, const Value &in
         if (k == kind) { out = in; return true; }
         break;
     }
-    why = where + " must be " + (kind == Kind::Array ? std::string("an array") : std::string(kindName(kind))) +
+    why = whereText(where) + " must be " + (kind == Kind::Array ? std::string("an array") : std::string(kindName(kind))) +
           " (it is " + kindName(k) + ")";
     return false;
 }
 
-bool conform(const Registry &reg, const Param &p, const Value &in, const std::string &where, Value &out,
-             std::string &why)
+bool conform(const Registry &reg, const Param &p, const Value &in, const Where &where, Value &out, std::string &why)
 {
     if (in.isNull()) {
         if (!p.fallback) {
-            why = where + " is required";
+            why = whereText(where) + " is required";
             return false;
         }
         return conformKind(reg, p.kind, p, *p.fallback, where, out, why);   // a default is checked too: an object's fills
@@ -600,7 +618,8 @@ Result Registry::callAt(std::size_t index, const Value::Array &args)
     for (size_t i = 0; i < params.size(); ++i) {
         Value v;
         std::string why;
-        if (!conform(*this, params[i], i < args.size() ? args[i] : Value(), params[i].name, v, why)) {
+        const Where where{nullptr, &params[i].name, -1};
+        if (!conform(*this, params[i], i < args.size() ? args[i] : Value(), where, v, why)) {
             r.status = Status::Failed;
             r.message = name + ": " + why;
             return r;
