@@ -977,16 +977,17 @@ set_target_properties(jahengine PROPERTIES
 target_compile_definitions(jahengine PRIVATE
     JAHENGINE_OGRE_PLUGIN_DIR="${OGRE_NEXT_PLUGIN_DIR}"
     JAHENGINE_MEDIA_DIR="${JAHSHAKA_MEDIA_DIR}/")
-target_link_libraries(jahengine PRIVATE JahshakaScript)
+target_link_libraries(jahengine PRIVATE JahshakaScript JahshakaEngineMcp)
 add_dependencies(jahengine JahshakaEngineMedia)
 
 # JahshakaEngineMcp (MCP-ON-HOST-1): THE MCP ADAPTER over the engine's script host - the standard library, Script.h and
 # ScriptJson.h, no Qt and no other engine header; it is linked into jahengine only (never Jahshaka, jahlab or IrisGL).
 # Stage 1: the schema of a signature (mcp/schema.h); stage 2: the session - the protocol and its five tools
-# (mcp/session.h). ITS PUBLIC INCLUDE ROOT IS ITS OWN HEADERS ONLY (mcp/include: "mcp/<file>.h")
+# (mcp/session.h) and its stdio transport (mcp/stdio.h). ITS PUBLIC INCLUDE ROOT IS ITS OWN HEADERS ONLY (mcp/include: "mcp/<file>.h")
 # - never irisgl/engine, which would hand every user the engine's private src/ (the boundary law).
 add_library(JahshakaEngineMcp STATIC ${CMAKE_CURRENT_SOURCE_DIR}/mcp/include/mcp/schema.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/schema.cpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/mcp/include/mcp/session.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/session.cpp)
+            ${CMAKE_CURRENT_SOURCE_DIR}/mcp/include/mcp/session.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/session.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/mcp/include/mcp/stdio.h ${CMAKE_CURRENT_SOURCE_DIR}/mcp/stdio.cpp)
 set_target_properties(JahshakaEngineMcp PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_include_directories(JahshakaEngineMcp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/mcp/include)
 target_link_libraries(JahshakaEngineMcp PUBLIC JahshakaScript)
