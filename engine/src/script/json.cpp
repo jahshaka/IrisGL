@@ -78,22 +78,22 @@ std::string capText(std::size_t n)
 }
 
 /// WHERE A VALUE SITS, as a chain on the stack: made into text only when a write fails.
-struct Path {
-    const Path *up = nullptr;
+struct JsonPath {
+    const JsonPath *up = nullptr;
     const std::string *name = nullptr;   // an object's member
     std::size_t index = 0;               // else an array's element
 };
-std::string pathText(const Path *p)
+std::string pathText(const JsonPath *p)
 {
     if (!p) return "value";
     return pathText(p->up) + (p->name ? "." + *p->name : "[" + std::to_string(p->index) + "]");
 }
 
-class Writer {
+class JsonWriter {
 public:
-    Writer(std::string &out, std::string &why) : mOut(out), mWhy(why) {}
+    JsonWriter(std::string &out, std::string &why) : mOut(out), mWhy(why) {}
 
-    bool value(const Value &v, const Path *at, int depth)
+    bool value(const Value &v, const JsonPath *at, int depth)
     {
         switch (v.kind()) {
         case Kind::Null:   mOut += "null"; return true;
@@ -108,7 +108,7 @@ public:
             const Value::Array &a = v.asArray();
             for (std::size_t i = 0; i < a.size(); ++i) {
                 if (i) mOut += ',';
-                const Path element{at, nullptr, i};
+                const JsonPath element{at, nullptr, i};
                 if (!value(a[i], &element, depth + 1)) return false;
             }
             mOut += ']';
@@ -127,7 +127,7 @@ public:
                 if (i) mOut += ',';
                 if (!string(name, at, "a member name ")) return false;
                 mOut += ':';
-                const Path member{at, &name, 0};
+                const JsonPath member{at, &name, 0};
                 if (!value(o[i].second, &member, depth + 1)) return false;
             }
             mOut += '}';
@@ -138,7 +138,7 @@ public:
     }
 
 private:
-    bool fail(const Path *at, const std::string &reason)
+    bool fail(const JsonPath *at, const std::string &reason)
     {
         mWhy = pathText(at) + " " + reason;
         return false;
@@ -153,7 +153,7 @@ private:
     }
 
     /// The shortest text that reads back to the same bits, with a fraction or an exponent so it reads back a Number.
-    bool number(double d, const Path *at)
+    bool number(double d, const JsonPath *at)
     {
         if (nonFiniteBits(d)) return fail(at, "is not a finite number (JSON carries no NaN or infinity)");
         char b[32];
@@ -165,7 +165,7 @@ private:
     }
 
     /// `s` quoted: every control character escaped (no newline is ever written), its UTF-8 checked.
-    bool string(const std::string &s, const Path *at, const char *what)
+    bool string(const std::string &s, const JsonPath *at, const char *what)
     {
         mOut += '"';
         for (std::size_t i = 0; i < s.size();) {
@@ -200,7 +200,7 @@ private:
         return true;
     }
 
-    bool bytes(const Value::Bytes &b, const Path *at)
+    bool bytes(const Value::Bytes &b, const JsonPath *at)
     {
         if (b.size() > kJsonBytesCap) return fail(at, "is " + capText(b.size()));
         mOut += "{\"$bytes\":\"";
@@ -277,9 +277,9 @@ bool base64Decode(const std::string &s, Value::Bytes &out, std::string &why)
     return true;
 }
 
-class Parser {
+class JsonReader {
 public:
-    Parser(std::string_view s, std::string &why) : mS(s), mWhy(why) {}
+    JsonReader(std::string_view s, std::string &why) : mS(s), mWhy(why) {}
 
     bool document(Value &out)
     {
@@ -553,7 +553,7 @@ private:
 bool toJson(const Value &value, std::string &out, std::string &why)
 {
     out.clear();
-    Writer w(out, why);
+    JsonWriter w(out, why);
     if (w.value(value, nullptr, 0)) return true;
     out.clear();
     return false;
@@ -561,7 +561,7 @@ bool toJson(const Value &value, std::string &out, std::string &why)
 
 bool parseJson(std::string_view text, Value &out, std::string &why)
 {
-    Parser p(text, why);
+    JsonReader p(text, why);
     Value v;
     if (!p.document(v)) return false;
     out = std::move(v);
