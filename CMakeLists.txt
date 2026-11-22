@@ -224,6 +224,7 @@ set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(_jah_shared_libs ${BUILD_SHARED_LIBS})
 set(BUILD_SHARED_LIBS OFF)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+set(QJS_ENABLE_INSTALL OFF)   # its default ON would put its headers, qjs, qjsc and man pages into any install: none of ours
 add_subdirectory(thirdparty/quickjs-ng EXCLUDE_FROM_ALL)
 unset(CMAKE_POLICY_DEFAULT_CMP0077)
 set(BUILD_SHARED_LIBS ${_jah_shared_libs})
