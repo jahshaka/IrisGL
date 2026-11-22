@@ -107,6 +107,8 @@ struct Param {
     /// Kind::Array: its elements' kind (Kind::Object: each is checked against `fields`) and their count (0 = any).
     Kind element = Kind::Number;
     unsigned count = 0;
+    /// Kind::Array: the most elements it may hold (0 = no bound), printed "node handle[] <= 65536"; more FAILS by name.
+    unsigned maxCount = 0;
     /// A TARGET: what the command acts on (a positional parameter; the shape rule above).
     bool target = false;
     /// A HANDLE (Kind::Int; or Kind::Array of them, handles()): the kind of object it must name ("scene", "node",
@@ -117,12 +119,15 @@ struct Param {
     /// host enforces it and the generated documentation shows it, and a command's body never re-checks it.
     std::vector<std::string> choices;   ///< Kind::String: the only values allowed (empty: any)
     std::optional<double> min, max;     ///< Kind::Int / Number, an array's elements too: the closed range
+    bool minExclusive = false;          ///< min itself is OUTSIDE (above(): "> 0")
     std::string unit;                   ///< a number's unit ("px", "m", "frames"): documentation
     /// Kind::Number: NaN and infinity are FAILED (read by their bits) unless this says the parameter takes them.
     bool nonFinite = false;
     Param oneOf(std::vector<std::string> values) const;
     Param range(double lo, double hi) const;
     Param atLeast(double lo) const;
+    Param above(double lo) const;
+    Param upTo(unsigned elements) const;   ///< an array's maxCount
     Param in(std::string unitName) const;
     Param allowNonFinite() const;
 };

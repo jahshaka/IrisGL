@@ -164,6 +164,19 @@ Param Param::atLeast(double lo) const
     p.min = lo;
     return p;
 }
+Param Param::above(double lo) const
+{
+    Param p = *this;
+    p.min = lo;
+    p.minExclusive = true;
+    return p;
+}
+Param Param::upTo(unsigned elements) const
+{
+    Param p = *this;
+    p.maxCount = elements;
+    return p;
+}
 Param Param::in(std::string unitName) const
 {
     Param p = *this;
@@ -364,9 +377,12 @@ std::string domainText(const Param &p)
 {
     std::string t;
     for (size_t i = 0; i < p.choices.size(); ++i) t += (i ? "|\"" : " \"") + p.choices[i] + "\"";
-    if (p.min && p.max) t += " " + numberText(*p.min) + ".." + numberText(*p.max);
-    else if (p.min) t += " >= " + numberText(*p.min);
-    else if (p.max) t += " <= " + numberText(*p.max);
+    if (p.min && p.max && !p.minExclusive) {
+        t += " " + numberText(*p.min) + ".." + numberText(*p.max);
+    } else {
+        if (p.min) t += (p.minExclusive ? " > " : " >= ") + numberText(*p.min);
+        if (p.max) t += " <= " + numberText(*p.max);
+    }
     if (!p.unit.empty()) t += " " + p.unit;
     if (p.nonFinite) t += " (non-finite allowed)";
     return t;
@@ -394,7 +410,7 @@ bool inDomain(const Param &p, double v, const Where &where, std::string &why)
         why = whereText(where) + " is not a finite number (" + numberText(v) + ")";
         return false;
     }
-    if ((p.min && v < *p.min) || (p.max && v > *p.max)) {
+    if ((p.min && (v < *p.min || (p.minExclusive && v == *p.min))) || (p.max && v > *p.max)) {
         why = whereText(where) + " " + numberText(v) + " is outside" + domainText(p);
         return false;
     }
@@ -407,6 +423,7 @@ std::string paramText(const Param &p)
     if (p.kind == Kind::Array) {
         t += !p.handle.empty() ? p.handle + " handle" : p.element == Kind::Object ? "object" : kindName(p.element);
         t += p.count ? "[" + std::to_string(p.count) + "]" : "[]";
+        if (p.maxCount) t += " <= " + std::to_string(p.maxCount);
     } else if (!p.handle.empty()) {
         t += p.handle + " handle";
     } else {
@@ -481,6 +498,11 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, Value &in, cons
         if (p.count && a.size() != p.count) {
             why = whereText(where) + " must hold " + std::to_string(p.count) + " elements (it holds " +
                   std::to_string(a.size()) + ")";
+            return false;
+        }
+        if (p.maxCount && a.size() > p.maxCount) {
+            why = whereText(where) + " holds " + std::to_string(a.size()) + " elements, at most " +
+                  std::to_string(p.maxCount);
             return false;
         }
         for (size_t i = 0; i < a.size(); ++i) {   // each element checked IN PLACE: the array is moved, never rebuilt
