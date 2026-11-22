@@ -102,7 +102,7 @@ private:
             s.emplace_back("minimum", Value(1));
             said.push_back("a " + p.handle + " handle");
         } else {
-            if (p.min) s.emplace_back("minimum", bound(*p.min, k));
+            if (p.min) s.emplace_back(p.minExclusive ? "exclusiveMinimum" : "minimum", bound(*p.min, k));
             if (p.max) s.emplace_back("maximum", bound(*p.max, k));
         }
         if (!p.unit.empty()) said.push_back(p.unit);
@@ -117,6 +117,8 @@ public:
         const Kind k = array ? p.element : p.kind;   // the kind the domain applies to (the registry checks each element)
         // A FIELD SET WHERE ITS KIND HAS NO FORM: named, never dropped
         if (!array && p.count) unmapped(where, "count", p.kind);
+        if (!array && p.maxCount) unmapped(where, "maxCount", p.kind);
+        if (p.minExclusive && !p.min) unmapped(where, "minExclusive", k);
         if (!array && p.element != Param().element) unmapped(where, "element", p.kind);
         if (array && (k == Kind::Array || k == Kind::Null)) unmapped(where, "element", k);
         if (!p.fields.empty() && k != Kind::Object) unmapped(where, "fields", k);
@@ -135,6 +137,8 @@ public:
             if (p.count) {
                 s.emplace_back("minItems", Value(p.count));
                 s.emplace_back("maxItems", Value(p.count));
+            } else if (p.maxCount) {
+                s.emplace_back("maxItems", Value(p.maxCount));
             }
         } else {
             s = value(p, k, where, said);

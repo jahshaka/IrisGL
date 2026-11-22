@@ -9,11 +9,13 @@
 //   * its kind's type: null / boolean / integer / number / string / array / object; BYTES the {"$bytes": "<base64>"}
 //     object (propertyNames {"const":"$bytes"}: the form without "$bytes" as a key, so the schema is itself a Value the
 //     codec carries), its base64 at most the 1 MiB cap's length;
-//   * choices -> "enum"; min / max -> "minimum" / "maximum" (an integer's as integers);
+//   * choices -> "enum"; min / max -> "minimum" / "maximum" (an integer's as integers), an exclusive min (above()) ->
+//     "exclusiveMinimum";
 //   * a handle -> {"type":"integer","minimum":1,"description":"a <kind> handle"}; a target -> " (target)" after its
 //     description ("the target" when it has none); a unit -> the description; non-finite allowed -> said there;
 //   * an array -> "items" (its element's kind, and the parameter's domain: the registry checks it on each element; an
-//     object element its own object schema), count > 0 -> "minItems" = "maxItems" = count;
+//     object element its own object schema), count > 0 -> "minItems" = "maxItems" = count, else maxCount > 0 (upTo())
+//     -> "maxItems";
 //   * an object -> "properties", "required" and "additionalProperties":false the same way, nested;
 //   * a default -> "default", the checked default as it is (the codec writes it).
 // A FIELD THE GENERATOR CANNOT CARRY - one set where its kind has no form for it (choices on an integer, a count on a
@@ -27,10 +29,10 @@
 
 namespace jahshaka { namespace engine { namespace mcp {
 
-/// The Param and Signature fields this generator reads (Signature's `returns` and `returnsHandle` describe the answer,
-/// not the arguments: read, and given no form in an argument schema).
-constexpr int kParamFieldsMapped = 13;
-constexpr int kSignatureFieldsMapped = 3;
+/// The Param and Signature fields this generator reads (Signature's `access`, `returns` and `returnsHandle` describe
+/// the command and its answer, not the arguments: read by the tools that list a command, given no form here).
+constexpr int kParamFieldsMapped = 15;
+constexpr int kSignatureFieldsMapped = 4;
 
 /// The JSON Schema of `command`'s arguments into `schema`; false with `why` naming EVERY fault (command: where: what).
 bool argumentSchema(const script::CommandInfo &command, script::Value &schema, std::string &why);
