@@ -16,6 +16,7 @@
 #include "SurfaceCache.h"
 #include "Atmosphere.h"
 #include <OgreHlmsAsyncCompiler.h>
+#include <OgreHlmsCompute.h>
 #include <OgreHlmsManager.h>
 #include <OgreRoot.h>
 #include <OgreHlmsDatablock.h>
@@ -65,7 +66,10 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
 bool OgreScene::hostPosts() const { return mEngine && mEngine->hostPosts(); }
 
 bool OgreScene::compilesInBackground() const {
-    if (!mAsyncShaders || mFramePace == FramePace::Complete || !mRoot) return false;
+    return computeOnService() && Ogre::HlmsCompute::jahMayDefer();
+}
+bool OgreScene::computeOnService() const {
+    if (!mAsyncShaders || !mRoot) return false;
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     return hm && hm->getComputeHlms() && hm->getAsyncCompiler() && hm->getAsyncCompiler()->isRunning();
 }

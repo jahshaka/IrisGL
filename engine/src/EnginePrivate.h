@@ -2346,6 +2346,7 @@ private:
     X(RayBuildHold, "rays.buildHold") /* a ray pipeline build counts as in flight for N frames after its launch: a late build (a test door, gi.card_build_late) */ \
     X(RayBuildHoldIds, "rays.buildHoldIds") /* the builds rays.buildHold holds, a bit per AheadId (0 = every build; a test door, gi.card_build_late) */ \
     X(RayBuildFail, "rays.buildFail") /* the ray builds named (a bit per AheadId) FAIL on their workers (a test door, gi.card_build_late) */ \
+    X(ShaderServiceSlow, "shaders.serviceSlow") /* ms: every background compile is held that long before it runs (the fork's _jahServiceDelayMs; a test door, gi.complete_joins) */ \
     X(ShaderAsyncFail, "shaders.asyncFail") /* every object's own graphics permutation fails at its request (the fork's _jahFailRequests; a test door, gi.card_build_late) */ \
     X(TextureResidencyHold, "textures.residencyHold") /* every texture bind awaits its pixels while on (a test door, gi.card_build_late) */ \
     X(FrameIncompleteHold, "frames.incompleteHold") /* every scene's drawn frame is noted INCOMPLETE while on, term bit 4 (a test door, gi.card_build_late.window) */
@@ -5122,8 +5123,14 @@ public:
     /// picture (FramePace::Complete), with the background compiler running. Everywhere else (the selftest, every
     /// fixture, scripts, screenshots) the frame waits for the compile, so when it lands is a function of the frames,
     /// never of a compile's wall time. Read by the delta commit's shader (PhotonComponent::commitShaderAsync) and the
-    /// ray tier's pipelines (RayQueryTier::aheadReady).
+    /// ray tier's pipelines (RayQueryTier::aheadReady). The pace is read through the fork's one place
+    /// (Ogre::HlmsCompute::jahMayDefer, set at the frame head): a COMPUTE site never asks this - it asks
+    /// computeOnService and the fork decides (source.compute_pace_one_place).
     bool compilesInBackground() const;
+    /// Does this scene's compute go through the background compiler (its views compile in the background and the
+    /// service runs)? A compute site puts its dispatch under the fork's deferral when this is true; whether THIS frame
+    /// may put it off is the fork's answer (requestAsync, dispatch: SHADER-SYSTEM-1 7a R2 (c)).
+    bool computeOnService() const;
     bool cardMoverFrame(CardMoverFrame &out) { return mPhoton.cardMoverFrame(out); }
     bool traceCardMovers(const CardMoverTrace &job);
     /// THE CARDS' INDIRECT BY TLAS RAYS (PHOTON-7 stage 10, 10-2a): the ray tier's gather of the relight's cards into

@@ -701,7 +701,7 @@ bool OgreScene::updateAtmosphere(bool deferrable) {
             bool prev = false;
             ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
         } deferral;
-        if (deferrable && hc && compilesInBackground()) {
+        if (deferrable && hc && computeOnService()) {
             deferral.hc = hc;
             deferral.prev = hc->getDeferredDispatch();
             hc->setDeferredDispatch(true);
@@ -1813,7 +1813,7 @@ void OgreScene::convolvePendingIbl() {
             bool prev = false;
             ~Deferral() { if (hc) hc->setDeferredDispatch(prev); }
         } deferral;
-        if (hc && compilesInBackground()) {
+        if (hc && computeOnService()) {
             deferral.hc = hc;
             deferral.prev = hc->getDeferredDispatch();
             hc->setDeferredDispatch(true);

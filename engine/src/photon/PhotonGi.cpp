@@ -795,11 +795,12 @@ struct InjectionRows final : Ogre::PhotonVoxelLighting::PhaseListener {
 }   // namespace
 
 // THE COMMIT'S SHADER IS ASYNCHRONOUS ONLY WHERE THE SCENE IS (PHOTON-7 stage 2's read D3): the delta injection's permutation
-// goes to the background compiler, and a commit waits a frame for it, only in a scene whose views compile in the background
-// (View::setAsyncShaders), on a frame that does not owe the whole picture (FramePace::Complete), with the compiler running -
-// giDeferrable's rule. Everywhere else the commit compiles in its own frame, so when a commit lands is a function of the
-// frames, never of a compile's wall time (the selftest and every fixture: cascadeCommitShaderWaits 0).
-bool PhotonComponent::commitShaderAsync() const { return mScene.compilesInBackground(); }   // the ONE rule (OgreScene)
+// goes to the background compiler in a scene whose views compile in the background (View::setAsyncShaders) with the
+// compiler running - giDeferrable's rule - and a commit waits a frame for it only on a frame that may put work off: on one
+// that owes the whole picture the fork answers ready (commitLightReady's requestAsync) and the dispatch joins the build in
+// flight (SHADER-SYSTEM-1 7a R2 (c): the pace meets compute in the fork's one place). Everywhere else the commit compiles in
+// its own frame, so when a commit lands is a function of the frames, never of a compile's wall time.
+bool PhotonComponent::commitShaderAsync() const { return mScene.computeOnService(); }   // the fork decides by the pace
 
 bool PhotonComponent::injectCascade(size_t i, const Ogre::PhotonCommitLight *commit) {
     Ogre::PhotonVoxelLighting *lighting = i < mVctCascades.size() ? mVctCascades[i].lighting : nullptr;
@@ -3713,7 +3714,9 @@ void PhotonComponent::applyPendingGiDeferrable() {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
     if (mGiDeferralRetry && mScene.asyncShaders() && hc) {
-        if (hc->getNumAsyncInFlight() != 0u) return;   // still building: the rebuild waits
+        // Still building: a frame that may put work off waits for the rebuild; one that owes its picture rebuilds now,
+        // its dispatches joining what is in flight (the fork's one place, Ogre::HlmsCompute::jahMayDefer).
+        if (hc->getNumAsyncInFlight() != 0u && Ogre::HlmsCompute::jahMayDefer()) return;
         mGiDeferralRetry = false;
         mGiChainShapeDirty = true;   // the partial arm is rebuilt whole
         mGiCachesDirty = true;
@@ -3736,7 +3739,7 @@ void PhotonComponent::giDeferrable(const std::function<void()> &work) {
 void PhotonComponent::deferDispatches(const std::function<void()> &work) {
     Ogre::HlmsManager *hm = mRoot->getHlmsManager();
     Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
-    if (!mScene.asyncShaders() || !hc || !hm->getAsyncCompiler()->isRunning()) {
+    if (!hc || !mScene.computeOnService()) {
         mGiDeferralRetry = false;
         work();
         return;

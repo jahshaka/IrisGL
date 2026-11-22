@@ -1103,12 +1103,19 @@ bool OgreEngine::runFrame(FrameInput &record, bool any) {
         // THE FAILED-PERMUTATION DOOR (COLD-BOOT-1 item 3; the arm shaders.asyncFail): while on, the fork fails every
         // object's own permutation at its request (HlmsAsyncCompiler::_jahFailRequests) - a failure is final
         mRoot->getHlmsManager()->getAsyncCompiler()->_jahFailRequests(mArms.on(ArmId::ShaderAsyncFail));
+        // THE SLOW-SERVICE DOOR (SHADER-SYSTEM-1 7a R2 (c); the arm shaders.serviceSlow): every background compile held
+        mRoot->getHlmsManager()->getAsyncCompiler()->_jahServiceDelayMs(
+            Ogre::uint32(mArms.value(ArmId::ShaderServiceSlow)));
         // WHAT THIS FRAME MAY PUT OFF (OPEN_COVER_SPEC §2.1): Engine::setFramePace's, IN FORCE UNTIL SET AGAIN (never
         // lowered here - a caller that sets Streaming gives Complete back itself). Pushed to every scene here,
         // once, because the decisions it changes are per scene (the GI arm's
         // staged build) and per frame (the texture drain below).
         const FramePace pace = mFramePace;
         for (auto &sc : mScenes) sc->setFramePace(pace);
+        // ...and THE ONE PLACE A COMPUTE PERMUTATION's LATENESS MEETS IT (SHADER-SYSTEM-1 7a R2 (c)): a frame that owes
+        // its whole picture puts no compute dispatch off - the fork's requestAsync answers ready and dispatch() joins
+        // the request in flight (counted: AsyncShaderStats::computeJoins), for every site alike.
+        Ogre::HlmsCompute::_jahSetFrameOwesPicture(pace == FramePace::Complete);
         if (pace == FramePace::Streaming) ++mStreamingFrames;   // published: PublishedEngineFrame::streamingFrames
         std::unique_ptr<monitor::Stage> monPre;
         if (monitor::live()) {

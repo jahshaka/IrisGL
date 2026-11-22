@@ -1777,6 +1777,12 @@ constexpr ArmDef kArms[] = {
       "k (rays.buildHoldIds' bits), FAIL on their workers - nothing is built, the build reports a failure, and its consumer "
       "latches it as a pipeline that cannot be made (no reader). Read at each build's launch. 0 = shipped.",
       true },
+    { ArmId::ShaderServiceSlow, 0.0, 0.0, 1000.0,
+      "A TEST DOOR (SHADER-SYSTEM-1 7a R2 (c), gi.complete_joins): N > 0 = every job a background compile thread takes "
+      "is held N ms before it runs (the fork's HlmsAsyncCompiler::_jahServiceDelayMs): a slow service - a loaded box, a "
+      "cold driver - made on demand, so a frame's dependence on WHEN a background build lands can be shown. Read at "
+      "each frame's top. 0 = shipped.",
+      true },
     { ArmId::ShaderAsyncFail, 0.0, 0.0, 1.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): 1 = every object's OWN graphics permutation "
       "requested while on FAILS at its request (the fork's HlmsAsyncCompiler::_jahFailRequests; a placeholder's request "
