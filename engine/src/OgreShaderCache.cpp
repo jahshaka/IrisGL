@@ -1773,6 +1773,7 @@ ShaderCacheStats ShaderCache::stats(Ogre::Root *root) const {
     s.copyFrames = mStepFrames;
     s.copyFrameOverruns = mStepFrameOverruns;
     s.savesWritten = mSavesWritten.load();
+    s.saveInFlight = mCopyInProgress || writeInFlight();
     s.enginePipelinesThisRun = sEnginePipelines.load();
     s.enginePipelineMs = double(sEnginePipelineUs.load()) / 1000.0;
     {

@@ -168,6 +168,10 @@ struct ShaderCacheStats {
     unsigned copyFrames = 0;
     unsigned copyFrameOverruns = 0;
     unsigned savesWritten = 0;
+    /// A SAVE IS IN FLIGHT (SHADER-SYSTEM-1 stage 7a): its chunked copy still continuing on the frames, or its write
+    /// on the writer. The startup gate's own save is waited for on it (frames flowing): a launch killed after the gate
+    /// keeps what the gate compiled. False after a no-op save and after a failed one alike.
+    bool saveInFlight = false;
     /// Compute pipelines the engine built outside the Hlms this PROCESS (the ray
     /// tier's, through the device's pipeline cache), and their build time — a warm
     /// pipeline layer makes the second near zero.
