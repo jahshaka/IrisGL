@@ -6,10 +6,13 @@
 //     field("cascadeCount", &GiParams::cascadeCount).range(0, 4)
 // The member pointer gives the C++ type, so the field's Kind, its signature Param (with the record's default as the
 // member's default), and both conversions are DERIVED. Generic over: bool, integers (their type's range, within 2^53),
-// float (a number past a float's range FAILS by name at the conversion) and double, std::string, an enum (a name table, JAH_ENUM_NAMES), Vec3 / Quat / Colour (3 / 4 / 4
-// numbers: x y z, x y z w, r g b a), a nested record, std::vector<T> (its maximum declared on the field: .upTo(n), in
-// the array's VALUES - a flat vector's numbers; Registry::add refuses an unbounded array), T[N], std::optional<T> and std::shared_ptr<const T> (null = absent). A
-// vector or an array of Vec3 / Quat / Colour is FLAT: 3 / 4 / 4 numbers an element (the batch convention).
+// float (single precision: printed `float`, a number past its range FAILS by name - the registry's check) and double,
+// std::string, an enum (a name table, JAH_ENUM_NAMES), Vec3 / Quat / Colour (3 / 4 / 4 floats: x y z, x y z w,
+// r g b a), a nested record, std::vector<T> (its maximum declared on the field, .upTo(n), in the array's VALUES - a flat
+// vector's numbers; Registry::add refuses an unbounded array), T[N], std::optional<T> and std::shared_ptr<const T>
+// (null = absent). A vector or an array of Vec3 / Quat / Colour is FLAT: its items' numbers in a row (the batch
+// convention: Param::flat, printed `float[3n] <= N numbers`; a length no multiple of the stride FAILS by name - the
+// registry's check).
 //
 // THE GUARD: JAH_RECORD_COUNT(T, N) - beside the table's declaration, in the subject's header - expands a structured
 // binding of EXACTLY N names (records_bind.inc, generated up to 128), so a field added to T BREAKS THE BUILD until its
@@ -25,8 +28,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cfloat>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -95,17 +96,6 @@ inline void flatOut(const Colour &c, Value::Array &a)
     a.insert(a.end(), {Value(double(c.r)), Value(double(c.g)), Value(double(c.b)), Value(double(c.a))});
 }
 inline float numberAt(const Value::Array &a, std::size_t i) { return float(a[i].asNumber()); }
-/// Every number of `a` inside a float's range, else false with `why` naming the first (a double past it would narrow to
-/// an infinity, silently).
-inline bool floats(const Value::Array &a, const std::string &where, std::string &why)
-{
-    for (std::size_t i = 0; i < a.size(); ++i)
-        if (std::fabs(a[i].asNumber()) > double(FLT_MAX)) {
-            why = where + "[" + std::to_string(i) + "] " + std::to_string(a[i].asNumber()) + " is beyond a float";
-            return false;
-        }
-    return true;
-}
 inline void flatIn(const Value::Array &a, std::size_t i, Vec3 &v) { v = Vec3(numberAt(a, i), numberAt(a, i + 1), numberAt(a, i + 2)); }
 inline void flatIn(const Value::Array &a, std::size_t i, Quat &q)
 {
@@ -133,12 +123,14 @@ template <class T> Param paramOf(std::string name)
         const double lo = std::is_signed<T>::value ? std::max(double(std::numeric_limits<T>::min()), -detail::kExact) : 0.0;
         const double hi = std::min(double(std::numeric_limits<T>::max()), detail::kExact);
         return arg(std::move(name), Kind::Int).range(lo, hi);
+    } else if constexpr (std::is_same<T, float>::value) {
+        return arg(std::move(name), Kind::Number).asFloat();
     } else if constexpr (std::is_floating_point<T>::value) {
         return arg(std::move(name), Kind::Number);
     } else if constexpr (std::is_same<T, std::string>::value) {
         return arg(std::move(name), Kind::String);
     } else if constexpr (detail::flatWidth<T>() != 0) {
-        return numbers(std::move(name), detail::flatWidth<T>());
+        return numbers(std::move(name), detail::flatWidth<T>()).asFloat();
     } else if constexpr (detail::IsOptional<T>::value || detail::IsShared<T>::value) {
         Param p = paramOf<typename std::conditional<detail::IsOptional<T>::value, detail::IsOptional<T>,
                                                     detail::IsShared<T>>::type::Element>(std::move(name));
@@ -157,6 +149,7 @@ template <class T> Param paramOf(std::string name)
         if constexpr (detail::flatWidth<E>() != 0) {   // FLAT: an element's numbers in a row
             p.element = Kind::Number;
             p.count = n * detail::flatWidth<E>();
+            p.stride = detail::flatWidth<E>();
         } else {
             p.element = e.kind;
             p.count = n;
@@ -201,8 +194,8 @@ template <class T> Value toValue(const T &v)
     }
 }
 
-/// A script value - conformed to paramOf<T>'s parameter by the registry - into `out`; false with `why` (naming
-/// `where`) for what the parameter cannot say: a flat vector whose length is no multiple of its element's numbers.
+/// A script value - conformed to paramOf<T>'s parameter by the registry (its kinds, ranges, float range and flat
+/// strides) - into `out`; false with `why` (naming `where`) for an enum name its table lacks.
 template <class T> bool fromValue(const Value &v, T &out, const std::string &where, std::string &why)
 {
     if constexpr (std::is_same<T, bool>::value) {
@@ -217,18 +210,11 @@ template <class T> bool fromValue(const Value &v, T &out, const std::string &whe
         return false;
     } else if constexpr (std::is_integral<T>::value) {
         out = T(v.asInt());
-    } else if constexpr (std::is_same<T, float>::value) {
-        if (std::fabs(v.asNumber()) > double(FLT_MAX)) {
-            why = where + " " + std::to_string(v.asNumber()) + " is beyond a float";
-            return false;
-        }
-        out = float(v.asNumber());
     } else if constexpr (std::is_floating_point<T>::value) {
         out = T(v.asNumber());
     } else if constexpr (std::is_same<T, std::string>::value) {
         out = v.asString();
     } else if constexpr (detail::flatWidth<T>() != 0) {
-        if (!detail::floats(v.asArray(), where, why)) return false;
         detail::flatIn(v.asArray(), 0, out);
     } else if constexpr (detail::IsOptional<T>::value) {
         if (v.isNull()) out.reset();
@@ -245,12 +231,7 @@ template <class T> bool fromValue(const Value &v, T &out, const std::string &whe
         using E = typename std::decay<decltype(*std::begin(out))>::type;
         const Value::Array &a = v.asArray();
         constexpr unsigned w = detail::flatWidth<E>();
-        const std::size_t n = w ? a.size() / w : a.size();
-        if (w && a.size() % w) {
-            why = where + " holds " + std::to_string(a.size()) + " numbers, not " + std::to_string(w) + " an element";
-            return false;
-        }
-        if (w && !detail::floats(a, where, why)) return false;
+        const std::size_t n = w ? a.size() / w : a.size();   // (a multiple of w: the registry checked the stride)
         if constexpr (detail::IsVector<T>::value) out.assign(n, E{});
         for (std::size_t i = 0; i < n; ++i) {
             if constexpr (w != 0) detail::flatIn(a, i * w, out[i]);

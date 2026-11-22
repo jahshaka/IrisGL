@@ -3,6 +3,7 @@
 #include "jahshaka/engine/Script.h"
 
 #include <atomic>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -187,6 +188,18 @@ Param Param::allowNonFinite() const
 {
     Param p = *this;
     p.nonFinite = true;
+    return p;
+}
+Param Param::asFloat() const
+{
+    Param p = *this;
+    p.single = true;
+    return p;
+}
+Param Param::flat(unsigned numbersEach) const
+{
+    Param p = *this;
+    p.stride = numbersEach;
     return p;
 }
 
@@ -449,6 +462,10 @@ bool inDomain(const Param &p, double v, const Where &where, std::string &why)
         why = whereText(where) + " is not a finite number (" + numberText(v) + ")";
         return false;
     }
+    if (p.single && std::fabs(v) > double(FLT_MAX) && !nonFiniteBits(v)) {
+        why = whereText(where) + " " + numberText(v) + " is beyond a float";
+        return false;
+    }
     if ((p.min && (v < *p.min || (p.minExclusive && v == *p.min))) || (p.max && v > *p.max)) {
         why = whereText(where) + " " + numberText(v) + " is outside" + domainText(p);
         return false;
@@ -460,13 +477,15 @@ std::string paramText(const Param &p)
 {
     std::string t = p.name + (p.target ? ": target " : ": ");
     if (p.kind == Kind::Array) {
-        t += !p.handle.empty() ? p.handle + " handle" : p.element == Kind::Object ? "object" : kindName(p.element);
-        t += p.count ? "[" + std::to_string(p.count) + "]" : "[]";
-        if (p.maxCount) t += " <= " + std::to_string(p.maxCount);
+        t += !p.handle.empty() ? p.handle + " handle"
+             : p.element == Kind::Object ? "object"
+             : p.single && p.element == Kind::Number ? "float" : kindName(p.element);
+        t += p.count ? "[" + std::to_string(p.count) + "]" : p.stride > 1 ? "[" + std::to_string(p.stride) + "n]" : "[]";
+        if (p.maxCount) t += " <= " + std::to_string(p.maxCount) + (p.stride > 1 ? " numbers" : "");
     } else if (!p.handle.empty()) {
         t += p.handle + " handle";
     } else {
-        t += kindName(p.kind);
+        t += p.single && p.kind == Kind::Number ? "float" : kindName(p.kind);
     }
     t += domainText(p);
     if (!p.fields.empty()) {
@@ -542,6 +561,11 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, Value &in, cons
         if (p.maxCount && a.size() > p.maxCount) {
             why = whereText(where) + " holds " + std::to_string(a.size()) + " elements, at most " +
                   std::to_string(p.maxCount);
+            return false;
+        }
+        if (p.stride > 1 && a.size() % p.stride) {
+            why = whereText(where) + " holds " + std::to_string(a.size()) + " numbers, not a multiple of " +
+                  std::to_string(p.stride);
             return false;
         }
         for (size_t i = 0; i < a.size(); ++i) {   // each element checked IN PLACE: the array is moved, never rebuilt

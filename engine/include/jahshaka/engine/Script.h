@@ -126,6 +126,12 @@ struct Param {
     std::string unit;                   ///< a number's unit ("px", "m", "frames"): documentation
     /// Kind::Number: NaN and infinity are FAILED (read by their bits) unless this says the parameter takes them.
     bool nonFinite = false;
+    /// Kind::Number (an array's elements too): SINGLE PRECISION - printed `float`, and a number past a float's range
+    /// FAILS by name (it would narrow to an infinity, silently).
+    bool single = false;
+    /// Kind::Array: a FLAT array of items of `stride` numbers each (a Vec3 is 3): printed `float[3n] <= N numbers`
+    /// (count and maxCount count NUMBERS), and a length that is no multiple of the stride FAILS by name. 0 = not flat.
+    unsigned stride = 0;
     Param oneOf(std::vector<std::string> values) const;
     Param range(double lo, double hi) const;
     Param atLeast(double lo) const;
@@ -133,6 +139,8 @@ struct Param {
     Param upTo(unsigned elements) const;   ///< an array's maxCount
     Param in(std::string unitName) const;
     Param allowNonFinite() const;
+    Param asFloat() const;                 ///< single precision
+    Param flat(unsigned numbersEach) const;   ///< a flat array, `numbersEach` numbers an item
 };
 /// A required parameter; one with its default.
 Param arg(std::string name, Kind kind);

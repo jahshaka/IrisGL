@@ -53,9 +53,9 @@ void registerNodeCommands(Host &host, const Commands &k)
            {Access::Changes,
             {target(handle("scene", kScene)),
              object("transforms", {handles("nodes", kNode).upTo(kBatch),
-                                   arg("positions", Kind::Array, Value()).upTo(3 * kBatch),
-                                   arg("rotations", Kind::Array, Value()).upTo(4 * kBatch),
-                                   arg("scales", Kind::Array, Value()).upTo(3 * kBatch)})},
+                                   arg("positions", Kind::Array, Value()).upTo(3 * kBatch).flat(3).asFloat(),
+                                   arg("rotations", Kind::Array, Value()).upTo(4 * kBatch).flat(4).asFloat(),
+                                   arg("scales", Kind::Array, Value()).upTo(3 * kBatch).flat(3).asFloat()})},
             Kind::Null},
            "The local transforms of N nodes in one call, as engine.node.setTransform sets one: positions (3 N numbers), "
            "rotations (4 N: quaternions x, y, z, w) and scales (3 N), node i's at 3 i / 4 i / 3 i. A part left out is "
