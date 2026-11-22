@@ -198,8 +198,17 @@ bool fromJsObject(JSContext *ctx, JSValueConst v, const Place &at, Budget &budge
             return false;
         }
         if (JS_IsUndefined(m.get())) continue;
-        const OwnedCString name{ctx, JS_AtomToCString(ctx, props[i].atom)};
-        const std::string key = name.s ? name.s : "";
+        size_t length = 0;
+        const OwnedCString name{ctx, JS_AtomToCStringLen(ctx, &length, props[i].atom)};
+        if (!name.s) {
+            why = takeException(ctx);
+            return false;
+        }
+        const std::string key(name.s, length);
+        if (key.find('\0') != std::string::npos) {   // (never cut at it: 'v\0x' is not the member v)
+            why = placeText(at) + " has a member name holding a NUL character: it cannot be carried";
+            return false;
+        }
         const Param *declared = nullptr;   // the member of that name, or none (open: taken; else the registry FAILS it)
         for (const Param &f : fields)
             if (f.name == key) declared = &f;
@@ -247,10 +256,16 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Val
             return false;
         }
         if (!budget.spend(std::size_t(units), at, why)) return false;
-        std::string text = toUtf8(ctx, v);
-        const std::size_t extra = text.size() > std::size_t(units) ? text.size() - std::size_t(units) : 0;
-        if (!budget.spend(extra, at, why)) return false;   // (UTF-8's bytes past one a unit)
-        out = Value(std::move(text));
+        // ITS UTF-8 made in the JS engine's heap (under the host's heap limit), its bytes past one a unit judged, and
+        // only then copied into the host's
+        size_t n = 0;
+        const OwnedCString text{ctx, JS_ToCStringLen(ctx, &n, v)};
+        if (!text.s) {
+            why = takeException(ctx);
+            return false;
+        }
+        if (!budget.spend(n > std::size_t(units) ? n - std::size_t(units) : 0, at, why)) return false;
+        out = Value(std::string(text.s, n));
         return true;
     }
     if (JS_IsSymbol(v) || JS_IsFunction(ctx, v)) {
@@ -261,8 +276,12 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Val
     if (buffer || JS_GetTypedArrayType(v) == JS_TYPED_ARRAY_UINT8) {
         size_t n = 0;
         const uint8_t *p = buffer ? JS_GetArrayBuffer(ctx, &n, v) : JS_GetUint8Array(ctx, &n, v);
-        if (!budget.spend(p ? n : 0, at, why)) return false;
-        out = Value::bytes(Value::Bytes(p, p + (p ? n : 0)));
+        if (!p) {   // a detached buffer, a view past its buffer's end: the engine's own error, taken - never empty bytes
+            why = placeText(at) + ": " + takeException(ctx);
+            return false;
+        }
+        if (!budget.spend(n, at, why)) return false;
+        out = Value::bytes(Value::Bytes(p, p + n));
         return true;
     }
     // THE LAW AT THE DOOR (D1): before any branch that could list an own key, at every place, declared or not

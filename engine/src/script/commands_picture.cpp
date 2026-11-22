@@ -2,8 +2,8 @@
 // answer, or engine.picture.create's) is held NATIVELY by the host and addressed by a picture handle: its reductions
 // (hash, columnStep, mean) read it in place - the script language is an interpreter, a pixel loop is never a script's,
 // and no picture crosses into the script unless engine.picture.bytes asks (one copy, then). A picture LIVES ACROSS
-// CALLS until engine.picture.release (MCP-ON-HOST-1: a session drives the host call by call); jahengine releases every
-// one at its script's end. THE CAP: the live pictures hold at most the host's Options::pictureBytesCap (512 MiB unless
+// CALLS until engine.picture.release (MCP-ON-HOST-1: a session drives the host call by call); the host's end releases
+// every one. THE CAP: the live pictures hold at most the host's Options::pictureBytesCap (512 MiB unless
 // its caller says otherwise) - a picture past it FAILS by name (release one first).
 #include "script/commands.h"
 

@@ -34,6 +34,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -169,7 +170,10 @@ template <class T> Value toValue(const T &v)
     } else if constexpr (std::is_enum<T>::value) {
         for (const auto &n : EnumNames<T>::all())
             if (n.first == v) return Value(n.second);
-        return Value(std::int64_t(v));   // an unnamed value (its table is incomplete: the round-trip case finds it)
+        // an unnamed value FAILS by name (never an integer under a declared string): the call that answers it is
+        // Failed, "<command>: threw: ..." (Registry catches a command's exception)
+        throw std::logic_error("the enum value " + std::to_string(std::int64_t(v)) + " has no name in its table "
+                               "(JAH_ENUM_NAMES)");
     } else if constexpr (std::is_integral<T>::value) {
         return Value(std::int64_t(v));
     } else if constexpr (std::is_floating_point<T>::value) {

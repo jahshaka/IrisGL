@@ -283,6 +283,7 @@ std::int64_t Registry::name(const std::string &kind, std::uint32_t id, std::stri
                         "from an id";
         return 0;
     }
+    mKindNamed[k - 1] = true;   // (a minted kind is NAMED from now on: a later binding of it to a type is a FAULT)
     return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(id));
 }
 

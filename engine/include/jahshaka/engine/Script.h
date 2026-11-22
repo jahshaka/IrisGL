@@ -309,7 +309,8 @@ public:
     std::int64_t name(const std::string &kind, std::uint32_t id, std::string *why = nullptr);
     /// Releases a held handle: false when it names no live held object of this registry.
     bool release(std::int64_t handle);
-    /// Releases every scoped handle: the caller's at ITS end (jahengine, at its script's end). Host::run never calls it.
+    /// Releases every scoped handle (a picture), before the registry's own end releases every held object: a caller
+    /// that drives the host call by call frees them at ITS end (MCP-ON-HOST-1's session). Host::run never calls it.
     void releaseScoped();
     /// The T of a live held handle - read through its kind's bound type: null when the handle is not live, or its kind
     /// holds another C++ type than T.
