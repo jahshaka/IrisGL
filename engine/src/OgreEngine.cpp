@@ -621,7 +621,7 @@ void OgreEngine::drainPendingSceneDestroys() noexcept {
 
 View *OgreEngine::createView(const std::string &name,
                              NativeWindowHandle handle, unsigned width, unsigned height,
-                             const Colour &background) {
+                             const Colour &background, unsigned samples) {
     // THE FIRST JOIN (U3 stage 4b): the window's surface is made on the render thread; the host posted the winId and
     // waits (Qt's rule: the native window exists and outlives the surface).
     // ...and its refusal is moved into the host's error at the rendezvous (decision 44): the host never reads the
@@ -631,7 +631,7 @@ View *OgreEngine::createView(const std::string &name,
         mRenderThread.runOn([&] {
             EngineSideScope engineSide;
             applyPendingEngineMessages();
-            made = createView(name, handle, width, height, background);
+            made = createView(name, handle, width, height, background, samples);
             moveErrorToHost();
         });
         return made;
@@ -642,7 +642,7 @@ View *OgreEngine::createView(const std::string &name,
         // A polite, documented refusal (Config.h EngineConfig::headless), not a
         // crash and not a View that draws nothing: the NULL render system has
         // no swapchain and no device to present with.
-        (void)handle; (void)width; (void)height; (void)background;
+        (void)handle; (void)width; (void)height; (void)background; (void)samples;
         mLastError = "createView('" + name + "'): this engine is headless (NULL render system) "
                      "— it has no window system and renders nothing";
         return nullptr;
@@ -650,7 +650,7 @@ View *OgreEngine::createView(const std::string &name,
 #if !defined(__linux__) && !defined(__APPLE__)
     // On-screen views need a native Vulkan window backend; this platform has
     // none yet. Offscreen views and the null window (headless) work everywhere.
-    (void)handle; (void)width; (void)height; (void)background;
+    (void)handle; (void)width; (void)height; (void)background; (void)samples;
     mLastError = "createView: on-screen engine views are not yet supported on this platform "
                  "(headless/offscreen rendering is available)";
     return nullptr;
@@ -722,7 +722,9 @@ View *OgreEngine::createView(const std::string &name,
         params["vsync_method"] = "Lowest Latency";
         // MSAA: the FSAA misc param must be passed at EVERY window creation —
         // here AND in the resize lambda below, or a resize silently resets it.
-        params["FSAA"] = Ogre::StringConverter::toString(mDefaultSamples);
+        // BORN AT THE PICTURE's COUNT (`samples`, Engine.h): the host's, else the config's.
+        const unsigned born = samples ? OgreView::sanitizeSamples(samples) : mDefaultSamples;
+        params["FSAA"] = Ogre::StringConverter::toString(born);
         Ogre::Window *window = mRoot->createRenderWindow(name, width, height, false, &params);
         noteDevice();   // the device exists from here (Engine::deviceInfo / rayQueryAvailable)
         // THE WINDOW's SHAPE, said (windowTargetShape's answer for the same window is read against it).
@@ -742,7 +744,7 @@ View *OgreEngine::createView(const std::string &name,
         syncHostViews();
         OgreView *view = mViews.back().get();
         view->mEngine = this;
-        view->mRequestedSamples = mDefaultSamples;
+        view->mRequestedSamples = born;
 #ifdef __APPLE__
         // No mCreateWindow on macOS (D2): VulkanMetalWindow implements
         // requestResolution/setFsaa by resizing its layer and rebuilding its own

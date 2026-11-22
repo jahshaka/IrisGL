@@ -2016,9 +2016,13 @@ public:
     /// pushed. Points == pixels on every unscaled display, so
     /// the two only diverge on HiDPI, which is its own program and not handled
     /// anywhere in this tree yet (deep audit area 7 F4).
+    ///
+    /// `samples`: the window's MSAA count AT BIRTH (0 = EngineConfig::sampleCount). A host that knows the count of the
+    /// picture the window will show gives it, so the window is never recreated for it (Vulkan has no runtime setFsaa: a
+    /// later View::setSampleCount recreates the window and its swapchain) and draws no frame at a shape it does not keep.
     virtual View  *createView(const std::string &name,
                               NativeWindowHandle, unsigned width, unsigned height,
-                              const Colour &background) = 0;
+                              const Colour &background, unsigned samples = 0) = 0;
     /// An offscreen View: renders to a texture instead of a window. Needs no native
     /// handle, so it works headless. Used for thumbnails, asset previews and tests.
     /// `contract` (View::setOffscreenContract: StillPicture or Live) is REQUIRED and is the view's from its first

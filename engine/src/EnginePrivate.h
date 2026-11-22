@@ -8913,7 +8913,7 @@ public:
 
     View *createView(const std::string &name,
                      NativeWindowHandle handle, unsigned width, unsigned height,
-                     const Colour &background) override;
+                     const Colour &background, unsigned samples = 0) override;
 
     View *createOffscreenView(const std::string &name, unsigned width, unsigned height,
                               const Colour &background, OffscreenContract contract,
