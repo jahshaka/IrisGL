@@ -14,10 +14,10 @@
 // THE CONVERSIONS. JS -> Value: undefined and null -> null (a trailing undefined argument is an absent one); a boolean;
 // a number -> Int when it is integral, not -0 and of magnitude <= 2^53, else Number; a BigInt -> Int (outside int64 an
 // error); a string -> UTF-8; an Array -> array; an ArrayBuffer or a Uint8Array -> bytes; any other typed array, a
-// DataView, a String object and an arguments object -> an error, at any place (refusedClass: quickjs would list their
-// indices before a bound is judged); any other object -> an object of its own enumerable string keys in their order (a
-// member holding undefined is absent). A function or a symbol is an error. Value -> JS: an Int of magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a Uint8Array; the rest
-// by kind.
+// DataView, a String object, an arguments object and a Proxy -> an error, at any place (refusedClass: quickjs would
+// list their indices before a bound is judged); any other object -> an object of its own enumerable string keys in
+// their order (a member holding undefined is absent). A function or a symbol is an error. Value -> JS: an Int of
+// magnitude <= 2^53 -> a number, a larger one -> a BigInt; bytes -> a Uint8Array; the rest by kind.
 //
 // THE ONE BOUNDED CONVERSION, JS -> Value (SCRIPT-IN-ENGINE-1 2b; the 2a final read's L1: a script's `a.length = 4e9`
 // costs it nothing and would cost the host 4e9 values): `convert` is the only door, and its caller states its
@@ -146,14 +146,18 @@ bool fromJs(JSContext *ctx, JSValueConst v, const Place &at, Budget &budget, Val
 /// and filled, quickjs.c:9575-9612) before a caller could judge a single bound: `new Int8Array(0x7fffffff)` costs the
 /// script a lazy 2 GiB and its listing ~16 GiB, a String over a rope of 2^30 units a few nodes and 8 GiB. So every
 /// typed array but the one carried kind (a Uint8Array is bytes: taken before this is asked), every arguments object
-/// (mapped and strict), the String object, and a DataView (else carried silently as an empty object) cannot be
-/// carried. The String and Arguments class ids are read from the runtime BY NAME, never copied from quickjs's private
+/// (mapped and strict), the String object, a DataView (else carried silently as an empty object) and a Proxy cannot
+/// be carried. The String and Arguments class ids are read from the runtime BY NAME, never copied from quickjs's private
 /// enum: quickjs's own classes carry the same ids in every runtime (JS_NewRuntime registers its one table in order,
 /// quickjs.c:2351), so the first runtime's reading serves the process.
 std::string refusedClass(JSContext *ctx, JSValueConst v)
 {
     const JSClassID id = JS_GetClassID(v);
     if (id == JS_INVALID_CLASS_ID) return std::string();
+    // A PROXY (2b's re-read R1): its class passes every test below (its class name is "Object"), and with no ownKeys
+    // trap the JS engine lists its TARGET's keys - a Proxy over a typed array lists every index - or whatever its own
+    // trap answers; no command takes one
+    if (JS_IsProxy(v)) return "Proxy";
     JSRuntime *rt = JS_GetRuntime(ctx);
     const auto nameOf = [ctx, rt](JSClassID c) {
         const JSAtom a = JS_GetClassName(rt, c);

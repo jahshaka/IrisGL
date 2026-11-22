@@ -397,6 +397,11 @@ public:
         /// can burn about 0.041 s x (limit in MiB)^2: 4 MiB 0.6 s, 16 MiB ~10 s, 64 MiB ~170 s, the default 1168 MiB
         /// ~15 h. An outside client's host chooses its limit knowing it; the fix (a patch at configure) is homed with
         /// MCP-ON-HOST-1, before an outside client is exposed.
+        /// A SECOND NAMED LIMIT: a string or member-name conversion refused by this limit LEAKS that string for the
+        /// runtime's life (the vendored JS engine at d7215b0: its C-string conversion frees nothing on that failure) -
+        /// a long-lived host's heap shrinks one failed call at a time; a host with a fresh realm per run loses it per
+        /// run. Its kept reproduction is in spikes/script-in-engine-1/stage2b/ (the C-string leak); the patch is homed
+        /// at MCP-ON-HOST-1 with the one above.
         static constexpr std::size_t kHeapFloor = std::size_t(16) << 20;
         std::size_t memoryLimit = 0;
         std::size_t heapLimit() const
@@ -485,6 +490,8 @@ namespace script {
 /// is the authority), and the scene's settings (ambient, GI) not at all; the script may make its own objects in it. A
 /// VIEW is the script's to drive (bind a scene, place, post-fx, declare, read), never to destroy; its owner restores
 /// its own state when it takes the view back. (Not built: a scene handed in WRITABLE - the app's, when it comes.)
+/// engine.arm STAYS OPEN in such a host (the lab's scripts and the tests measure with arms on purpose): an arm is
+/// ENGINE-WIDE - it changes what the owner's own scenes draw - so a host for an OUTSIDE client refuses it (the MCP's).
 /// WHAT IS HANDED IN OUTLIVES THE HOST (the owner's duty, as the host's own before its engine): the host holds the
 /// handed-in Scene* and View* - its end removes what it made in such a scene, and a route declared on such a view is
 /// judged at every frame - so an owner that destroys one before the host ends leaves the host touching freed memory.
