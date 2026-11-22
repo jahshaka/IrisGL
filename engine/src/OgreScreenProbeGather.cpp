@@ -1647,22 +1647,20 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // overlay, the field's two atlases, the hit set - are made BEFORE any state this frame advances (the view's age, its rest, its
     // flip): a texture not resident or with no image refuses the dispatch, said once, counted, and the frame is
     // incomplete (PublishedFrame::Completeness bit 5). The cache answers the later lookups of the same views.
-    {
-        using detail::RayViewKind;
-        if (!mHost.gatherInputsMade("the probe gather", { mHost.gatherView(in.normals, RayViewKind::LayerSampled),
-                                                          mHost.gatherView(in.depth, RayViewKind::LayerSampled),
-                                                          mHost.gatherView(in.shadowRough, RayViewKind::LayerSampled) }))
-            return;
-    }
-    if (in.photonOverlay &&
-        !mHost.gatherInputsMade("the probe gather (the photon overlay)",
-                                { mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage) }))
-        return;
-    if (in.fieldIrradiance && in.fieldDepth &&
-        !mHost.gatherInputsMade("the probe gather (the field)",
-                                { mHost.gatherView(in.fieldIrradiance, detail::RayViewKind::Sampled),
-                                  mHost.gatherView(in.fieldDepth, detail::RayViewKind::Sampled) }))
-        return;
+    // The views are kept and bound below (no second lookup); its own images are made or the gather fails, and the
+    // stand-ins with them: never null below.
+    const VkImageView normalsView = mHost.gatherView(in.normals, detail::RayViewKind::LayerSampled);
+    const VkImageView depthView = mHost.gatherView(in.depth, detail::RayViewKind::LayerSampled);
+    const VkImageView shadowRoughView = mHost.gatherView(in.shadowRough, detail::RayViewKind::LayerSampled);
+    if (!mHost.gatherInputsMade("the probe gather", { normalsView, depthView, shadowRoughView })) return;
+    const VkImageView photonView =
+        in.photonOverlay ? mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage) : VK_NULL_HANDLE;
+    if (in.photonOverlay && !mHost.gatherInputsMade("the probe gather (the photon overlay)", { photonView })) return;
+    const bool field = in.fieldIrradiance && in.fieldDepth;
+    const VkImageView fieldViews[2] = {
+        field ? mHost.gatherView(in.fieldIrradiance, detail::RayViewKind::Sampled) : VK_NULL_HANDLE,
+        field ? mHost.gatherView(in.fieldDepth, detail::RayViewKind::Sampled) : VK_NULL_HANDLE };
+    if (field && !mHost.gatherInputsMade("the probe gather (the field)", { fieldViews[0], fieldViews[1] })) return;
     if (!hitSetInputsMade(mHost, "the probe gather (its hit set)", in.hits)) return;
     const auto cpuStart = Clock::now();
 
@@ -2152,7 +2150,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     // ---- THE DESCRIPTOR SETS, rewritten every frame ------------------------
     // The views of Ogre textures come out of the tier's one cache (RayQueryViewCache.h, GATHER-HANG-1): made once
     // per texture and kind on the image they are built on, retired by the tier when that image goes.
-    const auto sampledView = [this](Ogre::TextureGpu *t) { return mHost.gatherView(t, detail::RayViewKind::Sampled); };
     VkImageView dummyCube = VK_NULL_HANDLE, dummyVolume = VK_NULL_HANDLE,
                 dummyFlat = VK_NULL_HANDLE;
     VkBuffer dummyStorage = VK_NULL_HANDLE;
@@ -2180,18 +2177,16 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     cellStoreInfo.range = VK_WHOLE_SIZE;
     VkDescriptorImageInfo normals{}, depth{};
     normals.sampler = mHost.gatherPointSampler();
-    normals.imageView = mHost.gatherView(in.normals, detail::RayViewKind::LayerSampled);
+    normals.imageView = normalsView;
     normals.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     depth.sampler = mHost.gatherPointSampler();
-    depth.imageView = mHost.gatherView(in.depth, detail::RayViewKind::LayerSampled);
+    depth.imageView = depthView;
     depth.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     // THE PREPASS'S SHADOW / ROUGHNESS (7-3: the rough specular's roughness, point-sampled as the reflection reads it)
     VkDescriptorImageInfo shadowRough{};
     shadowRough.sampler = mHost.gatherPointSampler();
-    shadowRough.imageView = mHost.gatherView(in.shadowRough, detail::RayViewKind::LayerSampled);
+    shadowRough.imageView = shadowRoughView;
     shadowRough.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    if (!mHost.gatherInputsMade("the probe gather", { normals.imageView, depth.imageView, shadowRough.imageView }))
-        return;
 
     {   // the placement set
         VkWriteDescriptorSet w[kPlaceBindings] = {};
@@ -2227,7 +2222,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
     VkDescriptorImageInfo irradianceStore{};
     irradianceStore.imageView = mHost.gatherView(v.irradiance, detail::RayViewKind::LayerStorage);
     irradianceStore.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    if (!mHost.gatherInputsMade("the probe gather (its irradiance)", { irradianceStore.imageView })) return;
     {   // the trace set: its own six, then THE HIT SET (the one writer, HitSetWrite: kTraceHitSlots)
         VkWriteDescriptorSet w[kTraceBindings] = {};
         for (unsigned i = 0; i < kTraceBindings; ++i) {
@@ -2259,9 +2253,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         VkDescriptorImageInfo hitsOverlay{};
         hitsOverlay.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         hitsOverlay.imageView = irradianceStore.imageView;
-        if (in.photonOverlay && in.photonOverlayGatherHits)
-            hitsOverlay.imageView = mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage);
-        if (!mHost.gatherInputsMade("the probe gather (its hits overlay)", { hitsOverlay.imageView })) return;
+        if (in.photonOverlay && in.photonOverlayGatherHits) hitsOverlay.imageView = photonView;
         w[kTraceOverlayBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kTraceOverlayBinding].pImageInfo = &hitsOverlay;
         w[kTraceClockBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2347,10 +2339,7 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         VkDescriptorImageInfo photon{};
         photon.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         photon.imageView = irradianceStore.imageView;
-        if (in.photonOverlay) {
-            photon.imageView = mHost.gatherView(in.photonOverlay, detail::RayViewKind::LayerStorage);
-            if (!mHost.gatherInputsMade("the probe gather (the photon overlay)", { photon.imageView })) return;
-        }
+        if (in.photonOverlay) photon.imageView = photonView;
         w[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[8].pImageInfo = &photon;
         w[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -2358,12 +2347,10 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         // THE IRRADIANCE FIELD'S TWO ATLASES (10, 11; 7-2), bilinear and clamped as the pass reads them - or the flat
         // stand-in where no field is bound (the shader reads none: fieldWin.w 0)
         VkDescriptorImageInfo fieldImgs[2] = {};
-        Ogre::TextureGpu *fieldTex[2] = { in.fieldIrradiance, in.fieldDepth };
         for (unsigned k = 0; k < 2u; ++k) {
             fieldImgs[k].sampler = mHost.gatherLinearSampler();
-            fieldImgs[k].imageView = in.fieldIrradiance && in.fieldDepth ? sampledView(fieldTex[k]) : dummyFlat;
+            fieldImgs[k].imageView = field ? fieldViews[k] : dummyFlat;
             fieldImgs[k].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            if (!mHost.gatherInputsMade("the probe gather (the field)", { fieldImgs[k].imageView })) return;
             w[10 + k].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             w[10 + k].pImageInfo = &fieldImgs[k];
         }
@@ -2381,7 +2368,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         VkDescriptorImageInfo roughOut{};
         roughOut.imageView = mHost.gatherView(v.roughSpec, detail::RayViewKind::LayerStorage);
         roughOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        if (!mHost.gatherInputsMade("the probe gather (its rough specular)", { roughOut.imageView })) return;
         w[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[14].pImageInfo = &roughOut;
         VkDescriptorImageInfo roughHist[2] = {};
@@ -2407,7 +2393,6 @@ void ScreenProbeGather::record(const void *key, const GatherInputs &in) {
         VkDescriptorImageInfo skyOut{};
         skyOut.imageView = mHost.gatherView(v.skyVis, detail::RayViewKind::LayerStorage);
         skyOut.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-        if (!mHost.gatherInputsMade("the probe gather (its sky visibility)", { skyOut.imageView })) return;
         w[kIntegrateSkyVisBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[kIntegrateSkyVisBinding].pImageInfo = &skyOut;
         w[kIntegrateClockBinding].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
