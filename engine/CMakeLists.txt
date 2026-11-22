@@ -135,7 +135,13 @@ set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_node.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_view.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_picture.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_picture.cpp
+    # 2c's split: one file a family, empty until its builder fills it
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_material.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_light.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_effects.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_atom.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_status.cpp)
 set(JAHSHAKA_ENGINE_SCRIPT_SOURCES "${JAHSHAKA_ENGINE_SCRIPT_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------

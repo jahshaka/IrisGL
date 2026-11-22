@@ -113,5 +113,11 @@ void registerViewCommands(Host &host, const Commands &k);
 void registerGiCommands(Host &host, const Commands &k);
 void registerPictureCommands(Host &host, const Commands &k);
 void registerFrameCommands(Host &host, const Commands &k);
+// 2c's split (each family's builder fills its own file; 2d's status family last)
+void registerMaterialCommands(Host &host, const Commands &k);
+void registerLightCommands(Host &host, const Commands &k);
+void registerEffectsCommands(Host &host, const Commands &k);
+void registerAtomCommands(Host &host, const Commands &k);
+void registerStatusCommands(Host &host, const Commands &k);
 
 }}}  // namespace jahshaka::engine::script

@@ -219,6 +219,11 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     registerGiCommands(host, k);
     registerFrameCommands(host, k);
     registerPictureCommands(host, k);
+    registerMaterialCommands(host, k);
+    registerLightCommands(host, k);
+    registerEffectsCommands(host, k);
+    registerAtomCommands(host, k);
+    registerStatusCommands(host, k);
     // THE EXISTENCE OF THE ENGINE's OWN IDS (THE HANDLES, Script.h; the lead's S1): a node, mesh or material handle names
     // the engine's id, and the ENGINE is asked (Scene::nodePresence...) whether its scene - the command's first target -
     // holds it now: a dead or foreign id FAILS by name before the command runs (Scene::setNodeTransform would ignore
