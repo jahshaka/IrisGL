@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -168,6 +169,45 @@ private:
     struct Entry { CommandInfo info; CommandFn fn; };
     std::vector<Entry> mEntries;
     std::string mLastError;
+};
+
+/// THE HOST — one per process (the process makes it; every Engine registers its commands into its registry, so a
+/// process whose engine failed to start still has a host that can say why). It runs a script on the CALLING thread and
+/// every command inline; a host whose scripts run on another thread than the engine's (Studio, later) installs an
+/// EXECUTOR that carries each command call to the engine's thread. Its own commands: `host.check(ok, what)` (prints
+/// `ok:   <what>` or `FAIL: <what>`, counting the failures) and `host.lastError()` (the registry's last refusal).
+class Host {
+public:
+    using ConsoleSink = std::function<void(const std::string &line)>;
+    using Executor = std::function<void(const std::function<void()> &call)>;
+    Host();
+    ~Host();
+    Host(const Host &) = delete;
+    Host &operator=(const Host &) = delete;
+
+    Registry &registry() { return mRegistry; }
+    /// Where the script's console lines and host.check's lines go (default: stdout, flushed a line).
+    void setConsole(ConsoleSink sink);
+    /// Where a command call runs (default: inline, on the script's thread).
+    void setExecutor(Executor executor);
+    /// Runs JavaScript `source`, `name` its file name in errors. Failed carries an uncaught error's text and its stack
+    /// (the script's line); a command's Failed is a thrown error the script may catch.
+    Result run(const std::string &source, const std::string &name);
+    /// The host.check calls that failed, over every run.
+    int checksFailed() const { return mChecksFailed; }
+
+    /// The language binding's two doors: a command call by name (through the executor) and a console line.
+    Result call(const std::string &name, const Value::Array &args);
+    void print(const std::string &line);
+
+    class Language;   // a script language's binding (private to the engine)
+
+private:
+    Registry mRegistry;
+    ConsoleSink mConsole;
+    Executor mExecutor;
+    int mChecksFailed = 0;
+    std::unique_ptr<Language> mJs;
 };
 
 }}}  // namespace jahshaka::engine::script

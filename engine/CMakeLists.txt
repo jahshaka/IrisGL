@@ -108,8 +108,12 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIrradianceField.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/photon/voxel/PhotonIfdProbeVisualizer.cpp
-    # THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1): the value and the registry (include/jahshaka/engine/Script.h).
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp)
+    # THE ENGINE'S SCRIPT HOST (SCRIPT-IN-ENGINE-1; include/jahshaka/engine/Script.h): the value and the registry, the
+    # host, and the ONE file that names the JavaScript engine (js_quickjs.cpp: source.script_neutral).
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/host.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/js_quickjs.cpp)
 set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------
@@ -907,6 +911,8 @@ target_include_directories(JahshakaEngine
 target_include_directories(JahshakaEngine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
+# The script host's JavaScript engine (SCRIPT-IN-ENGINE-1; irisgl/CMakeLists.txt): PRIVATE, read by src/script/js_quickjs.cpp alone.
+target_link_libraries(JahshakaEngine PRIVATE qjs)
 if(UNIX AND NOT APPLE)
     # Vulkan's XCB windowing path needs a Display* (SDL2x11 param) — backend detail.
     find_package(X11 REQUIRED)

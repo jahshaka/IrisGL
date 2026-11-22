@@ -215,6 +215,19 @@ option(MESHOPT_BUILD_GLTFPACK "" OFF)
 option(MESHOPT_BUILD_SHARED_LIBS "" OFF)
 add_subdirectory_with_folder("Dependencies/MeshOptimizer" thirdparty/meshoptimizer)
 set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# quickjs-ng (SCRIPT-IN-ENGINE-1; MIT, its LICENSE at the submodule's root; pinned at tag v0.18.0): the JavaScript engine
+# of the ENGINE's script host, linked PRIVATE into JahshakaEngine and named in ONE engine file (src/script/js_quickjs.cpp,
+# source.script_neutral). Vendored, never edited: its own CMake as it ships, EXCLUDE_FROM_ALL so only the library its
+# link needs is built (none of its tools, tests or examples), and STATIC (BUILD_SHARED_LIBS off around it, PIC for the
+# shared libraries that link the engine). Its option(BUILD_SHARED_LIBS) honours the variable only under CMP0077 NEW (its
+# own minimum, 3.10, leaves it unset, and the cache holds BUILD_SHARED_LIBS=ON): the default is set for its directory.
+set(_jah_shared_libs ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+add_subdirectory(thirdparty/quickjs-ng EXCLUDE_FROM_ALL)
+unset(CMAKE_POLICY_DEFAULT_CMP0077)
+set(BUILD_SHARED_LIBS ${_jah_shared_libs})
+set_target_properties(qjs PROPERTIES POSITION_INDEPENDENT_CODE ON FOLDER "Dependencies/QuickJS")
 # THE BAKE IS OPTIMISED IN DEBUG TOO (IMPORT-SPEED-1). Debug is the daily driver,
 # and at -O0 the bake's inner loops (the nearest-surface query, the simplifier)
 # call Vec3::operator-, length() and hypot() as real functions: measured on the
