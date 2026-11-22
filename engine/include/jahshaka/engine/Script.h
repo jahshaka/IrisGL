@@ -418,6 +418,10 @@ public:
         /// A DOCUMENTATION-ONLY host (jahengine --list; the MCP server before its first tools/call): its registry
         /// lists every command, and every run and every call FAILS "this host lists commands for documentation only".
         bool documentationOnly = false;
+        /// A FRESH REALM PER RUN (the MCP server's run_script: state across calls is only what a handle names): the
+        /// language made for a run is dropped at its end, so no global of one run survives into the next. Off: one
+        /// realm for the host's life (jahengine runs one script).
+        bool freshRealmPerRun = false;
     };
     Host();   // the default options
     explicit Host(Options options);
