@@ -1,0 +1,38 @@
+JS_ToCStringLen2: the string is freed when its UTF-8 cannot be allocated
+
+Jahshaka's change, MCP-ON-HOST-1 stage 2 (2026-11-23). quickjs-ng at the pinned
+v0.18.0 (d7215b0), file quickjs.c, JS_ToCStringLen2.
+
+The bug
+-------
+js_force_tostring makes (or dups) the string into val. Both `goto fail` after a
+refused js_alloc_string (the 8-bit path that widens non-ASCII bytes, :4902, and
+the 16-bit path, :4920) return WITHOUT JS_FreeValue(ctx, val): the string stays
+referenced for the runtime's life. Under a memory limit (Host::Options::
+memoryLimit) a refused conversion therefore shrinks the heap for good: the kept
+reproduction (SCRIPT-IN-ENGINE-1 2b, spikes/script-in-engine-1/stage2b/
+quickjs-tocstring-leak-repro.txt) - a 1.5 MiB U+00E9 string whose UTF-8 is
+refused under 4 MiB, then a 3 MiB buffer is refused too.
+
+The fix
+-------
+JS_FreeValue(ctx, val) at the fail label: every failure frees what the function
+took. On the first failure (js_force_tostring itself threw) val is JS_EXCEPTION,
+which frees nothing.
+
+Its law (script.host case 12d (bis), ours): the refused conversion FAILS its
+command by name "out of memory", and the next run allocates 3 MiB of the 4 MiB.
+
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -4952,6 +4952,10 @@
+         *plen = str_new->len;
+     return (const char *)str8(str_new);
+ fail:
++    /* JAHSHAKA 0002 (irisgl/thirdparty/quickjs-ng-patches): the string js_force_tostring made (or dup'd) is freed on
++       every failure - js_alloc_string refused past the runtime's memory limit left it referenced for the runtime's
++       life (on the first failure val is JS_EXCEPTION: freeing it is nothing) */
++    JS_FreeValue(ctx, val);
+     if (plen)
+         *plen = 0;
+     return NULL;
