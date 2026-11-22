@@ -923,6 +923,22 @@ set_target_properties(JahshakaEngine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # No Qt in here, ever; the root enables AUTOMOC globally.
 set_target_properties(JahshakaEngine PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 
+# jahengine (SCRIPT-IN-ENGINE-1): THE ENGINE, SCRIPTED, WITH NO STUDIO AND NO QT — `jahengine --script f.js [--test-doors]`
+# (jahengine/main.cpp says the rest). It links the engine library and nothing else of ours: source.script_neutral reads
+# its NEEDED list for Qt. Beside the app in bin/, its plugins and media the build's (the fixtures' two directories).
+add_executable(jahengine ${CMAKE_CURRENT_SOURCE_DIR}/jahengine/main.cpp)
+set_target_properties(jahengine PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    BUILD_RPATH "${OGRE_NEXT_PREFIX}/lib"
+    INSTALL_RPATH "$ORIGIN")
+target_compile_definitions(jahengine PRIVATE
+    JAHENGINE_OGRE_PLUGIN_DIR="${OGRE_NEXT_PLUGIN_DIR}"
+    JAHENGINE_MEDIA_DIR="${JAHSHAKA_MEDIA_DIR}/")
+target_link_libraries(jahengine PRIVATE JahshakaEngine)
+add_dependencies(jahengine JahshakaEngineMedia)
+
 # --- Runtime data: stage the Hlms shader templates next to the executable ----
 # The engine resolves `<exe dir>/media/Hlms/{Common,Pbs,Unlit}` at runtime; the
 # build-machine path is only a fallback default. ~600K, copied when stale.
