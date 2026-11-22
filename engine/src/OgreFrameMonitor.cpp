@@ -1745,15 +1745,18 @@ constexpr ArmDef kArms[] = {
       "as IN FLIGHT until frame f + N, finished or not - a consumer in a scene that compiles in the background takes its "
       "'not this frame' path and the frame's harvest leaves it unjoined; a consumer that joins in its frame, and a wait "
       "for the background compiles, land it at once (a hold is never a wait). A late driver compile on a warm cache. "
-      "0 = shipped." },
+      "0 = shipped.",
+      true },
     { ArmId::RayBuildHoldIds, 0.0, 0.0, 63.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late): the builds rays.buildHold holds, bit k for RayQueryTier's "
       "AheadId k (1 the reflection, 2 the cards' gather, 4 the card movers, 8 the voxel sides, 16 the glass escape, 32 "
-      "the screen-probe gather). 0 = every build." },
+      "the screen-probe gather). 0 = every build.",
+      true },
     { ArmId::RayBuildFail, 0.0, 0.0, 63.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): the builds named, bit k for RayQueryTier's AheadId "
       "k (rays.buildHoldIds' bits), FAIL on their workers - nothing is built, the build reports a failure, and its consumer "
-      "latches it as a pipeline that cannot be made (no reader). Read at each build's launch. 0 = shipped." },
+      "latches it as a pipeline that cannot be made (no reader). Read at each build's launch. 0 = shipped.",
+      true },
     { ArmId::ShaderAsyncFail, 0.0, 0.0, 1.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's failure case): 1 = every object's OWN graphics permutation "
       "requested while on FAILS at its request (the fork's HlmsAsyncCompiler::_jahFailRequests; a placeholder's request "
@@ -1762,7 +1765,8 @@ constexpr ArmDef kArms[] = {
     { ArmId::TextureResidencyHold, 0.0, 0.0, 1.0,
       "A TEST DOOR (COLD-BOOT-1 item 3, gi.card_build_late's texture case): 1 = every texture bound to a material while on "
       "is AWAITED as if its pixels had not landed (PhotonComponent's awaiting list), and nothing on the list settles "
-      "while on - a material wearing a texture still loading, held. 0 = shipped (the list settles the next frame)." },
+      "while on - a material wearing a texture still loading, held. 0 = shipped (the list settles the next frame).",
+      true },
     { ArmId::FrameIncompleteHold, 0.0, 0.0, 1.0,
       "A TEST DOOR (SHADER-SYSTEM-1, COLD-BOOT-1's leftover L2; gi.card_build_late.window): 1 = every scene's drawn frame "
       "is noted INCOMPLETE (PublishedFrame::Completeness term bit 4, the door's own) - a frame that turns incomplete with "
