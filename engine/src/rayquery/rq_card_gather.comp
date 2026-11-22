@@ -159,7 +159,10 @@ void main()
 		surfKey = jahAreaPcg( surfKey ^ floatBitsToUint( frameWords[k] ) );
 	const uvec2 keyT = uvec2( t.x ^ surfKey, t.y ^ jahAreaPcg( surfKey ) );
 	const float depth = inCard ? texelFetch( jahCardDepthLayer, at, 0 ).x : 0.0;
-	const int n = max( int( p.knobs.x ), 1 );
+	// THE RAYS AT THEIR LAW (GATHER-HANG-1 stage 2; CODING_RULES section 2): each ray a trip, each tracing one - the host
+	// writes max( rays, 1 ), the tier's count or the door gi.truthRays' at most 4096 (OgreFrameMonitor.cpp); the float
+	// tested by its bits before it steers
+	const int n = finite1( p.knobs.x ) ? clamp( int( min( p.knobs.x, 4096.0 ) ), 1, 4096 ) : 1;
 
 	uint c[10] = uint[10]( 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u );
 	vec4 answer = vec4( 0.0 );

@@ -141,7 +141,10 @@ const uint kCountRays = 0u, kCountCard = 1u, kCountVoxel = 2u, kCountBack = 3u, 
 vec3 jahSideGatherTlas( vec3 P, vec3 n, float pointError, inout uint c[9], out float share )
 {
 	share = 0.0;
-	const int rays = max( int( p.knobs.x ), 1 );
+	// THE RAYS AT THEIR LAW (GATHER-HANG-1 stage 2; CODING_RULES section 2): each ray a trip, each tracing one - the host
+	// writes max( rays, 1 ), the tier's count or the door gi.truthRays' at most 4096 (OgreFrameMonitor.cpp); the float
+	// tested by its bits before it steers
+	const int rays = finite1( p.knobs.x ) ? clamp( int( min( p.knobs.x, 4096.0 ) ), 1, 4096 ) : 1;
 	const vec3 origin = jahRayOrigin( P, n, 0.0, p.knobs.z );
 	if( jahRayOriginBuried( P, n, origin, pointError, uint( p.knobs.w ) ) )
 	{

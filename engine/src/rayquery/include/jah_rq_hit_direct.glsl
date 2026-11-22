@@ -261,10 +261,19 @@ float jahHitQuadFormFactor( vec3 N, vec3 P, vec3 c0, vec3 c1, vec3 c2, vec3 c3, 
 /// lobe (a mirror floor's sun glint, gi.id_depth), so it takes the lobe's integral mu ( F0 A( mu, r ) + w B( mu, r ) )
 /// - the store's own re-emission, energy-exact in expectation (Lumen's choice for the same reason).
 vec3 jahHitDirectPickSpec = vec3( 0.0 );   // THE PICK (the reds' instrument): the last jahHitDirect's lamp specular part
+/// THE LIGHTS' COUNT AT ITS LAW (GATHER-HANG-1 stage 2, the lead's call 7; CODING_RULES section 2: a count clamped at its
+/// law): each light traces a ray, and the host writes EVERY light of the scene (no budget by design) into the lights'
+/// section u[2] .. u[3] (OgreRayQuery.cpp updateHitTable: u[3] is the first material row's word) - so the count never
+/// exceeds what that section holds and no scene loses a lamp; a header that claims more is not the table the host wrote.
+uint jahHitLightCount( JahHitTableRef T )
+{
+	const uint b = T.u[2], e = T.u[3];
+	return min( T.u[0], e > b ? ( e - b ) / kJahHitLightWords : 0u );
+}
 vec3 jahHitDirect( vec3 P, vec3 N, vec3 V, vec3 albedo, float roughness, vec4 metal )
 {
 	JahHitTableRef T = JahHitTableRef( JAH_HIT_TABLE );
-	const uint count = T.u[0];
+	const uint count = jahHitLightCount( T );
 	const uint base = T.u[2];
 	// THE ONE ORIGIN LAW (jah_ray_origin.glsl): the hit's own float bound (its position, the distance it was carried)
 	// plus its surface term - 0 on level 0, which the casters' near copies are; a far copy's JAH_HIT_FAR_LIFT.
@@ -422,7 +431,7 @@ uint jahHitAreaVisWord( vec3 P, vec3 N, float t, bool far )
 	if( ( a.x | a.y ) == 0u )
 		return 0u;
 	JahHitTableRef T = JahHitTableRef( a );
-	const uint count = T.u[0];
+	const uint count = jahHitLightCount( T );
 	const uint base = T.u[2];
 	const vec3 origin = jahRayOrigin( P, N, t, far ? JAH_HIT_FAR_LIFT : 0.0 );
 	const float lift = length( origin - P );

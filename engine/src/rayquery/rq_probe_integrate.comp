@@ -1019,9 +1019,14 @@ void main()
 	// the irradiance along the surface, which the history's running mean dilutes
 	// frame by frame as the pixel ages (the converged answer is the bilinear's).
 	// NEVER AT REST: the rest mean is the shipped estimator's mean, exactly.
+	// THE REACH AT ITS LAW (GATHER-HANG-1 stage 2; CODING_RULES section 2): it steers the tent's two loops below, so its
+	// floats are tested by their bits, and the reach in cells is held to 64 - the door gather.youngReach's ceiling in
+	// pixels (OgreFrameMonitor.cpp), at a stride of at least one pixel a cell
+	const float youngFrames = finite1( p.young.x ) ? p.young.x : 0.0;
+	const float youngReach = finite1( p.young.y ) ? clamp( p.young.y, 1.0, 64.0 ) : 1.0;
 	float reach = 1.0;
-	if( temporal && gRestK < 1.0 && float( prevCount ) < p.young.x )
-		reach = mix( max( p.young.y, 1.0 ), 1.0, float( prevCount ) / max( p.young.x, 1.0 ) );
+	if( temporal && gRestK < 1.0 && float( prevCount ) < youngFrames )
+		reach = mix( youngReach, 1.0, float( prevCount ) / max( youngFrames, 1.0 ) );
 
 	// THE FOUR GRID PROBES AROUND THE PIXEL: the cells whose centres bracket
 	// it, and the bilinear weights of that bracket. A cell off the grid clamps

@@ -214,7 +214,9 @@ void main()
 			gnCard = r;
 			const vec3 Ng = jahGeometricNormal( ivec2( t ), ivec2( int( size ) ), depth, P, N, r.axisD.xyz );
 			const float lift = jahRayFloatBound( P, depth ) + r.rect.w;
-			for( uint i = 0u; i < lampCount.x; ++i )
+			// (THE COUNT AT ITS LAW, GATHER-HANG-1 stage 2: a lamp a trip, each tracing a ray - never past the records the
+			// buffer the host made holds)
+			for( uint i = 0u; i < min( lampCount.x, uint( lamps.length() ) ); ++i )
 			{
 				const CardLightRec l = lamps[i];
 				if( l.position.w < 0.5 )
