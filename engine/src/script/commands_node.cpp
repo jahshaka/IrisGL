@@ -13,7 +13,18 @@ void registerNodeCommands(Host &host, const Commands &k)
               if (!s) return Value();
               const NodeId id = s->createNode();
               if (!id) return c.refuse(k.st->engine->lastError());
+              noteMade(*k.st, s, MadeKind::Node, id);
               return c.name(kNode, id);
+          });
+    r.add({"engine.node.destroy", {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode))}, Kind::Bool},
+           "Removes a node of the scene (Scene::removeNode: its children go to the scene's root); its handle names "
+           "nothing after."},
+          [k](Call &c) -> Value {
+              Scene *s = k.scene(c, c[0]);
+              if (!s) return Value();
+              if (!s->removeNode(NodeId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
+              forgetMade(*k.st, s, MadeKind::Node, Call::idOf(c[1]));
+              return Value(true);
           });
     r.add({"engine.node.attachMesh",
            {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode)),

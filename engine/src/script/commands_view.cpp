@@ -3,6 +3,7 @@
 #include "script/commands.h"
 #include "jahshaka/engine/EngineInspect.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace jahshaka { namespace engine { namespace script {
@@ -60,7 +61,17 @@ void registerViewCommands(Host &host, const Commands &k)
               View *v = e->createOffscreenView(c[0]["name"].asString(), unsigned(w), unsigned(h),
                                                toColour(c[0]["background"]), OffscreenContract::Live);
               if (!v) return c.refuse(e->lastError());
-              return c.hold(kView, unowned(v));
+              return c.hold(kView, ownedView(k.st, v));
+          });
+    r.add({"engine.view.destroy", {Access::Changes, {target(handle("view", kView))}, Kind::Bool},
+           "Destroys a view a command made (its scene survives); its handle is stale after. A view the host's owner "
+           "handed in is not the script's to destroy: FAILS."},
+          [k](Call &c) -> Value {
+              const View *v = k.view(c, c[0]);
+              if (!v) return Value();
+              if (std::find(k.st->ownedViews.begin(), k.st->ownedViews.end(), v) == k.st->ownedViews.end())
+                  return c.fail("the view '" + v->name() + "' was handed in by the host's owner: not the script's to destroy");
+              return Value(c.registry().release(c[0].asInt()));   // (its deleter destroys it in the engine)
           });
     r.add({"engine.view.setScene", {Access::Changes,
                                     {target(handle("view", kView)), object("bind", {handle("scene", kScene)})}, Kind::Bool},

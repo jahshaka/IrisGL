@@ -76,10 +76,14 @@ int main(int argc, char **argv)
     std::string bootError;
     std::unique_ptr<Engine> engine = Engine::create(cfg, bootError);
 
-    script::Host host(script::Host::Options{});   // its options stated: the 512 MiB picture cap
-    script::registerEngineCommands(host, engine.get(), bootError, testDoors);
-    int failures = host.verdict(host.run(source.str(), scriptPath));
-    host.registry().releaseScoped();   // the script's pictures, released at its end (they live across calls until then)
+    int failures = 0;
+    {
+        // THE HOST DIES BEFORE ITS ENGINE (THE OWNERSHIP LAW, registerEngineCommands): its end destroys what the script
+        // made - the nodes, meshes and materials, the views, the scenes - while the engine lives
+        script::Host host(script::Host::Options{});   // its options stated: the 512 MiB picture cap
+        script::registerEngineCommands(host, engine.get(), bootError, testDoors);
+        failures = host.verdict(host.run(source.str(), scriptPath));
+    }
     if (const unsigned long long failed = Engine::processShaderCompileErrors()) {
         std::printf("FAIL: %llu shader program(s) failed to compile (the readings are of draws that never happened) - see "
                     "%s\n", failed, cfg.logFile.c_str());

@@ -230,6 +230,14 @@ Registry::Registry()
     mSerial = next.fetch_add(1, std::memory_order_relaxed) % kOwnerMask + 1;   // 1..4095
 }
 
+Registry::~Registry()
+{
+    for (auto it = mAtEnd.rbegin(); it != mAtEnd.rend(); ++it) (*it)();
+    for (auto it = mHeld.rbegin(); it != mHeld.rend(); ++it) it->object.reset();
+}
+
+void Registry::atEnd(std::function<void()> hook) { mAtEnd.push_back(std::move(hook)); }
+
 unsigned Registry::kindIndex(const std::string &kind)
 {
     for (size_t i = 0; i < mKinds.size(); ++i)

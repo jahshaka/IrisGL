@@ -25,11 +25,79 @@
 // (3) THE ENGINE's OWN CHAIN RECORD (inspect::ViewEcho::routes) that engine.view.declareRoutes' judgement holds the
 // published row against (the two doors agree: requireRoutes' law). R11 (source.testing_rules) bars that header from
 // Studio's src/ and irisgl/mirror, the hosts; this is the engine's own file.
+//
+// THE OWNERSHIP LAW (2b; the lead, for the lab's fresh host per Run): an engine object A COMMAND MADE is the host's -
+// a scene or a view held OWNED (its release destroys it: engine.scene.destroy / engine.view.destroy, or the host's
+// end), a node, mesh or material RECORDED by its scene and removed at the host's end (a scene the host's owner handed
+// in outlives the host; what a run made in it must not) - nodes first, then the meshes and materials they drew (trap
+// 1's order), then the views, then the scenes (the registry's reverse release). An object the host's OWNER handed in
+// (held unowned, by its owner's call) is never destroyed. THE HOST DIES BEFORE ITS ENGINE (registerEngineCommands'
+// contract): a host that ends after its engine is a named fault (stderr; it aborts a debug build) and calls nothing.
 #include "script/commands.h"
 
 #include "jahshaka/engine/EngineInspect.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+
 namespace jahshaka { namespace engine { namespace script {
+
+namespace {
+/// False, the end's fault said once, when the host's engine is gone (the deleters then call nothing).
+bool engineLive(EngineState &st)
+{
+    if (!st.engine || st.engineGone) return false;
+    if (Engine::isAlive()) return true;
+    st.engineGone = true;
+    std::fprintf(stderr, "FAULT: a script host ended after its engine (registerEngineCommands: the host dies first) - "
+                         "nothing it made is destroyed by it\n");
+#ifndef NDEBUG
+    std::abort();
+#endif
+    return false;
+}
+}  // namespace
+
+std::shared_ptr<Scene> ownedScene(const std::shared_ptr<EngineState> &st, Scene *s)
+{
+    st->ownedScenes.push_back(s);
+    return std::shared_ptr<Scene>(s, [st](Scene *dead) {
+        forgetScene(*st, dead);
+        st->ownedScenes.erase(std::remove(st->ownedScenes.begin(), st->ownedScenes.end(), dead), st->ownedScenes.end());
+        st->declared.erase(std::remove_if(st->declared.begin(), st->declared.end(),
+                                          [dead](const DeclaredRoutes &d) { return d.scene == dead; }),
+                           st->declared.end());
+        if (engineLive(*st)) st->engine->destroyScene(dead);
+    });
+}
+
+std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v)
+{
+    st->ownedViews.push_back(v);
+    return std::shared_ptr<View>(v, [st](View *dead) {
+        st->ownedViews.erase(std::remove(st->ownedViews.begin(), st->ownedViews.end(), dead), st->ownedViews.end());
+        st->declared.erase(std::remove_if(st->declared.begin(), st->declared.end(),
+                                          [dead](const DeclaredRoutes &d) { return d.view == dead; }),
+                           st->declared.end());
+        if (engineLive(*st)) st->engine->destroyView(dead);
+    });
+}
+
+void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id) { st.made.push_back(MadeId{scene, kind, id}); }
+
+void forgetMade(EngineState &st, const Scene *scene, MadeKind kind, std::uint32_t id)
+{
+    st.made.erase(std::remove_if(st.made.begin(), st.made.end(),
+                                 [&](const MadeId &m) { return m.scene == scene && m.kind == kind && m.id == id; }),
+                  st.made.end());
+}
+
+void forgetScene(EngineState &st, const Scene *scene)
+{
+    st.made.erase(std::remove_if(st.made.begin(), st.made.end(), [&](const MadeId &m) { return m.scene == scene; }),
+                  st.made.end());
+}
 
 bool Commands::frame(Call &c) const
 {
@@ -110,6 +178,20 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     st->bootError = std::move(bootError);
     st->testDoors = testDoors;
     st->pictureBytesCap = host.options().pictureBytesCap;
+    // THE HOST's END (THE OWNERSHIP LAW above): what the commands made in a scene they do not own, removed - every node
+    // first (a node draws a mesh and a material), then the meshes, then the materials; the views and scenes they made
+    // follow, released by the registry (the last held first)
+    host.registry().atEnd([st] {
+        if (!engineLive(*st)) return;
+        for (const MadeKind kind : {MadeKind::Node, MadeKind::Mesh, MadeKind::Material})
+            for (auto it = st->made.rbegin(); it != st->made.rend(); ++it) {
+                if (it->kind != kind) continue;
+                if (kind == MadeKind::Node) it->scene->removeNode(NodeId(it->id));
+                else if (kind == MadeKind::Mesh) it->scene->destroyMesh(MeshId(it->id));
+                else it->scene->destroyMaterial(MaterialId(it->id));
+            }
+        st->made.clear();
+    });
     const Commands k(st);
     // THE KINDS BOUND AT REGISTRATION (one kind, one type - never "whoever holds first"): what each held kind's handle
     // names, and the kinds that carry the engine's own ids

@@ -256,6 +256,15 @@ struct Result {
 class Registry {
 public:
     Registry();
+    /// THE REGISTRY's END (SCRIPT-IN-ENGINE-1 2b, THE OWNERSHIP LAW): its end hooks (atEnd), the last added first, then
+    /// every held object released, the last held first - an object a command MADE is owned by its handle (its deleter
+    /// destroys it), one its host's owner HANDED IN is held unowned and survives.
+    ~Registry();
+    Registry(const Registry &) = delete;
+    Registry &operator=(const Registry &) = delete;
+    /// A hook run at the registry's end, before any held object is released (the engine's: the ids its commands made
+    /// in a scene they do not own, removed).
+    void atEnd(std::function<void()> hook);
     /// False (nothing added, the fault kept: validate()) when the name is already registered or the command breaks
     /// validate's rules.
     bool add(CommandInfo info, CommandFn fn);
@@ -334,6 +343,7 @@ private:
     std::vector<bool> mKindNamed;      // index - 1: a NAMED kind (nameKind): it holds no object
     std::vector<HandleCheck> mChecks;  // index - 1
     std::vector<Held> mHeld;           // slot - 1
+    std::vector<std::function<void()>> mAtEnd;
 };
 
 template <class T> Value Call::hold(const std::string &kind, std::shared_ptr<T> object, bool scoped)
@@ -441,7 +451,9 @@ class Engine;
 namespace script {
 /// THE ENGINE REGISTERS INTO THE HOST (src/script/commands_engine.cpp): its `engine.*` commands on `engine`, which the
 /// calling thread created (its commands are called inline), and its judgements into the host's verdict (a route
-/// declaration no frame asserted). A null `engine` (it did not start) still registers them: each FAILS with "the engine
+/// declaration no frame asserted). THE HOST DIES BEFORE `engine`: its end destroys what its commands made (THE
+/// OWNERSHIP LAW: the scenes and views, and the nodes, meshes and materials made in a scene its owner handed in); a
+/// host ending after its engine calls nothing and is a named fault (a debug build aborts). A null `engine` (it did not start) still registers them: each FAILS with "the engine
 /// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open (jahengine --test-doors);
 /// without it engine.arm FAILS on one.
 void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);

@@ -21,6 +21,15 @@ struct DeclaredRoutes {
     int frames = 0;
 };
 
+/// AN ENGINE OBJECT A COMMAND MADE by the engine's own id (a node, mesh or material) in `scene`: removed at the host's
+/// end (THE OWNERSHIP LAW: a scene the host's owner handed in outlives the host, and what a run made in it must not).
+enum class MadeKind { Node, Mesh, Material };
+struct MadeId {
+    Scene *scene = nullptr;
+    MadeKind kind = MadeKind::Node;
+    std::uint32_t id = 0;
+};
+
 struct EngineState {
     Host *host = nullptr;
     Engine *engine = nullptr;
@@ -29,6 +38,13 @@ struct EngineState {
     std::vector<DeclaredRoutes> declared;
     std::size_t pictureBytes = 0;      // the live pictures' bytes (commands_picture.cpp: THE CAP)
     std::size_t pictureBytesCap = 0;   // the cap: the host's option (Host::Options::pictureBytesCap)
+    /// THE OWNERSHIP LAW (2b; commands_engine.cpp says it): the ids the commands made, in order; the scenes and views
+    /// the commands made (owned: destroyed at their release or the host's end - every other held one was handed in);
+    /// and whether the host's end found its engine gone (then nothing calls into it).
+    std::vector<MadeId> made;
+    std::vector<const Scene *> ownedScenes;
+    std::vector<const View *> ownedViews;
+    bool engineGone = false;
 };
 
 inline Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }
@@ -70,8 +86,15 @@ public:
     std::shared_ptr<EngineState> st;
 };
 
-/// An engine object the engine owns, held by a handle that never owns it (the engine destroys it).
-template <class T> std::shared_ptr<T> unowned(T *p) { return std::shared_ptr<T>(p, [](T *) {}); }
+/// A SCENE or a VIEW A COMMAND MADE, held OWNED: its handle's release (the destroy command, or the host's end) destroys
+/// it in the engine - unless the host's end found the engine gone. Recorded as owned (a handed-in one is not).
+std::shared_ptr<Scene> ownedScene(const std::shared_ptr<EngineState> &st, Scene *s);
+std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v);
+/// The made id of `kind` recorded (made) or forgotten (destroyed by its command); forgetScene: every one of a scene
+/// (destroyed with it).
+void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
+void forgetMade(EngineState &st, const Scene *scene, MadeKind kind, std::uint32_t id);
+void forgetScene(EngineState &st, const Scene *scene);
 /// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
 constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material",
                      *kPicture = "picture";

@@ -1,6 +1,8 @@
 // THE SCENE FAMILY (SCRIPT-IN-ENGINE-1): engine.scene.*, and what a scene holds - engine.mesh.*, engine.material.*.
 #include "script/commands.h"
 
+#include <algorithm>
+
 namespace jahshaka { namespace engine { namespace script {
 
 namespace {
@@ -41,7 +43,18 @@ void registerSceneCommands(Host &host, const Commands &k)
               if (!e) return Value();
               Scene *s = e->createScene(c[0].asString());
               if (!s) return c.refuse(e->lastError());
-              return c.hold(kScene, unowned(s));
+              return c.hold(kScene, ownedScene(k.st, s));
+          });
+    r.add({"engine.scene.destroy", {Access::Changes, {target(handle("scene", kScene))}, Kind::Bool},
+           "Destroys a scene a command made, with every node, mesh and material in it (the views showing it stay, "
+           "showing nothing); its handle - and every handle into it - is stale after. A scene the host's owner handed "
+           "in is not the script's to destroy: FAILS."},
+          [k](Call &c) -> Value {
+              const Scene *s = k.scene(c, c[0]);
+              if (!s) return Value();
+              if (std::find(k.st->ownedScenes.begin(), k.st->ownedScenes.end(), s) == k.st->ownedScenes.end())
+                  return c.fail("the scene '" + s->name() + "' was handed in by the host's owner: not the script's to destroy");
+              return Value(c.registry().release(c[0].asInt()));   // (its deleter destroys it in the engine)
           });
     r.add({"engine.scene.setAmbient",
            {Access::Changes,
@@ -58,7 +71,17 @@ void registerSceneCommands(Host &host, const Commands &k)
               if (!s) return Value();
               const MeshId id = s->createMesh(unitCube());
               if (!id) return c.refuse(k.st->engine->lastError());
+              noteMade(*k.st, s, MadeKind::Mesh, id);
               return c.name(kMesh, id);
+          });
+    r.add({"engine.mesh.destroy", {Access::Changes, {target(handle("scene", kScene)), target(handle("mesh", kMesh))}, Kind::Bool},
+           "Destroys a mesh of the scene; its handle names nothing after (a node still drawing it stops)."},
+          [k](Call &c) -> Value {
+              Scene *s = k.scene(c, c[0]);
+              if (!s) return Value();
+              if (!s->destroyMesh(MeshId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
+              forgetMade(*k.st, s, MadeKind::Mesh, Call::idOf(c[1]));
+              return Value(true);
           });
     r.add({"engine.material.createPbr",
            {Access::Changes, {target(handle("scene", kScene)),
@@ -78,7 +101,18 @@ void registerSceneCommands(Host &host, const Commands &k)
               p.emissive = toColour(c[1]["emissive"]);
               const MaterialId id = s->createPbrMaterial(p);
               if (!id) return c.refuse(k.st->engine->lastError());
+              noteMade(*k.st, s, MadeKind::Material, id);
               return c.name(kMaterial, id);
+          });
+    r.add({"engine.material.destroy",
+           {Access::Changes, {target(handle("scene", kScene)), target(handle("material", kMaterial))}, Kind::Bool},
+           "Destroys a material of the scene; its handle names nothing after."},
+          [k](Call &c) -> Value {
+              Scene *s = k.scene(c, c[0]);
+              if (!s) return Value();
+              if (!s->destroyMaterial(MaterialId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
+              forgetMade(*k.st, s, MadeKind::Material, Call::idOf(c[1]));
+              return Value(true);
           });
 }
 
