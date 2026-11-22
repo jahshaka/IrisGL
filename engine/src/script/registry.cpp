@@ -81,6 +81,19 @@ Param arg(std::string name, Kind kind, Value fallback)
     return p;
 }
 
+Param target(std::string name, Kind kind)
+{
+    Param p = arg(std::move(name), kind);
+    p.target = true;
+    return p;
+}
+
+Param target(Param p)
+{
+    p.target = true;
+    return p;
+}
+
 Param numbers(std::string name, unsigned count)
 {
     Param p = arg(std::move(name), Kind::Array);
@@ -102,6 +115,13 @@ Param object(std::string name, std::vector<Param> fields)
     return p;
 }
 
+Param object(std::string name, std::vector<Param> fields, Value fallback)
+{
+    Param p = object(std::move(name), std::move(fields));
+    p.fallback = std::move(fallback);
+    return p;
+}
+
 Param objects(std::string name, std::vector<Param> fields)
 {
     Param p = arg(std::move(name), Kind::Array);
@@ -114,7 +134,7 @@ namespace {
 
 std::string paramText(const Param &p)
 {
-    std::string t = p.name + ": ";
+    std::string t = p.name + (p.target ? ": target " : ": ");
     if (p.kind == Kind::Array) {
         t += p.element == Kind::Object ? "object" : kindName(p.element);
         t += p.count ? "[" + std::to_string(p.count) + "]" : "[]";
@@ -209,8 +229,7 @@ bool conform(const Param &p, const Value &in, const std::string &where, Value &o
             why = where + " is required";
             return false;
         }
-        out = *p.fallback;
-        return true;
+        return conformKind(p.kind, p, *p.fallback, where, out, why);   // a default is checked too: an object's fills
     }
     return conformKind(p.kind, p, in, where, out, why);
 }
@@ -327,6 +346,14 @@ std::vector<std::string> Registry::validate() const
         if (e.info.doc.empty()) out.push_back(e.info.name + ": no doc");
         if (!e.fn) out.push_back(e.info.name + ": no function");
         namesMissing(e.info.name, e.info.signature.params, out);
+        int named = 0;
+        for (const Param &p : e.info.signature.params) {
+            if (p.target && named) out.push_back(e.info.name + ": the target '" + p.name + "' follows a named parameter");
+            if (!p.target) ++named;
+        }
+        if (named > 1)
+            out.push_back(e.info.name + ": " + std::to_string(named) + " positional parameters are not targets (one at "
+                          "most: the rest are members of one options object)");
     }
     return out;
 }

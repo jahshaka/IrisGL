@@ -18,6 +18,11 @@
 //   * an argument is not of its parameter's kind — and a Number is an Int only when it is integral (3.0 is 3; 3.7 FAILS,
 //     it is never truncated);
 //   * the command itself calls Call::fail.
+// THE SHAPE OF A SIGNATURE (the lead's rule, 2026-11-22; Registry::validate enforces it): THE TARGETS ARE POSITIONAL —
+// what the command acts on (the scene; then the node, view or material in it; a picture it reduces), declared with
+// target() and first — AND EVERYTHING ELSE IS NAMED, in at most ONE further parameter (one scalar, or one options object
+// of named members). The strict call catches a misspelt name; it cannot catch two swapped positional values.
+//
 // FAIL IS THE CALLER'S MISTAKE; REFUSE IS THE ENGINE'S STATE. A command that is known and correctly called but cannot act
 // now (no node has that id, the engine did not take the value) returns Call::refuse(message): the call answers the falsy
 // value of its declared return (false, 0, null — the script carries on) and the message is kept as lastError().
@@ -96,15 +101,21 @@ struct Param {
     /// Kind::Array: its elements' kind (Kind::Object: each is checked against `fields`) and their count (0 = any).
     Kind element = Kind::Number;
     unsigned count = 0;
+    /// A TARGET: what the command acts on (a positional parameter; the shape rule above).
+    bool target = false;
 };
 /// A required parameter; one with its default.
 Param arg(std::string name, Kind kind);
+/// A TARGET (required): a handle (Kind::Int) or the value the command reduces (a picture object: target(object(...))).
+Param target(std::string name, Kind kind);
+Param target(Param p);
 Param arg(std::string name, Kind kind, Value fallback);
 /// An array of exactly `count` numbers (a vector, a colour, a quaternion), required or with its default.
 Param numbers(std::string name, unsigned count);
 Param numbers(std::string name, unsigned count, Value fallback);
 /// An object of exactly these members (each member required unless it declares its default), or an array of them.
 Param object(std::string name, std::vector<Param> fields);
+Param object(std::string name, std::vector<Param> fields, Value fallback);
 Param objects(std::string name, std::vector<Param> fields);
 
 struct Signature {
@@ -161,8 +172,9 @@ public:
     Result call(const std::string &name, const Value::Array &args);
     /// The last refusal's message ("" before any).
     const std::string &lastError() const { return mLastError; }
-    /// One line per command that lacks a name, a doc, or a name on any parameter or member: empty when every command is
-    /// documented.
+    /// One line per command that lacks a name, a doc, or a name on any parameter or member, or breaks the shape rule (a
+    /// target after a non-target, or more than one non-target parameter): empty when every command is documented and
+    /// shaped.
     std::vector<std::string> validate() const;
 
 private:
@@ -209,5 +221,14 @@ private:
     int mChecksFailed = 0;
     std::unique_ptr<Language> mJs;
 };
+
+}  // namespace script
+class Engine;
+namespace script {
+/// THE ENGINE REGISTERS INTO THE HOST (src/script/commands_engine.cpp): its `engine.*` commands on `engine`, which the
+/// calling thread created (its commands are called inline). A null `engine` (it did not start) still registers them:
+/// each FAILS with "the engine did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open
+/// (jahengine --test-doors); without it engine.arm FAILS on one.
+void registerEngineCommands(Registry &registry, Engine *engine, std::string bootError, bool testDoors);
 
 }}}  // namespace jahshaka::engine::script

@@ -8,12 +8,12 @@ namespace jahshaka { namespace engine { namespace script {
 
 Host::Host()
 {
-    mRegistry.add({"host.check", {{arg("ok", Kind::Bool), arg("what", Kind::String)}, Kind::Bool},
-                   "One law of a test script: prints `ok:   <what>` or `FAIL: <what>` and counts a failure (the host's "
-                   "verdict). Answers `ok`."},
+    mRegistry.add({"host.check", {{object("law", {arg("ok", Kind::Bool), arg("what", Kind::String)})}, Kind::Bool},
+                   "One law of a test script, {ok, what}: prints `ok:   <what>` or `FAIL: <what>` and counts a failure "
+                   "(the host's verdict). Answers `ok`."},
                   [this](Call &c) {
-                      const bool ok = c[0].asBool();
-                      print((ok ? "ok:   " : "FAIL: ") + c[1].asString());
+                      const bool ok = c[0]["ok"].asBool();
+                      print((ok ? "ok:   " : "FAIL: ") + c[0]["what"].asString());
                       if (!ok) ++mChecksFailed;
                       return Value(ok);
                   });
