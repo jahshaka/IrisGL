@@ -33,7 +33,7 @@ For more information see the LICENSE file
 // sum of squares; the fuzzy short-circuits in normalized()), that choice is
 // reproduced here on purpose and asserted bit-for-bit by tests/math/test_math_parity.
 //
-// Conversions to and from the Qt types live in document/qt/qtinterop.h and are
+// Conversions to and from the Qt types live in the app's src/app/qtstdgui.h and are
 // included ONLY by Qt-facing code (UI, serialization, the scripting bridge).
 // -----------------------------------------------------------------------------
 

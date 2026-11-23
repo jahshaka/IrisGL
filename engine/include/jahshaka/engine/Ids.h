@@ -3,8 +3,6 @@
 // declaration name). NOTHING here may reference Ogre, Qt or GL; a new subject is a new header, never an append here.
 #include "core/ids.h"
 
-#include <atomic>
-
 namespace jahshaka { namespace engine {
 
 /// Opaque handles to a Scene's meshes and materials. 0 is "none". Per-Scene and
@@ -13,20 +11,13 @@ using MeshId     = unsigned int;
 using MaterialId = unsigned int;
 /// THE RESOURCE IDS ARE RESERVED BY WHOEVER CREATES (ENGINE-UPGRADE-U3 stage 3): one process-wide counter per kind,
 /// 1-based (0 = none), never reused — a host names a mesh, a material or a texture in the record before the engine
-/// built it (Scene::createMesh(data, id) ...), and an engine create with no id reserves from the same counter.
-inline MeshId reserveMeshId() { static std::atomic<MeshId> next{1}; return next.fetch_add(1, std::memory_order_relaxed); }
-inline MaterialId reserveMaterialId()
-{
-    static std::atomic<MaterialId> next{1};
-    return next.fetch_add(1, std::memory_order_relaxed);
-}
+/// built it (Scene::createMesh(data, id) ...), and an engine create with no id reserves from the same counter. Each counter
+/// is IrisCore's (core/ids.h: defined once, in libIrisCore, on every platform).
+inline MeshId reserveMeshId() { return MeshId(iris::nextMeshId()); }
+inline MaterialId reserveMaterialId() { return MaterialId(iris::nextMaterialId()); }
 
 using TextureId = unsigned int;
-inline TextureId reserveTextureId()
-{
-    static std::atomic<TextureId> next{1};
-    return next.fetch_add(1, std::memory_order_relaxed);
-}
+inline TextureId reserveTextureId() { return TextureId(iris::nextTextureId()); }
 
 /// Native window handle a View renders into (X11 Window / HWND / NSView).
 ///
