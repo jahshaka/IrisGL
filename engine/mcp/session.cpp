@@ -438,10 +438,10 @@ Value Session::pictureTool(const Value &args, bool &isError)
         const Result r = mEngine->callNamed("engine.picture.png", std::move(named));
         if (r.status != Status::Ok) return fail(at + r.message);
         std::string text;
-        if (!script::toJson(r.value["png"], text, why)) {   // the CODEC's writer decides; the tool names what it carried
+        if (!iris::json::write(r.value["png"], text, why)) {   // the CODEC's writer decides; the tool names what it carried
             const std::size_t n = r.value["png"].kind() == Kind::Bytes ? r.value["png"].asBytes().size() : 0;
-            return fail(at + (n > script::kJsonBytesCap ? "its PNG is " + std::to_string(n) + " bytes: over the 1 MiB (" +
-                                                              std::to_string(script::kJsonBytesCap) + ") cap" : why));
+            return fail(at + (n > iris::json::kBytesCap ? "its PNG is " + std::to_string(n) + " bytes: over the 1 MiB (" +
+                                                              std::to_string(iris::json::kBytesCap) + ") cap" : why));
         }
         if (text.size() < kHead.size() + kTail.size() || text.compare(0, kHead.size(), kHead) != 0 ||
             text.compare(text.size() - kTail.size(), kTail.size(), kTail) != 0)
