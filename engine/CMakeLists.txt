@@ -144,6 +144,7 @@ set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_status.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi_read.cpp
     # each family's records (records_<family>.h) and their field tables (fields_<family>.cpp): records.h says how
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_shared.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_scene.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_scene.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_node.h

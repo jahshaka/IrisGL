@@ -19,10 +19,14 @@ namespace jahshaka { namespace engine {
 struct FrameInputScene;   // (jahshaka/engine/FrameInput.h: a family that submits a part includes it)
 namespace script {
 
-/// A route declaration not yet judged held (engine.view.declareRoutes): its view, its scene, the words, the frames since.
+/// A route declaration not yet judged held (engine.view.declareRoutes): its view and its scene WITH THEIR IDENTITIES
+/// (View::id, Scene::serial: taken at the declaration, while both lived - what the guard asks the engine, never the
+/// address alone), the words, the frames since.
 struct DeclaredRoutes {
     View *view = nullptr;
     Scene *scene = nullptr;
+    NodeId viewId = 0;
+    unsigned long long sceneSerial = 0;
     RouteWords words;
     int frames = 0;
 };
@@ -33,6 +37,21 @@ struct DeclaredRoutes {
 /// what this host may change or destroy in a scene it does not own. Its key in a scene: kind << 32 | id.
 enum class MadeKind { Node, Mesh, Material, Texture, DecalTexture };
 inline std::uint64_t madeKey(MadeKind kind, std::uint32_t id) { return std::uint64_t(kind) << 32 | id; }
+
+/// A RECORD THIS HOST SET ON A NODE, KEPT (RULED 9, least privilege for paths): engine.light.setIesProfile and
+/// engine.particles.setColourRamp re-apply THIS HOST's own last LightDesc / ParticleSystemDesc of the node with the
+/// path - the record lives here, per scene, keyed kind << 32 | node id; gone with its scene (forgetScene) and with its
+/// node (forgetMade of the node).
+enum class KeptKind { Light, ParticleSystem };
+
+/// WHAT THIS HOST RECORDED IN ONE SCENE, under the scene's IDENTITY (Scene::serial, read while it lived): the ids its
+/// commands made there (madeKey) and the records it kept (KeptKind). A record whose serial is not the live scene's
+/// belongs to a dead scene that had its address: it is never read, and the first new note replaces it.
+struct SceneRecord {
+    unsigned long long serial = 0;
+    std::set<std::uint64_t> made;
+    std::map<std::uint64_t, std::shared_ptr<const void>> kept;
+};
 
 struct EngineState {
     Host *host = nullptr;
@@ -45,10 +64,10 @@ struct EngineState {
     std::vector<DeclaredRoutes> declared;
     std::size_t pictureBytes = 0;      // the live pictures' bytes (commands_picture.cpp: THE CAP)
     std::size_t pictureBytesCap = 0;   // the cap: the host's option (Host::Options::pictureBytesCap)
-    /// THE OWNERSHIP LAW (2b; commands_engine.cpp says it): the ids the commands made, by scene (madeKey); the scenes
-    /// and views the commands made (owned: destroyed at their release or the host's end - every other held one was
-    /// handed in); and whether the host's end found its engine gone (then nothing calls into it).
-    std::map<Scene *, std::set<std::uint64_t>> made;
+    /// THE OWNERSHIP LAW (2b; commands_engine.cpp says it): what the commands made and kept, by scene (SceneRecord);
+    /// the scenes and views the commands made (owned: destroyed at their release or the host's end - every other held
+    /// one was handed in); and whether the host's end found its engine gone (then nothing calls into it).
+    std::map<Scene *, SceneRecord> scenes;
     /// A scene a command made, and its clock: the serial of the grid steps this host stamped (THE FRAME's PUBLIC DOOR,
     /// Commands::frame: +1 a frame, the scene's one clock writer).
     struct OwnedScene {
@@ -59,6 +78,8 @@ struct EngineState {
     std::vector<const View *> ownedViews;
     bool engineGone = false;
 };
+/// The live scene's record (Scene::serial read now): a record a dead scene left at its address is replaced.
+SceneRecord &sceneRecord(EngineState &st, Scene *scene);
 
 inline Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }
 inline Value rgb(const Colour &c) { return Value(Value::Array{Value(double(c.r)), Value(double(c.g)), Value(double(c.b))}); }
@@ -110,6 +131,19 @@ public:
     /// command that changes a SCENE's own settings acts only on a scene this host made (a handed-in one FAILS).
     bool mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const;
     bool settable(Call &c, const Scene *s) const;
+    /// THE KEPT RECORD (KeptKind): `record` kept as this host's last of `kind` on `node` in the live scene `s` (a scene
+    /// a command just read); kept answers it - null when this host kept none there (or it went with its node or scene).
+    template <class T> void keep(Scene *s, KeptKind kind, std::uint32_t node, T record) const
+    {
+        sceneRecord(*st, s).kept[std::uint64_t(kind) << 32 | node] = std::make_shared<const T>(std::move(record));
+    }
+    template <class T> const T *kept(const Scene *s, KeptKind kind, std::uint32_t node) const
+    {
+        const auto it = st->scenes.find(const_cast<Scene *>(s));
+        if (it == st->scenes.end() || it->second.serial != s->serial()) return nullptr;
+        const auto k = it->second.kept.find(std::uint64_t(kind) << 32 | node);
+        return k == it->second.kept.end() ? nullptr : static_cast<const T *>(k->second.get());
+    }
 
     std::shared_ptr<EngineState> st;
 };
@@ -118,8 +152,8 @@ public:
 /// it in the engine - unless the host's end found the engine gone. Recorded as owned (a handed-in one is not).
 std::shared_ptr<Scene> ownedScene(const std::shared_ptr<EngineState> &st, Scene *s);
 std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v);
-/// The made id of `kind` recorded (made) or forgotten (destroyed by its command); forgetScene: every one of a scene
-/// (destroyed with it).
+/// The made id of `kind` recorded (made) or forgotten (destroyed by its command: a node takes its kept records with
+/// it); forgetScene: every made id and kept record of a scene (destroyed with it).
 void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
 void forgetMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
 void forgetScene(EngineState &st, Scene *scene);

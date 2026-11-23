@@ -161,6 +161,8 @@ void registerViewCommands(Host &host, const Commands &k)
               DeclaredRoutes d;
               d.view = v;
               d.scene = s;
+              d.viewId = v->id();   // (both live now: their identities, the guard's - commands.h DeclaredRoutes)
+              d.sceneSerial = s->serial();
               d.words.gather = c[1]["gather"].asBool();
               d.words.integrate = c[1]["integrate"].asBool();
               d.words.reflection = c[1]["reflection"].asBool();
@@ -172,9 +174,14 @@ void registerViewCommands(Host &host, const Commands &k)
               return Value();
           });
     host.atVerdict([st = k.st]() {
-        for (const DeclaredRoutes &d : st->declared)
-            st->host->law(false, "ROUTES view '" + d.view->name() + "': declared {" + routeWordsText(d.words) +
+        for (const DeclaredRoutes &d : st->declared) {
+            // a view its owner handed in and destroyed is never read (Script.h, WHAT IS HANDED IN): named only while held
+            const bool live = st->engine && Engine::isLive(st->engineSerial) &&
+                              st->engine->viewPresence(d.view, d.viewId) != Scene::Presence::Absent;
+            st->host->law(false, "ROUTES " + (live ? "view '" + d.view->name() + "'" : std::string("a view since destroyed")) +
+                                     ": declared {" + routeWordsText(d.words) +
                                      "} and no frame asserted it before the script ended (URGENT #146)");
+        }
         st->declared.clear();
     });
     // THE PENDING DECLARATIONS, JUDGED AT THE VERDICT (enginetesthelpers.h's failPendingRoutes): a declaration no frame

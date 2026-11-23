@@ -95,6 +95,10 @@ public:
     /// (Engine::submitFrame).
     const std::string &name() const { return mIdentityName; }
     Engine *engine() const { return mIdentityEngine; }
+    /// ITS SERIAL (SCRIPT-IN-ENGINE-1 E0): a process-wide count of the scenes made, taken when the scene object is made
+    /// and never reused - a scene's identity where its address is not (a scene made after another is destroyed may
+    /// reuse its address): Engine::scenePresence asks pointer AND serial. (A view's is View::id().)
+    unsigned long long serial() const { return mIdentitySerial; }
     /// Ambient light as a hemisphere pair: `upper` is what a surface facing +Y
     /// receives, `lower` what a surface facing -Y receives. Kept as the simple
     /// entry point (previews, thumbnails, tests); it is expressed EXACTLY in the
@@ -1473,6 +1477,7 @@ public:
 protected:
     std::string mIdentityName;
     Engine     *mIdentityEngine = nullptr;
+    unsigned long long mIdentitySerial = 0;
 };
 
 /// A view onto a Scene, rendering into a native window supplied by the host or
@@ -2024,10 +2029,11 @@ public:
     unsigned long long serial() const { return mSerial; }
     static bool isLive(unsigned long long serial);
     /// Does this engine hold the scene / the view NOW (made here, not yet destroyed; a scene whose destroy a frame
-    /// deferred is Absent) - the pointer is compared, never read. A LOCKSTEP read, as Scene::nodePresence: UNANSWERED
-    /// while a render thread owns the engine (EngineConfig::hostRecords).
-    virtual Scene::Presence scenePresence(const Scene *scene) const = 0;
-    virtual Scene::Presence viewPresence(const View *view) const = 0;
+    /// deferred is Absent) - by its pointer AND its identity (Scene::serial, View::id: taken while it lived), so a
+    /// scene or view made later at a dead one's address is not it; the pointer is compared, never read. A LOCKSTEP
+    /// read, as Scene::nodePresence: UNANSWERED while a render thread owns the engine (EngineConfig::hostRecords).
+    virtual Scene::Presence scenePresence(const Scene *scene, unsigned long long serial) const = 0;
+    virtual Scene::Presence viewPresence(const View *view, NodeId id) const = 0;
     /// Program loads that FAILED to compile in this process, every engine's (the fork's GpuProgram::getJahCompileErrors:
     /// AsyncShaderStats::compileErrors' source), readable with no engine alive - the fixtures' exit check
     /// (tests/support/enginetesthelpers.h, URGENT #83's law for the fixtures).

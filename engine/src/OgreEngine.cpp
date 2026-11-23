@@ -497,22 +497,23 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
     } JAH_CATCH(mLastError, false);
 }
 
-// THE LIVENESS READS (Engine.h, Engine::scenePresence): the engine's own lists, the pointer compared and never read; a
-// scene whose destroy a frame deferred is already gone to its host (destroyScene's contract below). Lockstep only.
-Scene::Presence OgreEngine::scenePresence(const Scene *scene) const {
+// THE LIVENESS READS (Engine.h, Engine::scenePresence): the engine's own lists, the pointer compared and never read, then
+// the LIVE object's identity (a later one at a dead one's address is not it); a scene whose destroy a frame deferred is
+// already gone to its host (destroyScene's contract below). Lockstep only.
+Scene::Presence OgreEngine::scenePresence(const Scene *scene, unsigned long long serial) const {
     JAH_SYNC_GETTER("Engine::scenePresence");
     if (hostPosts()) return Scene::Presence::Unanswered;
     if (std::find(mPendingSceneDestroy.begin(), mPendingSceneDestroy.end(), scene) != mPendingSceneDestroy.end())
         return Scene::Presence::Absent;
     for (const auto &s : mScenes)
-        if (s.get() == scene) return Scene::Presence::Present;
+        if (s.get() == scene) return s->serial() == serial ? Scene::Presence::Present : Scene::Presence::Absent;
     return Scene::Presence::Absent;
 }
-Scene::Presence OgreEngine::viewPresence(const View *view) const {
+Scene::Presence OgreEngine::viewPresence(const View *view, NodeId id) const {
     JAH_SYNC_GETTER("Engine::viewPresence");
     if (hostPosts()) return Scene::Presence::Unanswered;
     for (const auto &v : mViews)
-        if (v.get() == view) return Scene::Presence::Present;
+        if (v.get() == view) return v->id() == id ? Scene::Presence::Present : Scene::Presence::Absent;
     return Scene::Presence::Absent;
 }
 

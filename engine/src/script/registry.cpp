@@ -248,6 +248,7 @@ unsigned Registry::kindIndex(const std::string &kind)
     mKindType.push_back(nullptr);
     mKindNamed.push_back(false);
     mChecks.emplace_back();
+    mKindIdentity.push_back(nullptr);
     return unsigned(mKinds.size());
 }
 
@@ -269,7 +270,8 @@ std::int64_t Registry::holdAs(const std::string &kind, const std::type_info &typ
     if (mHeld.size() >= kValueMask) return refuse("the " + kind + " could not be given a handle (the host's table is full)");
     mKindType[k - 1] = &type;
     mKindHeld[k - 1] = true;
-    mHeld.push_back(Held{k, std::move(object), scoped});
+    const std::uint64_t identity = mKindIdentity[k - 1] ? mKindIdentity[k - 1](object.get()) : 0;
+    mHeld.push_back(Held{k, std::move(object), scoped, identity});
     return std::int64_t(mSerial << kOwnerShift | std::uint64_t(k) << kKindShift | std::uint64_t(mHeld.size()));
 }
 
@@ -341,7 +343,14 @@ bool Registry::checkHandle(std::int64_t h, const std::string &kind, const std::s
     return true;
 }
 
-void Registry::bindAs(const std::string &kind, const std::type_info *type)
+std::uint64_t Registry::identityOf(std::int64_t h) const
+{
+    const std::uint64_t u = std::uint64_t(h), slot = u & kValueMask;
+    if (h <= 0 || (u >> kOwnerShift) != mSerial || !slot || slot > mHeld.size() || !mHeld[slot - 1].object) return 0;
+    return mHeld[slot - 1].identity;
+}
+
+void Registry::bindAs(const std::string &kind, const std::type_info *type, Identity identity)
 {
     const unsigned k = kindIndex(kind);
     if (!k) {
@@ -358,6 +367,7 @@ void Registry::bindAs(const std::string &kind, const std::type_info *type)
     if (type) {
         mKindType[k - 1] = type;
         mKindHeld[k - 1] = true;
+        mKindIdentity[k - 1] = identity;
     } else {
         mKindNamed[k - 1] = true;
     }
@@ -385,7 +395,7 @@ bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, st
     if (!p.handle.empty() && v.kind() == Kind::Array) {   // handles(): EVERY element asked, a dead one named by its index
         const Value::Array &a = v.asArray();
         for (size_t i = 0; i < a.size(); ++i)
-            if (!exists(a[i])) {
+            if (!a[i].isNull() && !exists(a[i])) {   // (a null element: an optional handle array's none)
                 why = p.name + "[" + std::to_string(i) + "]: " + why;
                 return false;
             }
@@ -577,7 +587,15 @@ bool conformKind(const Registry &reg, Kind kind, const Param &p, Value &in, cons
                   std::to_string(p.stride);
             return false;
         }
+        // AN OPTIONAL HANDLE's ARRAY (a handle array that declares a default: a record's id members, records.h
+        // Field::handle - SkyDesc's six faces): an element null or a literal 0 is NONE, conformed to null, nothing checked
+        const bool noneable = !p.handle.empty() && p.element == Kind::Int && p.fallback.has_value();
         for (size_t i = 0; i < a.size(); ++i) {   // each element checked IN PLACE: the array is moved, never rebuilt
+            if (noneable && (a[i].isNull() || ((a[i].kind() == Kind::Int || a[i].kind() == Kind::Number) &&
+                                                a[i].asNumber() == 0.0))) {
+                a[i] = Value();
+                continue;
+            }
             Value v;
             const Where element{&where, nullptr, long(i)};
             if (!conformKind(reg, p.element, p, a[i], element, v, why)) return false;   // the element kind, p's declarations
