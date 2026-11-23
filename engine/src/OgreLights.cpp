@@ -58,16 +58,8 @@ Ogre::ResourceGroupManager &rgm() { return Ogre::ResourceGroupManager::getSingle
 }  // namespace
 
 // ---------------------------------------------------------------------------
-bool assignProfile(Ogre::Root *root, Ogre::Light *light, const std::string &path,
-                   std::string &error) {
-    if (!light) { error = "assignProfile: no light"; return false; }
-    if (path.empty()) {
-        // Nothing was ever armed => every light already reads atlas row 0 (white).
-        if (!gProfiles) return true;
-        JAH_TRY { gProfiles->assignProfile(Ogre::IdString(), light); return true; }
-        JAH_CATCH(error, false);
-    }
-
+bool loadProfile(Ogre::Root *root, const std::string &path, std::string &error) {
+    if (path.empty()) return true;
     Ogre::HlmsPbs *pbs = pbsOf(root);
     if (!pbs) { error = "assignProfile: HlmsPbs is not registered yet"; return false; }
 
@@ -108,7 +100,21 @@ bool assignProfile(Ogre::Root *root, Ogre::Light *light, const std::string &path
             gProfilePaths[path] = file;
             gProfileNames[file] = path;
         }
+        return true;
+    } JAH_CATCH(error, false);
+}
 
+bool assignProfile(Ogre::Root *root, Ogre::Light *light, const std::string &path,
+                   std::string &error) {
+    if (!light) { error = "assignProfile: no light"; return false; }
+    if (path.empty()) {
+        // Nothing was ever armed => every light already reads atlas row 0 (white).
+        if (!gProfiles) return true;
+        JAH_TRY { gProfiles->assignProfile(Ogre::IdString(), light); return true; }
+        JAH_CATCH(error, false);
+    }
+    if (!loadProfile(root, path, error)) return false;
+    JAH_TRY {
         gProfiles->assignProfile(Ogre::IdString(gProfilePaths[path]), light);
         return true;
     } JAH_CATCH(error, false);

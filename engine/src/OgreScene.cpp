@@ -392,6 +392,13 @@ bool OgreScene::removeNode(NodeId id) {
                                          // which may name it again) — no consumer owes a full pass for a death
         uncountNode(it->second);
         if (mNodeById.get(it->first) == &it->second) mNodeById.set(it->first, nullptr);
+        // A REMOVED NODE LEAVES THE THREE VR LISTS (SCRIPT-IN-ENGINE-1 2e e1, the audit's lower list): the session
+        // places every listed node every VR frame (OgreVrSession.cpp placeProxies / the ray / placeHandBones) and
+        // skips a 0; a dead id left there would be a node setter's refusal - the frame's error - every VR frame.
+        for (NodeId &v : mVrProxyNode) if (v == id) v = 0;
+        for (NodeId &v : mVrRayNode) if (v == id) v = 0;
+        for (auto &hand : mVrHandBoneNode)
+            for (NodeId &v : hand) if (v == id) v = 0;
         mNodes.erase(it);
         // The last decal leaving must clear the SceneManager's atlas bindings,
         // which is what drops the decal code back out of every PBS shader.
@@ -1779,6 +1786,28 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
     if (postScene([=](OgreScene &s) { return s.setLight(id, d); })) return true;
     auto it = mNodes.find(id);
     if (it == mNodes.end()) { mError = "setLight: unknown node"; return false; }
+    // A REFUSAL IS ATOMIC (SCRIPT-IN-ENGINE-1 2e e1; the audit's finding 4): the requested IES profile is CHECKED (found,
+    // loaded: lightextras::loadProfile) BEFORE anything of the light changes - a false means NOTHING changed. Its refusal is
+    // FINAL for the value (Engine.h, Scene::setLight): the failing request is remembered, and asked again it is refused in
+    // the same words without a retry (never a per-frame retry). A directional or area light reads no profile.
+    {
+        Node &n = it->second;
+        const std::string wantProfile =
+            d.type == LightType::Spot || d.type == LightType::Point ? d.iesProfilePath : std::string();
+        if (!wantProfile.empty() && wantProfile != n.lightProfilePath) {
+            std::string err;
+            if (wantProfile == n.lightProfileFailed) {
+                mError = n.lightProfileError;
+                return false;
+            }
+            if (!lightextras::loadProfile(mRoot, wantProfile, err)) {
+                mError = "Scene::setLight: " + err;
+                n.lightProfileFailed = wantProfile;
+                n.lightProfileError = mError;
+                return false;
+            }
+        }
+    }
     JAH_TRY {
         // A LIGHT INJECTION WOULD READ THIS (DRAG-1 round 2, F5). The serial is
         // what tells the in-motion light tick that a cascade the scheduler
@@ -1929,31 +1958,17 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // lights, shadowed or not (the pass buffer's shadowed point loop reads
         // the profile row too: the fork's 800.PixelShader, PHOTON-7 10-4 R8),
         // and never directional or area lights.
-        //
-        // A PROFILE THAT CANNOT BE ASSIGNED IS REFUSED (SCRIPT-IN-ENGINE-1 2e e1: it answered true with the error
-        // set): the light is set with the profile it had, and setLight answers false in the engine's words (the file
-        // check: lightextras::assignProfile). The failing REQUEST is remembered: asked again it is refused again in
-        // the same words without a retry (never a per-frame retry). A directional or area light reads no profile.
-        bool profileRefused = false;
+        // (The profile was CHECKED before anything changed - the head of this function: here it is only assigned.)
         {
             const bool profileApplies =
                 d.type == LightType::Spot || d.type == LightType::Point;
             const std::string wantProfile = profileApplies ? d.iesProfilePath : std::string();
             if (wantProfile != n.lightProfilePath) {
                 std::string err;
-                if (!wantProfile.empty() && wantProfile == n.lightProfileFailed) {
-                    mError = n.lightProfileError;
-                    profileRefused = true;
-                } else if (lightextras::assignProfile(mRoot, L, wantProfile, err)) {
-                    n.lightProfilePath = wantProfile;
-                    n.lightProfileFailed.clear();
-                    n.lightProfileError.clear();
-                } else {
-                    mError = "Scene::setLight: " + err;
-                    n.lightProfileFailed = wantProfile;
-                    n.lightProfileError = mError;
-                    profileRefused = true;
-                }
+                if (!lightextras::assignProfile(mRoot, L, wantProfile, err)) throw std::runtime_error(err);
+                n.lightProfilePath = wantProfile;
+                n.lightProfileFailed.clear();
+                n.lightProfileError.clear();
             }
         }
         // THE LAMP-MAP CACHE'S PARAMETER INPUT (ENGINE_CACHE_POLICY_SPEC P3 item
@@ -2039,7 +2054,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             }
         }
         // Lights shine down their node's -Y once attached (document convention).
-        return !profileRefused;   // (the light is set either way; a profile not assigned is the refusal, its words in mError)
+        return true;
     } JAH_CATCH(mError, false);
 }
 

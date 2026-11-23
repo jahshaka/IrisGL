@@ -744,11 +744,13 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         topo.quotaBucket = quotaBucketFor(d.quota);
         topo.distortion = d.distortion;
         for (const auto &e : d.emitters) topo.emitterShapes.push_back(int(e.shape));
-        // A ramp whose image is not there is DROPPED from this push:
-        // ColourImageAffector2 cannot initialise without one, and a missing
-        // ramp must not take the whole emitter down - but the call is REFUSED
-        // (SCRIPT-IN-ENGINE-1 2e e1: it answered true), mError naming the file;
-        // the rest of the system is set.
+        // A ramp affector with NO image path yet is DROPPED from this push
+        // (ColourImageAffector2 cannot initialise without one): a legal record.
+        // A ramp whose image is NOT THERE refuses the call, mError naming the
+        // file - and the refusal is ATOMIC (SCRIPT-IN-ENGINE-1 2e e1, the
+        // audit's finding 4): it is answered here, before anything of the
+        // system changes (no release, no rebuild, no values); FINAL for the
+        // value (Engine.h, Scene::setParticleSystem).
         ParticleSystemDesc pushed = d;
         pushed.affectors.clear();
         bool rampMissing = false;
@@ -764,6 +766,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
             pushed.affectors.push_back(a);
             topo.affectorKinds.push_back(int(a.kind));
         }
+        if (rampMissing) return false;   // (mError: particleRampImage's words; nothing of the system changed)
 
         const bool rebuild = !n.particleDef || n.particleTopology != topo.key();
         if (rebuild) {
@@ -796,7 +799,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         // reaches it.
         n.particleDistortion = d.distortion;
         n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
-        return !rampMissing;   // (the system is set either way; a missing ramp is the refusal, its file in mError)
+        return true;
     } JAH_CATCH(mError, false);
 }
 
