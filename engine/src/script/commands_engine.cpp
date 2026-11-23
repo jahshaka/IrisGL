@@ -43,6 +43,7 @@
 // destroyed first is never read (Engine::scenePresence / viewPresence: a call on it FAILS by name, the end skips it).
 // A node, mesh, material, texture or decal image made in a handed-in scene is recorded and removed alike.
 #include "script/commands.h"
+#include "script/records_engine.h"
 
 #include "jahshaka/engine/EngineInspect.h"
 #include "jahshaka/engine/GiStatus.h"
@@ -303,6 +304,128 @@ void registerFrameCommands(Host &host, const Commands &k)
               }
               k.st->host->keepGoing(double(n), double(n));   // the end, as progress: every frame is drawn
               return Value();
+          });
+
+    // THE ENGINE-WIDE COMMANDS (SCRIPT-IN-ENGINE-1 2c, builder Q): the shader service, the display, the error sink, the
+    // renderer's reads and its counters' subscriptions. A SETTER here reaches beyond the scenes and views this host made
+    // (Commands::engineWide: a host for an outside client refuses it); a READ changes nothing the engine holds.
+    r.add({"engine.shaders.wait", {Access::Reads, {}, Kind::Null},
+           "Blocks until no shader build is pending, publishing as jobs land (Engine::waitForAsyncShaders): for a test or "
+           "a caller that must hand over a finished picture."},
+          [k](Call &c) -> Value {
+              Engine *e = k.engine(c);
+              if (e) e->waitForAsyncShaders();
+              return Value();
+          });
+    r.add({"engine.shaders.placeholdersOnly", {Access::Test, {arg("on", Kind::Bool)}, Kind::Null},
+           "A TEST DOOR (it changes what the engine draws): while on, an asynchronous view's waiting objects request only "
+           "the placeholder of the pass they are drawn in (Engine::setAsyncShaderPlaceholdersOnly: the startup gate's "
+           "tier sweep). Engine-wide: a host for an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              if (e) e->setAsyncShaderPlaceholdersOnly(c[0].asBool());
+              return Value();
+          });
+    r.add({"engine.shaders.saveCache", {Access::Files, {}, Kind::Bool},
+           "Serializes the shader cache now and hands its file write to the engine's writer (Engine::saveShaderCache): true "
+           "= handed over (not yet on the disk: engine.shaders.flushCache waits), false = nothing handed over (the cache "
+           "off, nothing dirty). Engine-wide: a host for an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              return e ? Value(e->saveShaderCache()) : Value();
+          });
+    r.add({"engine.shaders.flushCache", {Access::Files, {arg("budgetMs", Kind::Int).range(0, 60000).in("ms")}, Kind::Bool},
+           "Waits up to budgetMs for the shader cache's write saveCache handed off (Engine::flushShaderCache): true when the "
+           "writer is idle, false on its budget with the write still running. Engine-wide: a host for an outside client "
+           "refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              return e ? Value(e->flushShaderCache(unsigned(c[0].asInt()))) : Value();
+          });
+    r.add({"engine.shaders.prepareRays", {Access::Changes, {}, Kind::Null},
+           "Hands every ray-tier pipeline to its build worker now (Engine::prepareRayPipelines; nothing waits: each counts "
+           "as pending until joined); a no-op without the ray tier. Engine-wide: a host for an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              if (e) e->prepareRayPipelines();
+              return Value();
+          });
+    r.add({"engine.shaders.progress", {Access::Reads, {}, Kind::Object},
+           "The shader build's progress (Engine::shaderBuildProgress): {compiled, fromCache, expected} - compiled so far, "
+           "served from the cache so far, and how many the last saved run needed (0: never saved)."},
+          [k](Call &c) -> Value {
+              Engine *e = k.engine(c);
+              if (!e) return Value();
+              unsigned compiled = 0, fromCache = 0, expected = 0;
+              e->shaderBuildProgress(compiled, fromCache, expected);
+              return Value(Value::Object{{"compiled", Value(compiled)}, {"fromCache", Value(fromCache)}, {"expected", Value(expected)}});
+          });
+    r.add({"engine.display.setPeriod", {Access::Changes, {arg("seconds", Kind::Number).atLeast(0).asFloat().in("s")}, Kind::Null},
+           "The display's period the host draws at (Engine::setDisplayPeriod; 0 = unknown): a display property the free "
+           "render loop paces by - never a scene's clock. Engine-wide: a host for an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              if (e) e->setDisplayPeriod(float(c[0].asNumber()));
+              return Value();
+          });
+    r.add({"engine.takeLastError", {Access::Changes, {}, Kind::String},
+           "The reason of the engine's most recent failing call, AND the sink cleared (Engine::takeLastError: one sink per "
+           "process, every scene's and view's): \"\" when nothing failed since the last take. Engine-wide: a host for an "
+           "outside client refuses it (it would drain the owner's diagnostics)."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              return e ? Value(e->takeLastError()) : Value();
+          });
+    r.add({"engine.textureMemory", {Access::Reads, {}, Kind::Array},
+           "Every texture the renderer's texture manager holds, one record each, unsorted (Engine::textureMemory): name, "
+           "resource, width, height, depth, slices, mipmaps, msaa, format, bytes, renderTarget, uav, manual, pooled, "
+           "residency. REFUSED without a backend."},
+          [k](Call &c) -> Value {
+              Engine *e = k.engine(c);
+              if (!e) return Value();
+              std::vector<TextureMemoryEntry> out;
+              if (!e->textureMemory(out)) return c.refuse("the engine has no texture backend to ask");
+              return toValue(out);
+          });
+    r.add({"engine.validation", {Access::Reads, {}, Kind::Object},
+           "The validation layer's proof, read now (Engine::validation): {requested, active, layers, drawEntry} - a row "
+           "that runs under the layer asserts requested and active."},
+          [k](Call &c) -> Value {
+              Engine *e = k.engine(c);
+              return e ? toValue(e->validation()) : Value();
+          });
+    r.add({"engine.publishRenderStats", {Access::Changes, {arg("frames", Kind::Int).range(0, 1000000).in("frames")}, Kind::Null},
+           "Subscribes the renderer's geometry counting for the next `frames` frames (Engine::publishRenderStats; 0 ends "
+           "it): published as the engine's render statistics, the span's first frame reporting none. Engine-wide: a host "
+           "for an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              if (e) e->publishRenderStats(unsigned(c[0].asInt()));
+              return Value();
+          });
+    r.add({"engine.publishShadowStatus", {Access::Changes, {arg("frames", Kind::Int).range(0, 1000000).in("frames")}, Kind::Null},
+           "Subscribes the shadow atlas's pass counters for the next `frames` frames (Engine::publishShadowStatus; 0 ends "
+           "it): published with the engine's shadow status, the span's first frame not measured. Engine-wide: a host for "
+           "an outside client refuses it."},
+          [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
+              Engine *e = k.engine(c);
+              if (e) e->publishShadowStatus(unsigned(c[0].asInt()));
+              return Value();
+          });
+    r.add({"engine.rayQueryAvailable", {Access::Reads, {}, Kind::Bool},
+           "Whether this device traces rays (Engine::rayQueryAvailable: fixed when the device was made; false before it, "
+           "and on the NULL render system)."},
+          [k](Call &c) -> Value {
+              Engine *e = k.engine(c);
+              return e ? Value(e->rayQueryAvailable()) : Value();
           });
 }
 

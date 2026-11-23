@@ -1,5 +1,13 @@
 #pragma once
 // THE ATOM FAMILY's RECORDS (SCRIPT-IN-ENGINE-1 stage 2, keyed by family: records.h says how) - every record its
 // commands take or answer, declared with JAH_RECORD_COUNT beside its table's declaration, and its enums with
-// JAH_ENUM_NAMES; the tables in fields_atom.cpp. Made EMPTY by E0 (the batch's base); its family's builder fills it.
+// JAH_ENUM_NAMES; the tables in fields_atom.cpp. The atom commands take no record: the Atom view's names only.
 #include "script/records.h"
+#include "jahshaka/engine/Overlay.h"
+
+namespace jahshaka { namespace engine { namespace script {
+
+JAH_ENUM_NAMES(AtomView, {{AtomView::Off, "off"}, {AtomView::Triangles, "triangles"}, {AtomView::Levels, "levels"},
+                          {AtomView::Buckets, "buckets"}, {AtomView::Objects, "objects"}, {AtomView::Density, "density"}});
+
+}}}  // namespace jahshaka::engine::script
