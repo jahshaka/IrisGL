@@ -35,7 +35,7 @@
 #include "irisgl/document/assets/vertexbuffer.h"     // VertexBuffer / IndexBuffer (CPU copies)
 #include "irisgl/document/materials/material.h"
 #include "irisgl/document/materials/pbrmaterial.h"
-#include "irisgl/document/qt/property.h"
+#include "document/properties/property.h"
 #include "irisgl/core/math/trs.h"
 #include "irisgl/document/assets/livetextures.h"
 #include "irisgl/document/assets/texture2d.h"

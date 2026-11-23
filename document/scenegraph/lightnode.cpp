@@ -4,7 +4,7 @@
 #include "document/animation/keyframeset.h"
 #include "document/animation/animation.h"
 #include "document/animation/propertyanim.h"
-#include "document/qt/property.h"
+#include "document/properties/property.h"
 #include "document/scenegraph/shadowmap.h"
 #include <algorithm>
 

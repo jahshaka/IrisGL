@@ -432,7 +432,7 @@ set (HEADERS
     document/scenegraph/nodegraph.h
     document/scenegraph/scenepicking.h
     document/scenegraph/socket.h
-    document/qt/property.h
+    document/properties/property.h
     core/geometry/boundingsphere.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h

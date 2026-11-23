@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/meshnode.h"
 
 #include "irisglfwd.h"
-#include "document/qt/property.h"
+#include "document/properties/property.h"
 #include "document/assets/mesh.h"
 
 #include "document/materials/material.h"
@@ -69,7 +69,7 @@ PropertyRows MeshNode::getProperties()
     // would have to reload the mesh (and, for meshIndex, re-resolve a submesh
     // inside a model file), which is an import-time operation with asset-manager
     // side effects. setPropertyValue therefore refuses them; use setMesh().
-    // There is no StringProperty in document/qt/property.h — FileProperty is
+    // There is no StringProperty in document/properties/property.h — FileProperty is
     // the QString-valued Property.
     auto pathProp = std::make_unique<FileProperty>();
     pathProp->displayName = "Mesh Path";

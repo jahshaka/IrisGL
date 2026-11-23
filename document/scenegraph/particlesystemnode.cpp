@@ -14,7 +14,7 @@ For more information see the LICENSE file
 #include "document/srgbcolor.h"
 #include "document/qt/colour.h"
 
-#include "document/qt/property.h"
+#include "document/properties/property.h"
 #include "document/scenegraph/particlesystemnode.h"
 
 namespace iris

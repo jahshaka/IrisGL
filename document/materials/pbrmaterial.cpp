@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #include "document/assets/livetextures.h"
 #include "document/assets/texture2d.h"
 #include "core/log.h"
-#include "document/qt/property.h"
+#include "document/properties/property.h"
 
 #include "document/qt/colour.h"
 
