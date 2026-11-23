@@ -48,7 +48,9 @@ void registerStatusCommands(Host &host, const Commands &k)
     r.add({"engine.published", {Access::Reads, {selectParam<PublishedEngineFrame>()}, Kind::Object},
            "The engine's half of the last closed frame (PublishedEngineFrame): its frame and serial, the input "
            "drain, the VR session, the compile counters, the views' rows, the frame errors and refusals, the monitor's "
-           "status, the shadow atlas and the render figures. vrJoints is one bytes value a hand (left, right): its "
+           "status, the shadow atlas (shadow: ShadowStatus - its resolution is the atlas as the engine BUILT it, "
+           "Engine::setShadowResolution's effect; live false and every number 0 on a headless engine) and the render "
+           "figures. vrJoints is one bytes value a hand (left, right): its "
            "joints as VrPose records in their declared C++ layout, 32 bytes each - valid (1 byte, then 3 of padding), "
            "position (3 floats x y z), rotation (4 floats x y z w) - in this machine's byte order (little-endian on "
            "every target we build). {select: [members]} answers only those top-level members."},
