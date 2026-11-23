@@ -4168,6 +4168,10 @@ inline void areaLightCorners(const Ogre::Light *l, Ogre::Vector3 out[4]) {
 /// Returns false and fills `error` on failure; the light keeps what it had.
 bool assignProfile(Ogre::Root *root, Ogre::Light *light, const std::string &path,
                    std::string &error);
+/// ...its CHECKS AND ITS LOAD alone (no light touched): true when `path` (empty: none) is a profile assignProfile
+/// will take - found, loaded and atlas-built once; false and `error` (its words: "light profile not found: <path>")
+/// otherwise. OgreScene::setLight asks it BEFORE it changes anything (a refusal is atomic: SCRIPT-IN-ENGINE-1 2e e1).
+bool loadProfile(Ogre::Root *root, const std::string &path, std::string &error);
 
 /// Raises HlmsPbs's forward LTC budget off Ogre's default of 1 (and the
 /// approximation's to 0: none is ever drawn). Called

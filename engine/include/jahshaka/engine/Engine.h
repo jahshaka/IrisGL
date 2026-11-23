@@ -787,6 +787,9 @@ public:
     /// mode or texture — rebuilds the definition and recycles the old one.
     /// The system rides on the node: it moves with it, hides with it, and
     /// removeNode frees it. False with lastError() set; never throws.
+    /// A REFUSAL IS FINAL AND ATOMIC (SCRIPT-IN-ENGINE-1 2e e1): a colour ramp whose image is not there refuses the
+    /// call before anything of the system changes, and this VALUE is refused again - a host does not retry it, it
+    /// pushes again when its value changes. A ramp affector with no image path yet is accepted (dropped).
     virtual bool setParticleSystem(NodeId, const ParticleSystemDesc &) = 0;
     /// KEPT as the explicit counterpart of setParticleSystem: a node may stop
     /// being an emitter without being removed. Live particles vanish with it.
@@ -802,11 +805,16 @@ public:
 
     // ---- Lights (step 5): a node may carry one light. Directional and spot lights
     // shine down the node's -Y (the document's convention: identity = straight down).
-    virtual bool        setLight(NodeId, const LightDesc &) = 0;   // creates or updates
+    /// Creates or updates the node's light. A REFUSAL IS FINAL AND ATOMIC (SCRIPT-IN-ENGINE-1 2e e1): an IES profile
+    /// that cannot be assigned (a spot or point light's file not there: lastError names it) refuses the call before
+    /// anything of the light changes, and this VALUE is refused again in the same words - a host does not retry it, it
+    /// pushes again when its value changes. A directional or area light reads no profile; an empty path is none.
+    virtual bool        setLight(NodeId, const LightDesc &) = 0;
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
     virtual bool        removeLight(NodeId) = 0;
-    // THE LIGHT SERIAL: every light write through this interface advances it, and so does a frame whose ChangeSet
+    // THE LIGHT SERIAL: setLight (a set or a change) advances it - a REMOVE does not (removeLight counts in the
+    // scene's unpublished lights-removed count, OgreScene.cpp removeLight) - and so does a frame whose ChangeSet
     // moved a light (U0 3b — a lamp dragged, carried by a parent or animated writes no light verb at all; the
     // mirror's set names the written node and the drain finds the light under it). Monotonic, only ever compared
     // for equality; what the voxel light injection keys "have the lights changed since I injected?" on.

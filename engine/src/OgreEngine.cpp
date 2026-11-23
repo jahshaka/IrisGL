@@ -3105,6 +3105,10 @@ void OgreEngine::applySceneMessage(OgreScene *sc, const SceneMessage &m) {
     try { ok = !refuse && m.apply(*sc); }
     catch (Ogre::Exception &x) { mLastError = describeOgreFailure(x); ok = false; }
     catch (std::exception &x) { mLastError = std::string("engine: ") + x.what(); ok = false; }
+    // AN ACCEPTED MESSAGE THAT LEFT AN ERROR IS REFUSED (SCRIPT-IN-ENGINE-1 2e e1, the audit's finding 2): a host's
+    // wrapper accepts a void verb (scenecommands.h bindCall), so a setter's refusal - an unknown node, by its own words
+    // in the error - reaches the published refusals only here
+    if (ok && mLastError != before) ok = false;
     const std::string why = ok ? std::string() : mLastError != before ? mLastError : std::string("refused");
     if (!ok) {
         ++mFrameInputStatus.messagesRefused;

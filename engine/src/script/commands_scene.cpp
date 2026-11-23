@@ -172,8 +172,10 @@ void registerSceneCommands(Host &host, const Commands &k)
            {Access::Changes, {target(handle("scene", kScene)), Record<ShadowDesc>::table().param("shadows")}, Kind::Null},
            "The scene's shadow request (ShadowDesc, through the next frame's record): a filter \"hard\" | \"soft\" | "
            "\"verySoft\" when hasFilter, a map side in pixels - 0 (no opinion) or 256..8192. The engine's filter and atlas "
-           "are one for every scene: the last scene to ask owns them."},
+           "are one for every scene: the last scene to ask owns them - so it is ENGINE-WIDE: a host for an outside client "
+           "refuses it."},
           [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();   // (OgreScene::setShadowSettings writes the engine's one filter/atlas)
               const std::int64_t res = c[1]["resolution"].asInt();
               if (res != 0 && res < 256)
                   return c.fail("shadows.resolution " + std::to_string(res) + " is neither 0 (no opinion) nor 256..8192 px "

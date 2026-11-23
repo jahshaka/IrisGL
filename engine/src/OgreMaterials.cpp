@@ -1351,8 +1351,14 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
         // A reflector node whose mesh was swapped keeps its flag (detachItem
         // above only disarmed the dead Item) — re-derive the plane from the new
         // geometry. A failure here is not fatal to attachMesh: the node simply
-        // stops reflecting and lastError() says why.
-        if (mReflectors.count(id)) armReflector(id, n);
+        // stops reflecting - the REFLECTOR's state (the published facts' arms,
+        // rebuildFacts), never attachMesh's error: TRUE LEAVES NO ERROR
+        // (SCRIPT-IN-ENGINE-1 2e e1: an accepted message that left one is a
+        // published refusal, OgreEngine::applySceneMessage).
+        if (mReflectors.count(id)) {
+            const std::string before = mError;
+            if (!armReflector(id, n)) mError = before;
+        }
         return true;
     } JAH_CATCH(mError, false);
 }
@@ -2806,10 +2812,13 @@ void OgreScene::sweepCullTwins() {
 }
 
 void OgreScene::setNodeFaceCull(NodeId id, FaceCull cull) {
-    if (postScene([=](OgreScene &s) { s.setNodeFaceCull(id, cull); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeFaceCull(id, cull); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeFaceCull");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) {   // (2e e1: never a silent no-op - OgreScene.cpp, unknownNode's words)
+        mError = "Scene::setNodeFaceCull: node " + std::to_string(id) + " is not a node of this scene";
+        return;
+    }
     Node &n = it->second;
     if (n.faceCull == cull) return;
     n.faceCull = cull;

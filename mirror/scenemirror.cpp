@@ -1665,7 +1665,8 @@ void SceneMirror::syncSunAtmosphere()
     const LightDesc want = toLightDesc(mSyncSun, mSyncSun, true,
                                        atmosphereTintFor(mSyncSun, mSyncSun), mSunExposureGain);
     if (want == it->lastLight) return;            // the still case, every frame
-    if (postOk(entryRefusal(mSyncSun, "sun tint", [](Entry &x) { x.lastLight = LightDesc(); }),
+    // (setLight's refusal is FINAL for the value - Engine.h: latched, no retry until the tint changes)
+    if (postOk(entryRefusal(mSyncSun, "sun tint", nullptr, false),
                &jahshaka::engine::Scene::setLight, it->node, want)) {
         notePush(mSyncSun, "sun atmosphere tint");
         it->hasLight = true;
@@ -4008,7 +4009,9 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             // setLight reads is in it, which is what keeps a new field from
             // silently stopping at the first push).
             if (!e.lightPushed || want != e.lastLight) {
-                if (postOk(entryRefusal(node, "light", [](Entry &x) { x.lightPushed = false; }),
+                // (setLight's refusal is FINAL for the value - Engine.h: the push stays latched, made-and-refused, and
+                // goes again only when the document's value changes; no retry - SCRIPT-IN-ENGINE-1 2e e1)
+                if (postOk(entryRefusal(node, "light", nullptr, false),
                            &jahshaka::engine::Scene::setLight, e.node, want)) {
                     notePush(node, "light");
                     e.hasLight = true;
@@ -4566,7 +4569,8 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // whose texture cannot be resolved is left with no texture rather than
     // silently keeping a stale one.
     const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
-    if (postOk(entryRefusal(ps, "particle system", [](Entry &x) { x.hasParticles = false; x.particleSignature = 0; }),
+    // (setParticleSystem's refusal is FINAL for the value - Engine.h: latched, no retry until the signature changes)
+    if (postOk(entryRefusal(ps, "particle system", nullptr, false),
                &jahshaka::engine::Scene::setParticleSystem, e.node, toParticleDesc(ps, tex))) {
         notePush(ps, "particles");
         e.hasParticles = true;
