@@ -144,6 +144,16 @@ public:
         const auto k = it->second.kept.find(std::uint64_t(kind) << 32 | node);
         return k == it->second.kept.end() ? nullptr : static_cast<const T *>(k->second.get());
     }
+    /// ...and ERASED when the thing it records goes but its node stays (engine.light.remove, engine.particles.remove:
+    /// a later setIesProfile / setColourRamp then FAILS - "a node this host set no light on"). Serial-checked as kept:
+    /// a record a dead scene left at this address is not this scene's to erase.
+    void unkeep(const Scene *s, KeptKind kind, std::uint32_t node) const
+    {
+        const auto it = st->scenes.find(const_cast<Scene *>(s));
+        if (it == st->scenes.end() || it->second.serial != s->serial()) return;
+        it->second.kept.erase(std::uint64_t(kind) << 32 | node);
+        if (it->second.made.empty() && it->second.kept.empty()) st->scenes.erase(it);
+    }
 
     std::shared_ptr<EngineState> st;
 };
