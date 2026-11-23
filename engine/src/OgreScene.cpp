@@ -35,7 +35,6 @@
 #include "jahshaka/engine/Lights.h"
 #include "jahshaka/engine/Math.h"
 #include "jahshaka/engine/Mesh.h"
-#include "jahshaka/engine/Monitor.h"
 #include "jahshaka/engine/Overlay.h"
 #include "jahshaka/engine/Published.h"
 #include "jahshaka/engine/Skeleton.h"
