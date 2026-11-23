@@ -15,6 +15,8 @@ For more information see the LICENSE file
 #include "core/logger.h"
 #include "document/qt/property.h"
 
+#include "document/qt/colour.h"
+
 namespace iris
 {
 
@@ -54,9 +56,9 @@ PbrMaterial::PbrMaterial()
     // is a no-op multiplier, and ior/fresnelColor/separateFresnel are not read
     // at all. So the rows existing cannot move a pixel of shipped content.
     workflow            = 0;      // Metallic
-    specularColor       = QColor(255, 255, 255);
+    specularColor       = SrgbColor(255, 255, 255);
     ior                 = 1.5f;   // window glass; F0 = 0.04
-    fresnelColor        = QColor(10, 10, 10);   // ~0.04 linear, the dielectric F0
+    fresnelColor        = SrgbColor(10, 10, 10);   // ~0.04 linear, the dielectric F0
     useFresnelColor     = false;
     separateFresnel     = false;
     clearCoat           = 0.0f;
@@ -65,7 +67,7 @@ PbrMaterial::PbrMaterial()
     receiveShadows      = true;
     emissiveAsLightmap  = false;
 
-    emissiveColor       = QColor(0, 0, 0);
+    emissiveColor       = SrgbColor(0, 0, 0);
     emissiveIntensity   = 0.0f;
 
     alpha               = 1.0f;
@@ -97,7 +99,7 @@ PbrMaterial::PbrMaterial()
 
 // ---------------------------------------------------------------- setters
 
-void PbrMaterial::setBaseColor(QColor color)        { baseColor = color; touch(); }
+void PbrMaterial::setBaseColor(SrgbColor color)        { baseColor = color; touch(); }
 void PbrMaterial::setBaseColorFactor(float factor)  { baseColorFactor = factor; touch(); }
 void PbrMaterial::setBaseColorMap(Texture2DPtr tex)
 {
@@ -202,9 +204,9 @@ const QVector<const char *> &PbrMaterial::detailBlendNames()
     };
     return kNames;
 }
-void PbrMaterial::setSpecularColor(QColor color)        { specularColor = color; touch(); }
+void PbrMaterial::setSpecularColor(SrgbColor color)        { specularColor = color; touch(); }
 void PbrMaterial::setIor(float v)                       { ior = v; touch(); }
-void PbrMaterial::setFresnelColor(QColor color)         { fresnelColor = color; touch(); }
+void PbrMaterial::setFresnelColor(SrgbColor color)         { fresnelColor = color; touch(); }
 void PbrMaterial::setUseFresnelColor(bool use)          { useFresnelColor = use; touch(); }
 void PbrMaterial::setSeparateFresnel(bool separate)     { separateFresnel = separate; touch(); }
 void PbrMaterial::setClearCoat(float coat)              { clearCoat = coat; touch(); }
@@ -370,7 +372,7 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenDistortion()
     return kRows;
 }
 
-void PbrMaterial::setEmissiveColor(QColor color)        { emissiveColor = color; touch(); }
+void PbrMaterial::setEmissiveColor(SrgbColor color)        { emissiveColor = color; touch(); }
 void PbrMaterial::setEmissiveIntensity(float intensity) { emissiveIntensity = intensity; touch(); }
 void PbrMaterial::setEmissiveMap(Texture2DPtr tex)
 {
@@ -448,11 +450,11 @@ void PbrMaterial::setValue(const QString& name, const QVariant& in)
         break;
     }
 
-    if      (name == "baseColor")         baseColor         = value.value<QColor>();
+    if      (name == "baseColor")         baseColor         = toSrgbColor(value.value<QColor>());
     else if (name == "metallic")          metallicFactor    = value.toFloat();
     else if (name == "roughness")         roughnessFactor   = value.toFloat();
     else if (name == "normalFactor")      normalFactor      = value.toFloat();
-    else if (name == "emissiveColor")     emissiveColor     = value.value<QColor>();
+    else if (name == "emissiveColor")     emissiveColor     = toSrgbColor(value.value<QColor>());
     else if (name == "emissiveIntensity") emissiveIntensity = value.toFloat();
     else if (name == "alpha")             alpha             = value.toFloat();
     // "textureScale" sets BOTH axes (see setTextureScale): a file or a script
@@ -473,9 +475,9 @@ void PbrMaterial::setValue(const QString& name, const QVariant& in)
     else if (name == "clearCoatRoughness") clearCoatRoughness = value.toFloat();
     else if (name == "shadingModel")       shadingModel       = value.toInt();
     else if (name == "workflow")           workflow           = value.toInt();
-    else if (name == "specularColor")      specularColor      = value.value<QColor>();
+    else if (name == "specularColor")      specularColor      = toSrgbColor(value.value<QColor>());
     else if (name == "ior")                ior                = value.toFloat();
-    else if (name == "fresnelColor")       fresnelColor       = value.value<QColor>();
+    else if (name == "fresnelColor")       fresnelColor       = toSrgbColor(value.value<QColor>());
     else if (name == "useFresnelColor")    useFresnelColor    = value.toBool();
     else if (name == "separateFresnel")    separateFresnel    = value.toBool();
     else if (name == "detailWeightMap")    setDetailWeightMap(loadTexture(value.toString()));
@@ -584,7 +586,7 @@ void PbrMaterial::createProperties()
     colProp->id          = id++;
     colProp->displayName = "Base Color";
     colProp->name        = "baseColor";
-    colProp->value       = baseColor;
+    colProp->value       = toQColor(baseColor);
     addProperty(std::move(colProp));
 
     auto metallicProp         = std::make_unique<FloatProperty>();
@@ -618,7 +620,7 @@ void PbrMaterial::createProperties()
     emissiveColProp->id          = id++;
     emissiveColProp->displayName = "Emissive Color";
     emissiveColProp->name        = "emissiveColor";
-    emissiveColProp->value       = emissiveColor;
+    emissiveColProp->value       = toQColor(emissiveColor);
     addProperty(std::move(emissiveColProp));
 
     auto emissiveProp         = std::make_unique<FloatProperty>();
@@ -763,7 +765,7 @@ void PbrMaterial::createProperties()
     specColProp->id          = id++;
     specColProp->displayName = "Specular Color";
     specColProp->name        = "specularColor";
-    specColProp->value       = specularColor;
+    specColProp->value       = toQColor(specularColor);
     addProperty(std::move(specColProp));
 
     // 1.0 (vacuum, F0 = 0) to 3.0 (diamond is 2.42): the authoring range that
@@ -788,7 +790,7 @@ void PbrMaterial::createProperties()
     fresnelColProp->id          = id++;
     fresnelColProp->displayName = "Fresnel Color (F0)";
     fresnelColProp->name        = "fresnelColor";
-    fresnelColProp->value       = fresnelColor;
+    fresnelColProp->value       = toQColor(fresnelColor);
     addProperty(std::move(fresnelColProp));
 
     // Not a slider: flipping it changes the size of the renderer's fresnel term

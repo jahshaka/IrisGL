@@ -336,9 +336,9 @@ Scene::Scene()
     // itself — srgb(96)/255 decoded is 0.117 of radiance against the old flat
     // path's 0.120, so the level is preserved to 2.5% and the Sky Light's
     // default stays an honest 1.0.
-    skyColor = QColor(96, 96, 96);
+    skyColor = SrgbColor(96, 96, 96);
 
-    fogColor = QColor(250, 250, 250);
+    fogColor = SrgbColor(250, 250, 250);
     // THE WORLD FOG IS OFF BY DEFAULT (FOG-ATMO-1 fix round). It is an
     // authored medium (mist, smoke, a valley's haze), asked for, not a default —
     // and since SKY-ATMOSPHERE-1 it is THE scene's haze: the realistic sky's own
@@ -492,7 +492,7 @@ Scene::Scene()
     // primary colour is invalid by the same rule and is derived from the
     // outline colour when nobody sets one.
     outlineWidth = 3;
-    outlinePrimaryColor = QColor();
+    outlinePrimaryColor = SrgbColor();
 
     // sky init
     skyType = SkyType::SINGLE_COLOR;
@@ -503,9 +503,9 @@ Scene::Scene()
     // (SUN_AND_LIGHT_DEFAULTS Q1). The sky follows it; nothing steers it.
     sunLightGuid = QString();
 
-	gradientTop = QColor(255, 0, 0);
-	gradientMid = QColor(0, 255, 0);
-	gradientBot = QColor(0, 0, 255);
+	gradientTop = SrgbColor(255, 0, 0);
+	gradientMid = SrgbColor(0, 255, 0);
+	gradientBot = SrgbColor(0, 0, 255);
 	gradientOffset = .5f;
 
 	skyGuid = QString::fromStdString(iris::newGuid());
@@ -514,9 +514,9 @@ Scene::Scene()
 	singleColourBlock.insert("skyColor", iris::colorToJson(skyColor));
 
 	QJsonObject gradientBlock;
-	gradientBlock.insert("gradientTop", iris::colorToJson(QColor(255, 146, 138)));
-	gradientBlock.insert("gradientMid", iris::colorToJson(QColor("white")));
-	gradientBlock.insert("gradientBot", iris::colorToJson(QColor(64, 128, 255)));
+	gradientBlock.insert("gradientTop", iris::colorToJson(SrgbColor(255, 146, 138)));
+	gradientBlock.insert("gradientMid", iris::colorToJson(SrgbColor(255, 255, 255)));
+	gradientBlock.insert("gradientBot", iris::colorToJson(SrgbColor(64, 128, 255)));
 	gradientBlock.insert("gradientOffset", .73f);
 
 	skyData.insert("SingleColor", singleColourBlock);
@@ -561,7 +561,7 @@ void Scene::clearSkyTexture()
     skyTexture.reset();
 }
 
-void Scene::setSkyColor(QColor color)
+void Scene::setSkyColor(SrgbColor color)
 {
     this->skyColor = color;
 }
@@ -1096,12 +1096,12 @@ void Scene::setOutlineWidth(int width)
     outlineWidth = width;
 }
 
-void Scene::setOutlineColor(QColor color)
+void Scene::setOutlineColor(SrgbColor color)
 {
     outlineColor = color;
 }
 
-void Scene::setOutlinePrimaryColor(QColor color)
+void Scene::setOutlinePrimaryColor(SrgbColor color)
 {
     outlinePrimaryColor = color;
 }

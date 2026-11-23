@@ -4,6 +4,7 @@
 #include "core/math/vec.h"
 #include <QVector>
 #include "irisglfwd.h"
+#include "document/srgbcolor.h"
 
 namespace iris {
 
@@ -19,7 +20,7 @@ class LineMeshBuilder
 
 public:
     void addLine(iris::Vec3 a, iris::Vec3 b);
-	void addLine(iris::Vec3 a, QColor aCol, iris::Vec3 b, QColor bCol);
+	void addLine(iris::Vec3 a, SrgbColor aCol, iris::Vec3 b, SrgbColor bCol);
     MeshPtr build();
 };
 

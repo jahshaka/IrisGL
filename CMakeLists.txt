@@ -373,6 +373,8 @@ set (HEADERS
     document/assets/livetextures.h
     document/assets/shippedmeshes.h
     document/assets/image.h
+    document/srgbcolor.h
+    document/qt/colour.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h

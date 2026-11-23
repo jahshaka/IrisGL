@@ -8,6 +8,8 @@
 #include "document/scenegraph/shadowmap.h"
 #include <algorithm>
 
+#include "document/qt/colour.h"
+
 namespace iris
 {
 
@@ -18,7 +20,7 @@ PropertyRows LightNode::getProperties()
     auto colorProp = std::make_unique<ColorProperty>();
     colorProp->displayName = "Light Color";
     colorProp->name = "lightColor";
-    colorProp->value = color;
+    colorProp->value = toQColor(color);
     props.add(std::move(colorProp));
 
     auto prop = std::make_unique<FloatProperty>();
@@ -134,7 +136,7 @@ QVariant LightNode::getPropertyValue(QString valueName)
     if(valueName == "intensity")
         return intensity;
     if(valueName == "lightColor")
-        return color;
+        return toQColor(color);
     if(valueName == "distance")
         return distance;
     if(valueName == "sourceRadius")
@@ -181,7 +183,7 @@ QVariant LightNode::getPropertyValue(QString valueName)
 bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
 {
     if (valueName == "intensity")         { intensity = value.toFloat();         return markedParams(); }
-    if (valueName == "lightColor")        { color = value.value<QColor>();       return markedParams(); }
+    if (valueName == "lightColor")        { color = toSrgbColor(value.value<QColor>());       return markedParams(); }
     if (valueName == "distance")          { distance = value.toFloat();          return markedParams(); }
     if (valueName == "sourceRadius")      { sourceRadius = std::max(value.toFloat(), 0.001f); return markedParams(); }
     if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return markedParams(); }
@@ -246,7 +248,7 @@ LightNode::LightNode()
 
     distance = 10;
     sourceRadius = 0.1f;   // a bulb's size: the falloff caps at 1 / 0.01 m^2 inside it
-    color = QColor(255, 255, 255);
+    color = SrgbColor(255, 255, 255);
     intensity = 1.0f;
     spotCutOff = 30.0f;
     // 0..1, and it was 1.0 here for years — a full-width penumbra with a 1%

@@ -15,7 +15,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <QString>
-#include <QColor>
+#include "document/srgbcolor.h"
 
 #include "core/math/bezierhelper.h"
 
@@ -361,13 +361,13 @@ public:
     }
 };
 
-class ColorKeyFrame:public KeyFrame<QColor>
+class ColorKeyFrame:public KeyFrame<SrgbColor>
 {
 public:
-    QColor interpolate(QColor a,QColor b,float t)
+    SrgbColor interpolate(SrgbColor a,SrgbColor b,float t)
     {
         //return a+(b-a)*t;
-        return QColor(
+        return SrgbColor(
                     a.red()+(int)((b.red()-a.red())*t),
                     a.green()+(int)((b.green()-a.green())*t),
                     a.blue()+(int)((b.blue()-a.blue())*t),

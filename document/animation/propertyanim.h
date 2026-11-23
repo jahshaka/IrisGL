@@ -3,6 +3,7 @@
 
 #include "core/math/vec.h"
 #include "irisglfwd.h"
+#include "document/srgbcolor.h"
 
 namespace iris {
 
@@ -82,7 +83,7 @@ public:
     ColorPropertyAnim();
     ~ColorPropertyAnim();
 
-    QColor getValue(float time);
+    SrgbColor getValue(float time);
     virtual QList<PropertyAnimInfo> getKeyFrames() override;
     virtual FloatKeyFrame* getKeyFrame(QString name) override;
     virtual FloatKeyFrame* getKeyFrame(int index) override;

@@ -11,7 +11,8 @@ For more information see the LICENSE file
 
 #include "document/qt/qtinterop.h"
 #include "core/math/vec.h"
-#include <QColor>
+#include "document/srgbcolor.h"
+#include "document/qt/colour.h"
 
 #include "document/qt/property.h"
 #include "document/scenegraph/particlesystemnode.h"
@@ -56,8 +57,8 @@ void ParticleSystemNode::resetAuthoringDefaults()
     extents = iris::Vec3(1, 1, 1);
     innerExtents = iris::Vec3(0, 0, 0);
     coneAngle = 0.0f;
-    emitColourStart = QColor(255, 255, 255);
-    emitColourEnd = QColor(255, 255, 255);
+    emitColourStart = SrgbColor(255, 255, 255);
+    emitColourEnd = SrgbColor(255, 255, 255);
     burstDuration = burstRepeatDelay = startDelay = 0.0f;
     colourKeys.clear();
     scaleKeys.clear();
@@ -65,8 +66,8 @@ void ParticleSystemNode::resetAuthoringDefaults()
     // ADDENDUM A-4. All four defaults are the NEUTRAL values, and the mirror
     // omits an affector at its neutral value entirely (the turbulence rule),
     // so these fields existing cannot change what an existing emitter draws.
-    colourFade1 = QColor(0, 0, 0, 0);
-    colourFade2 = QColor(0, 0, 0, 0);
+    colourFade1 = SrgbColor(0, 0, 0, 0);
+    colourFade2 = SrgbColor(0, 0, 0, 0);
     colourFadeSwitch = 0.0f;
     colourRampImage.clear();
     colourRampGuid.clear();
@@ -405,9 +406,9 @@ PropertyRows ParticleSystemNode::getProperties()
     addVec3("Inner Extents", "innerExtents", innerExtents);
     addVec3("Wind",          "wind",         wind);
 
-    auto addColour = [&props](const char *display, const char *name, const QColor &value) {
+    auto addColour = [&props](const char *display, const char *name, const SrgbColor &value) {
         auto p = std::make_unique<ColorProperty>();
-        p->displayName = display; p->name = name; p->value = value;
+        p->displayName = display; p->name = name; p->value = toQColor(value);
         props.add(std::move(p));
     };
     addColour("Colour Fade 1 (rate)", "colourFade1", colourFade1);
@@ -471,10 +472,10 @@ QVariant ParticleSystemNode::getPropertyValue(QString valueName)
     if (valueName == "extents")            return iris::toQt(extents);
     if (valueName == "innerExtents")       return iris::toQt(innerExtents);
     if (valueName == "wind")               return iris::toQt(wind);
-    if (valueName == "emitColourStart")    return emitColourStart;
-    if (valueName == "emitColourEnd")      return emitColourEnd;
-    if (valueName == "colourFade1")        return colourFade1;
-    if (valueName == "colourFade2")        return colourFade2;
+    if (valueName == "emitColourStart")    return toQColor(emitColourStart);
+    if (valueName == "emitColourEnd")      return toQColor(emitColourEnd);
+    if (valueName == "colourFade1")        return toQColor(colourFade1);
+    if (valueName == "colourFade2")        return toQColor(colourFade2);
     if (valueName == "colourFadeSwitch")   return colourFadeSwitch;
     if (valueName == "scaleRate")          return scaleRate;
     if (valueName == "scaleRateMultiply")  return scaleRateMultiply;
@@ -513,10 +514,10 @@ bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &val
     if (valueName == "extents")            { extents      = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
     if (valueName == "innerExtents")       { innerExtents = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
     if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
-    if (valueName == "emitColourStart")    { emitColourStart = value.value<QColor>(); return markedParams(); }
-    if (valueName == "emitColourEnd")      { emitColourEnd   = value.value<QColor>(); return markedParams(); }
-    if (valueName == "colourFade1")        { colourFade1       = value.value<QColor>(); return markedParams(); }
-    if (valueName == "colourFade2")        { colourFade2       = value.value<QColor>(); return markedParams(); }
+    if (valueName == "emitColourStart")    { emitColourStart = toSrgbColor(value.value<QColor>()); return markedParams(); }
+    if (valueName == "emitColourEnd")      { emitColourEnd   = toSrgbColor(value.value<QColor>()); return markedParams(); }
+    if (valueName == "colourFade1")        { colourFade1       = toSrgbColor(value.value<QColor>()); return markedParams(); }
+    if (valueName == "colourFade2")        { colourFade2       = toSrgbColor(value.value<QColor>()); return markedParams(); }
     if (valueName == "colourFadeSwitch")   { colourFadeSwitch  = value.toFloat();   return markedParams(); }
     if (valueName == "scaleRate")          { scaleRate         = value.toFloat();   return markedParams(); }
     if (valueName == "scaleRateMultiply")  { scaleRateMultiply = value.toBool();    return markedParams(); }

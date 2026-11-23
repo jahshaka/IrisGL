@@ -19,6 +19,7 @@ For more information see the LICENSE file
 #include "document/scenegraph/scenenode.h"
 #include "core/irisutils.h"
 #include "document/assets/texture2d.h"
+#include "document/srgbcolor.h"
 
 namespace iris
 {
@@ -114,7 +115,7 @@ public:
     float coneAngle = 0.0f;
     /// Per-particle emission colour, picked between the two at birth. This is
     /// the FLAT tint; the ramp below is what changes over a particle's life.
-    QColor emitColourStart, emitColourEnd;
+    SrgbColor emitColourStart, emitColourEnd;
     /// Bursts. duration 0 = emit forever.
     float burstDuration = 0.0f, burstRepeatDelay = 0.0f, startDelay = 0.0f;
 
@@ -135,7 +136,7 @@ public:
     // the panel treats them as one "colour over life" source.
     /// Per-second colour deltas, stage 1 then stage 2. Both null = no fade
     /// affector at all (the mirror omits it, the turbulence rule).
-    QColor colourFade1, colourFade2;
+    SrgbColor colourFade1, colourFade2;
     /// Switch to stage 2 when a particle has this many SECONDS of life left.
     float colourFadeSwitch = 0.0f;
     /// A 1-D ramp image sampled across life (the classic fire gradient). A

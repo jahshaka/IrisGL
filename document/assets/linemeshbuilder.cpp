@@ -9,10 +9,10 @@ namespace iris {
 
 void LineMeshBuilder::addLine(iris::Vec3 a, iris::Vec3 b)
 {
-	this->addLine(a, QColor(255, 255, 255), b, QColor(255, 255, 255));
+	this->addLine(a, SrgbColor(255, 255, 255), b, SrgbColor(255, 255, 255));
 }
 
-void LineMeshBuilder::addLine(iris::Vec3 a, QColor aCol, iris::Vec3 b, QColor bCol)
+void LineMeshBuilder::addLine(iris::Vec3 a, SrgbColor aCol, iris::Vec3 b, SrgbColor bCol)
 {
 	lineData.append({ a, iris::Vec4(aCol.redF(), aCol.greenF(), aCol.blueF(), aCol.alphaF()) });
 	lineData.append({ b, iris::Vec4(bCol.redF(), bCol.greenF(), bCol.blueF(), bCol.alphaF()) });

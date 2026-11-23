@@ -15,7 +15,7 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/materials/material.h"
 #include "document/qt/property.h"
-#include <QColor>
+#include "document/srgbcolor.h"
 #include <QHash>
 #include <QList>
 #include <QVector>
@@ -72,7 +72,7 @@ namespace iris
 namespace defaultmaterial
 {
 /// The unauthored albedo, as the sRGB colour the panel shows (linear 0.5775).
-inline QColor baseColor() { return QColor(200, 200, 200); }
+inline SrgbColor baseColor() { return SrgbColor(200, 200, 200); }
 /// ...and the same value as the LINEAR scalar the renderer's fallback needs,
 /// so the two can never drift: keep it equal to linearOf(baseColor()).
 constexpr float kBaseColorLinear = 0.5775f;
@@ -98,7 +98,7 @@ public:
     }
 
     // --- base colour ---
-    void setBaseColor(QColor color);
+    void setBaseColor(SrgbColor color);
     void setBaseColorFactor(float factor);
     void setBaseColorMap(Texture2DPtr tex);
 
@@ -128,9 +128,9 @@ public:
 
     // --- specular / fresnel workflow (MATERIAL_GAPS_SPEC GAP 1) ---
     void setWorkflow(int workflow);         // 0 metallic, 1 specular, 2 specular-as-fresnel
-    void setSpecularColor(QColor color);
+    void setSpecularColor(SrgbColor color);
     void setIor(float ior);
-    void setFresnelColor(QColor color);
+    void setFresnelColor(SrgbColor color);
     void setUseFresnelColor(bool use);
     void setSeparateFresnel(bool separate);
 
@@ -167,7 +167,7 @@ public:
     // Readers stay tolerant of `occlusionFactor` / `occlusionMap` in old
     // files — they are simply undeclared names now, and every reader skips
     // those. No migration exists or is needed.
-    void setEmissiveColor(QColor color);
+    void setEmissiveColor(SrgbColor color);
     void setEmissiveIntensity(float intensity);
     void setEmissiveMap(Texture2DPtr tex);
 
@@ -317,7 +317,7 @@ public:
     // slot was a copy of "is there an entry under this sampler name" that only
     // the setters maintained. `textures.contains("u_baseColorMap")` is the one
     // answer, and it cannot go stale.
-    QColor baseColor;
+    SrgbColor baseColor;
     float  baseColorFactor;
 
     float  metallicFactor;
@@ -388,7 +388,7 @@ public:
     /// kS, the specular colour — a multiplier on the specular response.
     /// Meaningful in EVERY workflow, metallic included (the renderer's own
     /// header says so); white is inert and is the default.
-    QColor specularColor;
+    SrgbColor specularColor;
 
     /// Index of refraction, the authoring front-end for F0: the renderer
     /// computes F0 = ((1-ior)/(1+ior))². 1.5 is window glass. Honoured only in
@@ -399,7 +399,7 @@ public:
     /// F0 DIRECTLY, used instead of `ior` when `useFresnelColor` is set. The
     /// escape hatch for an F0 no single IOR expresses — a coloured metal's
     /// specular, or KHR_materials_specular's specularColorFactor on import.
-    QColor fresnelColor;
+    SrgbColor fresnelColor;
     bool   useFresnelColor;
     /// false = one scalar F0 shared by RGB (the cheaper shader permutation),
     /// true = a per-channel F0. Changing it recompiles the material's shader
@@ -499,7 +499,7 @@ public:
     /// emissive colour should be white or it tints the lightmap.
     bool   emissiveAsLightmap;
 
-    QColor emissiveColor;
+    SrgbColor emissiveColor;
     float  emissiveIntensity;
 
     float  alpha;

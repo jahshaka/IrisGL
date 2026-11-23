@@ -14,7 +14,7 @@ For more information see the LICENSE file
 
 #include "core/math/vec.h"
 #include <functional>
-#include <QColor>
+#include "document/srgbcolor.h"
 #include <QList>
 #include <QStringList>
 #include <QVector>
@@ -475,10 +475,10 @@ public:
     /// whoever set the guid (the reader, world.clouds). Runtime only, like
     /// `skyTexture`: the guid is the fact, this is its loaded pixels.
     Texture2DPtr cloudWeatherMap;
-    QColor skyColor;
-	QColor gradientTop;
-	QColor gradientMid;
-	QColor gradientBot;
+    SrgbColor skyColor;
+	SrgbColor gradientTop;
+	SrgbColor gradientMid;
+	SrgbColor gradientBot;
 	float gradientOffset;
 
     // Fog properties. The model is EXPONENTIAL (jahshaka::engine::FogDesc):
@@ -491,7 +491,7 @@ public:
     // law): exponential fog begins at the camera and never stops, so a start
     // and an end distance described nothing the renderer could draw. Nothing
     // reads or writes them (forward-building).
-    QColor fogColor;       // the fog colour under the non-realistic skies
+    SrgbColor fogColor;       // the fog colour under the non-realistic skies
     bool fogEnabled;
     float fogDensity;          // per world unit, exp2
     float fogHeightDensity;    // 0 = no height layer
@@ -1201,7 +1201,7 @@ public:
      * @future todo could include camera speed, motion blur px, clipping (near/far plane) pos
      */
     int outlineWidth;
-    QColor outlineColor;
+    SrgbColor outlineColor;
     /// The PRIMARY member's outline colour (EDITOR_MULTISELECT_SPEC D4 b, the
     /// Blender rule: the active object reads brighter than the rest of the
     /// selection). Only meaningful with MORE THAN ONE node selected — with a
@@ -1209,7 +1209,7 @@ public:
     /// `outlineColor` and a one-node selection is pixel-identical to what it
     /// was before this field existed. Invalid = "never set", and the mirror
     /// then lightens `outlineColor` itself.
-    QColor outlinePrimaryColor;
+    SrgbColor outlinePrimaryColor;
 
 	// The last absolute animation time, as handed to updateSceneAnimation.
 	float animTime = 0.0f;
@@ -1262,7 +1262,7 @@ public:
 
     QString getSkyTextureSource();
     void clearSkyTexture();
-    void setSkyColor(QColor color);
+    void setSkyColor(SrgbColor color);
 
     void updateSceneAnimation(float time);
     /// The last time updateSceneAnimation was given.
@@ -1473,14 +1473,14 @@ public:
      * Sets the viewport stencil color
      * @param color
      */
-    void setOutlineColor(QColor color);
+    void setOutlineColor(SrgbColor color);
 
     /**
      * Sets the colour the PRIMARY member of a multi-selection is outlined in.
      * An invalid colour restores the derived default (a lightened outlineColor).
      * @param color
      */
-    void setOutlinePrimaryColor(QColor color);
+    void setOutlinePrimaryColor(SrgbColor color);
 
     void cleanup();
 

@@ -12,8 +12,8 @@ For more information see the LICENSE file
 #ifndef SKYBAKE_H
 #define SKYBAKE_H
 
-#include <QColor>
-#include <QImage>
+#include "document/assets/image.h"
+#include "document/srgbcolor.h"
 
 namespace iris
 {
@@ -23,8 +23,8 @@ namespace iris
 /// nadir, which is the convention every other sky image in the codebase uses
 /// (SceneMirror::bakeRealisticSky writes it, integrateSkyAmbientSh reads it).
 /// `offset` is where the middle stop sits, 0..1 from the bottom; it is clamped
-/// to [0.01, 0.99] so the two segments can never collapse. The result is
-/// Format_RGBA8888 (alpha 255), so `constBits()` is a straight RGBA upload.
+/// to [0.01, 0.99] so the two segments can never collapse. The result is an
+/// iris::Image (8-bit RGBA, alpha 255), a straight RGBA upload.
 ///
 /// THE one implementation (VISUAL_PARITY re-audit F10). The engine mirror's
 /// sky path and the glTF/web exporter both need this ramp and each carried its
@@ -33,7 +33,7 @@ namespace iris
 /// the sky in the viewport agreed in the first place. It lives in the IrisGL
 /// library rather than on SceneMirror because the exporter links the document
 /// but not the mirror (which drags in the engine).
-QImage bakeGradientSky(const QColor &top, const QColor &mid, const QColor &bottom,
+Image bakeGradientSky(const SrgbColor &top, const SrgbColor &mid, const SrgbColor &bottom,
                        float offset, int width = 4, int height = 256);
 
 }

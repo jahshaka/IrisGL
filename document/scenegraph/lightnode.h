@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #define LIGHTNODE_H
 
 #include "core/math/vec.h"
-#include "QColor"
+#include "document/srgbcolor.h"
 #include <QJsonObject>
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
@@ -82,7 +82,7 @@ public:
     /// source a light cannot get brighter. Falloff only: Ogre's shadow maps
     /// have no source size. Default 0.1 m.
     float sourceRadius;
-    QColor color;
+    SrgbColor color;
     float intensity;
 
     // THE SUN'S ANGULAR SIZE USED TO LIVE HERE (`sunAngle`, 0.53 degrees).

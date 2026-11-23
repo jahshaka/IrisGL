@@ -19,7 +19,7 @@
 // (audit §3.3/§10: iris/mirror/) so boundary changes and mirror updates land
 // in one commit. Includes iris (Qt) and jahshaka/engine. Never Ogre.
 #include "core/math/mat4.h"
-#include <QColor>
+#include "document/srgbcolor.h"
 #include <QHash>
 #include <QList>
 #include <QImage>
@@ -1922,7 +1922,7 @@ private:
         /// place — swapping the sky swaps the object.
         const void *cubeTexture = nullptr;
         /// Gradient: the three stops and the horizon offset.
-        QColor  gradientTop, gradientMid, gradientBot;
+        iris::SrgbColor  gradientTop, gradientMid, gradientBot;
         float   gradientOffset = 0.0f;
         /// Realistic: the planet's atmosphere's dials (iris::SkyRealistic;
         /// the engine's AtmosphereSky). A change is a table rebuild and a
@@ -1944,7 +1944,7 @@ private:
         /// baked as a 64x32 strip of the colour and pushed through the equirect
         /// path, so its SH band 0 is linear(colour), its reflections are
         /// uniform, and the sun disc has a sky pass to compose over.
-        QColor  skyColor;
+        iris::SrgbColor  skyColor;
 
         bool operator==(const SkySource &o) const;
         bool operator!=(const SkySource &o) const { return !(*this == o); }
@@ -2144,8 +2144,8 @@ private:
     jahshaka::engine::MaterialId mOutlinePrimaryMaterial = 0;
     jahshaka::engine::MaterialId mOutlinePrimarySkinnedMaterial = 0;
     bool mHighlightWireframe = false;
-    QColor mHighlightColourApplied;                        // what the materials show now
-    QColor mHighlightPrimaryColourApplied;                 // ...and the primary's
+    iris::SrgbColor mHighlightColourApplied;                        // what the materials show now
+    iris::SrgbColor mHighlightPrimaryColourApplied;                 // ...and the primary's
     // Strongest shadow quality any shadow-casting light asked for, from the last
     // sync(); pushed engine-wide by buildEnvironment (see comment there).
     jahshaka::engine::ShadowFilter mShadowFilter = jahshaka::engine::ShadowFilter::Hard;

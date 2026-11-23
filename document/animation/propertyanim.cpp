@@ -110,9 +110,9 @@ ColorPropertyAnim::~ColorPropertyAnim()
     delete keyFrames[3];
 }
 
-QColor ColorPropertyAnim::getValue(float time)
+SrgbColor ColorPropertyAnim::getValue(float time)
 {
-    return QColor(
+    return SrgbColor(
                 keyFrames[0]->getValueAt(time) * 255,
                 keyFrames[1]->getValueAt(time) * 255,
                 keyFrames[2]->getValueAt(time) * 255,

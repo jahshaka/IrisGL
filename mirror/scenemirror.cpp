@@ -1909,7 +1909,7 @@ void SceneMirror::syncHighlight()
     // (scene->outlineColor, filled from Preferences by MainWindow::
     // updateSceneSettings — legacy reads it the same way). Fall back to the
     // historical selection yellow when the document never got one.
-    const QColor pref = mSource ? mSource->outlineColor : QColor();
+    const iris::SrgbColor pref = mSource ? mSource->outlineColor : iris::SrgbColor();
     const Colour kSelection = pref.isValid()
         ? Colour(float(pref.redF()), float(pref.greenF()), float(pref.blueF()))
         : Colour(1.0f, 0.85f, 0.1f);
@@ -1918,7 +1918,7 @@ void SceneMirror::syncHighlight()
     // hue including the dark ones (QColor::lighter multiplies HSV value and
     // does nothing at all to a colour whose value is already 255 — the shipped
     // default #3498db is close enough to that to matter).
-    const QColor primaryPref = mSource ? mSource->outlinePrimaryColor : QColor();
+    const iris::SrgbColor primaryPref = mSource ? mSource->outlinePrimaryColor : iris::SrgbColor();
     const Colour kPrimary = [&]() -> Colour {
         if (primaryPref.isValid())
             return Colour(float(primaryPref.redF()), float(primaryPref.greenF()),
@@ -3324,7 +3324,7 @@ void SceneMirror::syncLightWires(Entry &e, iris::LightNode *light)
             notePush(light, "wire shape");
         }
     }
-    const QColor c = light->color;
+    const iris::SrgbColor c = light->color;
     // On change only, like every other push here: setUnlitMaterial schedules a
     // const-buffer update, and a light's colour is edited by hand, not animated.
     pushWireColour(e, Colour(c.redF(), c.greenF(), c.blueF(), 1.0f));
@@ -4486,7 +4486,7 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
         // A QColor cannot carry a NEGATIVE delta, and a fade-out is exactly
         // that, so the components are read as SIGNED rates in [-1, 1] around
         // 0.5: 0 is -1/s, 128 is 0, 255 is +1/s. The panel says so on the row.
-        const auto rate = [](const QColor &c) {
+        const auto rate = [](const iris::SrgbColor &c) {
             return Colour(float(c.redF()) * 2.0f - 1.0f, float(c.greenF()) * 2.0f - 1.0f,
                           float(c.blueF()) * 2.0f - 1.0f, float(c.alphaF()) * 2.0f - 1.0f);
         };
@@ -5155,11 +5155,10 @@ struct FieldHasher {
     /// Nothing in the tree writes a colour that fine today — the panel's picker
     /// and every reader are 8-bit — which is exactly why it would have been a
     /// silent trap rather than a visible one (lead review F5).
-    inline FieldHasher &operator<<(const QColor &c)
+    inline FieldHasher &operator<<(const iris::SrgbColor &c)
     {
-        const QRgba64 q = c.rgba64();
-        return *this << quint32(q.red() << 16 | q.green())
-                     << quint32(q.blue() << 16 | q.alpha());
+        return *this << quint32(c.red16() << 16 | c.green16())
+                     << quint32(c.blue16() << 16 | c.alpha16());
     }
     FieldHasher &operator<<(const QString &s)
     {
@@ -8263,11 +8262,11 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             // which used to carry its own copy of it (re-audit F10). It stays a
             // host bake: it is 64 x 32 texels of a linear interpolation, and
             // there is no engine-side gradient sky to adopt.
-            const QImage strip = iris::bakeGradientSky(mSource->gradientTop, mSource->gradientMid,
-                                                       mSource->gradientBot, mSource->gradientOffset);
+            const iris::Image strip = iris::bakeGradientSky(mSource->gradientTop, mSource->gradientMid,
+                                                            mSource->gradientBot, mSource->gradientOffset);
             mSkyFaceTextures[0] = strip.isNull() ? 0
-                : newTexture(unsigned(strip.width()), unsigned(strip.height()),
-                                         strip.constBits(), true);
+                : newTexture(unsigned(strip.width), unsigned(strip.height),
+                                         strip.rgba.data(), true);
             if (mSkyFaceTextures[0]) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
                 mSkyDesc.equirect = mSkyFaceTextures[0];
@@ -8289,12 +8288,12 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
             // what it decoded — which is precisely what makes a 72-grey COLOUR
             // sky and a 72-grey PAINTED sky the same sky (the colour-space
             // rule, §4).
-            const QColor c = mSource->skyColor;
-            QImage strip(64, 32, QImage::Format_RGBA8888);
-            strip.fill(QColor(c.red(), c.green(), c.blue(), 255));
-            mSkyFaceTextures[0] = newTexture(unsigned(strip.width()),
-                                                         unsigned(strip.height()),
-                                                         strip.constBits(), true);
+            const iris::SrgbColor c = mSource->skyColor;
+            const iris::Image strip = iris::Image::filled(64, 32, std::uint8_t(c.red()), std::uint8_t(c.green()),
+                                                          std::uint8_t(c.blue()), 255);
+            mSkyFaceTextures[0] = newTexture(unsigned(strip.width),
+                                                         unsigned(strip.height),
+                                                         strip.rgba.data(), true);
             if (mSkyFaceTextures[0]) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
                 mSkyDesc.equirect = mSkyFaceTextures[0];

@@ -20,16 +20,17 @@ For more information see the LICENSE file
 // that guessed the other form read black (or white) and said nothing.
 // Forward-only: there is no reader of the integer form.
 
-#include <QColor>
 #include <QJsonObject>
 #include <QtGlobal>
+
+#include "document/srgbcolor.h"
 
 namespace iris
 {
 
-/// `c` as {r, g, b, a}, each 0..1. An invalid colour writes as transparent
-/// black, which is what QColor reports for it.
-inline QJsonObject colorToJson(const QColor &c)
+/// `c` as {r, g, b, a}, each 0..1. An invalid colour writes what it reads:
+/// its channels 0, its alpha 1 (QColor's own answer for an invalid colour).
+inline QJsonObject colorToJson(const SrgbColor &c)
 {
     QJsonObject o;
     o.insert(QStringLiteral("r"), c.redF());
@@ -40,16 +41,16 @@ inline QJsonObject colorToJson(const QColor &c)
 }
 
 /// The colour an {r, g, b, a} object holds (channels clamped to 0..1; `a`
-/// absent = opaque). An EMPTY object is `absent` — an invalid QColor unless the
+/// absent = opaque). An EMPTY object is `absent` — an invalid colour unless the
 /// caller names a default, so a reader can tell "not written" from black.
-inline QColor colorFromJson(const QJsonObject &o, const QColor &absent = QColor())
+inline SrgbColor colorFromJson(const QJsonObject &o, const SrgbColor &absent = SrgbColor())
 {
     if (o.isEmpty()) return absent;
     const auto channel = [&o](const char *key, double fallback) {
         return qBound(0.0, o.value(QLatin1String(key)).toDouble(fallback), 1.0);
     };
-    return QColor::fromRgbF(float(channel("r", 0.0)), float(channel("g", 0.0)),
-                            float(channel("b", 0.0)), float(channel("a", 1.0)));
+    return SrgbColor::fromRgbF(float(channel("r", 0.0)), float(channel("g", 0.0)),
+                               float(channel("b", 0.0)), float(channel("a", 1.0)));
 }
 
 }  // namespace iris
