@@ -264,7 +264,7 @@ SceneNodePtr MeshNode::createDuplicate()
 bool MeshNode::hasBone(const QString &boneName) const
 {
     if (!skeleton || boneName.isEmpty()) return false;
-    return skeleton->boneMap.contains(boneName);
+    return skeleton->boneMap.count(boneName.toStdString()) != 0;
 }
 
 const Socket *MeshNode::findSocket(const QString &socketName) const
@@ -283,7 +283,7 @@ bool MeshNode::addSocket(const Socket &socket, QString *error)
     if (socket.name.isEmpty()) return refuse(QStringLiteral("a socket needs a name"));
     if (findSocket(socket.name))
         return refuse(QStringLiteral("this node already has a socket named '%1'").arg(socket.name));
-    if (!skeleton || skeleton->bones.isEmpty())
+    if (!skeleton || skeleton->bones.empty())
         return refuse(QStringLiteral("'%1' has no rig — sockets attach to BONES, so only a "
                                      "skinned mesh can carry one").arg(name));
     if (!hasBone(socket.boneName))

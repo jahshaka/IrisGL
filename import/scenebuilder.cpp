@@ -231,7 +231,7 @@ SkeletonPtr extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     for (unsigned i = 0;i<mesh->mNumBones; i++) {
         auto meshBone = mesh->mBones[i];
 
-        auto bone = Bone::create(QString(meshBone->mName.C_Str()));
+        auto bone = Bone::create(std::string(meshBone->mName.C_Str()));
         bone->inverseMeshSpacePoseMatrix = aiMatrixToQMatrix(meshBone->mOffsetMatrix);
         bone->meshSpacePoseMatrix = bone->inverseMeshSpacePoseMatrix.inverted();
 
@@ -256,7 +256,7 @@ SkeletonPtr extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     // is identical to the old behaviour (nearest bone ancestor == parent bone).
     std::function<void(aiNode*, const BonePtr&)> evalChildren;
     evalChildren = [&skel, &evalChildren](aiNode *node, const BonePtr &ancestor) {
-        auto bone = skel->getBone(QString(node->mName.C_Str()));
+        auto bone = skel->getBone(std::string(node->mName.C_Str()));
         // A bone may appear twice in a node tree only if the file is malformed;
         // don't re-parent one that already has a parent.
         if (!!bone && !!ancestor && bone->parentBone.expired() && bone != ancestor)
@@ -319,8 +319,8 @@ QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QStr
         const QString animName = clipNameFor(QString(anim->mName.C_Str()), i, anims);
 
         auto skelAnim = SkeletalAnimation::create();
-        skelAnim->name = animName;
-        skelAnim->source = source;
+        skelAnim->name = animName.toStdString();
+        skelAnim->source = source.toStdString();
         // The duration the FILE declares, kept beside the keys: it is the only
         // record of a one-frame clip's length once FindInvalidData has merged
         // its identical keys (smoke L10 item 2; SkeletalAnimation::declaredLength).
@@ -349,7 +349,7 @@ QMap<QString, SkeletalAnimationPtr> extractAnimations(const aiScene *scene, QStr
                 boneAnim->scaleKeys->addKey(iris::Vec3(key.mValue.x, key.mValue.y, key.mValue.z), key.mTime / ticksPerSecond);
             }
 
-            skelAnim->addBoneAnimation(nodeName, boneAnim);
+            skelAnim->addBoneAnimation(nodeName.toStdString(), boneAnim);
         }
 
         anims.insert(animName, skelAnim);
@@ -445,7 +445,7 @@ std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
             if (xf.skeleton) meshObj->setSkeleton(extractSkeleton(mesh, scene));
 
             meshNode->setMesh(meshObj);
-            meshNode->name = QString(mesh->mName.C_Str());
+            meshNode->name = std::string(mesh->mName.C_Str());
             meshNode->meshPath = filePath;
             meshNode->meshIndex = node->mMeshes[0];
 
@@ -467,7 +467,7 @@ std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
     else {
         //otherwise, add meshes as child nodes
         sceneNode = std::shared_ptr<iris::SceneNode>(new iris::SceneNode());
-        sceneNode->name = QString(node->mName.C_Str());
+        sceneNode->name = std::string(node->mName.C_Str());
 
         for (unsigned i = 0; i < node->mNumMeshes; i++) {
             auto mesh = scene->mMeshes[node->mMeshes[i]];
@@ -475,7 +475,7 @@ std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
             if (xf.skeleton) meshObj->setSkeleton(extractSkeleton(mesh, scene));
 
             auto meshNode = iris::MeshNode::create();
-            meshNode->name = QString(mesh->mName.C_Str());
+            meshNode->name = std::string(mesh->mName.C_Str());
             meshNode->meshPath = filePath;
             meshNode->meshIndex = node->mMeshes[i];
 

@@ -14,9 +14,8 @@ For more information see the LICENSE file
 
 #include "core/math/quat.h"
 #include "core/math/vec.h"
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <string>
+#include <vector>
 
 #include "irisglfwd.h"
 #include "document/animation/skeletalanimation.h"
@@ -24,6 +23,7 @@ For more information see the LICENSE file
 #include "core/geometry/aabb.h"
 #include "document/assets/vertexlayout.h"
 #include "document/assets/vertexbuffer.h"
+#include <cstdint>
 
 namespace iris
 {
@@ -118,11 +118,11 @@ struct MeshCard
     }
 
     /// 0..5 — one of the six directions above.
-    quint8 axis = 0;
+    std::uint8_t axis = 0;
     /// The LOD level (0 = the authored geometry, i = `lodIndices[i - 1]`) whose
     /// simplifier error is below this card's TEXEL — the same rule ATOM-2's
     /// voxeliser picks a level by, with the card texel in the cell's place.
-    quint8 lodLevel = 0;
+    std::uint8_t lodLevel = 0;
     /// The CENTRE of the card's box, mesh space. The capture's near plane is
     /// `origin + axisDirection(axis) * halfDepth`, its far plane
     /// `origin - axisDirection(axis) * halfDepth`.
@@ -166,35 +166,35 @@ struct MeshClusterDag
 {
     struct Cluster
     {
-        quint32 vertexOffset = 0;     ///< first entry of this cluster in `vertices`
-        quint32 triangleOffset = 0;   ///< first TRIANGLE of this cluster in `triangles` (3 bytes each)
-        quint16 vertexCount = 0;
-        quint16 triangleCount = 0;
-        qint32  group = -1;           ///< the group this cluster is a MEMBER of
-        qint32  refined = -1;         ///< the group whose simplification PRODUCED it; -1 = level 0
+        std::uint32_t vertexOffset = 0;     ///< first entry of this cluster in `vertices`
+        std::uint32_t triangleOffset = 0;   ///< first TRIANGLE of this cluster in `triangles` (3 bytes each)
+        std::uint16_t vertexCount = 0;
+        std::uint16_t triangleCount = 0;
+        std::int32_t  group = -1;           ///< the group this cluster is a MEMBER of
+        std::int32_t  refined = -1;         ///< the group whose simplification PRODUCED it; -1 = level 0
         float   centre[3] = { 0.0f, 0.0f, 0.0f };   ///< culling sphere, mesh space
         float   radius = 0.0f;
     };
     struct Group
     {
-        qint32 depth = 0;             ///< the DAG level the group was formed at
+        std::int32_t depth = 0;             ///< the DAG level the group was formed at
         float  centre[3] = { 0.0f, 0.0f, 0.0f };    ///< the simplified bounds' sphere, mesh space —
         float  radius = 0.0f;         ///< ...grown at bake to CONTAIN every child group's sphere
         float  error = 0.0f;          ///< MEASURED, mesh units, monotone, finite (the reader refuses anything else)
         float  estimate = 0.0f;       ///< the simplifier's own error (a diagnostic)
     };
 
-    QVector<Cluster> clusters;
-    QVector<Group>   groups;
-    QVector<quint32> vertices;        ///< per-cluster local -> mesh vertex, concatenated
-    QByteArray       triangles;       ///< 8-bit local indices, 3 per triangle, concatenated
+    std::vector<Cluster> clusters;
+    std::vector<Group>   groups;
+    std::vector<std::uint32_t> vertices;        ///< per-cluster local -> mesh vertex, concatenated
+    std::vector<std::uint8_t> triangles;   ///< 8-bit local indices, 3 per triangle, concatenated
 
-    bool isEmpty() const { return clusters.isEmpty(); }
-    int  triangleCount() const { return triangles.size() / 3; }
+    bool isEmpty() const { return clusters.empty(); }
+    int  triangleCount() const { return int(triangles.size() / 3); }
     /// The mesh-vertex index of corner `k` (0..2) of local triangle `t` of cluster `c`.
-    quint32 vertexOf(const Cluster &c, int t, int k) const
+    std::uint32_t vertexOf(const Cluster &c, int t, int k) const
     {
-        const quint8 local = quint8(triangles.at(int(c.triangleOffset + quint32(t)) * 3 + k));
+        const std::uint8_t local = std::uint8_t(triangles.at(int(c.triangleOffset + std::uint32_t(t)) * 3 + k));
         return vertices.at(int(c.vertexOffset) + int(local));
     }
 };
@@ -205,9 +205,9 @@ struct MeshClusterDag
 class Mesh
 {
     SkeletonPtr skeleton;
-    QMap<QString, SkeletalAnimationPtr> skeletalAnimations;
+    std::map<std::string, SkeletalAnimationPtr> skeletalAnimations;
 
-	QList<VertexBufferPtr> vertexBuffers;
+	std::vector<VertexBufferPtr> vertexBuffers;
 	IndexBufferPtr idxBuffer;
 
 public:
@@ -249,9 +249,9 @@ public:
     /// Nothing reads it to choose a level.
     ///
     /// The three arrays have one entry per level above 0.
-    QVector<QVector<quint32>> lodIndices;
-    QVector<float>            lodErrors;
-    QVector<float>            lodBounds;
+    std::vector<std::vector<std::uint32_t>> lodIndices;
+    std::vector<float>            lodErrors;
+    std::vector<float>            lodBounds;
 
     /// SURFACE-CACHE phase 1 — the mesh's card list, built at IMPORT by
     /// MeshBake (beside the chain above) and carried in the .jmb bake, and
@@ -265,7 +265,7 @@ public:
     /// of a capture is fixed per card (SURFACE-CACHE-0's measurement), so the
     /// number and the shape of the cards authored here is the number and the
     /// shape of the work they will do.
-    QVector<MeshCard> cards;
+    std::vector<MeshCard> cards;
 
     /// The fraction of the mesh's sampled surfels covered by AT LEAST ONE card
     /// — the quality of the list above, measured by the generator against the
@@ -280,7 +280,7 @@ public:
 
     /// CPU-side geometry, read-only. The engine mirror and importers convert from
     /// these.
-    const QList<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }
+    const std::vector<VertexBufferPtr>& getVertexBuffers() const { return vertexBuffers; }
     IndexBufferPtr getIndexBuffer() const { return idxBuffer; }
 
     TriMesh* getTriMesh()
@@ -292,8 +292,8 @@ public:
     bool hasSkeleton();
     SkeletonPtr getSkeleton();
 
-    void addSkeletalAnimation(QString name, SkeletalAnimationPtr anim);
-    QMap<QString, SkeletalAnimationPtr> getSkeletalAnimations();
+    void addSkeletalAnimation(std::string name, SkeletalAnimationPtr anim);
+    std::map<std::string, SkeletalAnimationPtr> getSkeletalAnimations();
     bool hasSkeletalAnimations();
 
     // (`loadMesh`, `pinLoadPaths`, `clearLoadCache` and `loadCacheSize` are

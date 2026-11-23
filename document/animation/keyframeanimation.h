@@ -14,10 +14,11 @@ For more information see the LICENSE file
 
 #include "core/math/quat.h"
 #include "core/math/vec.h"
-#include <QString>
-#include <QVector>
+#include <string>
+#include <vector>
 
 #include "core/math/bezierhelper.h"
+#include <algorithm>
 
 namespace iris
 {
@@ -83,8 +84,8 @@ template<typename T>
 class KeyFrame
 {
 public:
-    QString name;
-    QVector<Key<T>*> keys;
+    std::string name;
+    std::vector<Key<T>*> keys;
     float length;//in seconds
 
     KeyFrame()
@@ -108,23 +109,13 @@ public:
         return length;
     }
 
-    void autoAdjustLength()
-    {
-        if(keys.size()==0)
-            return;
-
-        //sort keys
-        this->sortKeys();
-        //get last key and use that to determine length
-        auto last = keys.end().c;
-        length = last->time;
-    }
-
     /// Takes `key` out of the track and FREES it (the track owns it); a key
     /// that is not this track's is left alone. True when it was removed.
     bool removeKey(Key<T>* key)
     {
-        if (!keys.removeOne(key)) return false;
+        const auto at = std::find(keys.begin(), keys.end(), key);
+        if (at == keys.end()) return false;
+        keys.erase(at);
         delete key;
         return true;
     }
@@ -162,20 +153,20 @@ public:
 
     T getValueAt(double time,T defaultVal)
     {
-        Key<T>* leftKey = Q_NULLPTR;
-        Key<T>* rightKey = Q_NULLPTR;
+        Key<T>* leftKey = nullptr;
+        Key<T>* rightKey = nullptr;
 
         //why bother with a copy?
         T val = defaultVal;
 
         this->getKeyFramesAtTime(&leftKey,&rightKey,time);
 
-        if(leftKey!=Q_NULLPTR && rightKey==Q_NULLPTR)
+        if(leftKey!=nullptr && rightKey==nullptr)
         {
             val = leftKey->value;
         }
 
-        if(leftKey!=Q_NULLPTR && rightKey!=Q_NULLPTR)
+        if(leftKey!=nullptr && rightKey!=nullptr)
         {
             //linearly interpolate between frames
             //float t =0;
@@ -187,7 +178,7 @@ public:
                 //t = (time-leftKey->time)/timeDiff;
             }
 
-            if(leftKey!=Q_NULLPTR && rightKey!=Q_NULLPTR)
+            if(leftKey!=nullptr && rightKey!=nullptr)
             {
                 //linearly interpolate between frames
                 float t =0;
@@ -256,20 +247,6 @@ public:
         std::sort(keys.begin(),keys.end(),KeyCompare<T>);
     }
 
-    double getFirstKeyTime()
-    {
-        Q_ASSERT(keys.size()>0);
-
-        return keys.begin().time;
-    }
-
-    double getLastKeyTime()
-    {
-        Q_ASSERT(keys.size()>0);
-
-        return keys.end().time;
-    }
-
     virtual ~KeyFrame()
     {
         for(auto iter = keys.begin();iter!=keys.end();iter++)
@@ -298,29 +275,6 @@ public:
     int interpolate(int a,int b,float t)
     {
         return a+(b-a)*t;
-    }
-};
-
-class BoolKeyFrame:public KeyFrame<bool>
-{
-public:
-    bool interpolate(bool a,bool b,float t)
-    {
-        Q_UNUSED(b);
-        Q_UNUSED(t);
-        //booleans favor first value
-        return a;
-    }
-};
-
-class StringKeyFrame:public KeyFrame<QString>
-{
-public:
-    QString interpolate(QString a,QString b,float t)
-    {
-        Q_UNUSED(b);
-        Q_UNUSED(t);
-        return a;
     }
 };
 

@@ -215,7 +215,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             if (!hasMeshGeometry) {
                 qWarning("PhysicsHelper: '%s' asks for a convex-hull body but carries no mesh "
                          "geometry — building an empty shape instead",
-                         qUtf8Printable(sceneNode->getName()));
+                         sceneNode->getName().c_str());
                 buildEmptyShapeBody(transform, mass, shape, motionState, body);
                 break;
             }
@@ -266,7 +266,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             if (!hasMeshGeometry) {
                 qWarning("PhysicsHelper: '%s' asks for a triangle-mesh body but carries no mesh "
                          "geometry — building an empty shape instead",
-                         qUtf8Printable(sceneNode->getName()));
+                         sceneNode->getName().c_str());
                 buildEmptyShapeBody(transform, mass, shape, motionState, body);
                 break;
             }
@@ -308,7 +308,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 				if (!childMeshNode || !childMeshNode->getMesh()
 				    || !childMeshNode->getMesh()->getTriMesh()) {
 					qWarning("PhysicsHelper: compound child '%s' carries no mesh geometry — skipped",
-					         qUtf8Printable(node->getName()));
+					         node->getName().c_str());
 					return;
 				}
 				auto *childTriMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
@@ -354,7 +354,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 				shape = nullptr;
 				qWarning("PhysicsHelper: '%s' asks for a compound body but no node in its subtree "
 				         "carries mesh geometry — building an empty shape instead",
-				         qUtf8Printable(sceneNode->getName()));
+				         sceneNode->getName().c_str());
 				buildEmptyShapeBody(transform, mass, shape, motionState, body);
 				break;
 			}

@@ -5,10 +5,9 @@
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "irisglfwd.h"
-#include <Qt>
-#include <QList>
-#include <QMap>
-#include <QString>
+#include <vector>
+#include <map>
+#include <string>
 
 namespace iris
 {
@@ -23,7 +22,7 @@ class Bone : public std::enable_shared_from_this<Bone>
 {
     Bone(){}
 public:
-    QString name;
+    std::string name;
     iris::Mat4 inverseMeshSpacePoseMatrix;// mesh space
     iris::Mat4 meshSpacePoseMatrix;// mesh space
     iris::Mat4 transformMatrix;// skeleton space
@@ -41,7 +40,7 @@ public:
 
     iris::Mat4 skinMatrix;// final transform sent to the shader
 
-    QList<BonePtr> childBones;
+    std::vector<BonePtr> childBones;
     // WEAK: parent and children as two strong pointers made every skeleton a
     // reference cycle that never freed (one clone per skinned MeshNode —
     // platform audit B8.1). The parent always outlives the child through
@@ -52,10 +51,10 @@ public:
     void addChild(BonePtr bone)
     {
         bone->parentBone = this->weak_from_this().lock();
-        childBones.append(bone);
+        childBones.push_back(bone);
     }
 
-    static BonePtr create(QString name = "")
+    static BonePtr create(std::string name = "")
     {
         auto bone = new Bone();
         bone->name = name;
@@ -72,15 +71,15 @@ class Skeleton
 {
     Skeleton(){}
 public:
-    QMap<QString, int> boneMap;
-    QList<BonePtr> bones;
+    std::map<std::string, int> boneMap;
+    std::vector<BonePtr> bones;
 
-    BonePtr getBone(QString name);
+    BonePtr getBone(std::string name);
 
     void addBone(BonePtr bone)
     {
-        bones.append(bone);
-        boneMap.insert(bone->name, bones.size()-1);
+        bones.push_back(bone);
+        boneMap.insert_or_assign(bone->name, bones.size()-1);
     }
 
     BonePtr getRootBone()
@@ -91,12 +90,12 @@ public:
         return BonePtr();  // no parentless bone (empty/cyclic skeleton)
     }
 
-    QList<BonePtr> getRootBones()
+    std::vector<BonePtr> getRootBones()
     {
-        QList<BonePtr> roots;
+        std::vector<BonePtr> roots;
         for(auto bone : bones)
             if(bone->parentBone.expired())
-                roots.append(bone);
+                roots.push_back(bone);
 
         return roots;
     }

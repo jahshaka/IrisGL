@@ -148,6 +148,9 @@ public:
     struct Model
     {
         bool valid = false;
+        /// Why a read refused a blob, when the refusal has a NAME (a checksum that does not match: the bake is
+        /// corrupt); empty for a plain miss (a stale version, another key, a truncated file).
+        std::string refusal;
         QString fingerprint;
         /// aiScene mesh order — `meshIndex` on a MeshNode indexes this.
         QList<MeshPtr> meshes;

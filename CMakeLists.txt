@@ -581,7 +581,10 @@ set(_mesh_bake_hashed_sources
     import/atomdag/build.h
     import/atomdag/build.cpp
     thirdparty/meshoptimizer/src/clusterizer.cpp
-    thirdparty/meshoptimizer/src/spatialorder.cpp)
+    thirdparty/meshoptimizer/src/spatialorder.cpp
+    # NOQT-DOCUMENT-1 stage 5: every .jmb ends with xxHash's XXH3 of its bytes (meshbake.cpp, inlined): another
+    # release of the header is another checksum, so it re-bakes like the code that writes the blob.
+    thirdparty/xxhash/xxhash.h)
 # A CONFIGURE-TIME hash goes STALE (found by this lane's own suite, 2026-09-15):
 # editing import/meshbake.cpp does not re-run CMake, so the compiled-in term
 # kept describing the PREVIOUS contents of the file until something unrelated

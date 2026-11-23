@@ -42,8 +42,8 @@ QHash<QString, SceneNodePtr> nodesByName(const SceneNodePtr &root)
 {
     QHash<QString, SceneNodePtr> out;
     std::function<void(const SceneNodePtr &)> walk = [&](const SceneNodePtr &n) {
-        if (n->getSceneNodeType() != SceneNodeType::Mesh && !out.contains(n->getName()))
-            out.insert(n->getName(), n);
+        if (n->getSceneNodeType() != SceneNodeType::Mesh && !out.contains(QString::fromStdString(n->getName())))
+            out.insert(QString::fromStdString(n->getName()), n);
         for (const auto &c : n->children()) walk(c);
     };
     if (root) walk(root);
@@ -63,7 +63,7 @@ LightNodePtr lightFor(const aiLight *l)
     default: return LightNodePtr();
     }
     auto light = LightNode::create();
-    light->setName(QString::fromUtf8(l->mName.C_Str()));
+    light->setName(std::string(l->mName.C_Str()));
     light->setLightType(type);
     const float r = l->mColorDiffuse.r, g = l->mColorDiffuse.g, b = l->mColorDiffuse.b;
     const float peak = std::max({ r, g, b, 0.0f });
@@ -94,7 +94,7 @@ LightNodePtr lightFor(const aiLight *l)
 CameraNodePtr cameraFor(const aiCamera *c)
 {
     auto camera = CameraNode::create();
-    camera->setName(QString::fromUtf8(c->mName.C_Str()));
+    camera->setName(std::string(c->mName.C_Str()));
     const float aspect = c->mAspect > 0.0f ? c->mAspect : 16.0f / 9.0f;
     camera->setAspectRatio(aspect);
     if (c->mHorizontalFOV > 0.0f) {

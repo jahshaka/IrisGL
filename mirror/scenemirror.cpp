@@ -673,7 +673,7 @@ std::function<void(const std::string &)> SceneMirror::entryRefusal(iris::SceneNo
         if (alive.expired()) return;
         const auto e = mEntries.find(key);
         if (e == mEntries.end() || e->node != id) return;   // released or re-adopted since: nothing of ours to hand back
-        qWarning("SceneMirror: the engine refused the %s of '%s' (%s)%s", what, qUtf8Printable(key->getName()),
+        qWarning("SceneMirror: the engine refused the %s of '%s' (%s)%s", what, key->getName().c_str(),
                  why.c_str(), retry ? "; retried at the next sync" : "");
         if (reset) reset(*e);
         if (retry) key->markChanged(iris::NodeChange::Content);
@@ -4348,13 +4348,13 @@ bool SceneMirror::syncMobility(Entry &e, iris::SceneNode *node, bool parentMovab
             if (!e.mobilityWarned) {
                 e.mobilityWarned = true;
                 ++mMobilityMisses;
-                mLastMobilityMiss = node->getName();
+                mLastMobilityMiss = QString::fromStdString(node->getName());
                 // PLAIN WORDS, once, naming the thing: the author is not a
                 // programmer and the fix is one combo box away.
                 qWarning("Jahshaka: '%s' started moving during play but is not marked Movable. "
                          "It moves smoothly, but it leaves its old bounce light behind until you "
                          "stop play — set Movement to Movable in its properties to remove that.",
-                         qUtf8Printable(node->getName()));
+                         node->getName().c_str());
             }
         }
     }
@@ -5021,14 +5021,14 @@ void SceneMirror::notePush(const iris::SceneNode *node, const char *what)
     // an hour must not fill the log with the same line.
     static QSet<QString> reported;
     const QString key = QStringLiteral("%1/%2")
-                            .arg(node ? node->name : QStringLiteral("<none>"))
+                            .arg(node ? QString::fromStdString(node->name) : QStringLiteral("<none>"))
                             .arg(QLatin1String(what));
     if (reported.contains(key)) return;
     reported.insert(key);
     qWarning("SceneMirror: the change list MISSED '%s' (%s) — the document changed it without "
              "reporting it (SceneNode::notifyChanged / Material::touch). The verifier pushed it; "
              "the fix is the missing mark, not this message.",
-             qUtf8Printable(node ? node->name : QStringLiteral("<unnamed>")), what);
+             node ? node->name.c_str() : "<unnamed>", what);
 }
 
 TextureId SceneMirror::textureFor(const QString &path, bool srgb)
@@ -5842,9 +5842,9 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     std::vector<float> tan3, bitan3;
     for (const auto &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data) continue;
-        const QList<iris::VertexAttribute> attribs = vb->vertexLayout.getAttribs();
-        if (attribs.isEmpty()) continue;
-        const iris::VertexAttribute &attr = attribs.first();
+        const std::vector<iris::VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        if (attribs.empty()) continue;
+        const iris::VertexAttribute &attr = attribs.front();
         const float *f = reinterpret_cast<const float *>(vb->data);
         const int floats = vb->dataSize / int(sizeof(float));
         switch (attr.usage) {
@@ -5930,9 +5930,9 @@ bool SceneMirror::toMeshData(iris::Mesh *mesh, MeshData &out)
     const int levels = std::min(std::min(mesh->lodIndices.size(), mesh->lodErrors.size()),
                                 mesh->lodBounds.size());
     for (int i = 0; i < levels; ++i) {
-        const QVector<quint32> &level = mesh->lodIndices.at(i);
+        const std::vector<quint32> &level = mesh->lodIndices.at(i);
         if (level.size() < 3 || level.size() % 3 != 0) break;
-        out.lodIndices.emplace_back(level.constBegin(), level.constEnd());
+        out.lodIndices.emplace_back(level.cbegin(), level.cend());
         out.lodErrors.push_back(mesh->lodErrors.at(i));
         out.lodBounds.push_back(mesh->lodBounds.at(i));
     }
@@ -6025,7 +6025,7 @@ struct StructureHash {
     void operator()(float v) { const int q = int(std::lround(double(v) * 4096.0)); bytes(&q, sizeof(q)); }
     void operator()(const iris::Vec3 &v) { (*this)(v.x()); (*this)(v.y()); (*this)(v.z()); }
     void operator()(const iris::Quat &q) { (*this)(q.x()); (*this)(q.y()); (*this)(q.z()); (*this)(q.scalar()); }
-    void operator()(const QString &s) { const QByteArray b = s.toUtf8(); bytes(b.constData(), size_t(b.size())); }
+    void operator()(const std::string &s) { bytes(s.data(), s.size()); }   // UTF-8: the bytes QString::toUtf8 gave
     std::string hex() const { char buf[24]; std::snprintf(buf, sizeof(buf), "%016llx", h); return buf; }
 };
 
@@ -6034,9 +6034,9 @@ struct StructureHash {
 bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc &out)
 {
     out = SkeletonDesc();
-    if (!skeleton || skeleton->bones.isEmpty()) return false;
+    if (!skeleton || skeleton->bones.empty()) return false;
 
-    const QList<iris::BonePtr> &bones = skeleton->bones;
+    const std::vector<iris::BonePtr> &bones = skeleton->bones;
     out.bones.resize(size_t(bones.size()));
     StructureHash hash;
     bool warnedShear = false;
@@ -6044,7 +6044,7 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
     for (int i = 0; i < bones.size(); ++i) {
         const iris::BonePtr &b = bones[i];
         BoneDesc &bd = out.bones[size_t(i)];
-        bd.name = b->name.toStdString();
+        bd.name = b->name;
         // The parent comes from Bone::parentBone, which iris::extractSkeleton
         // fills with the NEAREST BONE ANCESTOR in the aiNode tree — skipping the
         // `$AssimpFbx$` pivot nodes that sit between real bones in every
@@ -6052,8 +6052,8 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
         // parentless and this loop would have produced a flat rig.)
         bd.parent = -1;
         if (!b->parentBone.expired()) {
-            const auto it = skeleton->boneMap.constFind(b->parent()->name);
-            if (it != skeleton->boneMap.constEnd() && it.value() != i) bd.parent = it.value();
+            const auto it = skeleton->boneMap.find(b->parent()->name);
+            if (it != skeleton->boneMap.cend() && it->second != i) bd.parent = it->second;
         }
 
         // R1: the bind LOCAL that makes the engine's derived reverse bind pose
@@ -6068,7 +6068,7 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
             warnedShear = true;
             qWarning("toSkeletonDesc: bone '%s' has a sheared bind pose (|cos| %.4f); "
                      "bones are TRS-only and the shear is dropped",
-                     qUtf8Printable(b->name), double(shear));
+                     b->name.c_str(), double(shear));
         }
         bd.bindPosition = toVec3(p);
         bd.bindRotation = toQuat(r);
@@ -6131,7 +6131,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
 
     for (int p : mergeOrder) {
         const iris::SkeletonPtr &sk = pieces[p];
-        if (!sk || sk->bones.isEmpty()) {
+        if (!sk || sk->bones.empty()) {
             if (excludedOut) excludedOut->append(p);
             continue;
         }
@@ -6140,7 +6140,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
         bool agrees = true;
         for (const iris::BonePtr &b : sk->bones) {
             if (!b) { agrees = false; break; }
-            const auto it = recs.constFind(b->name);
+            const auto it = recs.constFind(QString::fromStdString(b->name));
             if (it != recs.constEnd() && !bindAgrees(it->meshSpace, b->meshSpacePoseMatrix)) {
                 agrees = false;
                 break;
@@ -6153,8 +6153,8 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
             continue;
         }
         for (const iris::BonePtr &b : sk->bones) {
-            const bool fresh = !recs.contains(b->name);
-            BoneRec &r = recs[b->name];
+            const bool fresh = !recs.contains(QString::fromStdString(b->name));
+            BoneRec &r = recs[QString::fromStdString(b->name)];
             if (fresh) {
                 r.meshSpace = b->meshSpacePoseMatrix;
                 r.invMeshSpace = b->inverseMeshSpacePoseMatrix;
@@ -6164,7 +6164,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
             // the chains is what the character's real ancestry is.
             for (iris::Bone *up = b->parent().get(); up; up = up->parent().get()) {
                 if (up->name == b->name) break;       // defensive: a self-parent
-                r.ancestors.insert(up->name);
+                r.ancestors.insert(QString::fromStdString(up->name));
             }
         }
         ++merged;
@@ -6225,7 +6225,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
     auto rig = iris::Skeleton::create();
     for (const QString &name : order) {
         const BoneRec &rec = *recs.constFind(name);
-        auto bone = iris::Bone::create(name);
+        auto bone = iris::Bone::create(name.toStdString());
         bone->meshSpacePoseMatrix = rec.meshSpace;
         bone->inverseMeshSpacePoseMatrix = rec.invMeshSpace;
         rig->addBone(bone);
@@ -6233,7 +6233,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
     for (const QString &name : order) {
         const auto pit = parentOf.constFind(name);
         if (pit == parentOf.constEnd()) continue;
-        rig->getBone(pit.value())->addChild(rig->getBone(name));
+        rig->getBone(pit.value().toStdString())->addChild(rig->getBone(name.toStdString()));
     }
     out = rig;
     return true;
@@ -6247,9 +6247,9 @@ bool SceneMirror::rigRemap(const iris::SkeletonPtr &piece, const iris::SkeletonP
     out.reserve(piece->bones.size());
     for (const iris::BonePtr &b : piece->bones) {
         if (!b) return false;
-        const auto it = rig->boneMap.constFind(b->name);
-        if (it == rig->boneMap.constEnd()) { out.clear(); return false; }
-        out.append((unsigned short)it.value());
+        const auto it = rig->boneMap.find(b->name);
+        if (it == rig->boneMap.cend()) { out.clear(); return false; }
+        out.append((unsigned short)it->second);
     }
     return true;
 }
@@ -6268,8 +6268,8 @@ bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string 
     // Everything that can change the sampled pose goes into the hash: the rig,
     // the name, the length, and every key of every track.
     StructureHash hash;
-    hash(QString::fromStdString(rigId));
-    hash(clip.name);
+    hash(rigId);
+    hash(clip.name.toStdString());
     hash(clip.length);
     out.tracks.reserve(size_t(clip.tracks.size()));
     for (const iris::ClipBoneTrack &track : clip.tracks) {
@@ -6305,13 +6305,13 @@ bool SceneMirror::toSkinData(iris::Mesh *mesh, std::vector<float> &boneIndices,
     if (!mesh) return false;
     for (const auto &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data) continue;
-        const QList<iris::VertexAttribute> attribs = vb->vertexLayout.getAttribs();
-        if (attribs.isEmpty()) continue;
+        const std::vector<iris::VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        if (attribs.empty()) continue;
         // Both buffers are 4 floats per vertex (mesh.cpp MAX_BONE_INDICES; indices
         // are stored as floats — the GL shader cast them back with int()).
         const float *f = reinterpret_cast<const float *>(vb->data);
         const int floats = vb->dataSize / int(sizeof(float));
-        switch (attribs.first().usage) {
+        switch (attribs.front().usage) {
         case iris::VertexAttribUsage::BoneIndices: boneIndices.assign(f, f + floats); break;
         case iris::VertexAttribUsage::BoneWeights: boneWeights.assign(f, f + floats); break;
         default: break;
@@ -6464,7 +6464,7 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
     QString why;
     if (!buildUnionSkeleton(skels, rig, &excluded, &why)) {
         qWarning("SceneMirror: '%s' keeps per-piece rigs (%s)",
-                 qUtf8Printable(const_cast<iris::SceneNode *>(host)->getName()),
+                 (const_cast<iris::SceneNode *>(host)->getName()).c_str(),
                  qUtf8Printable(why));
         const quint32 epoch = rec.epoch + 1;      // pieces on the old union must re-attach
         rec = CharacterRig();
@@ -6671,8 +6671,8 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
 {
     if (!mTarget) return false;
     if (!e.gpuSkinned || !e.rigSkeleton || !e.docNode) return false;
-    const QList<iris::BonePtr> &bones = e.rigSkeleton->bones;
-    if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) return false;
+    const std::vector<iris::BonePtr> &bones = e.rigSkeleton->bones;
+    if (bones.empty() || size_t(bones.size()) != e.boneCount) return false;
     // The three scratch buffers are MEMBERS, not locals: this used to run once
     // per bone-overlay refresh, and now it runs every frame for every rig that
     // carries a socket. assign()/resize() on a member keeps the capacity, so
@@ -6705,9 +6705,9 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
         e.boneParents.assign(n, -1);
         for (size_t i = 0; i < n; ++i) {
             if (bones[int(i)]->parentBone.expired()) continue;
-            const auto pit = e.rigSkeleton->boneMap.constFind(bones[int(i)]->parent()->name);
-            if (pit != e.rigSkeleton->boneMap.constEnd() && size_t(pit.value()) != i)
-                e.boneParents[i] = pit.value();
+            const auto pit = e.rigSkeleton->boneMap.find(bones[int(i)]->parent()->name);
+            if (pit != e.rigSkeleton->boneMap.cend() && size_t(pit->second) != i)
+                e.boneParents[i] = pit->second;
         }
         e.boneParentsOwner = e.rigSkeleton.get();
     }
@@ -6717,7 +6717,7 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // rigged node per frame, and every bone paid an indirect call on top.
     for (size_t i = 0; i < n; ++i) resolveBoneDerived(int(i), e.boneParents, poses);
     for (int i = 0; i < bones.size(); ++i)
-        out.insert(bones[i]->name, meshWorld * mDerivedScratch[size_t(i)]);
+        out.insert(QString::fromStdString(bones[i]->name), meshWorld * mDerivedScratch[size_t(i)]);
     return true;
 }
 

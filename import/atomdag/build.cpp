@@ -541,7 +541,7 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
 
     // THE FORMAT: meshlet-local (per cluster its vertices in first-use order, three 8-bit locals per triangle).
     MeshClusterDag dag;
-    dag.groups = QVector<MeshClusterDag::Group>(groups.begin(), groups.end());
+    dag.groups = std::vector<MeshClusterDag::Group>(groups.begin(), groups.end());
     dag.clusters.resize(int(cl.size()));
     int maxDepth = 0;
     for (const MeshClusterDag::Group &g : groups) maxDepth = std::max(maxDepth, int(g.depth));
@@ -555,9 +555,9 @@ bool build(const MeshView &input, const std::vector<unsigned> &base, MeshCluster
             auto it = std::find(local.begin(), local.end(), v);
             const size_t l = size_t(it - local.begin());
             if (it == local.end()) local.push_back(v);
-            dag.triangles.append(char(quint8(l)));
+            dag.triangles.push_back(char(quint8(l)));
         }
-        for (unsigned v : local) dag.vertices.append(quint32(v));
+        for (unsigned v : local) dag.vertices.push_back(quint32(v));
         o.vertexCount = quint16(local.size());
         o.triangleCount = quint16(x.tris.size() / 3);
         o.group = x.group;

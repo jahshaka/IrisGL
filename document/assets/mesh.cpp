@@ -15,8 +15,7 @@ For more information see the LICENSE file
 #include "core/math/vec.h"
 #include "document/assets/mesh.h"
 
-#include <QString>
-#include <QFile>
+#include <string>
 
 #include "irisglfwd.h"
 
@@ -60,7 +59,7 @@ Mesh::Mesh(void* data,int dataSize,int numElements,VertexLayout* vertexLayout)
 
     auto vb = VertexBuffer::create(*vertexLayout);
     vb->setData(data, dataSize);
-    vertexBuffers.append(vb);
+    vertexBuffers.push_back(vb);
 
     usesIndexBuffer = false;
     this->setPrimitiveMode(PrimitiveMode::Triangles);
@@ -88,7 +87,7 @@ void Mesh::clearVertexBuffers()
 
 void Mesh::addVertexBuffer(VertexBufferPtr vertexBuffer)
 {
-    this->vertexBuffers.append(vertexBuffer);
+    this->vertexBuffers.push_back(vertexBuffer);
 }
 
 void Mesh::setIndexBuffer(IndexBufferPtr indexBuffer)
@@ -106,19 +105,19 @@ SkeletonPtr Mesh::getSkeleton()
     return skeleton;
 }
 
-void Mesh::addSkeletalAnimation(QString name, SkeletalAnimationPtr anim)
+void Mesh::addSkeletalAnimation(std::string name, SkeletalAnimationPtr anim)
 {
-    skeletalAnimations.insert(name, anim);
+    skeletalAnimations.insert_or_assign(name, anim);
 }
 
-QMap<QString, SkeletalAnimationPtr> Mesh::getSkeletalAnimations()
+std::map<std::string, SkeletalAnimationPtr> Mesh::getSkeletalAnimations()
 {
     return skeletalAnimations;
 }
 
 bool Mesh::hasSkeletalAnimations()
 {
-    return skeletalAnimations.count() != 0;
+    return skeletalAnimations.size() != 0;
 }
 
 // (THE PARSE CACHE, `loadMesh`, the PIN and `clearLoadCache` are DELETED —

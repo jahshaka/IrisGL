@@ -5,9 +5,9 @@
 namespace iris
 {
 
-BonePtr Skeleton::getBone(QString name)
+BonePtr Skeleton::getBone(std::string name)
 {
-    if (boneMap.contains(name))
+    if ((boneMap.count(name) != 0))
         return bones[boneMap[name]];
     return BonePtr();// null
 }
@@ -34,9 +34,9 @@ SkeletonPtr Skeleton::clone() const
     // clone's bones. (addChild sets parentBone, so only the child walk is needed.)
     for (int i = 0; i < bones.size(); ++i) {
         for (const auto &child : bones[i]->childBones) {
-            const auto it = copy->boneMap.constFind(child->name);
-            if (it != copy->boneMap.constEnd())
-                copy->bones[i]->addChild(copy->bones[it.value()]);
+            const auto it = copy->boneMap.find(child->name);
+            if (it != copy->boneMap.cend())
+                copy->bones[i]->addChild(copy->bones[it->second]);
         }
     }
     return copy;

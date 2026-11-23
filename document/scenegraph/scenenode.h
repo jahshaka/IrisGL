@@ -26,6 +26,7 @@ For more information see the LICENSE file
 #include <QList>
 #include <QString>
 #include <QtGlobal>
+#include <string>
 
 namespace iris
 {
@@ -224,7 +225,7 @@ protected:
 public:
     SceneNodeType sceneNodeType;
 
-    QString name;
+    std::string name;   ///< UTF-8 (NOQT-DOCUMENT-1 stage 5: the bake writes it)
     /// Process-unique, monotonic, and 64 bits WHATEVER the platform: this was
     /// `long`, which is 32 bits on Windows LLP64 (deep audit 2026-09, area 5).
     /// SceneMirror keys its entry map on it, so a wrap is a silent aliasing of
@@ -554,8 +555,8 @@ protected:
     }
 public:
 
-    void setName(QString name);
-    QString getName();
+    void setName(std::string name);
+    const std::string &getName() const;
 
     qint64 getNodeId() const;
     /// Takes a SESSION id (an undo's replay, src/io/scenereader.cpp): the owner table the write journal resolves

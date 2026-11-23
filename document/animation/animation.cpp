@@ -64,8 +64,8 @@ void Animation::calculateAnimationLength()
 
     // calculate length of each bone in the skeletal animation
     if (!!skeletalAnimation) {
-        for (auto boneAnim : skeletalAnimation->boneAnimations) {
-            maxLength = qMax(maxLength, boneAnim->getLength());
+        for (const auto &boneAnim : skeletalAnimation->boneAnimations) {
+            maxLength = qMax(maxLength, boneAnim.second->getLength());
         }
         // Keys that span NO time — a one-frame clip whose identical keys the
         // import preset collapsed to one (SkeletalAnimation::declaredLength) —
@@ -188,7 +188,7 @@ bool Animation::hasPropertyAnim(QString name)
 
 AnimationPtr Animation::createFromSkeletalAnimation(SkeletalAnimationPtr skelAnim)
 {
-    auto anim = new Animation(skelAnim->name);
+    auto anim = new Animation(QString::fromStdString(skelAnim->name));
     anim->setSkeletalAnimation(skelAnim);
     return AnimationPtr(anim);
 }
@@ -215,7 +215,7 @@ AnimationPtr Animation::clone() const
             b->clear();
             b->name = a->name;
             b->length = a->length;
-            for (const auto *key : a->keys) b->keys.append(new Key<float>(*key));
+            for (const auto *key : a->keys) b->keys.push_back(new Key<float>(*key));
         }
         copy->properties.insert(it.key(), dst);
     }

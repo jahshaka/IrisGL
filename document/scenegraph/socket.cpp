@@ -24,7 +24,7 @@ bool bindPoseWorldTransforms(MeshNode *node, QHash<QString, Mat4> &out)
     out.clear();
     if (!node) return false;
     const SkeletonPtr skeleton = node->getSkeleton();
-    if (!skeleton || skeleton->bones.isEmpty()) return false;
+    if (!skeleton || skeleton->bones.empty()) return false;
 
     // meshSpacePoseMatrix IS the bind pose, already composed down the chain —
     // no FK needed, and no disagreement possible with the engine's bind pose,
@@ -33,7 +33,7 @@ bool bindPoseWorldTransforms(MeshNode *node, QHash<QString, Mat4> &out)
     const Mat4 world = node->getGlobalTransform();
     for (const BonePtr &bone : skeleton->bones) {
         if (!bone) continue;
-        out.insert(bone->name, world * bone->meshSpacePoseMatrix);
+        out.insert(QString::fromStdString(bone->name), world * bone->meshSpacePoseMatrix);
     }
     return !out.isEmpty();
 }

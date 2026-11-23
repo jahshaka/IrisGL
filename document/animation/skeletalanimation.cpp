@@ -1,18 +1,19 @@
 #include "document/animation/skeletalanimation.h"
 #include "document/animation/keyframeanimation.h"
+#include <algorithm>
 
 namespace iris {
 
-void SkeletalAnimation::addBoneAnimation(QString boneName, iris::BoneAnimation *boneAnim)
+void SkeletalAnimation::addBoneAnimation(std::string boneName, iris::BoneAnimation *boneAnim)
 {
-    boneAnimations.insert(boneName, std::shared_ptr<BoneAnimation>(boneAnim));
+    boneAnimations.insert_or_assign(boneName, std::shared_ptr<BoneAnimation>(boneAnim));
 }
 
 SkeletalAnimationPtr SkeletalAnimation::referencedAs(const SkeletalAnimationPtr &anim,
-                                                    const QString &guid)
+                                                    const std::string &guid)
 {
     if (!anim) return anim;
-    if (anim->assetGuid.isEmpty() || anim->assetGuid == guid) {
+    if (anim->assetGuid.empty() || anim->assetGuid == guid) {
         anim->assetGuid = guid;
         return anim;
     }
@@ -42,20 +43,20 @@ bool BoneAnimation::moves() const
     const auto vecSame = [](const iris::Vec3 &a, const iris::Vec3 &b) { return a == b; };
     // q and -q are one rotation.
     const auto quatSame = [](const iris::Quat &a, const iris::Quat &b) { return a == b || a == -b; };
-    return trackMoves(posKeys.data(), vecSame) || trackMoves(scaleKeys.data(), vecSame)
-        || trackMoves(rotKeys.data(), quatSame);
+    return trackMoves(posKeys.get(), vecSame) || trackMoves(scaleKeys.get(), vecSame)
+        || trackMoves(rotKeys.get(), quatSame);
 }
 
-bool SkeletalAnimation::movesNode(const QString &nodeName) const
+bool SkeletalAnimation::movesNode(const std::string &nodeName) const
 {
-    const auto it = boneAnimations.constFind(nodeName);
-    return it != boneAnimations.constEnd() && !!it.value() && it.value()->moves();
+    const auto it = boneAnimations.find(nodeName);
+    return it != boneAnimations.cend() && !!it->second && it->second->moves();
 }
 
 bool SkeletalAnimation::movesAnything() const
 {
-    for (auto it = boneAnimations.constBegin(); it != boneAnimations.constEnd(); ++it)
-        if (!!it.value() && it.value()->moves()) return true;
+    for (auto it = boneAnimations.cbegin(); it != boneAnimations.cend(); ++it)
+        if (!!it->second && it->second->moves()) return true;
     return false;
 }
 
@@ -63,8 +64,8 @@ float BoneAnimation::getLength()
 {
     float maxLength = 0;
     maxLength = posKeys->getLength();
-    maxLength = qMax(maxLength, rotKeys->getLength());
-    return qMax(maxLength, scaleKeys->getLength());
+    maxLength = std::max(maxLength, rotKeys->getLength());
+    return std::max(maxLength, scaleKeys->getLength());
 }
 
 }

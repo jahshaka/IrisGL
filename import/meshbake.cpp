@@ -44,6 +44,11 @@ For more information see the LICENSE file
 
 #include <QCryptographicHash>
 #include <QDataStream>
+
+// xxHash (irisgl/thirdparty/xxhash, BSD-2, PROVENANCE.md there): INLINED into this one translation unit, its only user
+// (the bake's payload checksum): every function static inline here, no symbol exported.
+#define XXH_INLINE_ALL
+#include "thirdparty/xxhash/xxhash.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -301,7 +306,12 @@ namespace
 // v36 (2026-11-23, NOQT-CORE-1 stage 2): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — this file's nine log lines
 // write IrisCore's log (core/log.h) at their level; the DAG's per-piece stats are a RESULT on the Model
 // (meshbake.h `dagStats`, never serialized: serialize writes named fields). No write path edited. Every bake re-bakes.
-constexpr int kFormatVersion = 36;
+// v37 (2026-11-23, NOQT-DOCUMENT-1 stage 5, "5-bake"): THE OUTPUT CHANGES - every blob ENDS with an XXH3 64-bit
+// checksum of every byte before it, and a read refuses a mismatch by name (the bake is corrupt) before any field past the
+// version. The document's names and containers are std (UTF-8 std::string names, std::map / std::vector members: this
+// file's crossings write each name as the QString they wrote before, so the stream's name bytes are unchanged); three
+// index guards compare UNSIGNED (an index of 2^31 or more passed `int(x) >= count`). Every bake re-bakes.
+constexpr int kFormatVersion = 37;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -421,7 +431,7 @@ void writeSkeleton(QDataStream &s, const SkeletonPtr &skel)
     QHash<Bone *, int> index;
     for (int i = 0; i < skel->bones.size(); ++i) index.insert(skel->bones[i].get(), i);
     for (const BonePtr &bone : skel->bones) {
-        s << bone->name;
+        s << QString::fromStdString(bone->name);
         writeMatrix(s, bone->inverseMeshSpacePoseMatrix);
         s << qint32(bone->parentBone.expired() ? -1 : index.value(bone->parent().get(), -1));
     }
@@ -438,7 +448,7 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
     for (qint32 i = 0; i < count; ++i) {
         QString name;
         s >> name;
-        auto bone = Bone::create(name);
+        auto bone = Bone::create(name.toStdString());
         bone->inverseMeshSpacePoseMatrix = readMatrix(s);
         bone->meshSpacePoseMatrix = bone->inverseMeshSpacePoseMatrix.inverted();
         s >> parents[i];
@@ -488,9 +498,9 @@ void writeClusterDag(QDataStream &s, const MeshClusterDag &dag)
           << quint16(c.triangleCount) << qint32(c.group) << qint32(c.refined)
           << c.centre[0] << c.centre[1] << c.centre[2] << c.radius;
     }
-    s << QByteArray(reinterpret_cast<const char *>(dag.vertices.constData()),
+    s << QByteArray(reinterpret_cast<const char *>(dag.vertices.data()),
                     dag.vertices.size() * int(sizeof(quint32)));
-    s << dag.triangles;
+    s << QByteArray(reinterpret_cast<const char *>(dag.triangles.data()), int(dag.triangles.size()));
 }
 
 /// Every field is checked, for the reason the chain's levels are: a consumer
@@ -539,20 +549,21 @@ bool readClusterDag(QDataStream &s, int vertexCount, MeshClusterDag *out)
             !finite(c.radius) || c.radius < 0.0f)
             return false;
     }
-    QByteArray vertexBytes;
-    s >> vertexBytes >> out->triangles;
+    QByteArray vertexBytes, triangleBytes;
+    s >> vertexBytes >> triangleBytes;
+    out->triangles.assign(triangleBytes.cbegin(), triangleBytes.cend());
     if (s.status() != QDataStream::Ok || vertexBytes.size() % int(sizeof(quint32)) != 0 ||
         out->triangles.size() % 3 != 0)
         return false;
     out->vertices.resize(vertexBytes.size() / int(sizeof(quint32)));
     std::memcpy(out->vertices.data(), vertexBytes.constData(), size_t(vertexBytes.size()));
-    for (quint32 v : out->vertices) if (int(v) >= vertexCount) return false;
+    for (quint32 v : out->vertices) if (v >= quint32(vertexCount)) return false;   // unsigned (an index >= 2^31 passed `int(v)`)
     const quint64 triCount = quint64(out->triangles.size() / 3);
     for (const MeshClusterDag::Cluster &c : out->clusters) {
         if (quint64(c.vertexOffset) + c.vertexCount > quint64(out->vertices.size()) ||
             quint64(c.triangleOffset) + c.triangleCount > triCount)
             return false;
-        const uchar *t = reinterpret_cast<const uchar *>(out->triangles.constData()) +
+        const uchar *t = reinterpret_cast<const uchar *>(out->triangles.data()) +
                          size_t(c.triangleOffset) * 3u;
         for (int k = 0; k < int(c.triangleCount) * 3; ++k)
             if (t[k] >= c.vertexCount) return false;
@@ -573,14 +584,14 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
     writeVec3(s, mesh->aabb.getMin());
     writeVec3(s, mesh->aabb.getMax());
 
-    const QList<VertexBufferPtr> &vbs = mesh->getVertexBuffers();
+    const std::vector<VertexBufferPtr> &vbs = mesh->getVertexBuffers();
     s << qint32(vbs.size());
     for (const VertexBufferPtr &vb : vbs) {
         // Every buffer this pipeline builds carries exactly one attribute
         // (addVertexArray, import/scenebuilder.cpp) — the format records that shape explicitly so
         // a future multi-attribute buffer fails the read instead of silently
         // losing elements.
-        QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        std::vector<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
         s << qint32(attribs.size());
         for (const VertexAttribute &a : attribs)
             s << qint32(a.usage) << qint32(a.type) << qint32(a.count) << qint32(a.sizeInBytes);
@@ -604,9 +615,9 @@ void writeMesh(QDataStream &s, const MeshPtr &mesh)
                                 mesh->lodBounds.size());
     s << qint32(levels);
     for (int i = 0; i < levels; ++i) {
-        const QVector<quint32> &idx = mesh->lodIndices.at(i);
+        const std::vector<quint32> &idx = mesh->lodIndices.at(i);
         s << qint32(idx.size()) << float(mesh->lodErrors.at(i)) << float(mesh->lodBounds.at(i));
-        s << QByteArray(reinterpret_cast<const char *>(idx.constData()),
+        s << QByteArray(reinterpret_cast<const char *>(idx.data()),
                         idx.size() * int(sizeof(quint32)));
     }
 
@@ -710,14 +721,14 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
         if (!std::isfinite(error) || error < 0.0f || !std::isfinite(bound) ||
             !(bound > 0.0f) || bound < previousBound) { *okOut = false; return MeshPtr(); }
         previousBound = bound;
-        QVector<quint32> idx(indexCount);
+        std::vector<quint32> idx(static_cast<size_t>(indexCount));
         std::memcpy(idx.data(), levelBytes.constData(), size_t(levelBytes.size()));
         // A level that names a vertex the mesh does not have would draw
         // garbage the moment the camera backs off — refuse the blob instead.
-        for (quint32 v : idx) if (int(v) >= vertexCount) { *okOut = false; return MeshPtr(); }
-        mesh->lodIndices.append(idx);
-        mesh->lodErrors.append(error);
-        mesh->lodBounds.append(bound);
+        for (quint32 v : idx) if (v >= quint32(vertexCount)) { *okOut = false; return MeshPtr(); }   // unsigned: as above
+        mesh->lodIndices.push_back(idx);
+        mesh->lodErrors.push_back(error);
+        mesh->lodBounds.push_back(bound);
     }
 
     // SURFACE-CACHE phase 1's trailing block (format v10). Every field is
@@ -750,7 +761,7 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
             || !std::isfinite(card.coverage) || card.coverage < 0.0f || card.coverage > 1.0f) {
             *okOut = false; return MeshPtr();
         }
-        mesh->cards.append(card);
+        mesh->cards.push_back(card);
     }
     mesh->cardCoverage = cardCount > 0 ? cardCoverage : 0.0f;
 
@@ -772,7 +783,9 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
         mesh->triMesh->triangles.reserve(idxCount / 3);
         for (int i = 0; i + 2 < idxCount; i += 3) {
             const unsigned a = idx[i], b = idx[i + 1], c = idx[i + 2];
-            if (int(a) >= vertexCount || int(b) >= vertexCount || int(c) >= vertexCount) {
+            // UNSIGNED against the count (NOQT-DOCUMENT-1 stage 5): `int(a)` made an index of 2^31 or more negative,
+            // it passed, and the reads below went out of bounds on a corrupt blob.
+            if (a >= unsigned(vertexCount) || b >= unsigned(vertexCount) || c >= unsigned(vertexCount)) {
                 *okOut = false;
                 return MeshPtr();
             }
@@ -806,16 +819,16 @@ void writeAnimations(QDataStream &s, const QMap<QString, SkeletalAnimationPtr> &
     for (auto it = anims.constBegin(); it != anims.constEnd(); ++it) {
         s << it.key();
         const SkeletalAnimationPtr &anim = it.value();
-        s << anim->name;
+        s << QString::fromStdString(anim->name);
         s << double(anim->declaredLength);
         s << qint32(anim->boneAnimations.size());
-        for (auto b = anim->boneAnimations.constBegin(); b != anim->boneAnimations.constEnd(); ++b) {
-            s << b.key();
-            writeKeys(s, b.value()->posKeys.data(),
+        for (auto b = anim->boneAnimations.cbegin(); b != anim->boneAnimations.cend(); ++b) {
+            s << QString::fromStdString(b->first);
+            writeKeys(s, b->second->posKeys.get(),
                       [](QDataStream &st, const iris::Vec3 &v) { writeVec3(st, v); });
-            writeKeys(s, b.value()->rotKeys.data(),
+            writeKeys(s, b->second->rotKeys.get(),
                       [](QDataStream &st, const iris::Quat &q) { writeQuat(st, q); });
-            writeKeys(s, b.value()->scaleKeys.data(),
+            writeKeys(s, b->second->scaleKeys.get(),
                       [](QDataStream &st, const iris::Vec3 &v) { writeVec3(st, v); });
         }
     }
@@ -837,8 +850,8 @@ bool readAnimations(QDataStream &s, const QString &source,
         if (s.status() != QDataStream::Ok || boneCount < 0 || boneCount > 1000000) return false;
         if (!(declaredLength >= 0.0) || declaredLength > 1.0e7) return false;
         auto anim = SkeletalAnimation::create();
-        anim->name = name;
-        anim->source = source;
+        anim->name = name.toStdString();
+        anim->source = source.toStdString();
         anim->declaredLength = float(declaredLength);
         for (qint32 b = 0; b < boneCount; ++b) {
             QString boneName;
@@ -863,7 +876,7 @@ bool readAnimations(QDataStream &s, const QString &source,
                 return s.status() == QDataStream::Ok;
             };
             if (!readTrack(0) || !readTrack(1) || !readTrack(2)) { delete boneAnim; return false; }
-            anim->addBoneAnimation(boneName, boneAnim);
+            anim->addBoneAnimation(boneName.toStdString(), boneAnim);
         }
         out.insert(key, anim);
     }
@@ -1313,9 +1326,9 @@ const float *attribData(const MeshPtr &mesh, VertexAttribUsage usage, int *compo
 {
     for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data || vb->dataSize <= 0) continue;
-        const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
-        if (attribs.isEmpty()) continue;
-        const VertexAttribute &a = attribs.first();
+        const std::vector<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        if (attribs.empty()) continue;
+        const VertexAttribute &a = attribs.front();
         if (a.usage != usage) continue;
         const int comps = a.count > 0 ? a.count : 3;
         if (componentsOut) *componentsOut = comps;
@@ -1766,10 +1779,10 @@ void build(const MeshPtr &mesh, int maxCards)
     std::vector<unsigned> coarse;
     float extraTolerance = 0.0f;
     if (triCount > size_t(kCoverageMaxTriangles)) {
-        if (!mesh->lodIndices.isEmpty()) {
-            const QVector<quint32> &level = mesh->lodIndices.last();
-            coarse.assign(level.constBegin(), level.constEnd());
-            extraTolerance = mesh->lodBounds.isEmpty() ? 0.0f : mesh->lodBounds.last();
+        if (!mesh->lodIndices.empty()) {
+            const std::vector<quint32> &level = mesh->lodIndices.back();
+            coarse.assign(level.cbegin(), level.cend());
+            extraTolerance = mesh->lodBounds.empty() ? 0.0f : mesh->lodBounds.back();
         }
         const std::vector<unsigned> &source = coarse.empty() ? indices : coarse;
         const size_t sourceTris = source.size() / 3;
@@ -2014,7 +2027,7 @@ void build(const MeshPtr &mesh, int maxCards)
         return l.origin.z() < r.origin.z();
     });
 
-    mesh->cards = best;
+    mesh->cards = std::vector<MeshCard>(best.cbegin(), best.cend());
     mesh->cardCoverage = bestCoverage;
 }
 
@@ -2046,7 +2059,7 @@ void MeshBake::buildLevelTable(const MeshPtr &mesh)
     int previousTriangles = -1;
     for (int d : depths) {
         // THE UNIFORM CUT AT DEPTH d: every cluster born at or before d whose own group forms at or after d.
-        QVector<quint32> level;
+        std::vector<quint32> level;
         float bound = 0.0f, estimate = 0.0f;
         for (const MeshClusterDag::Cluster &c : dag.clusters) {
             const int born = c.refined < 0 ? 0 : int(dag.groups.at(c.refined).depth) + 1;
@@ -2057,16 +2070,16 @@ void MeshBake::buildLevelTable(const MeshPtr &mesh)
                 estimate = std::max(estimate, dag.groups.at(c.refined).estimate);
             }
             for (int t = 0; t < int(c.triangleCount); ++t)
-                for (int k = 0; k < 3; ++k) level.append(quint32(dag.vertexOf(c, t, k)));
+                for (int k = 0; k < 3; ++k) level.push_back(quint32(dag.vertexOf(c, t, k)));
         }
         // a level is a reduction: something stored above zero and fewer triangles than the level before it
         const int triangles = int(level.size() / 3);
         if (!(bound > 0.0f) || triangles == 0 || (previousTriangles >= 0 && triangles >= previousTriangles)) continue;
-        if (!mesh->lodBounds.isEmpty() && bound < mesh->lodBounds.last()) bound = mesh->lodBounds.last();   // never
+        if (!mesh->lodBounds.empty() && bound < mesh->lodBounds.back()) bound = mesh->lodBounds.back();   // never
         previousTriangles = triangles;
-        mesh->lodIndices.append(level);
-        mesh->lodBounds.append(bound);
-        mesh->lodErrors.append(std::isfinite(estimate) && estimate >= 0.0f ? estimate : 0.0f);
+        mesh->lodIndices.push_back(level);
+        mesh->lodBounds.push_back(bound);
+        mesh->lodErrors.push_back(std::isfinite(estimate) && estimate >= 0.0f ? estimate : 0.0f);
     }
 }
 
@@ -2112,9 +2125,9 @@ void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
     if (!mesh || a.count() == 0) return;
     for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data || vb->dataSize <= 0) continue;
-        const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        const std::vector<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
         if (attribs.size() != 1) continue;
-        const VertexAttribute &at = attribs.first();
+        const VertexAttribute &at = attribs.front();
         const size_t comps = size_t(at.count > 0 ? at.count : 3);
         const size_t nv = size_t(vb->dataSize) / (sizeof(float) * comps);
         if (nv != a.nv0) continue;   // not a per-vertex float buffer of this mesh
@@ -2640,8 +2653,25 @@ QByteArray MeshBake::serialize(const Model &model)
     // A trailing sentinel: a truncated blob that happens to parse this far
     // still fails, and the reader never has to trust "no error so far".
     s << quint32(kMagic);
+    // THE PAYLOAD CHECKSUM (v37, NOQT-DOCUMENT-1 stage 5): an XXH3 64-bit hash of EVERY byte before it, last. The magic,
+    // the version and the sentinel catch a truncated file, never a byte flipped inside it, which would be read as data.
+    // Eight bytes, little-endian, appended after the stream's last write.
+    const std::uint64_t sum = XXH3_64bits(blob.constData(), size_t(blob.size()));
+    for (int i = 0; i < 8; ++i) blob.append(char((sum >> (8 * i)) & 0xffu));
     return blob;
 }
+
+namespace {
+/// The checksum's law (deserialize): the last 8 bytes are the XXH3 64-bit hash of every byte before them.
+bool checksumHolds(const QByteArray &blob)
+{
+    if (blob.size() < 8) return false;
+    const auto *tail = reinterpret_cast<const unsigned char *>(blob.constData()) + (blob.size() - 8);
+    std::uint64_t stored = 0;
+    for (int i = 0; i < 8; ++i) stored |= std::uint64_t(tail[i]) << (8 * i);   // little-endian, as serialize wrote it
+    return stored == XXH3_64bits(blob.constData(), size_t(blob.size() - 8));
+}
+}   // namespace
 
 bool MeshBake::headerMatches(const QString &path, const QString &expectFingerprint)
 {
@@ -2670,14 +2700,19 @@ bool MeshBake::headerMatches(const QString &path, const QString &expectFingerpri
 MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &expectFingerprint)
 {
     Model model;
-    if (blob.size() < 16) return model;
+    if (blob.size() < 16 + 8) return model;
 
     QDataStream s(blob);
     configure(s);
     quint32 magic = 0;
     qint32 version = 0;
     s >> magic >> version;
-    if (magic != kMagic || version != kFormatVersion) return model;
+    if (magic != kMagic || version != kFormatVersion) return model;   // stale or not a bake: a re-bake, not "corrupt"
+    // THE CHECKSUM BEFORE ANY OTHER FIELD: a flipped byte anywhere is refused BY NAME, never partly read.
+    if (!checksumHolds(blob)) {
+        model.refusal = "its checksum does not match";
+        return model;
+    }
     s >> model.fingerprint;
     if (s.status() != QDataStream::Ok) return Model();
     if (!expectFingerprint.isEmpty() && model.fingerprint != expectFingerprint) return Model();
@@ -2757,7 +2792,11 @@ MeshBake::Model MeshBake::read(const QString &path, const QString &expectFingerp
     if (!file.open(QIODevice::ReadOnly)) return Model();
     const QByteArray blob = file.readAll();
     file.close();
-    return deserialize(blob, expectFingerprint);
+    Model model = deserialize(blob, expectFingerprint);
+    if (!model.refusal.empty())
+        iris::log::warn("mesh bake: the bake " + QFileInfo(path).fileName().toStdString() + " is corrupt: " + model.refusal +
+                        ": re-import the asset");
+    return model;
 }
 
 bool MeshBake::write(const QString &path, const Model &model, QString *errorOut)
@@ -2938,19 +2977,19 @@ QMap<QString, SkeletalAnimationPtr> MeshBake::clipAnimations(const Clip &clip,
         if (!from) continue;
         auto anim = SkeletalAnimation::create();
         anim->name = from->name;
-        anim->source = source;
+        anim->source = source.toStdString();
         anim->declaredLength = from->declaredLength;
-        for (auto b = from->boneAnimations.constBegin(); b != from->boneAnimations.constEnd(); ++b) {
+        for (auto b = from->boneAnimations.cbegin(); b != from->boneAnimations.cend(); ++b) {
             auto *bone = new BoneAnimation();
             // ScaleProcess touches POSITION keys only — rotations and scales
             // come out as authored, so they are copied as they are.
-            for (const auto *key : b.value()->posKeys->keys)
+            for (const auto *key : b->second->posKeys->keys)
                 bone->posKeys->addKey(scaled ? key->value * factor : key->value, key->time);
-            for (const auto *key : b.value()->rotKeys->keys)
+            for (const auto *key : b->second->rotKeys->keys)
                 bone->rotKeys->addKey(key->value, key->time);
-            for (const auto *key : b.value()->scaleKeys->keys)
+            for (const auto *key : b->second->scaleKeys->keys)
                 bone->scaleKeys->addKey(key->value, key->time);
-            anim->addBoneAnimation(b.key(), bone);
+            anim->addBoneAnimation(b->first, bone);
         }
         out.insert(it.key(), anim);
     }
@@ -2972,7 +3011,7 @@ SceneNodePtr buildFragmentNode(
         if (n.meshIndex < 0 || n.meshIndex >= model.meshes.size()) return;
         MeshPtr mesh = model.meshes[n.meshIndex];
         meshNode->setMesh(mesh);
-        meshNode->name = n.name;
+        meshNode->name = n.name.toStdString();
         meshNode->meshPath = filePath;
         meshNode->meshIndex = n.meshIndex;
         if (n.materialIndex >= 0 && n.materialIndex < model.materials.size()) {
@@ -2995,7 +3034,7 @@ SceneNodePtr buildFragmentNode(
         sceneNode = meshNode;
     } else {
         sceneNode = SceneNodePtr(new SceneNode());
-        sceneNode->name = baked.name;
+        sceneNode->name = baked.name.toStdString();
         for (int i = 0; i < baked.meshChildCount && i < baked.children.size(); ++i) {
             auto meshNode = MeshNode::create();
             attachMesh(baked.children[i], meshNode);
@@ -3033,7 +3072,7 @@ SceneNodePtr MeshBake::buildFragment(
     const auto attachAnimations = [&](const SceneNodePtr &node) {
         for (auto it = model.animations.constBegin(); it != model.animations.constEnd(); ++it) {
             auto skelAnim = it.value();
-            skelAnim->source = filePath;
+            skelAnim->source = filePath.toStdString();
             auto anim = Animation::createFromSkeletalAnimation(skelAnim);
             node->addAnimation(anim);
             if (node->getAnimations().size() == 1) node->setAnimation(anim);

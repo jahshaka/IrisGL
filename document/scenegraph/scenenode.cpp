@@ -47,7 +47,7 @@ SceneNode::SceneNode()
 {
     sceneNodeType = SceneNodeType::Empty;
     nodeId = generateNodeId();
-    setName(QString("SceneNode%1").arg(nodeId));
+    setName((QString("SceneNode%1").arg(nodeId)).toStdString());
 
     visible = true;
     duplicable = true;
@@ -118,14 +118,14 @@ void SceneNode::setLocomotionComponent(const AvatarLocomotionPtr &component)
     notifyChanged(NodeChange::Flags);
 }
 
-QString SceneNode::getName()
+const std::string &SceneNode::getName() const
 {
     return name;
 }
 
-void SceneNode::setName(QString name)
+void SceneNode::setName(std::string name)
 {
-    this->name = name;
+    this->name = std::move(name);
     notifyChanged(NodeChange::Name);
 }
 
@@ -277,7 +277,7 @@ bool drivesTransform(const AnimationPtr &a) { return !!a && !a->properties.isEmp
 /// channel names it and its keys move. (Before, carrying ANY clip made the carrier
 /// movable — and rule 2 then made the Bistro's 5,942 meshes movable for a Take that
 /// moved one camera.)
-bool clipKeysNode(const AnimationPtr &a, const QString &name)
+bool clipKeysNode(const AnimationPtr &a, const std::string &name)
 {
     return !!a && !!a->skeletalAnimation && a->skeletalAnimation->movesNode(name);
 }
@@ -463,7 +463,7 @@ void SceneNode::_applyStaticHint(bool value)
         qWarning("iris::SceneNode: static graph class refused for '%s': this node kind moves "
                  "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
                  "bodies, socket riders, avatars and animated nodes are never graph-static).",
-                 qPrintable(name));
+                 name.c_str());
         return;
     }
     // The GRAPH state is part of the test, not just the field: a node that
@@ -622,7 +622,7 @@ PropertyRows SceneNode::getProperties()
     auto nameProp = std::make_unique<FileProperty>();
     nameProp->displayName = "Name";
     nameProp->name = "name";
-    nameProp->value = name.toStdString();
+    nameProp->value = name;
     props.add(std::move(nameProp));
 
     auto boolProp = std::make_unique<BoolProperty>();
@@ -710,7 +710,7 @@ Value SceneNode::getPropertyValue(std::string_view valueName)
     if (valueName == "position") return vec3ToValue(getLocalPos());
     if (valueName == "rotation") return vec3ToValue(getLocalRot().toEulerAngles());
     if (valueName == "scale")    return vec3ToValue(getLocalScale());
-    if (valueName == "name")       return Value(getName().toStdString());
+    if (valueName == "name")       return Value(getName());
     if (valueName == "visible")    return Value(isVisible());
     if (valueName == "castShadow") return Value(getShadowCastingEnabled());
     if (valueName == "planarReflector") return Value(getPlanarReflector());
@@ -735,7 +735,7 @@ bool SceneNode::setPropertyValue(std::string_view valueName, const Value &value)
     if (valueName == "scale")    { if (!vec3FromValue(value, v)) return false; setLocalScale(v); return true; }
     if (valueName == "name") {
         if (value.kind() != Kind::String) return false;
-        setName(QString::fromStdString(value.asString()));
+        setName(QString::fromStdString(value.asString()).toStdString());
         return true;
     }
     const bool isBool = value.kind() == Kind::Bool;

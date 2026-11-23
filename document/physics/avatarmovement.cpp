@@ -544,14 +544,14 @@ const float *positionsOf(Mesh *mesh, int &floats)
     if (!mesh) return nullptr;
     for (const auto &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data || vb->dataSize <= 0) continue;
-        QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
+        std::vector<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
         // One attribute per buffer is how every producer in the tree builds them
         // (importers, the .jmb bake, the procedural builders), and this walk
         // reads xyz triples with no stride — so an interleaved buffer is
         // declined rather than misread.
         if (attribs.size() != 1) continue;
-        if (attribs.first().usage != VertexAttribUsage::Position) continue;
-        if (attribs.first().type != AttribTypeFloat || attribs.first().count < 3) continue;
+        if (attribs.front().usage != VertexAttribUsage::Position) continue;
+        if (attribs.front().type != AttribTypeFloat || attribs.front().count < 3) continue;
         floats = vb->dataSize / int(sizeof(float));
         return reinterpret_cast<const float *>(vb->data);
     }

@@ -19,7 +19,7 @@ VertexLayout::VertexLayout()
     stride = 0;
 }
 
-QList<VertexAttribute> VertexLayout::getAttribs()
+std::vector<VertexAttribute> VertexLayout::getAttribs()
 {
     return attribs;
 }
@@ -27,7 +27,7 @@ QList<VertexAttribute> VertexLayout::getAttribs()
 void VertexLayout::addAttrib(VertexAttribUsage usage,int type,int count,int sizeOfAttribInBytes)
 {
     VertexAttribute attrib = {usage, type, count, sizeOfAttribInBytes};
-    attribs.append(attrib);
+    attribs.push_back(attrib);
 
     stride += sizeOfAttribInBytes;
 }

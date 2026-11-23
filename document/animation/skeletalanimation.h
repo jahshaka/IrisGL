@@ -4,9 +4,9 @@
 #include "irisglfwd.h"
 #include "document/animation/keyframeanimation.h"
 
-#include <QMap>
-#include <QScopedPointer>
-#include <QString>
+#include <map>
+#include <memory>
+#include <string>
 
 namespace iris {
 
@@ -14,9 +14,9 @@ namespace iris {
 class BoneAnimation
 {
 public:
-    QScopedPointer<Vector3DKeyFrame>    posKeys;
-    QScopedPointer<QuaternionKeyFrame>  rotKeys;
-    QScopedPointer<Vector3DKeyFrame>    scaleKeys;
+    std::unique_ptr<Vector3DKeyFrame>    posKeys;
+    std::unique_ptr<QuaternionKeyFrame>  rotKeys;
+    std::unique_ptr<Vector3DKeyFrame>    scaleKeys;
 
     BoneAnimation()
         : posKeys(new Vector3DKeyFrame())
@@ -40,20 +40,20 @@ class SkeletalAnimation
     SkeletalAnimation(){}
 public:
     // both read-only
-    QString name;
+    std::string name;
     /// The file the keys were READ from this session (provenance and logs
     /// only). Never a reference: it is a path on this machine, in this data
     /// root, and is not persisted.
-    QString source;
+    std::string source;
     /// THE REFERENCE (CLIP-REF-1): the guid of the stored asset the keys come
     /// out of — a model's own row for its embedded clips, an animation row for
     /// a clip file. A scene persists {assetGuid, name} and nothing else, and
     /// the reader derives the path from the guid through the store, so the
     /// clip survives a project switch, a moved data root and a re-save.
     /// Empty = a clip no stored asset backs (it cannot be persisted).
-    QString assetGuid;
+    std::string assetGuid;
 
-    QMap<QString, std::shared_ptr<BoneAnimation>> boneAnimations;
+    std::map<std::string, std::shared_ptr<BoneAnimation>> boneAnimations;
 
     /// The clip's DECLARED length in seconds — the file's own duration
     /// (assimp's mDuration / mTicksPerSecond), 0 when it declares none.
@@ -68,13 +68,13 @@ public:
     float declaredLength = 0.0f;
 
     // takes ownership of boneAnim
-    void addBoneAnimation(QString boneName,BoneAnimation* boneAnim);
+    void addBoneAnimation(std::string boneName,BoneAnimation* boneAnim);
 
     /// WHAT THIS CLIP ANIMATES (BISTRO-IMPORT-1, the mobility rule): a clip's channels
     /// are matched to scene nodes BY NAME, so the nodes it moves are exactly those
     /// named by a channel that moves (BoneAnimation::moves). A default "Take" carries
     /// a camera's two pivots and nothing else; it moves those and nothing more.
-    bool movesNode(const QString &nodeName) const;
+    bool movesNode(const std::string &nodeName) const;
     /// Any channel at all moves (a rig's skin follows its bones, whichever they are).
     bool movesAnything() const;
 
@@ -90,7 +90,7 @@ public:
     /// channels stay shared), so one asset's reference never rewrites
     /// another's.
     static SkeletalAnimationPtr referencedAs(const SkeletalAnimationPtr &anim,
-                                             const QString &guid);
+                                             const std::string &guid);
 };
 
 }

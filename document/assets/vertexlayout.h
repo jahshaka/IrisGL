@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef VERTEXLAYOUT_H
 #define VERTEXLAYOUT_H
 
-#include <QList>
+#include <vector>
 
 namespace iris
 {
@@ -54,13 +54,13 @@ struct VertexAttribute
 
 class VertexLayout
 {
-    QList<VertexAttribute> attribs;
+    std::vector<VertexAttribute> attribs;
     int stride;
 
 public:
     VertexLayout();
 
-    QList<VertexAttribute> getAttribs();
+    std::vector<VertexAttribute> getAttribs();
     void addAttrib(VertexAttribUsage usage, int type, int count, int sizeInBytes);
 
     int getStride();

@@ -33,7 +33,7 @@ namespace {
 /// One component track of a property animation from a channel's keys.
 void addVecTrack(Animation &anim, const char *property, const Vector3DKeyFrame &keys)
 {
-    if (keys.keys.isEmpty()) return;
+    if (keys.keys.empty()) return;
     auto *track = new Vector3DPropertyAnim();
     track->setName(QString::fromLatin1(property));
     for (const auto *k : keys.keys)
@@ -46,7 +46,7 @@ void addVecTrack(Animation &anim, const char *property, const Vector3DKeyFrame &
 /// linear blend never takes the long way round through +-180.
 void addRotTrack(Animation &anim, const QuaternionKeyFrame &keys)
 {
-    if (keys.keys.isEmpty()) return;
+    if (keys.keys.empty()) return;
     auto *track = new Vector3DPropertyAnim();
     track->setName(QStringLiteral("rotation"));
     Vec3 prev;
@@ -81,9 +81,10 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
             const auto mesh = std::static_pointer_cast<MeshNode>(n);
             if (!!mesh->skeleton)
                 for (const auto &bone : mesh->skeleton->bones)
-                    if (bone) bones.insert(bone->name);
+                    if (bone) bones.insert(QString::fromStdString(bone->name));
         }
-        if (!byName.contains(n->getName())) byName.insert(n->getName(), n);
+        const auto key = QString::fromStdString(n->getName());
+        if (!byName.contains(key)) byName.insert(key, n);
         for (const auto &c : n->children()) walk(c);
     };
     walk(fragment);
@@ -94,15 +95,15 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
         if (!clip || !clip->skeletalAnimation) continue;
         bool keysARig = false;
         const auto &channels = clip->skeletalAnimation->boneAnimations;
-        for (auto it = channels.constBegin(); it != channels.constEnd(); ++it) {
+        for (auto it = channels.cbegin(); it != channels.cend(); ++it) {
             // A pivot-preserving FBX keys a bone through its `<bone>_$AssimpFbx$_<part>`
             // pivot nodes (a Mixamo clip: almost every channel), so a channel belongs to
             // a rig when its BASE name is a bone.
-            const int pivot = it.key().indexOf(QLatin1String("_$AssimpFbx$_"));
-            const QString base = pivot >= 0 ? it.key().left(pivot) : it.key();
+            const std::size_t pivot = it->first.find("_$AssimpFbx$_");
+            const QString base = QString::fromStdString(pivot != std::string::npos ? it->first.substr(0, pivot) : it->first);
             if (bones.contains(base)) { keysARig = true; continue; }
-            const BoneAnimation *channel = it.value().get();
-            const SceneNodePtr node = byName.value(it.key());
+            const BoneAnimation *channel = it->second.get();
+            const SceneNodePtr node = byName.value(QString::fromStdString(it->first));
             if (!channel || !node || node == fragment || !channel->moves()) continue;
             auto anim = Animation::create(clip->getName());
             addVecTrack(*anim, "position", *channel->posKeys);
