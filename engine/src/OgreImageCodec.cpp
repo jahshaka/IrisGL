@@ -53,6 +53,9 @@ bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &
     } catch (const Ogre::Exception &e) {
         why = "no PNG codec on this engine: " + e.getDescription();
         return false;
+    } catch (const std::exception &e) {
+        why = std::string("no PNG codec on this engine: ") + e.what();
+        return false;
     }
     // Ogre's door takes a mutable pointer: the rows are copied (top-left origin, RGBA8: the codec flips them for its own
     // bottom-up bitmap and orders the channels itself)
@@ -66,7 +69,11 @@ bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &
         if (!out.empty()) out.resize(png->read(out.data(), out.size()));
     } catch (const Ogre::Exception &e) {
         out.clear();
-        why = "the PNG encode failed: " + e.getDescription();
+        // A codec that DECODES png but cannot encode it (a build with STBI and no FreeImage: STBIImageCodec::encode throws
+        // ERR_NOT_IMPLEMENTED, OgreMain/src/OgreSTBICodec.cpp) is told by the exception's NUMBER, never its sentence
+        why = (e.getNumber() == Ogre::Exception::ERR_NOT_IMPLEMENTED ? "no PNG encoder on this engine: "
+                                                                     : "the PNG encode failed: ") +
+              e.getDescription();
         return false;
     } catch (const std::exception &e) {
         out.clear();
