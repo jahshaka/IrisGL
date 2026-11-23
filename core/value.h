@@ -64,8 +64,9 @@ public:
     /// AN OBJECT's MEMBER SET (NOQT-CORE-1 stage 3, for the document's overrides): replaced IN PLACE when the object has it
     /// (its position kept), else appended - the members stay in the order the type holds them, INSERTION order (the compact
     /// writer keeps it; writePretty sorts by name, so the saved form is the same whatever order the members were set in).
-    /// False, nothing changed, when this is not an object (as `find` answers null for one).
-    bool set(const std::string &name, Value value);
+    /// False, nothing changed, when this is not an object (as `find` answers null for one): [[nodiscard]], since a false
+    /// means the caller wrote into a non-object (an override that would silently never be saved).
+    [[nodiscard]] bool set(const std::string &name, Value value);
     /// The member removed: true when one went, false when this is not an object or holds no such member.
     bool erase(const std::string &name);
 
