@@ -101,9 +101,10 @@ public:
     /// Replaces the pixels. REFUSES a different size (a live texture's
     /// renderer-side twin cannot resize — destroy and create), a null image
     /// and anything that is not a live texture. Bumps the generation on success.
-    /// Taken BY VALUE: a producer hands its frame over with std::move and the buffer becomes the texture's
-    /// (a video frame pays no copy here).
-    bool writeLive(Image rgba);
+    /// THE BUFFERS ARE SWAPPED, never copied: on success `rgba`'s buffer becomes the texture's and `rgba` receives
+    /// the PREVIOUS frame (the same size), so a producer that keeps one Image writes its next frame into memory it
+    /// already has: no copy, no allocation, no zero fill a frame. On a refusal `rgba` is untouched.
+    bool writeLive(Image &rgba);
 
 private:
     Texture2D();

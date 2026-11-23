@@ -96,11 +96,11 @@ Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
     return std::shared_ptr<Texture2D>(tex);
 }
 
-bool Texture2D::writeLive(Image rgba)
+bool Texture2D::writeLive(Image &rgba)
 {
     if (!live || rgba.isNull()) return false;
     if (rgba.width != image.width || rgba.height != image.height) return false;
-    image = std::move(rgba);
+    std::swap(image, rgba);
     ++generation;
     return true;
 }
