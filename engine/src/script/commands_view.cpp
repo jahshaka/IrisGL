@@ -52,6 +52,44 @@ Quat lookAtRotation(const Vec3 &pos, const Vec3 &target)
 
 }  // namespace
 
+namespace {
+/// A VIEW THIS HOST MADE (the R lane's audit, 3): enabled, asynchronous shaders, size and sample count are the view's
+/// OWNER's - a view lent to a script (lab.view(), a handed-in view) gets them back from nobody (the owner's give-back
+/// re-asserts camera, background and post-fx only) - so on a view this host did not make they FAIL by name, the test
+/// engine.view.destroy uses. Asked of the handle's pointer before anything is read of the view.
+bool madeHere(Call &c, const Commands &k, const char *what)
+{
+    const View *v = c.object<View>(c[0]);
+    if (std::find(k.st->ownedViews.begin(), k.st->ownedViews.end(), v) != k.st->ownedViews.end()) return true;
+    c.fail(std::string("this view was handed in by the host's owner: its ") + what + " is the owner's to set");
+    return false;
+}
+/// THE POST CHAIN's LAWS BETWEEN MEMBERS (the audit, 7: the engine would take each and change the picture silently) and
+/// ITS TWO MEASURING ARMS (the audit, 5: ditherOff and ssrSteps are a diagnostic and a measuring knob, PostFx.h - set
+/// only by the test door engine.view.setPostFxArms): false, the call FAILED naming the member.
+bool postFxLaws(Call &c, const PostFxDesc &d)
+{
+    if (d.exposureMin > d.exposureMax) {
+        c.fail("desc.exposureMin " + std::to_string(d.exposureMin) + " is above desc.exposureMax " +
+                      std::to_string(d.exposureMax) + " (the meter's window would invert: PostFx.h exposureMin)");
+        return false;
+    }
+    if (d.meterLowPercent > d.meterHighPercent) {
+        c.fail("desc.meterLowPercent " + std::to_string(d.meterLowPercent) + " is above desc.meterHighPercent " +
+                      std::to_string(d.meterHighPercent) + " (the meter would fall back to the whole frame: PostFx.h)");
+        return false;
+    }
+    for (size_t i = 0; i < d.looks.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (d.looks[i].kind == d.looks[j].kind) {
+                c.fail("desc.looks[" + std::to_string(i) + "].kind '" + toValue(d.looks[i].kind).asString() +
+                              "' is already desc.looks[" + std::to_string(j) + "] (a kind at most once: PostFx.h LookDesc)");
+                return false;
+            }
+    return true;
+}
+}  // namespace
+
 void registerViewCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();
@@ -98,13 +136,22 @@ void registerViewCommands(Host &host, const Commands &k)
            {Access::Changes, {target(handle("view", kView)), Record<PostFxDesc>::table().param("desc")}, Kind::Null},
            "The view's whole post chain (PostFxDesc; a member left out takes the record's default): an offscreen view "
            "runs the chain only with allowOffscreen (display-encoded bytes); hdrReadback keeps the scene's radiance for "
-           "readPixels' content \"radiance\" on every view; ssr is the reflection's tier (0 off)."},
+           "readPixels' content \"radiance\" on every view; ssr is the reflection's tier (0 off). exposureMin <= "
+           "exposureMax, meterLowPercent <= meterHighPercent and each look kind once, else it FAILS by name. The two "
+           "MEASURING ARMS, ditherOff and ssrSteps, stay at their defaults here (on, either FAILS by name): the test door "
+           "engine.view.setPostFxArms sets them, after this call."},
           [k](Call &c) -> Value {
-              View *v = k.view(c, c[0]);
-              if (!v) return Value();
+              // (the arguments' laws first: the caller's mistake, before the engine or the view is asked)
               PostFxDesc d;
               std::string why;
               if (!Record<PostFxDesc>::table().fromValue(c[1], d, "desc", why)) return c.fail(why);
+              if (!postFxLaws(c, d)) return Value();
+              const PostFxDesc def;
+              if (d.ditherOff != def.ditherOff || d.ssrSteps != def.ssrSteps)
+                  return c.fail(std::string("desc.") + (d.ditherOff != def.ditherOff ? "ditherOff" : "ssrSteps") +
+                                " is a measuring arm (PostFx.h): set it with the test door engine.view.setPostFxArms");
+              View *v = k.view(c, c[0]);
+              if (!v) return Value();
               v->setPostFx(d);
               return Value();
           });
@@ -112,13 +159,21 @@ void registerViewCommands(Host &host, const Commands &k)
            {Access::Changes, {target(handle("view", kView)), Record<CameraDesc>::table().param("camera")}, Kind::Null},
            "The view's whole camera (CameraDesc; a member left out takes the record's default): position and "
            "orientation absolute (it looks down its local -Z), the vertical field of view, the clip planes, the "
-           "projection, the letterbox, the framing hold and the lens shift."},
+           "projection, the letterbox, the framing hold and the lens shift. Every range is the one the engine takes as "
+           "it is; a zero orientation and a far clip not 0.01 m past the near FAIL by name."},
           [k](Call &c) -> Value {
-              View *v = k.view(c, c[0]);
-              if (!v) return Value();
               CameraDesc d;
               std::string why;
               if (!Record<CameraDesc>::table().fromValue(c[1], d, "camera", why)) return c.fail(why);
+              // the engine normalises the orientation (OgreCamera.cpp:455-458): a zero one is NaN in every matrix
+              const Quat &q = d.orientation;
+              if (q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1e-12f)
+                  return c.fail("camera.orientation is a zero quaternion (|q|^2 under 1e-12): it has no rotation to normalise");
+              if (d.farClip < d.nearClip + 0.01f)   // OgreView.cpp:1402: max(far, near + 0.01)
+                  return c.fail("camera.farClip " + std::to_string(d.farClip) + " is not 0.01 m past camera.nearClip " +
+                                std::to_string(d.nearClip) + " (the engine would move it there)");
+              View *v = k.view(c, c[0]);
+              if (!v) return Value();
               v->setCamera(d);
               return Value();
           });
@@ -128,8 +183,10 @@ void registerViewCommands(Host &host, const Commands &k)
              object("size", {arg("width", Kind::Int).range(1, 16384).in("px"), arg("height", Kind::Int).range(1, 16384).in("px")})},
             Kind::Null},
            "Asks for the view's new size {width, height}: an offscreen view's target is replaced at once (what it drew "
-           "is dropped); the achieved size is the view's published width and height."},
+           "is dropped); the achieved size is the view's published width and height. A view this host did not make "
+           "FAILS by name (its size is its owner's)."},
           [k](Call &c) -> Value {
+              if (!madeHere(c, k, "size")) return Value();
               View *v = k.view(c, c[0]);
               if (!v) return Value();
               v->resize(unsigned(c[1]["width"].asInt()), unsigned(c[1]["height"].asInt()));
@@ -145,17 +202,23 @@ void registerViewCommands(Host &host, const Commands &k)
           });
     r.add({"engine.view.setSampleCount",
            {Access::Changes, {target(handle("view", kView)), arg("samples", Kind::Int).range(1, 16)}, Kind::Null},
-           "The view's MSAA sample count (1 = off), rounded down to a power of two; the driver may clamp it - the "
-           "achieved count is the view's published sampleCount. A change recreates the target."},
+           "The view's MSAA sample count, a power of two (1 = off; another count FAILS by name - the engine would "
+           "round it down, OgreView.cpp:1763-1767); the driver may clamp it - the achieved count is the view's published "
+           "sampleCount. A change recreates the target. A view this host did not make FAILS by name."},
           [k](Call &c) -> Value {
+              if (!madeHere(c, k, "sample count")) return Value();
+              const std::int64_t n = c[1].asInt();
+              if (n & (n - 1)) return c.fail("samples " + std::to_string(n) + " is not a power of two (1, 2, 4, 8, 16)");
               View *v = k.view(c, c[0]);
               if (!v) return Value();
               v->setSampleCount(unsigned(c[1].asInt()));
               return Value();
           });
     r.add({"engine.view.setEnabled", {Access::Changes, {target(handle("view", kView)), arg("on", Kind::Bool)}, Kind::Null},
-           "Enables or disables the view: a disabled view is skipped by every frame."},
+           "Enables or disables the view: a disabled view is skipped by every frame. A view this host did not make "
+           "FAILS by name (its owner decides whether it draws)."},
           [k](Call &c) -> Value {
+              if (!madeHere(c, k, "enable")) return Value();
               View *v = k.view(c, c[0]);
               if (!v) return Value();
               v->setEnabled(c[1].asBool());
@@ -163,8 +226,10 @@ void registerViewCommands(Host &host, const Commands &k)
           });
     r.add({"engine.view.setAsyncShaders", {Access::Changes, {target(handle("view", kView)), arg("on", Kind::Bool)}, Kind::Null},
            "Asynchronous shaders for the view's own frames: on, a permutation not built yet is built in the background "
-           "while the view draws its placeholder; off (the default), a frame compiles what it needs first."},
+           "while the view draws its placeholder; off (the default), a frame compiles what it needs first. A view this "
+           "host did not make FAILS by name."},
           [k](Call &c) -> Value {
+              if (!madeHere(c, k, "asynchronous shaders")) return Value();
               View *v = k.view(c, c[0]);
               if (!v) return Value();
               v->setAsyncShaders(c[1].asBool());
@@ -177,6 +242,28 @@ void registerViewCommands(Host &host, const Commands &k)
               const View *v = k.view(c, c[0]);
               if (!v) return Value();
               return Value(v->isOffscreen());
+          });
+    r.add({"engine.view.setPostFxArms",
+           {Access::Test,
+            {target(handle("view", kView)),
+             object("arms", {arg("ditherOff", Kind::Bool, Value(false)), arg("ssrSteps", Kind::Int, Value(0)).range(0, 128)})},
+            Kind::Null},
+           "THE POST CHAIN's TWO MEASURING ARMS (a test door: --test-doors): ditherOff (the 8-bit store undithered: a "
+           "diagnostic, PostFx.h; its push is process-global, OgreView.cpp:793-803) and ssrSteps (the reflection march's "
+           "step count, 0 = the quality row's, else 8..128 - 1..7 FAIL by name: the engine would make them 8), set on "
+           "top of the chain the host last pushed (engine.view.setPostFx puts both back to their defaults)."},
+          [k](Call &c) -> Value {
+              const std::int64_t steps = c[1]["ssrSteps"].asInt();
+              if (steps > 0 && steps < 8)   // OgreChain.cpp:4688-4689: min(max(steps, 8), 128)
+                  return c.fail("arms.ssrSteps " + std::to_string(steps) + " is neither 0 nor in 8..128 (the engine "
+                                "would make it 8)");
+              View *v = k.view(c, c[0]);
+              if (!v) return Value();
+              PostFxDesc d = v->pushedPostFx();
+              d.ditherOff = c[1]["ditherOff"].asBool();
+              d.ssrSteps = int(steps);
+              v->setPostFx(d);
+              return Value();
           });
     r.add({"engine.view.requestFrameCapture",
            {Access::Changes,
