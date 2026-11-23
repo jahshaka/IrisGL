@@ -43,7 +43,8 @@ For more information see the LICENSE file
 
 #include "core/value.h"
 
-#include <QString>
+#include <string>
+#include <string_view>
 
 namespace iris
 {
@@ -91,7 +92,7 @@ struct LookDef
 const LookDef *lookCatalogue(int &count);
 
 /// The look with this id, or null.
-const LookDef *lookDef(const QString &id);
+const LookDef *lookDef(std::string_view id);
 
 /// The engine's parameter vector for one stack entry: the entry's values in the
 /// look's own canonical order, clamped, defaulted, and zero-filled to 8.

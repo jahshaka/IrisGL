@@ -140,8 +140,8 @@ public:
     Value toValue() const;
     /// Tolerant: an unknown action name or an unparseable key is SKIPPED, not
     /// an error — a settings file written by a future build must not brick the
-    /// input layer. An action whose rows ALL fail to decode keeps what it has (a row written before the keys were
-    /// stored as numbers is such a row). Returns false when nothing at all was understood.
+    /// input layer. An action whose rows ALL fail to decode keeps what it has: a corrupt or foreign row never unbinds
+    /// an action (an explicit empty list still does). Returns false when nothing at all was understood.
     bool fromValue(const Value &m);
 
     /// jahsettings.ini "input/<Action>" — the same shape ShortcutRegistry uses

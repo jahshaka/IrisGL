@@ -101,10 +101,10 @@ const LookDef *lookCatalogue(int &count)
     return kCatalogue;
 }
 
-const LookDef *lookDef(const QString &id)
+const LookDef *lookDef(std::string_view id)
 {
     for (const LookDef &d : kCatalogue)
-        if (id == QLatin1String(d.id)) return &d;
+        if (id == d.id) return &d;
     return nullptr;
 }
 
@@ -139,7 +139,7 @@ Value normalizeLookStack(const Value &in)
         if (entry.kind() != Kind::Object) continue;
         const Value &idValue = entry["id"];
         const std::string id = idValue.kind() == Kind::String ? idValue.asString() : std::string();
-        const LookDef *def = lookDef(QString::fromStdString(id));
+        const LookDef *def = lookDef(id);
         if (!def) continue;              // a look this build does not implement
         if (std::find(seen.begin(), seen.end(), id) != seen.end()) continue;   // ONE INSTANCE PER LOOK (§7 R2)
         seen.push_back(id);

@@ -43,9 +43,8 @@ For more information see the LICENSE file
 // Shadows) must route through setRowValue() or the override bookkeeping goes
 // stale — that is the bug this design invites, and the one the tests pin.
 
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <string>
+#include <vector>
 #include <functional>
 
 #include "irisglfwd.h"
@@ -67,8 +66,8 @@ enum class TierSpace { World, Photon, None };
 
 /// One choice of an Enum row. `value` is what lands in the backing field.
 struct EnumOption {
-    QString id;      ///< stable, script-facing ("vct", "4x", "auto")
-    QString label;   ///< human ("VCT", "4x", "Auto")
+    std::string id;      ///< stable, script-facing ("vct", "4x", "auto")
+    std::string label;   ///< human ("VCT", "4x", "Auto")
     int     value = 0;   ///< the backing-field value
 };
 
@@ -80,44 +79,44 @@ struct EnumOption {
 /// `followsTier` says choosing it DROPS the row's pin so the tier decides again
 /// (the SSR row's "Traced": off -> traced is "let the tier's reflections run").
 struct ComboItem {
-    QString    id;
-    QString    label;
+    std::string    id;
+    std::string    label;
     int        value = 0;
     bool       followsTier = false;
-    QList<int> shows;
+    std::vector<int> shows;
 };
 
 struct Row {
-    QString  id;                       ///< stable, script-facing
-    QString  label;
-    QString  group;                    ///< panel grouping ("Rendering", "Shadows", ...)
+    std::string  id;                       ///< stable, script-facing
+    std::string  label;
+    std::string  group;                    ///< panel grouping ("Rendering", "Shadows", ...)
     RowType  type = RowType::Int;
-    QVector<EnumOption> options;       ///< Enum rows only
+    std::vector<EnumOption> options;       ///< Enum rows only
     int      minValue = 0, maxValue = 0;   ///< Int rows only
     int      tier[4] = { 0, 0, 0, 0 };  ///< Low, Medium, High, Epic
     /// The row's tooltip text when it is the same on every machine. READ IT
     /// THROUGH rowCost(), never directly: a row whose text depends on whether
     /// this machine's rays resolve carries `costAt` instead and leaves this empty.
-    QString  cost;
+    std::string  cost;
     /// THE TEXT OF A ROW WHOSE TRUTH DEPENDS ON THE MACHINE (STUDIO-CRUD-1
     /// item 6). After PHOTON-F12-PCC no shipped tier builds a reflection-probe
     /// grid wherever the scene traces rays, so a row that explains reflections
     /// at High and Epic says one thing on a tracing machine and another off it.
     /// The ONE text is computed from `sceneTracesRays` (through
     /// tierRaysResolve), never two hand-kept literals.
-    std::function<QString(bool sceneTracesRays)> costAt;
+    std::function<std::string(bool sceneTracesRays)> costAt;
     /// An Enum row whose option NAMES depend on the SCENE on this machine (the
     /// technique: ordinal 2 is "VCT + rays" where probeGridByRays(scene,
     /// sceneTracesRays) holds, "VCT + probes" where it does not — the ONE rule
     /// the GI section and world.gi read too). Null = the options' own labels.
     /// Read through optionLabel().
-    std::function<QString(int value, const iris::ScenePtr &scene, bool sceneTracesRays)>
+    std::function<std::string(int value, const iris::ScenePtr &scene, bool sceneTracesRays)>
         optionLabelAt;
     /// A row whose OFFERED entries depend on the scene on this machine (the SSR
     /// row at a ray tier offers "Off" and one disabled "Traced"). Null = one
     /// enabled entry per option, named through optionLabel(). Read through
     /// comboItems().
-    std::function<QVector<ComboItem>(const iris::ScenePtr &scene, bool sceneTracesRays)>
+    std::function<std::vector<ComboItem>(const iris::ScenePtr &scene, bool sceneTracesRays)>
         comboItemsAt;
     bool     available = true;         ///< false = declared but not yet implemented
     /// TIER SPACE — WHICH DIAL, IF ANY, RESOLVES THIS ROW.
@@ -169,13 +168,13 @@ struct Row {
 /// builds a scrubbable row per entry and world.postFx reads and writes through
 /// the same entries, so a range can never mean two different things.
 struct ParamRow {
-    QString id;          ///< script-facing, and the world.postFx key ("exposure")
-    QString label;       ///< human ("Exposure")
-    QString ownerRowId;  ///< the Row this belongs under ("hdr", "bloom", "ssao")
+    std::string id;          ///< script-facing, and the world.postFx key ("exposure")
+    std::string label;       ///< human ("Exposure")
+    std::string ownerRowId;  ///< the Row this belongs under ("hdr", "bloom", "ssao")
     double  minValue = 0.0, maxValue = 1.0;
     double  perPixelStep = 0.02;   ///< scrub sensitivity in the panel
     int     decimals = 2;
-    QString doc;         ///< the row tooltip AND the verb's documentation
+    std::string doc;         ///< the row tooltip AND the verb's documentation
 
     /// WHEN THIS PARAMETER IS LIVE. Null (the common case) means "its owner row
     /// is on", which is the right rule for a Bool owner and the only rule this
@@ -194,13 +193,13 @@ struct ParamRow {
 };
 
 /// The continuous post-process parameters, in panel order.
-const QVector<ParamRow> &postFxParams();
+const std::vector<ParamRow> &postFxParams();
 /// The parameter with this id, or null.
-const ParamRow *postFxParam(const QString &id);
+const ParamRow *postFxParam(const std::string &id);
 /// The ids of the Row entries the World > Post Process section shows, in order.
 /// (The post chain's rows, as opposed to shadows/GI/reflections, which have
 /// sections of their own.)
-const QStringList &postFxRowIds();
+const std::vector<std::string> &postFxRowIds();
 
 /// THE FOG'S CONTINUOUS ROWS (FOG-ATMO-1) — the same one-table pattern as
 /// postFxParams: the World > Fog section builds a slider per entry and
@@ -209,39 +208,39 @@ const QStringList &postFxRowIds();
 /// world.fog key ("density"); `ownerRowId` is "fog" (the Fog Enabled row, which
 /// the rows are greyed under). Enabled and the colour are not continuous and
 /// stay the section's own two rows.
-const QVector<ParamRow> &fogParams();
+const std::vector<ParamRow> &fogParams();
 /// The fog row with this world.fog key, or null.
-const ParamRow *fogParam(const QString &id);
+const ParamRow *fogParam(const std::string &id);
 /// The row's document key — the sceneprops / undo key ("fogDensity" for
 /// "density"): what the panel's undo step and world.fog's snapshot name.
-QString fogParamSceneKey(const ParamRow &p);
+std::string fogParamSceneKey(const ParamRow &p);
 /// WHETHER THE AUTHORED FOG COLOUR IS IN FORCE: false under the realistic sky,
 /// whose own scattering colours every fog layer (FOG-ATMO-1). The panel greys
 /// the colour row by it and world.fog's doc states it.
 bool fogColourAuthored(const iris::ScenePtr &scene);
 
 /// The registry. Built once, never mutated.
-const QVector<Row> &rows();
+const std::vector<Row> &rows();
 /// The row with this id, or null.
-const Row *row(const QString &id);
+const Row *row(const std::string &id);
 
 /// A row's tooltip text on a machine where the scene does (`sceneTracesRays`)
 /// or does not trace rays — IEditorViewport::sceneTracesRays, false with no
 /// engine. EVERY surface that shows a row's text reads it here (the World
 /// panels, world.modeTable), so a text cannot be right on one and stale on
 /// another.
-QString rowCost(const Row &r, bool sceneTracesRays);
+std::string rowCost(const Row &r, bool sceneTracesRays);
 /// An Enum row option's display name for `scene` on this machine (see
 /// Row::optionLabelAt). Every surface that names an option reads it here.
-QString optionLabel(const Row &r, const EnumOption &o, const iris::ScenePtr &scene,
+std::string optionLabel(const Row &r, const EnumOption &o, const iris::ScenePtr &scene,
                     bool sceneTracesRays);
 /// The entries an Enum row's combo OFFERS for `scene` on this machine (see
 /// Row::comboItemsAt) — the World panels, the camera overrides and
 /// world.modeTable all read it, so no surface offers what another hides.
-QVector<ComboItem> comboItems(const Row &r, const iris::ScenePtr &scene, bool sceneTracesRays);
+std::vector<ComboItem> comboItems(const Row &r, const iris::ScenePtr &scene, bool sceneTracesRays);
 /// The index in `items` that shows backing value `value` (its own value or one
 /// it `shows`), -1 when none does.
-int comboIndexOf(const QVector<ComboItem> &items, int value);
+int comboIndexOf(const std::vector<ComboItem> &items, int value);
 /// CHOOSES an entry (the panels' combos and world.override's option ids): an
 /// ordinary entry pins its value (setRowValue); a `followsTier` entry drops the
 /// row's pin (clearOverride) so the tier's column decides — and where that
@@ -303,12 +302,12 @@ enum class PhotonTier { Low = 0, Medium = 1, High = 2, Epic = 3 };
 
 /// The registry id of the tier row, and of the four rows it writes through
 /// (giMode, giQuality, giDdgi, giBounces — in that order).
-QString     photonRowId();
-QStringList photonRowIds();
+std::string     photonRowId();
+std::vector<std::string> photonRowIds();
 
-QString     photonTierName(PhotonTier t);        ///< "low" | "medium" | "high" | "epic"
-PhotonTier   photonTierFromName(const QString &name, bool *ok = nullptr);
-QStringList photonTierNames();
+std::string     photonTierName(PhotonTier t);        ///< "low" | "medium" | "high" | "epic"
+PhotonTier   photonTierFromName(const std::string &name, bool *ok = nullptr);
+std::vector<std::string> photonTierNames();
 
 /// The scene's Photon tier (what quality it comes back at), whether GI is on or
 /// off; and whether GI is on at all.
@@ -361,8 +360,8 @@ jahshaka::engine::GiGatherFacts photonVrGather(PhotonTier t);
 /// 5 m at 64 cubed (0.16 m cells) ... the irradiance field on, 1 bounce, no
 /// reflection probes."); `photonTierSummary` is all four, for a tooltip that
 /// describes the dial rather than a setting.
-QString photonTierSentence(PhotonTier t);
-QString photonTierSummary();
+std::string photonTierSentence(PhotonTier t);
+std::string photonTierSummary();
 
 /// THE OFFSCREEN PICTURE CONTRACT (D4-PHOTON-TIERS §2.2). Every picture the app
 /// renders away from the viewport is one row here, and it either renders THE
@@ -373,15 +372,15 @@ QString photonTierSummary();
 /// would be a defect, not an optimisation. `kind` is the stable id (world.tierTable's
 /// `offscreen` list carries the same rows); `renders` names the lower picture.
 struct OffscreenPicture {
-    QString kind;
+    std::string kind;
     bool    tierPicture = false;
-    QString renders;
+    std::string renders;
 };
-const QVector<OffscreenPicture> &offscreenPictures();
+const std::vector<OffscreenPicture> &offscreenPictures();
 /// The VOXEL RESOLUTIONS a tier actually uses, as a phrase: the chain's
 /// distinct resolutions when the chain is on ("64", "64 and 128"), which is
 /// what the quality dial buys.
-QString photonTierVoxelPhrase(PhotonTier t);
+std::string photonTierVoxelPhrase(PhotonTier t);
 /// The probe cube-face size a tier resolves to, in pixels (the engine's own
 /// quality dial; 0 is never returned).
 int photonTierProbeFaceSize(PhotonTier t);
@@ -411,10 +410,10 @@ bool reflectionsTraced(const iris::ScenePtr &scene, bool sceneTracesRays);
 /// THE TECHNIQUE'S NAME — one source for the World rows, the GI panel and the
 /// docs: 0 "Off", 1 "VCT", 2 "VCT + rays" where `raysResolve`, else
 /// "VCT + probes".
-QString techniqueLabel(int technique, bool raysResolve);
+std::string techniqueLabel(int technique, bool raysResolve);
 /// The one sentence both surfaces give for it (the verb's refusal, the rows'
 /// tooltip).
-QString probeGridByRaysReason();
+std::string probeGridByRaysReason();
 
 /// Applies a Photon state: records the tier, writes each Photon-tiered row's
 /// tier value into its backing field EXCEPT rows the user pinned, and writes
@@ -431,13 +430,13 @@ void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier);
 /// is off (there is nothing to deviate from: the picture is no GI either way).
 bool photonCustom(const iris::ScenePtr &scene);
 /// The labels of the deviating rows, for the tier row's tooltip.
-QStringList photonDeviations(const iris::ScenePtr &scene);
+std::vector<std::string> photonDeviations(const iris::ScenePtr &scene);
 /// Drops the pins on the Photon-tiered rows and re-applies the tier.
 void clearPhotonOverrides(const iris::ScenePtr &scene);
 
-QString    modeName(Mode m);            ///< "custom" | "low" | "medium" | "high" | "epic"
-Mode       modeFromName(const QString &name, bool *ok = nullptr);
-QStringList modeNames();                ///< low, medium, high, epic (Custom is not pickable)
+std::string    modeName(Mode m);            ///< "custom" | "low" | "medium" | "high" | "epic"
+Mode       modeFromName(const std::string &name, bool *ok = nullptr);
+std::vector<std::string> modeNames();                ///< low, medium, high, epic (Custom is not pickable)
 
 /// The scene's tier AS IT RENDERS: the picked mode, or Custom when none is picked OR the
 /// Photon row has left the picked mode's column (WORLD-MODE-1, owner 2026-10-09: each World
@@ -460,13 +459,13 @@ int tierValue(const Row &r, Mode m, const iris::ScenePtr &scene);
 int resolved(const iris::ScenePtr &scene, const Row &r);
 
 /// Where the resolved value came from: "override", "mode" or "custom".
-QString source(const iris::ScenePtr &scene, const Row &r);
+std::string source(const iris::ScenePtr &scene, const Row &r);
 
 /// Writes a row's value. `recordOverride` false is the internal path used by
 /// setMode()/clearOverride(); every user- or script-driven edit records.
 /// Values are validated against the row (enum membership / int range); an
 /// invalid value is refused and returns false.
-bool setRowValue(const iris::ScenePtr &scene, const QString &id, int value,
+bool setRowValue(const iris::ScenePtr &scene, const std::string &id, int value,
                  bool recordOverride = true);
 
 /// The `photon` row is NEVER recorded as a pin (WORLD-MODE-1): a set of it writes through
@@ -479,22 +478,22 @@ bool setRowValue(const iris::ScenePtr &scene, const QString &id, int value,
 /// accepts any value in 256..8192, not just the five the row lists — but the
 /// override bookkeeping must still see the edit or a later mode switch would
 /// silently undo it. Unknown ids are ignored.
-void pinRowValue(const iris::ScenePtr &scene, const QString &id, int value);
+void pinRowValue(const iris::ScenePtr &scene, const std::string &id, int value);
 
 /// Drops the pin and writes the tier value back (no-op in Custom mode beyond
 /// dropping the pin, since there is no tier to fall back to — and likewise for
 /// a `TierSpace::None` row, which has no tier at all: its value is the user's
 /// and clearing a pin must not reset it).
-bool clearOverride(const iris::ScenePtr &scene, const QString &id);
+bool clearOverride(const iris::ScenePtr &scene, const std::string &id);
 void clearOverrides(const iris::ScenePtr &scene);
 
 /// The label of the option holding `value`, or the number as text.
-QString valueLabel(const Row &r, int value);
+std::string valueLabel(const Row &r, int value);
 /// The option id holding `value`, or the number as text — the script-facing
 /// spelling of a row's value.
-QString valueId(const Row &r, int value);
+std::string valueId(const Row &r, int value);
 /// The value an option id (or a plain number) means; false when unparseable.
-bool valueFromId(const Row &r, const QString &id, int &out);
+bool valueFromId(const Row &r, const std::string &id, int &out);
 
 }   // namespace worldmodes
 

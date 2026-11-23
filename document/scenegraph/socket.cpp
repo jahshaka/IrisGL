@@ -88,7 +88,8 @@ int SocketResolver::resolve(Scene *scene)
     // The registry is keyed by OWNER, so a rig's pose is read once however many
     // things hang off it: a character with a first-person camera, a third-person
     // camera and a prop in its hand reads one pose, not three. `mBones` is
-    // cleared and refilled in place, so the steady state allocates nothing.
+    // cleared and refilled: its buckets are kept, but every refill allocates one
+    // node per bone (and its name, past the short-string size) per owner per frame.
     for (auto it = attachments.cbegin(); it != attachments.cend(); ++it) {
         const std::vector<SceneNodePtr> &attached = it->second;
         if (attached.empty()) continue;

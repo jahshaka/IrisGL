@@ -7517,7 +7517,7 @@ static std::vector<LookDesc> resolveLooks(const iris::Value &stack)
     for (const iris::Value &entry : clean.asArray()) {
         // The validator's own shape: `enabled` a Bool, `id` a known look's.
         if (!entry["enabled"].asBool()) continue;
-        const iris::LookDef *def = iris::lookDef(QString::fromStdString(entry["id"].asString()));
+        const iris::LookDef *def = iris::lookDef(entry["id"].asString());
         if (!def) continue;
         LookDesc desc;
         switch (def->kind) {

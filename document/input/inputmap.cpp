@@ -221,7 +221,7 @@ bool InputMap::fromValue(const Value &m)
             InputKeyBinding b;
             if (decodeKey(row, axis, b)) keys.push_back(b);
         }
-        if (!rows.empty() && keys.empty()) continue;   // every row undecodable: the action keeps what it has
+        if (!rows.empty() && keys.empty()) continue;   // every row undecodable (corrupt, foreign): the action keeps what it has
         mBindings[int(a)] = keys;
         understoodAny = true;
     }
