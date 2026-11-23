@@ -1117,6 +1117,7 @@ const Table<AsyncShaderStats> &Record<AsyncShaderStats>::table()
     static const Table<AsyncShaderStats> t({
         JAH_FIELD(AsyncShaderStats, running),
         JAH_FIELD(AsyncShaderStats, threads),
+        JAH_FIELD(AsyncShaderStats, placeholdersOnly),
         JAH_FIELD(AsyncShaderStats, pending),
         JAH_FIELD(AsyncShaderStats, completed),
         JAH_FIELD(AsyncShaderStats, failed),

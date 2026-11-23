@@ -76,7 +76,7 @@ JAH_RECORD_COUNT(VrProfileName, 1);
 JAH_RECORD_COUNT(VrInfo, 17);
 JAH_RECORD_COUNT(VrBindingBlock, 3);
 JAH_RECORD_COUNT(StreamingWork, 7);
-JAH_RECORD_COUNT(AsyncShaderStats, 39);
+JAH_RECORD_COUNT(AsyncShaderStats, 40);
 JAH_RECORD_COUNT(AsyncShaderStats::Burst, 2);
 JAH_RECORD_COUNT(PublishedEngineFrame::FrameError, 3);
 JAH_RECORD_COUNT(PublishedEngineFrame::Refusal, 2);
