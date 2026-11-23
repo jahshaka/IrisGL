@@ -5719,6 +5719,10 @@ private:
         // first time (an atlas rebuild) and the mirror calls setLight for every
         // light on every sync — at 60 Hz.
         std::string      lightProfilePath;
+        // ...and a REQUESTED profile that could not be assigned, with the engine's reason (SCRIPT-IN-ENGINE-1 2e e1):
+        // asked again, setLight refuses it again in those words without retrying it (never a per-frame retry), and
+        // the profile above stays assigned.
+        std::string      lightProfileFailed, lightProfileError;
         // Vestigial since the selftest-era addTestCube was pruned (nothing assigns
         // these any more); releaseNode still clears them so a future node-owned
         // mesh/datablock keeps the "dropped before Root" teardown guarantee.

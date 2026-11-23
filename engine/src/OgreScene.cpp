@@ -44,6 +44,24 @@
 
 namespace jahshaka { namespace engine { namespace detail {
 
+namespace {
+/// A NODE SETTER's ONE REFUSAL (SCRIPT-IN-ENGINE-1 2e e1; OPEN_REDS:44 - the setters swallowed an unknown id): the
+/// engine's error names the verb and the node; the POSTED body (hostRecords) answers false, so the frame that drains it
+/// publishes the refusal (OgreEngine::applySceneMessage). Never a silent no-op.
+std::string unknownNode(const char *verb, NodeId id)
+{
+    return std::string(verb) + ": node " + std::to_string(id) + " is not a node of this scene";
+}
+/// ...and a VR NODE LIST's (setVrProxyNodes, setVrRayNodes, setVrHandBoneNodes): "" when every id is 0 (unregistered)
+/// or a node of `s`, else the refusal of the first that is not.
+std::string unknownVrNode(const OgreScene &s, const char *verb, const NodeId *ids, unsigned count)
+{
+    for (unsigned i = 0; i < count; ++i)
+        if (ids[i] && !s.node(ids[i])) return unknownNode(verb, ids[i]);
+    return std::string();
+}
+}  // namespace
+
 OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string &name,
                      std::string &errorSink)
     : mRoot(root), mSceneMgr(sm), mError(errorSink) {
@@ -871,7 +889,13 @@ bool OgreScene::setNodeParent(NodeId id, NodeId parent) {
 
 void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, const Vec3 &scale) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setNodeTransform(id, pos, rot, scale); return true; })) return;
+    // (its POSTED body answers the outcome: an unknown node or a document node is a published refusal - 2e e1)
+    if (postScene([=](OgreScene &s) {
+            s.setNodeTransform(id, pos, rot, scale);
+            const auto it = s.mNodes.find(id);
+            return s.node(id) != nullptr && (it == s.mNodes.end() || !it->second.document);
+        }))
+        return;
     JAH_TRY {
         auto it = mNodes.find(id);
         if (it != mNodes.end() && it->second.document) {
@@ -906,6 +930,8 @@ void OgreScene::setNodeTransform(NodeId id, const Vec3 &pos, const Quat &rot, co
             // reads its pose, so the in-motion tick must not skip a cascade
             // that was injected before it moved.
             if (it != mNodes.end() && it->second.light) ++mGiLightWriteSerial;
+        } else {
+            mError = unknownNode("Scene::setNodeTransform", id);
         }
     } JAH_CATCH(mError, );
 }
@@ -1254,9 +1280,9 @@ Ogre::uint32 OgreScene::particleVisibilityBits(const Node &n) {
 
 void OgreScene::setNodeHelper(NodeId id, bool helper) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setNodeHelper(id, helper); return true; })) return;
+    if (postScene([=](OgreScene &s) { s.setNodeHelper(id, helper); return s.mNodes.count(id) != 0; })) return;
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeHelper", id); return; }
     if (it->second.helper == helper) return;
     const bool probeBefore = probeSeesItem(it->second);
     it->second.helper = helper;
@@ -1280,9 +1306,9 @@ bool OgreScene::nodeHelper(NodeId id) const {
 // channel that exactly one view in the process asks for.
 void OgreScene::setNodeVrHelper(NodeId id, bool vrHelper) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setNodeVrHelper(id, vrHelper); return true; })) return;
+    if (postScene([=](OgreScene &s) { s.setNodeVrHelper(id, vrHelper); return s.mNodes.count(id) != 0; })) return;
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeVrHelper", id); return; }
     if (it->second.vrHelper == vrHelper) return;
     it->second.vrHelper = vrHelper;
     applyNodeVisibilityFlags(it->second);
@@ -1299,7 +1325,11 @@ bool OgreScene::nodeVrHelper(NodeId id) const {
 // wears a headset carries two zeroes.
 void OgreScene::setVrProxyNodes(NodeId left, NodeId right) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setVrProxyNodes(left, right); return true; })) return;
+    // (2e e1: a node the scene does not hold is refused by name and NOT registered - the pair in force stays; 0 unregisters)
+    const NodeId ids[2] = {left, right};
+    if (postScene([=](OgreScene &s) { s.setVrProxyNodes(left, right); return unknownVrNode(s, "", ids, 2).empty(); })) return;
+    const std::string why = unknownVrNode(*this, "Scene::setVrProxyNodes", ids, 2);
+    if (!why.empty()) { mError = why; return; }
     mVrProxyNode[0] = left;
     mVrProxyNode[1] = right;
 }
@@ -1325,7 +1355,11 @@ void OgreScene::vrProxyNodes(NodeId out[2]) const {
 // inside the frame from the state the host pushed.
 void OgreScene::setVrRayNodes(NodeId line, NodeId marker) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setVrRayNodes(line, marker); return true; })) return;
+    // (2e e1: a node the scene does not hold is refused by name and NOT registered - the pair in force stays; 0 unregisters)
+    const NodeId ids[2] = {line, marker};
+    if (postScene([=](OgreScene &s) { s.setVrRayNodes(line, marker); return unknownVrNode(s, "", ids, 2).empty(); })) return;
+    const std::string why = unknownVrNode(*this, "Scene::setVrRayNodes", ids, 2);
+    if (!why.empty()) { mError = why; return; }
     mVrRayNode[0] = line;
     mVrRayNode[1] = marker;
 }
@@ -1345,14 +1379,21 @@ void OgreScene::setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned 
     // U3 stage 4a: the host's call is a message OWNING what it carries (a copy of the pointed-to data).
     if (hostPosts()) {
         std::vector<NodeId> c(nodes, nodes + (nodes ? count : 0u));
-        postScene([=](OgreScene &s) { s.setVrHandBoneNodes(hand, c.empty() ? nullptr : c.data(), unsigned(c.size())); return true; });
+        postScene([=](OgreScene &s) {
+            s.setVrHandBoneNodes(hand, c.empty() ? nullptr : c.data(), unsigned(c.size()));
+            return hand < 2u && unknownVrNode(s, "", c.data(), unsigned(std::min<size_t>(c.size(), kVrHandBoneCount))).empty();
+        });
         return;
     }
     JAH_HOST_CALL("Scene::setVrHandBoneNodes");
-    if (hand >= 2u) return;
+    // (2e e1: a hand past the two, or a node the scene does not hold, is refused by name and NOT registered - the list in
+    // force stays; a count of 0 unregisters)
+    if (hand >= 2u) { mError = "Scene::setVrHandBoneNodes: hand " + std::to_string(hand) + " is not 0 or 1"; return; }
     const unsigned n = (!nodes || count == 0u)
                            ? 0u
                            : (count < kVrHandBoneCount ? count : unsigned(kVrHandBoneCount));
+    const std::string why = unknownVrNode(*this, "Scene::setVrHandBoneNodes", nodes, n);
+    if (!why.empty()) { mError = why; return; }
     for (unsigned b = 0; b < kVrHandBoneCount; ++b)
         mVrHandBoneNode[hand][b] = b < n ? nodes[b] : 0;
     mVrHandBones[hand] = n;
@@ -1431,10 +1472,10 @@ bool OgreScene::nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) co
 // meaning, so `setNodeHelper(id,false)` cannot leave an object claiming to be a
 // backdrop that no capture excludes.
 void OgreScene::setNodeBackdrop(NodeId id, bool backdrop) {
-    if (postScene([=](OgreScene &s) { s.setNodeBackdrop(id, backdrop); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeBackdrop(id, backdrop); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeBackdrop");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeBackdrop", id); return; }
     if (it->second.backdrop == backdrop && (!backdrop || it->second.helper)) return;
     it->second.backdrop = backdrop;
     if (backdrop && !it->second.helper) { setNodeHelper(id, true); return; }
@@ -1468,10 +1509,10 @@ bool OgreScene::nodeBackdrop(NodeId id) const {
 // node) reaches none of the three — there is no item to re-flag and no probe
 // that ever saw it — which is why a scene full of movers costs nothing to open.
 void OgreScene::setNodeMovable(NodeId id, bool movable) {
-    if (postScene([=](OgreScene &s) { s.setNodeMovable(id, movable); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeMovable(id, movable); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeMovable");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeMovable", id); return; }
     Node &n = it->second;
     if (n.movable == movable) return;
     const bool probeBefore = probeSeesItem(n);
@@ -1573,10 +1614,10 @@ void OgreScene::rebuildFacts() {
 }
 
 void OgreScene::setNodeLightMask(NodeId id, unsigned mask) {
-    if (postScene([=](OgreScene &s) { s.setNodeLightMask(id, mask); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeLightMask(id, mask); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeLightMask");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeLightMask", id); return; }
     // Remembered even when nothing is attached yet: attachMesh applies it to
     // the Item it creates, which is also what makes the mask survive the Item
     // rebuild a material swap performs.
@@ -1604,10 +1645,10 @@ unsigned OgreScene::nodeLightMask(NodeId id) const {
 // MovableObject::setVisibilityFlags does NOT overwrite (it merges the reserved
 // layer bits), so this coexists with itemVisibilityFlags' channel scheme.
 void OgreScene::setNodeCastShadow(NodeId id, bool on) {
-    if (postScene([=](OgreScene &s) { s.setNodeCastShadow(id, on); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeCastShadow(id, on); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeCastShadow");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) { mError = unknownNode("Scene::setNodeCastShadow", id); return; }
     const bool changed = it->second.castShadow != on;
     it->second.castShadow = on;
     if (it->second.item) {
@@ -1634,7 +1675,8 @@ bool OgreScene::nodeCastShadow(NodeId id) const {
 
 void OgreScene::setNodeVisible(NodeId id, bool visible) {
     // THE HOST'S CALL IS A MESSAGE of the scene's stream (U3 stage 4a, decision 39), applied at the drain.
-    if (postScene([=](OgreScene &s) { s.setNodeVisible(id, visible); return true; })) return;
+    if (postScene([=](OgreScene &s) { s.setNodeVisible(id, visible); return s.mNodes.count(id) != 0; })) return;
+    if (!mNodes.count(id)) { mError = unknownNode("Scene::setNodeVisible", id); return; }
     setNodeVisibleImpl(id, visible, nullptr);
 }
 
@@ -1646,8 +1688,9 @@ void OgreScene::setNodeVisible(NodeId id, bool visible) {
 // for an answer the caller had in a local variable. Measured at 10,503 nodes:
 // 21,006 inheritedShown calls, of which half were this one.
 void OgreScene::setNodeVisibleUnder(NodeId id, bool visible, bool parentShown) {
-    if (postScene([=](OgreScene &s) { s.setNodeVisibleUnder(id, visible, parentShown); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeVisibleUnder(id, visible, parentShown); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeVisibleUnder");
+    if (!mNodes.count(id)) { mError = unknownNode("Scene::setNodeVisibleUnder", id); return; }
     setNodeVisibleImpl(id, visible, &parentShown);
 }
 
@@ -1886,19 +1929,30 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
         // lights, shadowed or not (the pass buffer's shadowed point loop reads
         // the profile row too: the fork's 800.PixelShader, PHOTON-7 10-4 R8),
         // and never directional or area lights.
+        //
+        // A PROFILE THAT CANNOT BE ASSIGNED IS REFUSED (SCRIPT-IN-ENGINE-1 2e e1: it answered true with the error
+        // set): the light is set with the profile it had, and setLight answers false in the engine's words (the file
+        // check: lightextras::assignProfile). The failing REQUEST is remembered: asked again it is refused again in
+        // the same words without a retry (never a per-frame retry). A directional or area light reads no profile.
+        bool profileRefused = false;
         {
             const bool profileApplies =
                 d.type == LightType::Spot || d.type == LightType::Point;
             const std::string wantProfile = profileApplies ? d.iesProfilePath : std::string();
             if (wantProfile != n.lightProfilePath) {
                 std::string err;
-                if (lightextras::assignProfile(mRoot, L, wantProfile, err)) {
+                if (!wantProfile.empty() && wantProfile == n.lightProfileFailed) {
+                    mError = n.lightProfileError;
+                    profileRefused = true;
+                } else if (lightextras::assignProfile(mRoot, L, wantProfile, err)) {
                     n.lightProfilePath = wantProfile;
+                    n.lightProfileFailed.clear();
+                    n.lightProfileError.clear();
                 } else {
-                    mError = err;
-                    // Remember the REQUEST anyway: a failing path must not be
-                    // retried (and re-logged) every single frame.
-                    n.lightProfilePath = wantProfile;
+                    mError = "Scene::setLight: " + err;
+                    n.lightProfileFailed = wantProfile;
+                    n.lightProfileError = mError;
+                    profileRefused = true;
                 }
             }
         }
@@ -1985,7 +2039,7 @@ bool OgreScene::setLight(NodeId id, const LightDesc &d) {
             }
         }
         // Lights shine down their node's -Y once attached (document convention).
-        return true;
+        return !profileRefused;   // (the light is set either way; a profile not assigned is the refusal, its words in mError)
     } JAH_CATCH(mError, false);
 }
 
@@ -2016,6 +2070,8 @@ bool OgreScene::removeLight(NodeId id) {
         // A recreated light starts with no profile: forget what the dead one
         // carried, or the next setLight would skip re-assigning it.
         it->second.lightProfilePath.clear();
+        it->second.lightProfileFailed.clear();
+        it->second.lightProfileError.clear();
         it->second.lightGiKnown = it->second.lightPoseKnown = false;
         if (it->second.lightNode) { mSceneMgr->destroySceneNode(it->second.lightNode); it->second.lightNode = nullptr; }
         // A VANISHED LIGHT MUST STOP BOUNCING — and that is a re-INJECTION over

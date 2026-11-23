@@ -250,10 +250,13 @@ bool OgreScene::demoteDragMover(NodeId id) {
 }
 
 void OgreScene::setNodeProbeGridExcluded(NodeId id, bool excluded) {
-    if (postScene([=](OgreScene &s) { s.setNodeProbeGridExcluded(id, excluded); return true; })) return;   // U3 4a: a message
+    if (postScene([=](OgreScene &s) { s.setNodeProbeGridExcluded(id, excluded); return s.mNodes.count(id) != 0; })) return;   // U3 4a: a message
     JAH_HOST_CALL("Scene::setNodeProbeGridExcluded");
     auto it = mNodes.find(id);
-    if (it == mNodes.end()) return;
+    if (it == mNodes.end()) {   // (2e e1: never a silent no-op - OgreScene.cpp, unknownNode)
+        mError = "Scene::setNodeProbeGridExcluded: node " + std::to_string(id) + " is not a node of this scene";
+        return;
+    }
     if (it->second.probeGridExcluded == excluded) return;
     it->second.probeGridExcluded = excluded;
     // The flag changes where the probe grid is placed, so it is as much of a
