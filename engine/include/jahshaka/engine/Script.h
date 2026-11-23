@@ -392,18 +392,12 @@ public:
         /// 0.11 MiB; the full 65,536-transform batch built as JS numbers 12.6 MiB more). jahengine's: 1168 MiB. A
         /// host for an outside client (MCP) derives it from its own smaller callBounds, or states its own. NO HOST IS
         /// UNLIMITED: 0 never means "no limit".
-        /// A NAMED LIMIT - it bounds MEMORY, not the CPU the JS engine spends in its own C: a Proxy's ownKeys list is
-        /// checked for duplicates in O(n^2) there (vendored), where no cancel reaches. Measured 2026-11-22 (Debug; spikes/
-        /// script-in-engine-1/stage2b/residue-proxy-dupcheck.txt): ~2.3e-10 s x n^2, and a trap makes ~13,400 distinct
-        /// keys a MiB of this limit before it refuses, so a script - on itself (Reflect.ownKeys), no command needed -
-        /// can burn about 0.041 s x (limit in MiB)^2: 4 MiB 0.6 s, 16 MiB ~10 s, 64 MiB ~170 s, the default 1168 MiB
-        /// ~15 h. An outside client's host chooses its limit knowing it; the fix (a patch at configure) is homed with
-        /// MCP-ON-HOST-1, before an outside client is exposed.
-        /// A SECOND NAMED LIMIT: a string or member-name conversion refused by this limit LEAKS that string for the
-        /// runtime's life (the vendored JS engine at d7215b0: its C-string conversion frees nothing on that failure) -
-        /// a long-lived host's heap shrinks one failed call at a time; a host with a fresh realm per run loses it per
-        /// run. Its kept reproduction is in spikes/script-in-engine-1/stage2b/ (the C-string leak); the patch is homed
-        /// at MCP-ON-HOST-1 with the one above.
+        /// IT BOUNDS MEMORY, and through it the CPU the JS engine spends in its own C where no cancel reaches: a
+        /// Proxy's ownKeys list (a trap makes ~13,400 distinct keys a MiB of this limit before it refuses) is checked
+        /// for duplicates and target keys in n log n WORST CASE by the vendored engine's patch 0001 (irisgl/thirdparty,
+        /// its patch stack; it was O(n^2), ~15 h at the derived 1168 MiB): ~0.1 s at an outside client's 32 MiB,
+        /// ~4.5 s at 1168 MiB (INFERRED from 131,072 keys in 0.027 s, Debug). A string or member-name conversion
+        /// refused by this limit gives its string back (patch 0002; the pin leaked it for the runtime's life).
         static constexpr std::size_t kHeapFloor = std::size_t(16) << 20;
         std::size_t memoryLimit = 0;
         std::size_t heapLimit() const

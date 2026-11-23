@@ -46,8 +46,8 @@ constexpr script::ValueBounds kCompletionBounds{16384, 32, std::size_t(256) << 1
 /// THE MCP HOST's HEAP LIMIT (Host::Options::memoryLimit - STATED, never the derived 2 x callBounds.bytes + 16 MiB =
 /// 1168 MiB a local host takes): 32 MiB, about 2.5x the largest script working set measured (the full 65,536-transform
 /// setTransforms batch built as JS numbers, 12.6 MiB, beside the interpreter's 0.11 MiB: 2b's D1b measure). It also
-/// bounds the one cost no cancel reaches - the vendored Proxy own-key duplicate check, ~0.041 s x (limit in MiB)^2
-/// (Script.h): ~42 s here against ~15 h at 1168 MiB - until that check is patched.
+/// bounds the one cost no cancel reaches inside the vendored JS engine - a Proxy's own-key checks, n log n through
+/// the engine's patch 0001 (irisgl/thirdparty, its patch stack): ~430,000 keys fit 32 MiB, listed in ~0.1 s.
 constexpr std::size_t kHeapLimit = std::size_t(32) << 20;
 /// What one call's console capture keeps (the `console` array of call / read / run_script): the rest goes to stderr
 /// only, the array ending in a line that says how many were left out.

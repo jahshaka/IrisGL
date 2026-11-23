@@ -1,0 +1,186 @@
+Proxy ownKeys: the duplicate check and the target-key lookups through a SORTED COPY (n log n, worst case)
+
+Jahshaka's change, MCP-ON-HOST-1 stage 2 (2026-11-23). quickjs-ng at the pinned
+v0.18.0 (d7215b0), file quickjs.c, js_proxy_get_own_property_names.
+
+The cost
+--------
+A Proxy's ownKeys trap answers a list of n keys; the function then checks it for
+duplicates by scanning every earlier key for each key (find_prop_key over
+tab[0..i), its own comment: "XXX: inefficient"), and looks each non-configurable
+target key up the same way. That is ~n^2/2 comparisons in C, where the runtime's
+interrupt handler never runs: a script reaches it with no command at all
+(Reflect.ownKeys(new Proxy({}, {ownKeys: () => keys}))). Measured on the
+Jahshaka box (Debug, script.host's case 18 before this patch): 32,768 keys 0.25 s,
+131,072 keys 3.9 s of CPU (15.6x for 4x the keys); bounded only by the heap
+limit - ~0.041 s x (limit in MiB)^2, ~42 s at the MCP host's 32 MiB, ~15 h at a
+local host's 1168 MiB - so an outside client could hold the engine's script
+thread that long, uncancellable.
+
+The fix
+-------
+A SORTED COPY of the list's (atom, index) pairs - a heapsort: O(n log n) in the
+WORST case, whatever atom values the script chose (an integer-like key's atom is
+the integer | 1 << 31, so a script picks atoms: a hash table it could crowd was
+this patch's first form and is gone - the final read's crafted keys), no
+recursion, nothing allocated but the copy. A duplicate is two equal atoms
+adjacent in it (the TypeError's text names no key, so which pair is "first" is
+not observable); a non-configurable target key is found by a binary search of
+it. The trap's list itself is never reordered: the trap's order is the result's.
+The copy (8 bytes a key) is allocated through js_malloc (counted by the memory
+limit) and freed on both exits. find_prop_key, its only user gone, is removed.
+
+ITS BOUND (no interrupt poll needed inside it): the heap limit bounds n. At the
+MCP host's 32 MiB a trap's distinct keys stop near 430,000 (SCRIPT-IN-ENGINE-1
+2b's measure: ~13,400 keys a MiB before the limit refuses). MEASURED (Debug,
+case 18 after this patch): 131,072 keys listed through the trap in 0.027 s of
+CPU, so ~430,000 keys take ~0.1 s (n log n, INFERRED from that measure) - the
+bound at which a cancel reaches it; at a local host's derived 1168 MiB (~15.6 M
+keys) ~4.5 s, INFERRED the same way (an outside client's host states 32 MiB).
+A cancel reaches the script at the runtime's next interrupt poll after it.
+
+ONE ACCEPTED DIFFERENCE: near a full heap, "out of memory" (the copy refused)
+can come where the pin would have answered the duplicate or target-key
+TypeError: both fail the call by name; the copy cannot be done in place without
+reordering the trap's list.
+
+The laws it keeps (script.host case 18, ours): the result in the trap's order; a
+duplicate a TypeError "proxy: duplicate property" (at 3 keys, at index 50,000
+repeating index 7, and two different duplicates in one list); a non-configurable
+target key the trap leaves out a TypeError, and an extra key on a non-extensible
+target a TypeError; the right lists accepted. Its scaling law, in CPU time, for
+ordinary keys AND for the crafted families (one low-bit residue, adjacent
+residues): 4x the keys under 8x the time.
+
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -52789,15 +52789,73 @@
+     return res;
+ }
+ 
+-/* return the index of the property or -1 if not found */
+-static int find_prop_key(const JSPropertyEnum *tab, int n, JSAtom atom)
++/* JAHSHAKA 0001 (irisgl/thirdparty/quickjs-ng-patches): a Proxy's ownKeys list is checked through a SORTED COPY of its
++   (atom, index) pairs - a heapsort, n log n in the WORST case whatever atoms the script chose (no hash a script can
++   crowd), no recursion - the list itself never reordered: the trap's order is the result's. The quadratic scans it
++   replaces cost ~2.3e-10 s x n^2 in C where no interrupt reaches. */
++typedef struct JahKeyPair {
++    uint32_t atom;
++    uint32_t index;
++} JahKeyPair;
++
++static int jah_key_less(const JahKeyPair *a, const JahKeyPair *b)
++{
++    return a->atom < b->atom || (a->atom == b->atom && a->index < b->index);
++}
++
++static void jah_key_sift(JahKeyPair *p, size_t root, size_t n)
+ {
+-    int i;
+-    for(i = 0; i < n; i++) {
+-        if (tab[i].atom == atom)
+-            return i;
++    for (;;) {
++        size_t child = 2 * root + 1;
++        JahKeyPair t;
++        if (child >= n)
++            return;
++        if (child + 1 < n && jah_key_less(&p[child], &p[child + 1]))
++            child++;
++        if (!jah_key_less(&p[root], &p[child]))
++            return;
++        t = p[root];
++        p[root] = p[child];
++        p[child] = t;
++        root = child;
+     }
+-    return -1;
++}
++
++/* the pairs of tab[0..len) sorted by (atom, index); NULL on an allocation refused (the exception thrown) */
++static JahKeyPair *jah_key_sorted(JSContext *ctx, const JSPropertyEnum *tab, uint32_t len)
++{
++    JahKeyPair *p, t;
++    size_t i, n = len;
++    p = js_malloc(ctx, (n ? n : 1) * sizeof(p[0]));
++    if (!p)
++        return NULL;
++    for (i = 0; i < n; i++) {
++        p[i].atom = tab[i].atom;
++        p[i].index = (uint32_t)i;
++    }
++    for (i = n / 2; i-- > 0;)
++        jah_key_sift(p, i, n);
++    for (i = n; i-- > 1;) {
++        t = p[0];
++        p[0] = p[i];
++        p[i] = t;
++        jah_key_sift(p, 0, i);
++    }
++    return p;
++}
++
++/* the index of `atom` in the list, or -1: a binary search of the sorted pairs */
++static int jah_key_find(const JahKeyPair *p, uint32_t len, JSAtom atom)
++{
++    size_t lo = 0, hi = len;
++    while (lo < hi) {
++        size_t mid = lo + (hi - lo) / 2;
++        if (p[mid].atom < atom)
++            lo = mid + 1;
++        else
++            hi = mid;
++    }
++    return lo < len && p[lo].atom == atom ? (int)p[lo].index : -1;
+ }
+ 
+ static int js_proxy_get_own_property_names(JSContext *ctx,
+@@ -52811,6 +52869,7 @@
+     JSPropertyEnum *tab, *tab2;
+     JSAtom atom;
+     int res, is_extensible, idx;
++    JahKeyPair *keys = NULL;   /* JAHSHAKA 0001: the sorted (atom, index) pairs */
+ 
+     s = get_proxy_method(ctx, &method, obj, JS_ATOM_ownKeys);
+     if (!s)
+@@ -52871,10 +52930,13 @@
+         len++;
+     }
+ 
+-    /* check duplicate properties (XXX: inefficient, could store the
+-     * properties an a temporary object to use the hash) */
++    /* check duplicate properties - JAHSHAKA 0001: equal atoms are adjacent in the sorted pairs (a duplicate is
++       one: the message names none, so which pair is the first is not observable) */
++    keys = jah_key_sorted(ctx, tab, len);
++    if (!keys)
++        goto fail;
+     for(i = 1; i < len; i++) {
+-        if (find_prop_key(tab, i, tab[i].atom) >= 0) {
++        if (keys[i].atom == keys[i - 1].atom) {
+             JS_ThrowTypeError(ctx, "proxy: duplicate property");
+             goto fail;
+         }
+@@ -52905,7 +52967,7 @@
+                 goto fail;
+             if (res) {  /* safety, property should be found */
+                 if (!(desc_flags & JS_PROP_CONFIGURABLE) || !is_extensible) {
+-                    idx = find_prop_key(tab, len, tab2[i].atom);
++                    idx = jah_key_find(keys, len, tab2[i].atom);
+                     if (idx < 0) {
+                         JS_ThrowTypeError(ctx, "proxy: target property must be present in proxy ownKeys");
+                         goto fail;
+@@ -52927,12 +52989,14 @@
+         }
+     }
+ 
++    js_free(ctx, keys);
+     js_free_prop_enum(ctx, tab2, len2);
+     JS_FreeValue(ctx, prop_array);
+     *ptab = tab;
+     *plen = len;
+     return 0;
+  fail:
++    js_free(ctx, keys);
+     js_free_prop_enum(ctx, tab2, len2);
+     js_free_prop_enum(ctx, tab, len);
+     JS_FreeValue(ctx, prop_array);

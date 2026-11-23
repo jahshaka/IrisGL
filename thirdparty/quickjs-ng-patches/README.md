@@ -25,10 +25,13 @@ cmake -DSRC=irisgl/thirdparty/quickjs-ng -DPATCHES=irisgl/thirdparty/quickjs-ng-
 
 | # | file | what | its law (tests/engine/test_script_host.cpp) |
 |---|---|---|---|
-| 0001 | `0001-proxy-ownkeys-linear-key-checks.patch` | a Proxy's ownKeys list checked for duplicates and target keys in linear time (it was ~n^2/2 comparisons in C no interrupt reaches) | case 18: the own-key laws kept exactly; 4x the keys under 8x the CPU |
+| 0001 | `0001-proxy-ownkeys-sorted-key-checks.patch` | a Proxy's ownKeys list checked for duplicates and target keys through a sorted copy of its (atom, index) pairs - a heapsort, n log n in the WORST case whatever atoms a script chose (it was ~n^2/2 comparisons in C no interrupt reaches) | case 18: the own-key laws kept exactly; 4x the keys under 8x the CPU for ordinary keys AND crafted ones (one low-bit residue, adjacent residues) |
 | 0002 | `0002-tocstring-free-on-failure.patch` | JS_ToCStringLen2 frees its string when the UTF-8 cannot be allocated (it leaked it for the runtime's life) | case 12d (bis): a refused conversion gives its string back |
 
 Each patch's header says the bug, the measurement and the fix (MCP-ON-HOST-1
-stage 2, 2026-11-23). Neither is reported upstream (we report nothing upstream);
+stage 2, 2026-11-23). ONE ACCEPTED DIFFERENCE from the pin (0001): near a full
+heap, "out of memory" (its sorted copy refused, 8 bytes a key) can come where the
+pin would have answered the duplicate or target-key TypeError - both FAIL the call
+by name; the copy cannot be done in place without reordering the trap's list. Neither is reported upstream (we report nothing upstream);
 when the pin moves, each is re-read against upstream's change and dropped if
 upstream fixed it.
