@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef TEXTURE2D_H
 #define TEXTURE2D_H
 
+#include "document/export.h"
+
 #include <atomic>
 #include <memory>
 #include <string>
@@ -28,7 +30,7 @@ namespace iris
 // itself holds (a cube sky's faces, a live texture's frame), an iris::Image,
 // which is what the engine-backed viewport reads: SceneMirror re-loads by
 // `source`, and cube skies read the six face images via cubeFaces().
-class Texture2D: public Texture
+class IRIS_DOCUMENT_API Texture2D: public Texture
 {
 
 public:

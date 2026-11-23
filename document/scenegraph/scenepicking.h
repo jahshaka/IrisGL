@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_SCENEPICKING_H
 #define IRIS_SCENEPICKING_H
 
+#include "document/export.h"
+
 // -----------------------------------------------------------------------------
 // iris::picking — THE segment/mesh intersection, once.
 //
@@ -71,7 +73,7 @@ namespace picking
 /// `pickingMask` is the document's ALL-test (`(node->pickingGroups & mask) ==
 /// mask`), applied to the candidates with `pickable` and the effective
 /// visibility. `allowUnpickable` ignores the per-node `pickable` flag.
-std::vector<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
+IRIS_DOCUMENT_API std::vector<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
                               uint64_t pickingMask = 0, bool allowUnpickable = false);
 
 

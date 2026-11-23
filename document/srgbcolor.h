@@ -21,7 +21,7 @@ namespace iris
 
 /// A COLOUR A USER PICKED, as the document stores it: sRGB-encoded (core/color.h says why), with an INVALID state ("not
 /// set": an outline colour that follows the theme, an importer's absent factor) and an alpha that is coverage, not
-/// colour. Qt-free (NOQT-DOCUMENT-1 ruling 3); the editor converts at its edge (document/qt/colour.h).
+/// colour. Qt-free (NOQT-DOCUMENT-1 ruling 3); the editor converts at its edge (src/app/qtstdgui.h).
 /// ITS 16-BIT CHANNELS AND ITS ROUNDING ARE QColor's (Rgb spec), BIT FOR BIT, BECAUSE THE STORED BYTES MUST NOT MOVE: it
 /// is the stored format's colour until the saved scene's format is rewritten (plan 0.16) - never a design to copy.
 /// core.colour_qt_parity proves the equality over every channel value and 100,000 seeded floats.

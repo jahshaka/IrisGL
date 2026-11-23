@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef MATERIAL_H
 #define MATERIAL_H
 
+#include "document/export.h"
+
 #include "irisglfwd.h"
 #include "document/properties/property.h"
 
@@ -49,7 +51,7 @@ struct MaterialTexture {
 // (2026-09-07) - nothing ever read the stored text back, so the carrier
 // (iris::Shader), the include-expanding loader and app/shaders/ are gone.
 // The engine mirror translates these fields into engine materials.
-class Material
+class IRIS_DOCUMENT_API Material
 {
 public:
     int renderLayer;
@@ -133,17 +135,13 @@ public:
     std::uint32_t revision() const { return mRevision; }
     /// "Something in this material changed." Called by every setter below and
     /// by host code that writes a field by hand.
-    void touch()
-    {
-        ++mRevision;
-        sGlobalRevision.fetch_add(1, std::memory_order_relaxed);
-    }
+    /// OUT OF LINE, both (NOQT-DOCUMENT-1 stage 6): sGlobalRevision is defined
+    /// in libIrisDocument ALONE - an inline read in the app made the linker give
+    /// the app its own copy (a copy relocation), a second definition.
+    void touch();
     /// How many material writes this process has made, ever. Relaxed: the only
     /// requirement is that a change moves it, never that it orders anything.
-    static std::uint64_t globalRevision()
-    {
-        return sGlobalRevision.load(std::memory_order_relaxed);
-    }
+    static std::uint64_t globalRevision();
 
     bool acceptsLighting;
 

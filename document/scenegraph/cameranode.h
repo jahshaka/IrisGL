@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef CAMERANODE_H
 #define CAMERANODE_H
 
+#include "document/export.h"
+
 
 #include "core/math/mat4.h"
 #include "core/math/vec.h"
@@ -98,11 +100,11 @@ struct CameraPostKey {
 
 /// The table, and its size. Stable order: the panel and the verbs report it
 /// as-is.
-const CameraPostKey *cameraPostKeys(int &count);
+IRIS_DOCUMENT_API const CameraPostKey *cameraPostKeys(int &count);
 /// The entry with this id, or null.
-const CameraPostKey *cameraPostKey(std::string_view id);
+IRIS_DOCUMENT_API const CameraPostKey *cameraPostKey(std::string_view id);
 
-class CameraNode : public SceneNode
+class IRIS_DOCUMENT_API CameraNode : public SceneNode
 {
 public:
     float aspectRatio;

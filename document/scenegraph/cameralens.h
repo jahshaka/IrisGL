@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef CAMERALENS_H
 #define CAMERALENS_H
 
+#include "document/export.h"
+
 // THE LENS MATH (CAMERA_LENS_SPEC §3, phases P1/P2).
 //
 // Pure functions and two tables. Nothing here knows about a CameraNode, a
@@ -86,27 +88,27 @@ struct Filmback {
 };
 
 /// Auto resolves against the aspect; the other two are themselves.
-FitAxis fitAxis(CameraSensorFit fit, float aspect);
+IRIS_DOCUMENT_API FitAxis fitAxis(CameraSensorFit fit, float aspect);
 
 /// The effective sensor dimension (mm) on the binding axis — sensorHeight for a
 /// vertical fit, sensorWidth * squeeze for a horizontal one. Auto on a portrait
 /// frame binds the sensor WIDTH through the vertical axis (Blender's rule), and
 /// takes no squeeze there: the squeeze is a property of the horizontal axis.
-float bindingSensorMm(const Filmback &fb);
+IRIS_DOCUMENT_API float bindingSensorMm(const Filmback &fb);
 
 /// The VERTICAL angle of view (degrees) a focal length gives on this filmback.
 /// Zero or negative focal lengths have no angle and return 0.
-float verticalFovDegFromFocal(const Filmback &fb, float focalMm);
+IRIS_DOCUMENT_API float verticalFovDegFromFocal(const Filmback &fb, float focalMm);
 
 /// The exact inverse: the focal length (mm) that gives this vertical angle.
 /// Degenerate angles (<= 0, >= 180) return 0.
-float focalFromVerticalFovDeg(const Filmback &fb, float verticalFovDeg);
+IRIS_DOCUMENT_API float focalFromVerticalFovDeg(const Filmback &fb, float verticalFovDeg);
 
 /// tan(h/2) = tan(v/2) * aspect — the standard cross-axis pair (§3).
-float horizontalFovDeg(float verticalFovDeg, float aspect);
-float verticalFovDegFromHorizontal(float horizontalFovDeg, float aspect);
+IRIS_DOCUMENT_API float horizontalFovDeg(float verticalFovDeg, float aspect);
+IRIS_DOCUMENT_API float verticalFovDegFromHorizontal(float horizontalFovDeg, float aspect);
 /// The corner-to-corner angle, from the vertical one and the aspect.
-float diagonalFovDeg(float verticalFovDeg, float aspect);
+IRIS_DOCUMENT_API float diagonalFovDeg(float verticalFovDeg, float aspect);
 
 /// THE WIDE-ASPECT FRAMING HOLD, document side: the VERTICAL angle that keeps
 /// this camera's HORIZONTAL extent at the one it has on a frame of
@@ -146,16 +148,16 @@ float diagonalFovDeg(float verticalFovDeg, float aspect);
 /// all, which is what keeps every existing 16:9 projection (and every pixel
 /// assertion built on one) exactly as it was. A non-positive framing aspect,
 /// aspect or angle is likewise the identity — off is free.
-float verticalFovDegForFramingAspect(float verticalFovDeg, float aspect, float framingAspect);
+IRIS_DOCUMENT_API float verticalFovDegForFramingAspect(float verticalFovDeg, float aspect, float framingAspect);
 
 /// sqrt(w^2 + h^2) — the physical sensor diagonal, squeeze-free.
-float sensorDiagonalMm(float sensorWidth, float sensorHeight);
+IRIS_DOCUMENT_API float sensorDiagonalMm(float sensorWidth, float sensorHeight);
 
 /// The circle-of-confusion CRITERION for this sensor, in mm: the classic
 /// diagonal/1500 (Zeiss). Full frame gives 0.0288 mm, which is the number every
 /// published depth-of-field table for 35 mm film is computed from. It is a
 /// criterion, not a measurement — it says how much blur we agree to call sharp.
-float circleOfConfusionMm(float sensorWidth, float sensorHeight);
+IRIS_DOCUMENT_API float circleOfConfusionMm(float sensorWidth, float sensorHeight);
 
 /// What `camera.focusInfo` reports (CAMERA_LENS_SPEC §3, P2). Distances are
 /// METRES; `cocLimit` is millimetres. `farLimit` is +infinity when the far
@@ -182,7 +184,7 @@ struct FocusInfo {
 /// it makes the hyperfocal identity exact: focusing at H gives [H/2, infinity),
 /// which is what the definition of a hyperfocal distance says and what the
 /// suite asserts.
-FocusInfo focusInfo(float focalMm, float fStop, float focusDistanceMetres, float cocMm);
+IRIS_DOCUMENT_API FocusInfo focusInfo(float focalMm, float fStop, float focusDistanceMetres, float cocMm);
 
 // ---- lens shift -----------------------------------------------------------
 //
@@ -201,21 +203,21 @@ FocusInfo focusInfo(float focalMm, float fStop, float focusDistanceMetres, float
 // changes; it is never a value to compute once and store.
 
 /// The near-plane half-extent on an axis: tan(angle/2) * near.
-float halfExtentAtNear(float fovDegOnAxis, float nearDist);
+IRIS_DOCUMENT_API float halfExtentAtNear(float fovDegOnAxis, float nearDist);
 
 /// The world-space near-plane offset a fraction-of-frame shift asks for.
 /// A full frame spans 2 * halfExtent, so the offset is shift * 2 * halfExtent.
-float nearOffsetFromShift(float shiftFraction, float halfExtent);
-float shiftFromNearOffset(float nearOffset, float halfExtent);
+IRIS_DOCUMENT_API float nearOffsetFromShift(float shiftFraction, float halfExtent);
+IRIS_DOCUMENT_API float shiftFromNearOffset(float nearOffset, float halfExtent);
 
 /// The value to hand Ogre's setFrustumOffset so the near plane ends up offset
 /// by `nearOffsetFromShift`. Ogre multiplies it by near / stereoFocalLength, so
 /// this divides that back out. With the default stereo focal length of 1.0 the
 /// near distance cancels — a coincidence of the default, not a rule, which is
 /// why it is spelled out here instead of simplified away.
-float ogreFrustumOffset(float shiftFraction, float halfExtent, float nearDist,
+IRIS_DOCUMENT_API float ogreFrustumOffset(float shiftFraction, float halfExtent, float nearDist,
                         float stereoFocalLength);
-float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float nearDist,
+IRIS_DOCUMENT_API float shiftFromOgreFrustumOffset(float frustumOffset, float halfExtent, float nearDist,
                                  float stereoFocalLength);
 
 // ---- EXPOSURE (CAMERA_LENS_SPEC §4; EXPOSURE-1, 2026-09-17) ---------------
@@ -290,14 +292,14 @@ struct FilmParams {
 /// display output, before the sRGB encode. The curve is BUILT so that
 /// filmCurve(0.18) == 0.18 for any parameters (Unreal solves the toe through
 /// that point), so an 18 % card exposed to 0.18 displays as code 118.
-float filmCurve(float x, const FilmParams &params = FilmParams());
+IRIS_DOCUMENT_API float filmCurve(float x, const FilmParams &params = FilmParams());
 
 /// THE FILM ON A COLOUR — the shader's jahFilmToneMap, the ONE C++ transcription:
 /// linear sRGB in (post-exposure), linear sRGB out (before the encode), through
 /// ACEScg, the RRT's glow and red modifier, the pre/post desaturation and the
 /// curve per channel. `filmCurve` is this on a grey (the colour terms are the
 /// identity there, the matrices' rows normalised so white maps to white).
-void filmRGB(const double in[3], double out[3], const FilmParams &params = FilmParams());
+IRIS_DOCUMENT_API void filmRGB(const double in[3], double out[3], const FilmParams &params = FilmParams());
 
 /// THE TONEMAPPER INPUT THAT DISPLAYS AS AN 18 % GREY CARD — the curve
 /// inverted at `kGreyCardDisplay`. 0.18 by the curve's construction; computed
@@ -307,7 +309,7 @@ void filmRGB(const double in[3], double out[3], const FilmParams &params = FilmP
 /// The window and every offscreen target are plain UNORM and the shader
 /// applies the exact sRGB encode itself (SRGB-ENCODE-1), so "the display emits
 /// 18 %" is the curve's output 0.18, code 118 on screen and in a screenshot.
-float greyCardFilmInput();
+IRIS_DOCUMENT_API float greyCardFilmInput();
 
 /// THE KEY IRRADIANCE of a scene's lights, in the renderer's own units.
 ///
@@ -328,7 +330,7 @@ float greyCardFilmInput();
 /// decoded sRGB->linear; the analytic sky is its integral). NdotL is taken as 1
 /// — the key is what a surface FACING the key light gets, which is the
 /// photographic definition and not an average over the frame.
-float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadiance);
+IRIS_DOCUMENT_API float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadiance);
 
 /// THE EXPOSURE THAT DEVELOPS THAT ILLUMINATION CORRECTLY, on the chain's axis.
 ///
@@ -342,7 +344,7 @@ float keyIrradiance(float sunIntensity, float skyLightIntensity, float skyRadian
 ///
 /// A doubling of the light is exactly one stop down, which is the property that
 /// makes this a meter and not a fudge factor.
-float exposureForKeyIrradiance(float keyIrradianceValue);
+IRIS_DOCUMENT_API float exposureForKeyIrradiance(float keyIrradianceValue);
 
 /// THE DEFAULT WORLD GRADE, derived: the formula above for the lights a NEW
 /// SCENE is born with (MainWindow::createDefaultScene; SKY-DEFAULTS-1) — the
@@ -356,7 +358,7 @@ float exposureForKeyIrradiance(float keyIrradianceValue);
 /// (both terms MEASURED through the renderer on an 18 % card — cameralens.cpp
 /// defaultKeyIrradiance has the numbers; IMAGE-1 re-measured them.) So an
 /// 18 % card on a new scene's floor develops to the film's 0.18: code 118.
-float defaultExposureChain();
+IRIS_DOCUMENT_API float defaultExposureChain();
 /// THE NEW LAMP'S INTENSITY (IMAGE-1): a point or spot light added to a scene
 /// puts an 18 % card 3 m away, facing it, on the film's grey (code 118) at the
 /// default exposure, by itself. MEASURED through the renderer
@@ -367,18 +369,18 @@ float defaultExposureChain();
 /// surface 1 m away, facing it, exactly as a sun of intensity I does.)
 constexpr float kDefaultLampIntensity = 8.0f;
 /// The chain exposure zero stops corresponds to — `defaultExposureChain()`.
-float exposureAnchorChain();
+IRIS_DOCUMENT_API float exposureAnchorChain();
 
 /// stops -> the chain's `E`, and back. Exact inverses.
-float exposureStopsToChain(float stops);
-float exposureChainToStops(float chain);
+IRIS_DOCUMENT_API float exposureStopsToChain(float stops);
+IRIS_DOCUMENT_API float exposureChainToStops(float chain);
 
 /// The multiplier the tonemapper applies for a chain exposure `E` in the FIXED
 /// (manual) form: `e^(E-2) / 0.18`. This is the one number manual exposure is:
 /// the chain's clear colour, the thumbnail grade's constant, and the value the
 /// auto path converges to on a scene whose measured geometric-mean luminance is
 /// the 0.18 grey card. Also used to re-seed the adaptation history on a cut.
-float exposureMultiplier(float chainExposure);
+IRIS_DOCUMENT_API float exposureMultiplier(float chainExposure);
 
 /// THE WINDOW IS NOT AN EXPOSURE, and this is the number that says so.
 ///
@@ -410,7 +412,7 @@ float exposureMultiplier(float chainExposure);
 /// first cut of this lane converted the window with the EXPOSURE's anchor and
 /// was 2.43 stops out; the suites pinned only the window's WIDTH, so nothing
 /// caught it — they pin the OFFSET now.)
-float meterGreyCardChain();
+IRIS_DOCUMENT_API float meterGreyCardChain();
 
 }   // namespace lens
 
@@ -423,8 +425,8 @@ enum class ExposureMode {
 	Auto
 };
 
-const char *exposureModeName(ExposureMode m);              ///< "manual" | "auto"
-ExposureMode exposureModeFromName(const char *name, bool *ok = nullptr);
+IRIS_DOCUMENT_API const char *exposureModeName(ExposureMode m);              ///< "manual" | "auto"
+IRIS_DOCUMENT_API ExposureMode exposureModeFromName(const char *name, bool *ok = nullptr);
 
 /// HOW THE AUTOMATIC EXPOSURE'S METER LOOKS AT THE FRAME (EXPOSURE-2) — a
 /// camera's METERING PATTERN, by its own names. Read only in Auto: Manual
@@ -448,8 +450,8 @@ enum class ExposureMetering {
 	Spot
 };
 
-const char *exposureMeteringName(ExposureMetering m);     ///< "average" | "centreWeighted" | "spot"
-ExposureMetering exposureMeteringFromName(const char *name, bool *ok = nullptr);
+IRIS_DOCUMENT_API const char *exposureMeteringName(ExposureMetering m);     ///< "average" | "centreWeighted" | "spot"
+IRIS_DOCUMENT_API ExposureMetering exposureMeteringFromName(const char *name, bool *ok = nullptr);
 
 /// ONE EXPOSURE STATEMENT, in the document's unit, after the world and the
 /// driving camera have been combined. This is what crosses the mirror.
@@ -490,7 +492,7 @@ namespace lens
 /// true for Manual. In that form `chainMin`/`chainMax` are not read by anything
 /// — the clear colour is the whole grade — and they are returned at the
 /// resolved exposure so a description is never carrying a stale window.
-void toChain(const ExposureDesc &d, float &chainExposure, float &chainMin, float &chainMax,
+IRIS_DOCUMENT_API void toChain(const ExposureDesc &d, float &chainExposure, float &chainMin, float &chainMax,
              bool &fixed);
 
 /// Exponential smoothing toward a target, framerate-independent:
@@ -498,7 +500,7 @@ void toChain(const ExposureDesc &d, float &chainExposure, float &chainMin, float
 /// Speed <= 0 or a non-positive dt snaps. Used by focus tracking (P2) and kept
 /// here — as a pure function of an explicit dt — so it can be asserted without
 /// a clock.
-float smoothTowards(float current, float target, float speed, float dt);
+IRIS_DOCUMENT_API float smoothTowards(float current, float target, float speed, float dt);
 
 // ---- the preset tables ----------------------------------------------------
 //
@@ -523,8 +525,8 @@ struct LensPreset {
 };
 
 /// The tables and their sizes. Stable order — the verbs report them as-is.
-const FilmbackPreset *filmbackPresets(int &count);
-const LensPreset     *lensPresets(int &count);
+IRIS_DOCUMENT_API const FilmbackPreset *filmbackPresets(int &count);
+IRIS_DOCUMENT_API const LensPreset     *lensPresets(int &count);
 
 // ---- THE IMAGE BLOCK (IMAGE-1) ---------------------------------------------
 //
@@ -565,9 +567,9 @@ struct ImageParamDef {
 };
 
 /// The table, in panel order, indexed by ImageParam.
-const ImageParamDef *imageParams();
+IRIS_DOCUMENT_API const ImageParamDef *imageParams();
 /// The entry with this id, or null.
-const ImageParamDef *imageParam(const char *id);
+IRIS_DOCUMENT_API const ImageParamDef *imageParam(const char *id);
 
 }   // namespace lens
 }   // namespace iris

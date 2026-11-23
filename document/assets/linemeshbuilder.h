@@ -1,6 +1,8 @@
 #ifndef LINEMESHBUILDER_H
 #define LINEMESHBUILDER_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include <vector>
 #include "irisglfwd.h"
@@ -8,7 +10,7 @@
 
 namespace iris {
 
-class LineMeshBuilder
+class IRIS_DOCUMENT_API LineMeshBuilder
 {
 	struct LineData
 	{

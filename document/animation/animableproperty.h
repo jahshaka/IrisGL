@@ -3,6 +3,8 @@
 
 #include "irisglfwd.h"
 
+#include <string>
+
 namespace iris
 {
 

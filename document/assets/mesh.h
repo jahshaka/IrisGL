@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef MESH_H
 #define MESH_H
 
+#include "document/export.h"
+
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <string>
@@ -52,7 +54,7 @@ enum class PrimitiveMode
 /// EVERYTHING IS IN MESH SPACE and stays there: an instance's world transform
 /// is applied by whoever captures, so one mesh's card list serves every
 /// instance of it, at any scale, exactly as the LOD chain does.
-struct MeshCard
+struct IRIS_DOCUMENT_API MeshCard
 {
     /// The six axis directions a card can look FROM, in this order:
     /// 0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z. The capture camera sits
@@ -202,7 +204,7 @@ struct MeshClusterDag
 // CPU-side mesh: geometry buffers, skeleton, animations, bounds and the picking
 // TriMesh. The GL half (VAO/draw) died with the legacy renderer at step 14; the
 // engine mirror converts these buffers into engine meshes each time one changes.
-class Mesh
+class IRIS_DOCUMENT_API Mesh
 {
     SkeletonPtr skeleton;
     std::map<std::string, SkeletalAnimationPtr> skeletalAnimations;

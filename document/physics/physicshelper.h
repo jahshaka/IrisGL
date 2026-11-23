@@ -1,6 +1,8 @@
 #ifndef PHYSICS_HELPER
 #define PHYSICS_HELPER
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include <vector>
 
@@ -41,7 +43,7 @@ struct PhysicsBody
     std::vector<btStridingMeshInterface *> meshInterfaces;
 };
 
-class PhysicsHelper
+class IRIS_DOCUMENT_API PhysicsHelper
 {
 public:
     PhysicsHelper() = default;

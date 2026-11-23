@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef SOCKET_H
 #define SOCKET_H
 
+#include "document/export.h"
+
 // Sockets — named attach points on a RIG (CAMERAS_SPEC §5, owner decision D9).
 //
 // A socket is {name, boneName, offset} on a skinned MeshNode. Any node — a
@@ -104,12 +106,12 @@ using BonePoseSource = std::function<bool(MeshNode *, std::unordered_map<std::st
 /// the engine's bind locals from exactly these matrices).
 ///
 /// False when the node is not a skinned mesh.
-bool bindPoseWorldTransforms(MeshNode *node, std::unordered_map<std::string, Mat4> &out);
+IRIS_DOCUMENT_API bool bindPoseWorldTransforms(MeshNode *node, std::unordered_map<std::string, Mat4> &out);
 
 /// The world transform of one socket: `boneWorld * socket.offset`.
 /// False when the owner has no socket of that name, or the socket names a bone
 /// the pose does not have.
-bool socketWorldTransform(MeshNode *owner, const std::string &socketName,
+IRIS_DOCUMENT_API bool socketWorldTransform(MeshNode *owner, const std::string &socketName,
                           const BonePoseSource &source, Mat4 &out);
 
 /// Drives every socket-attached node of a scene, once per frame.
@@ -118,7 +120,7 @@ bool socketWorldTransform(MeshNode *owner, const std::string &socketName,
 /// map is a scratch buffer that lives across frames (cleared, never
 /// reallocated), and the attachment walk groups by owner so a rig's pose is
 /// read ONCE however many things hang off it.
-class SocketResolver
+class IRIS_DOCUMENT_API SocketResolver
 {
 public:
     /// Where poses come from. Unset (the default) means "bind pose only",

@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_AVATARDEFINITION_H
 #define IRIS_AVATARDEFINITION_H
 
+#include "document/export.h"
+
 #include "core/value.h"
 #include <string>
 #include <vector>
@@ -72,7 +74,7 @@ struct AvatarRigInfo
     double unitScale = 1.0;
 };
 
-struct AvatarDefinition
+struct IRIS_DOCUMENT_API AvatarDefinition
 {
     static constexpr int kFormatVersion = 1;
 
@@ -113,12 +115,12 @@ struct AvatarDefinition
 };
 
 /// Serialization. `toJson` always writes every key (nulls included).
-Value avatarDefinitionToJson(const AvatarDefinition &def);
+IRIS_DOCUMENT_API Value avatarDefinitionToJson(const AvatarDefinition &def);
 
 /// Parses AND validates: on refusal `out` is untouched and `*error` says what
 /// is wrong in the file's own vocabulary. A definition with no model is a
 /// refusal, not an empty avatar — nothing downstream can do anything with one.
-bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, std::string *error);
+IRIS_DOCUMENT_API bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, std::string *error);
 
 }   // namespace iris
 

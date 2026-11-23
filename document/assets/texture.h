@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef TEXTURE_H
 #define TEXTURE_H
 
+#include "document/export.h"
+
 #include <memory>
 #include <string>
 
@@ -22,7 +24,7 @@ namespace iris
 // object half died with the legacy renderer at step 14; the engine loads
 // textures itself from `source` (or from the kept iris::Image for the pixels
 // the document holds).
-class Texture
+class IRIS_DOCUMENT_API Texture
 {
 public:
     std::string source;

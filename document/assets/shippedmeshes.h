@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_SHIPPEDMESHES_H
 #define IRIS_SHIPPEDMESHES_H
 
+#include "document/export.h"
+
 // THE APP'S OWN MESHES, BY THEIR SEED KEY (SHIPPED-BAKES-1).
 //
 // Every mesh the app SHIPS and draws — the twelve primitives, the samples'
@@ -45,13 +47,13 @@ namespace ShippedMeshes
 using Resolver = std::function<MeshPtr(const std::string &seedKey)>;
 
 /// Install (or, with an empty function, remove) the host's resolver.
-void setResolver(Resolver resolver);
+IRIS_DOCUMENT_API void setResolver(Resolver resolver);
 
 /// True while a resolver is installed.
-bool hasResolver();
+IRIS_DOCUMENT_API bool hasResolver();
 
 /// The baked mesh for `seedKey`, or null.
-MeshPtr mesh(const std::string &seedKey);
+IRIS_DOCUMENT_API MeshPtr mesh(const std::string &seedKey);
 
 }   // namespace ShippedMeshes
 }   // namespace iris

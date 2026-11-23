@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef PBRMATERIAL_H
 #define PBRMATERIAL_H
 
+#include "document/export.h"
+
 #include "irisglfwd.h"
 #include "document/materials/material.h"
 #include "document/properties/property.h"
@@ -88,7 +90,7 @@ constexpr float kMetalness = 0.0f;
  * translation layer. The shader (:assets/shaders/pbr_material.frag) consumes the same
  * light uniforms ForwardRenderer already provides, so no renderer change is needed.
  */
-class PbrMaterial : public Material
+class IRIS_DOCUMENT_API PbrMaterial : public Material
 {
 public:
 

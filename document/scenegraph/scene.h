@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef SCENE_H
 #define SCENE_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include "core/value.h"
 #include <functional>
@@ -85,10 +87,10 @@ enum class RayTracingMode : int
 };
 
 /// Stable strings for the file, the verb and the panel row.
-const char *rayTracingModeName(RayTracingMode mode);
+IRIS_DOCUMENT_API const char *rayTracingModeName(RayTracingMode mode);
 /// Case-insensitive; false (and `out` untouched) when `name` names no mode —
 /// the verb REFUSES rather than guessing, and the reader keeps its default.
-bool rayTracingModeFromName(const std::string &name, RayTracingMode &out);
+IRIS_DOCUMENT_API bool rayTracingModeFromName(const std::string &name, RayTracingMode &out);
 
 // ---- THE VR WEARER'S LOCOMOTION (VR-WORLD-1, owner request 2026-09-18) ------
 //
@@ -124,10 +126,10 @@ enum class VrTurnMode : int
     Smooth = 1
 };
 
-const char *vrFlyModeName(VrFlyMode mode);
-bool vrFlyModeFromName(const std::string &name, VrFlyMode &out);
-const char *vrTurnModeName(VrTurnMode mode);
-bool vrTurnModeFromName(const std::string &name, VrTurnMode &out);
+IRIS_DOCUMENT_API const char *vrFlyModeName(VrFlyMode mode);
+IRIS_DOCUMENT_API bool vrFlyModeFromName(const std::string &name, VrFlyMode &out);
+IRIS_DOCUMENT_API const char *vrTurnModeName(VrTurnMode mode);
+IRIS_DOCUMENT_API bool vrTurnModeFromName(const std::string &name, VrTurnMode &out);
 
 /// THE DEFAULTS, IN ONE PLACE — used by the Scene constructor and by anything
 /// that has to answer before a scene exists (services/vrworld.h resolves a
@@ -211,7 +213,7 @@ enum class GiQuality : int
 /// FORWARD ONLY: the non-physical model's dials this replaced (density,
 /// diffusion, horizon, skyColour, power) are deleted and an old file's keys are
 /// not read.
-struct SkyRealistic
+struct IRIS_DOCUMENT_API SkyRealistic
 {
 	/// THE HAZE: the aerosol (Mie) density as a multiple of the reference's
 	/// very clear air (aerosol optical depth 0.005). 0 = none (a purely
@@ -258,7 +260,7 @@ struct SkyRealistic
 /// OFF BY DEFAULT, and a scene whose layer is at the default writes NO
 /// `clouds` key at all (SceneWriter) — so no shipped sample, fixture or
 /// selftest pose changes by one byte until an author turns it on.
-struct CloudLayer
+struct IRIS_DOCUMENT_API CloudLayer
 {
 	/// The layer is drawn, captured and casts its shadow only while this is on.
 	bool enabled = false;
@@ -323,7 +325,7 @@ struct CloudLayer
 /// World templates switch on (MainWindow::createDefaultScene): Unreal's
 /// defaults, except the start distance, which clears the Basic floor from the
 /// default camera. A scene at the constructor writes no `heightFog` key.
-struct HeightFog
+struct IRIS_DOCUMENT_API HeightFog
 {
 	bool enabled = false;
 	/// Unreal's Fog Density (0.02 default): the density at `baseHeight`.
@@ -373,7 +375,7 @@ enum class SunContactResolution : int
 	Full = 1,   ///< one ray per pixel
 	Half = 2,   ///< one ray per 2x2 block
 };
-struct SunContact
+struct IRIS_DOCUMENT_API SunContact
 {
 	bool enabled = false;
 	/// Metres a ray looks for an occluder before the shadow map answers
@@ -396,7 +398,7 @@ struct SunContact
 	static bool resolutionFromName(const std::string &name, SunContactResolution &out);
 };
 
-class Scene
+class IRIS_DOCUMENT_API Scene
 {
     std::shared_ptr<Environment> environment;
     /// The one possession slot (§8.4). Owned like `environment` — created in

@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_SIMULATIONCLOCK_H
 #define IRIS_SIMULATIONCLOCK_H
 
+#include "document/export.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -70,7 +72,7 @@ namespace iris
 ///
 /// Value type, no engine, no Qt: the document owns one (iris::Scene) and the
 /// document tests exercise it with no display.
-class SimulationClock
+class IRIS_DOCUMENT_API SimulationClock
 {
 public:
     /// The grid. 60 steps per simulated second — Bullet's own default fixed

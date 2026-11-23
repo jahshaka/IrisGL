@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef WORLDMODES_H
 #define WORLDMODES_H
 
+#include "document/export.h"
+
 // World Modes — the per-scene scalability system (POST_CHAIN_SPEC.md §9).
 //
 // THE DOCUMENT'S TIER TABLE (LAB-1, 2026-10-22: moved down from Studio's src/services so the engine-only
@@ -193,13 +195,13 @@ struct ParamRow {
 };
 
 /// The continuous post-process parameters, in panel order.
-const std::vector<ParamRow> &postFxParams();
+IRIS_DOCUMENT_API const std::vector<ParamRow> &postFxParams();
 /// The parameter with this id, or null.
-const ParamRow *postFxParam(const std::string &id);
+IRIS_DOCUMENT_API const ParamRow *postFxParam(const std::string &id);
 /// The ids of the Row entries the World > Post Process section shows, in order.
 /// (The post chain's rows, as opposed to shadows/GI/reflections, which have
 /// sections of their own.)
-const std::vector<std::string> &postFxRowIds();
+IRIS_DOCUMENT_API const std::vector<std::string> &postFxRowIds();
 
 /// THE FOG'S CONTINUOUS ROWS (FOG-ATMO-1) — the same one-table pattern as
 /// postFxParams: the World > Fog section builds a slider per entry and
@@ -208,45 +210,45 @@ const std::vector<std::string> &postFxRowIds();
 /// world.fog key ("density"); `ownerRowId` is "fog" (the Fog Enabled row, which
 /// the rows are greyed under). Enabled and the colour are not continuous and
 /// stay the section's own two rows.
-const std::vector<ParamRow> &fogParams();
+IRIS_DOCUMENT_API const std::vector<ParamRow> &fogParams();
 /// The fog row with this world.fog key, or null.
-const ParamRow *fogParam(const std::string &id);
+IRIS_DOCUMENT_API const ParamRow *fogParam(const std::string &id);
 /// The row's document key — the sceneprops / undo key ("fogDensity" for
 /// "density"): what the panel's undo step and world.fog's snapshot name.
-std::string fogParamSceneKey(const ParamRow &p);
+IRIS_DOCUMENT_API std::string fogParamSceneKey(const ParamRow &p);
 /// WHETHER THE AUTHORED FOG COLOUR IS IN FORCE: false under the realistic sky,
 /// whose own scattering colours every fog layer (FOG-ATMO-1). The panel greys
 /// the colour row by it and world.fog's doc states it.
-bool fogColourAuthored(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API bool fogColourAuthored(const iris::ScenePtr &scene);
 
 /// The registry. Built once, never mutated.
-const std::vector<Row> &rows();
+IRIS_DOCUMENT_API const std::vector<Row> &rows();
 /// The row with this id, or null.
-const Row *row(const std::string &id);
+IRIS_DOCUMENT_API const Row *row(const std::string &id);
 
 /// A row's tooltip text on a machine where the scene does (`sceneTracesRays`)
 /// or does not trace rays — IEditorViewport::sceneTracesRays, false with no
 /// engine. EVERY surface that shows a row's text reads it here (the World
 /// panels, world.modeTable), so a text cannot be right on one and stale on
 /// another.
-std::string rowCost(const Row &r, bool sceneTracesRays);
+IRIS_DOCUMENT_API std::string rowCost(const Row &r, bool sceneTracesRays);
 /// An Enum row option's display name for `scene` on this machine (see
 /// Row::optionLabelAt). Every surface that names an option reads it here.
-std::string optionLabel(const Row &r, const EnumOption &o, const iris::ScenePtr &scene,
+IRIS_DOCUMENT_API std::string optionLabel(const Row &r, const EnumOption &o, const iris::ScenePtr &scene,
                     bool sceneTracesRays);
 /// The entries an Enum row's combo OFFERS for `scene` on this machine (see
 /// Row::comboItemsAt) — the World panels, the camera overrides and
 /// world.modeTable all read it, so no surface offers what another hides.
-std::vector<ComboItem> comboItems(const Row &r, const iris::ScenePtr &scene, bool sceneTracesRays);
+IRIS_DOCUMENT_API std::vector<ComboItem> comboItems(const Row &r, const iris::ScenePtr &scene, bool sceneTracesRays);
 /// The index in `items` that shows backing value `value` (its own value or one
 /// it `shows`), -1 when none does.
-int comboIndexOf(const std::vector<ComboItem> &items, int value);
+IRIS_DOCUMENT_API int comboIndexOf(const std::vector<ComboItem> &items, int value);
 /// CHOOSES an entry (the panels' combos and world.override's option ids): an
 /// ordinary entry pins its value (setRowValue); a `followsTier` entry drops the
 /// row's pin (clearOverride) so the tier's column decides — and where that
 /// column is 0 (a World mode whose SSR column is off) it pins its own value,
 /// so the state the entry names is the state the scene is in. False = refused.
-bool applyComboItem(const iris::ScenePtr &scene, const Row &r, const ComboItem &item);
+IRIS_DOCUMENT_API bool applyComboItem(const iris::ScenePtr &scene, const Row &r, const ComboItem &item);
 
 // ---------------------------------------------------------------------------
 // PHOTON — the unified realtime-GI switch (GI_UNIFIED_SPEC.md §2 / P2).
@@ -302,24 +304,24 @@ enum class PhotonTier { Low = 0, Medium = 1, High = 2, Epic = 3 };
 
 /// The registry id of the tier row, and of the four rows it writes through
 /// (giMode, giQuality, giDdgi, giBounces — in that order).
-std::string     photonRowId();
-std::vector<std::string> photonRowIds();
+IRIS_DOCUMENT_API std::string     photonRowId();
+IRIS_DOCUMENT_API std::vector<std::string> photonRowIds();
 
-std::string     photonTierName(PhotonTier t);        ///< "low" | "medium" | "high" | "epic"
-PhotonTier   photonTierFromName(const std::string &name, bool *ok = nullptr);
-std::vector<std::string> photonTierNames();
+IRIS_DOCUMENT_API std::string     photonTierName(PhotonTier t);        ///< "low" | "medium" | "high" | "epic"
+IRIS_DOCUMENT_API PhotonTier   photonTierFromName(const std::string &name, bool *ok = nullptr);
+IRIS_DOCUMENT_API std::vector<std::string> photonTierNames();
 
 /// The scene's Photon tier (what quality it comes back at), whether GI is on or
 /// off; and whether GI is on at all.
-PhotonTier photonTier(const iris::ScenePtr &scene);
-bool      photonEnabled(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API PhotonTier photonTier(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API bool      photonEnabled(const iris::ScenePtr &scene);
 
 /// What the tier resolves each of its rows to — THE TABLE, read one column at
 /// a time. `technique` is a GiMode ordinal, `quality` a GiQuality ordinal,
 /// `ddgi` 0/1, `bounces` 0/1 (the light bounces, converged by feedback; 0 the direct store alone).
-int photonTechnique(PhotonTier t);
-int photonQuality(PhotonTier t);
-int photonDdgi(PhotonTier t);
+IRIS_DOCUMENT_API int photonTechnique(PhotonTier t);
+IRIS_DOCUMENT_API int photonQuality(PhotonTier t);
+IRIS_DOCUMENT_API int photonDdgi(PhotonTier t);
 /// THE FIELD'S AUTO FOR A SCENE, RESOLVED THE ENGINE'S ONE WAY (DDGI-AUTO-1):
 /// `GiQualityFacts::fieldDefault` of the quality the scene RUNS at — its
 /// giQuality, pinned or not — never of the tier's column. The mirror hands the
@@ -328,22 +330,22 @@ int photonDdgi(PhotonTier t);
 /// off), so the row that shows Auto shows what renders. The
 /// desktop column: the VR column's transform (giQualityFacts) leaves
 /// fieldDefault as it is, so the headset resolves the same.
-bool photonFieldAuto(const iris::ScenePtr &scene);
-int photonBounces(PhotonTier t);
+IRIS_DOCUMENT_API bool photonFieldAuto(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API int photonBounces(PhotonTier t);
 /// The probe capture size column (pixels per cube face; 0 = follow the engine's
 /// quality dial). Every tier is 0 today — the column exists so a scene can pin
 /// one, which is the owner's 2026-09-13 Q4 decision.
-int photonProbeSize(PhotonTier t);
+IRIS_DOCUMENT_API int photonProbeSize(PhotonTier t);
 /// THE GATHER COLUMN (PHOTON-GATHER-1d): the screen-probe gather at this tier —
 /// the probe stride, the octahedral resolution, the adaptive cap — as a
 /// PROJECTION of the engine's tier table (`giQualityFacts(...).gather`, the
 /// quality column and the Epic tier), never a copy: on at every tier wherever
 /// the machine traces (no row turns it off, PHOTON-7 7-5): 32 px a probe at Low,
 /// 16 at Medium (36 rays) and High, 8 at Epic.
-jahshaka::engine::GiGatherFacts photonGather(PhotonTier t);
+IRIS_DOCUMENT_API jahshaka::engine::GiGatherFacts photonGather(PhotonTier t);
 /// ...and its VR COLUMN (PHOTON-GA-VR): the gather a HEADSET gets at this tier —
 /// the same projection through `GiViewProfile::Vr`.
-jahshaka::engine::GiGatherFacts photonVrGather(PhotonTier t);
+IRIS_DOCUMENT_API jahshaka::engine::GiGatherFacts photonVrGather(PhotonTier t);
 
 /// WHAT A TIER IS, GENERATED FROM THE TABLES — the cure for the five tier
 /// tooltips that described a renderer which did not exist (render audit A5,
@@ -360,8 +362,8 @@ jahshaka::engine::GiGatherFacts photonVrGather(PhotonTier t);
 /// 5 m at 64 cubed (0.16 m cells) ... the irradiance field on, 1 bounce, no
 /// reflection probes."); `photonTierSummary` is all four, for a tooltip that
 /// describes the dial rather than a setting.
-std::string photonTierSentence(PhotonTier t);
-std::string photonTierSummary();
+IRIS_DOCUMENT_API std::string photonTierSentence(PhotonTier t);
+IRIS_DOCUMENT_API std::string photonTierSummary();
 
 /// THE OFFSCREEN PICTURE CONTRACT (D4-PHOTON-TIERS §2.2). Every picture the app
 /// renders away from the viewport is one row here, and it either renders THE
@@ -376,14 +378,14 @@ struct OffscreenPicture {
     bool    tierPicture = false;
     std::string renders;
 };
-const std::vector<OffscreenPicture> &offscreenPictures();
+IRIS_DOCUMENT_API const std::vector<OffscreenPicture> &offscreenPictures();
 /// The VOXEL RESOLUTIONS a tier actually uses, as a phrase: the chain's
 /// distinct resolutions when the chain is on ("64", "64 and 128"), which is
 /// what the quality dial buys.
-std::string photonTierVoxelPhrase(PhotonTier t);
+IRIS_DOCUMENT_API std::string photonTierVoxelPhrase(PhotonTier t);
 /// The probe cube-face size a tier resolves to, in pixels (the engine's own
 /// quality dial; 0 is never returned).
-int photonTierProbeFaceSize(PhotonTier t);
+IRIS_DOCUMENT_API int photonTierProbeFaceSize(PhotonTier t);
 
 /// AT A RAY TIER THE PROBE GRID IS NOT BUILT (PHOTON-F12-PCC) — the engine's
 /// rule (`OgreScene::probeGridByRays`) read from the DOCUMENT: the scene's
@@ -393,12 +395,12 @@ int photonTierProbeFaceSize(PhotonTier t);
 /// (IEditorViewport::sceneTracesRays; false with no engine). Technique-free on
 /// purpose: it answers "would a grid be built here", which is what world.gi's
 /// probe keys and the World panel's probe rows ask. False with no scene.
-bool probeGridByRays(const iris::ScenePtr &scene, bool sceneTracesRays);
+IRIS_DOCUMENT_API bool probeGridByRays(const iris::ScenePtr &scene, bool sceneTracesRays);
 /// The same rule — the same function underneath — for a TIER rather than a
 /// scene: the tier's quality column traces its reflections and the scene
 /// traces rays on this machine. What the rows' tier-describing TEXTS read; a
 /// NAME for the scene in front of the user reads probeGridByRays.
-bool tierRaysResolve(PhotonTier t, bool sceneTracesRays);
+IRIS_DOCUMENT_API bool tierRaysResolve(PhotonTier t, bool sceneTracesRays);
 /// THE SSR ROW'S MEANING (D4-PHOTON-TIERS): true where the scene's reflections
 /// are TRACED — Photon on, a quality whose reflections the tier traces
 /// (giQualityFacts rayReflections: High, Epic) and a scene that traces rays on
@@ -406,14 +408,14 @@ bool tierRaysResolve(PhotonTier t, bool sceneTracesRays);
 /// the row offers only "Off" and "Traced" (comboItems; choosing Traced drops the
 /// pin, applyComboItem): OFF IS HONOURED AT EVERY TIER (no trace, no march — SceneMirror feeds 0), and any
 /// other value is fed as the tier's trace resolution (GiQualityFacts::reflectTrace).
-bool reflectionsTraced(const iris::ScenePtr &scene, bool sceneTracesRays);
+IRIS_DOCUMENT_API bool reflectionsTraced(const iris::ScenePtr &scene, bool sceneTracesRays);
 /// THE TECHNIQUE'S NAME — one source for the World rows, the GI panel and the
 /// docs: 0 "Off", 1 "VCT", 2 "VCT + rays" where `raysResolve`, else
 /// "VCT + probes".
-std::string techniqueLabel(int technique, bool raysResolve);
+IRIS_DOCUMENT_API std::string techniqueLabel(int technique, bool raysResolve);
 /// The one sentence both surfaces give for it (the verb's refusal, the rows'
 /// tooltip).
-std::string probeGridByRaysReason();
+IRIS_DOCUMENT_API std::string probeGridByRaysReason();
 
 /// Applies a Photon state: records the tier, writes each Photon-tiered row's
 /// tier value into its backing field EXCEPT rows the user pinned, and writes
@@ -423,49 +425,49 @@ std::string probeGridByRaysReason();
 /// enable share one field, and remembering "off, but pinned to VCT" would be a
 /// state nothing can render. Everything else — a pinned quality, a pinned DDGI
 /// — survives the trip, which is what makes the toggle non-destructive.
-void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier);
+IRIS_DOCUMENT_API void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier);
 
 /// True when a Photon-tiered row RESOLVES to something other than the tier's
 /// value — the honest "Custom" indicator for the tier row. False whenever Photon
 /// is off (there is nothing to deviate from: the picture is no GI either way).
-bool photonCustom(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API bool photonCustom(const iris::ScenePtr &scene);
 /// The labels of the deviating rows, for the tier row's tooltip.
-std::vector<std::string> photonDeviations(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API std::vector<std::string> photonDeviations(const iris::ScenePtr &scene);
 /// Drops the pins on the Photon-tiered rows and re-applies the tier.
-void clearPhotonOverrides(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API void clearPhotonOverrides(const iris::ScenePtr &scene);
 
-std::string    modeName(Mode m);            ///< "custom" | "low" | "medium" | "high" | "epic"
-Mode       modeFromName(const std::string &name, bool *ok = nullptr);
-std::vector<std::string> modeNames();                ///< low, medium, high, epic (Custom is not pickable)
+IRIS_DOCUMENT_API std::string    modeName(Mode m);            ///< "custom" | "low" | "medium" | "high" | "epic"
+IRIS_DOCUMENT_API Mode       modeFromName(const std::string &name, bool *ok = nullptr);
+IRIS_DOCUMENT_API std::vector<std::string> modeNames();                ///< low, medium, high, epic (Custom is not pickable)
 
 /// The scene's tier AS IT RENDERS: the picked mode, or Custom when none is picked OR the
 /// Photon row has left the picked mode's column (WORLD-MODE-1, owner 2026-10-09: each World
 /// Mode runs Photon at the same name; Photon's own dropdown or switch moving it reads
 /// Custom). What the panel's selector, world.mode() and world.get().mode report.
-Mode mode(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API Mode mode(const iris::ScenePtr &scene);
 /// The PICKED tier — scene->worldMode as a Mode, Custom for -1 — the column a caller falls
 /// back to (clearOverride, a row's tierValue, source()). Never moved by a Photon edit.
-Mode pickedMode(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API Mode pickedMode(const iris::ScenePtr &scene);
 /// Applies a tier: writes each row's tier value into its backing field, EXCEPT
 /// rows present in scene->worldOverrides (overrides survive mode switches). The
 /// `photon` row is never pinned and a pick DROPS a Photon Technique (giMode) pin, so a
 /// re-pick always snaps Photon — tier and technique — to the mode's column (WORLD-MODE-1).
-void setMode(const iris::ScenePtr &scene, Mode m);
+IRIS_DOCUMENT_API void setMode(const iris::ScenePtr &scene, Mode m);
 
 /// The row's tier value for `m`, or the row's current value when m == Custom.
-int tierValue(const Row &r, Mode m, const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API int tierValue(const Row &r, Mode m, const iris::ScenePtr &scene);
 /// The RESOLVED value — by the write-through invariant this is simply the
 /// backing field (or the recorded override for a row with no backing field).
-int resolved(const iris::ScenePtr &scene, const Row &r);
+IRIS_DOCUMENT_API int resolved(const iris::ScenePtr &scene, const Row &r);
 
 /// Where the resolved value came from: "override", "mode" or "custom".
-std::string source(const iris::ScenePtr &scene, const Row &r);
+IRIS_DOCUMENT_API std::string source(const iris::ScenePtr &scene, const Row &r);
 
 /// Writes a row's value. `recordOverride` false is the internal path used by
 /// setMode()/clearOverride(); every user- or script-driven edit records.
 /// Values are validated against the row (enum membership / int range); an
 /// invalid value is refused and returns false.
-bool setRowValue(const iris::ScenePtr &scene, const std::string &id, int value,
+IRIS_DOCUMENT_API bool setRowValue(const iris::ScenePtr &scene, const std::string &id, int value,
                  bool recordOverride = true);
 
 /// The `photon` row is NEVER recorded as a pin (WORLD-MODE-1): a set of it writes through
@@ -478,22 +480,22 @@ bool setRowValue(const iris::ScenePtr &scene, const std::string &id, int value,
 /// accepts any value in 256..8192, not just the five the row lists — but the
 /// override bookkeeping must still see the edit or a later mode switch would
 /// silently undo it. Unknown ids are ignored.
-void pinRowValue(const iris::ScenePtr &scene, const std::string &id, int value);
+IRIS_DOCUMENT_API void pinRowValue(const iris::ScenePtr &scene, const std::string &id, int value);
 
 /// Drops the pin and writes the tier value back (no-op in Custom mode beyond
 /// dropping the pin, since there is no tier to fall back to — and likewise for
 /// a `TierSpace::None` row, which has no tier at all: its value is the user's
 /// and clearing a pin must not reset it).
-bool clearOverride(const iris::ScenePtr &scene, const std::string &id);
-void clearOverrides(const iris::ScenePtr &scene);
+IRIS_DOCUMENT_API bool clearOverride(const iris::ScenePtr &scene, const std::string &id);
+IRIS_DOCUMENT_API void clearOverrides(const iris::ScenePtr &scene);
 
 /// The label of the option holding `value`, or the number as text.
-std::string valueLabel(const Row &r, int value);
+IRIS_DOCUMENT_API std::string valueLabel(const Row &r, int value);
 /// The option id holding `value`, or the number as text — the script-facing
 /// spelling of a row's value.
-std::string valueId(const Row &r, int value);
+IRIS_DOCUMENT_API std::string valueId(const Row &r, int value);
 /// The value an option id (or a plain number) means; false when unparseable.
-bool valueFromId(const Row &r, const std::string &id, int &out);
+IRIS_DOCUMENT_API bool valueFromId(const Row &r, const std::string &id, int &out);
 
 }   // namespace worldmodes
 

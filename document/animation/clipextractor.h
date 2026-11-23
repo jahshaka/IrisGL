@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_CLIPEXTRACTOR_H
 #define IRIS_CLIPEXTRACTOR_H
 
+#include "document/export.h"
+
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "irisglfwd.h"
@@ -91,7 +93,7 @@ struct ExtractedClip
 /// a slerp between the originals does not reproduce mid-interval); this is the
 /// standard FBX pivot bake, and it is why every parity gate downstream is a
 /// tolerance and never bit-equality.
-class ClipExtractor
+class IRIS_DOCUMENT_API ClipExtractor
 {
 public:
     struct RestLocal

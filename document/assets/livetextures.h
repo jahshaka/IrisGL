@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_LIVETEXTURES_H
 #define IRIS_LIVETEXTURES_H
 
+#include "document/export.h"
+
 // LIVE TEXTURES — pixels a producer writes at runtime, addressed by a guid
 // (MATERIAL_GAPS_SPEC ADDENDUM A-1).
 //
@@ -45,7 +47,7 @@ For more information see the LICENSE file
 namespace iris
 {
 
-class LiveTextures
+class IRIS_DOCUMENT_API LiveTextures
 {
 public:
     /// The scheme every live reference carries. A material row holding one of

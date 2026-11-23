@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef DECALNODE_H
 #define DECALNODE_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include <string>
 
@@ -43,7 +45,7 @@ namespace iris
  * document node's own scale (the scale gizmo) MULTIPLIES them, so both ways of
  * shaping the projector volume compose (DECALS_SPEC D4).
  */
-class DecalNode : public SceneNode
+class IRIS_DOCUMENT_API DecalNode : public SceneNode
 {
 public:
     /// Diffuse / base-colour image asset. The decal's identity: with no

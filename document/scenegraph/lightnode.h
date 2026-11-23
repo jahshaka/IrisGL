@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef LIGHTNODE_H
 #define LIGHTNODE_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include "document/srgbcolor.h"
 #include "core/value.h"
@@ -56,7 +58,7 @@ enum class SkyLightSource : int
     Cubemap = 1,
 };
 
-class LightNode:public SceneNode
+class IRIS_DOCUMENT_API LightNode:public SceneNode
 {
 
 public:

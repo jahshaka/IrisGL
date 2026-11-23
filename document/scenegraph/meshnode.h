@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef MESHNODE_H
 #define MESHNODE_H
 
+#include "document/export.h"
+
 #include <functional>
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
@@ -30,7 +32,7 @@ enum class FaceCullingMode
 	DefinedInMaterial
 };
 
-class MeshNode : public SceneNode
+class IRIS_DOCUMENT_API MeshNode : public SceneNode
 {
 public:
     MeshPtr mesh;

@@ -1,6 +1,8 @@
 #ifndef PROPERTYTYPE_H
 #define PROPERTYTYPE_H
 
+#include "document/export.h"
+
 // THE DOCUMENT's PROPERTY ROWS (NOQT-DOCUMENT-1 stage 4: std types, no Qt). A row's value is carried as an iris::Value
 // in the shapes of document/properties/valueshapes.h; its setter is STRICT: it takes its own kind only (a Float row
 // an Int too: one JSON number type) and otherwise returns false with NOTHING changed. The editor converts a Qt value
@@ -31,7 +33,7 @@ enum class PropertyType
     List
 };
 
-struct Property
+struct IRIS_DOCUMENT_API Property
 {
     /// The panel's widget index (PropertyWidget stores it on every row it
     /// builds). Only the MATERIAL property lists ever assigned it —
@@ -104,7 +106,7 @@ private:
     std::vector<Property *> mView;   // mOwned's pointers, same order
 };
 
-class PropertyListener
+class IRIS_DOCUMENT_API PropertyListener
 {
 public:
     virtual void onPropertyChanged(Property*) = 0;
@@ -114,7 +116,7 @@ public:
     virtual ~PropertyListener() = default;
 };
 
-struct BoolProperty : public Property
+struct IRIS_DOCUMENT_API BoolProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<BoolProperty>(*this); }
 
@@ -145,7 +147,7 @@ struct BoolProperty : public Property
 // (AI_SURFACE_PROGRAM_SPEC §3.A). The convention that follows from zeroing them:
 // a row has a declared range only when max > min, and readers must emit min/max
 // on exactly that condition.
-struct IntProperty : public Property
+struct IRIS_DOCUMENT_API IntProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<IntProperty>(*this); }
 
@@ -169,7 +171,7 @@ struct IntProperty : public Property
     }
 };
 
-struct FloatProperty : public Property
+struct IRIS_DOCUMENT_API FloatProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<FloatProperty>(*this); }
 
@@ -195,7 +197,7 @@ struct FloatProperty : public Property
     }
 };
 
-struct ColorProperty : public Property
+struct IRIS_DOCUMENT_API ColorProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<ColorProperty>(*this); }
 
@@ -216,7 +218,7 @@ struct ColorProperty : public Property
     }
 };
 
-struct TextureProperty : public Property
+struct IRIS_DOCUMENT_API TextureProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<TextureProperty>(*this); }
 
@@ -261,7 +263,7 @@ struct TextureProperty : public Property
     }
 };
 
-struct FileProperty : public Property
+struct IRIS_DOCUMENT_API FileProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<FileProperty>(*this); }
 
@@ -299,7 +301,7 @@ struct FileProperty : public Property
 /// with it. A row whose labels do not cover its whole value range is the same
 /// defect as before; the labels being the only source of the range is what
 /// makes that unrepresentable.
-struct ListProperty : public Property
+struct IRIS_DOCUMENT_API ListProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<ListProperty>(*this); }
 
@@ -321,7 +323,7 @@ struct ListProperty : public Property
     }
 };
 
-struct Vec3Property : public Property
+struct IRIS_DOCUMENT_API Vec3Property : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<Vec3Property>(*this); }
 

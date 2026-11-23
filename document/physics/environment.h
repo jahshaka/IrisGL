@@ -1,6 +1,8 @@
 #ifndef ENVIRONMENT_H
 #define ENVIRONMENT_H
 
+#include "document/export.h"
+
 // This class entails the simulated environment. That is, bullet utilized in iris.
 // DO NOT use bullet specific types or functions in the main application, all objects should live here
 // This includes any constraints, rigid bodies and bullet specific variables.
@@ -55,7 +57,7 @@ struct PickingHandle
 	PickingHandleType pickHandleType = PickingHandleType::None;
 };
 
-class Environment
+class IRIS_DOCUMENT_API Environment
 {
 public:
 

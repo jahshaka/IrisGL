@@ -1,6 +1,8 @@
 #ifndef SKELETON_H
 #define SKELETON_H
 
+#include "document/export.h"
+
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
 #include "core/math/vec.h"
@@ -67,7 +69,7 @@ public:
     }
 };
 
-class Skeleton
+class IRIS_DOCUMENT_API Skeleton
 {
     Skeleton(){}
 public:

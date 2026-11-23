@@ -19,6 +19,17 @@ namespace iris
 
 std::atomic<std::uint64_t> Material::sGlobalRevision{1};
 
+void Material::touch()
+{
+    ++mRevision;
+    sGlobalRevision.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::uint64_t Material::globalRevision()
+{
+    return sGlobalRevision.load(std::memory_order_relaxed);
+}
+
 Value Material::textureRef(const std::string &path, const std::string &guid)
 {
     return Value(Value::Object{{"guid", Value(guid)}, {"path", Value(path)}});

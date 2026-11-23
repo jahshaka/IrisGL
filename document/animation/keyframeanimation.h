@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef KEYFRAMEANIMATION_H
 #define KEYFRAMEANIMATION_H
 
+#include "document/export.h"
+
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <string>
@@ -260,7 +262,7 @@ protected:
 
 //typedef Key<float> FloatKey;
 
-class FloatKeyFrame:public KeyFrame<float>
+class IRIS_DOCUMENT_API FloatKeyFrame:public KeyFrame<float>
 {
 public:
     float interpolate(float a,float b,float t)
@@ -269,7 +271,7 @@ public:
     }
 };
 
-class IntKeyFrame:public KeyFrame<int>
+class IRIS_DOCUMENT_API IntKeyFrame:public KeyFrame<int>
 {
 public:
     int interpolate(int a,int b,float t)
@@ -278,7 +280,7 @@ public:
     }
 };
 
-class Vector2DKeyFrame:public KeyFrame<iris::Vec2>
+class IRIS_DOCUMENT_API Vector2DKeyFrame:public KeyFrame<iris::Vec2>
 {
 public:
     iris::Vec2 interpolate(iris::Vec2 a,iris::Vec2 b,float t)
@@ -287,7 +289,7 @@ public:
     }
 };
 
-class Vector3DKeyFrame:public KeyFrame<iris::Vec3>
+class IRIS_DOCUMENT_API Vector3DKeyFrame:public KeyFrame<iris::Vec3>
 {
 public:
     iris::Vec3 interpolate(iris::Vec3 a,iris::Vec3 b,float t)
@@ -296,7 +298,7 @@ public:
     }
 };
 
-class Vector4DKeyFrame:public KeyFrame<iris::Vec4>
+class IRIS_DOCUMENT_API Vector4DKeyFrame:public KeyFrame<iris::Vec4>
 {
 public:
     iris::Vec4 interpolate(iris::Vec4 a,iris::Vec4 b,float t)
@@ -305,7 +307,7 @@ public:
     }
 };
 
-class QuaternionKeyFrame:public KeyFrame<iris::Quat>
+class IRIS_DOCUMENT_API QuaternionKeyFrame:public KeyFrame<iris::Quat>
 {
 public:
     iris::Quat interpolate(iris::Quat a,iris::Quat b,float t)

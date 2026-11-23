@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef SCENENODE_H
 #define SCENENODE_H
 
+#include "document/export.h"
+
 
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
@@ -135,10 +137,10 @@ enum class MobilityReason : std::uint8_t {
 
 /// Stable lower-case names — what the file, the verbs and the panel speak.
 /// Enum values travel as NAMES on this surface, never as ordinals.
-const char *mobilityName(Mobility m);
+IRIS_DOCUMENT_API const char *mobilityName(Mobility m);
 /// False when `name` is not one of auto/static/movable (case-insensitive).
-bool mobilityFromName(const std::string &name, Mobility &out);
-const char *mobilityReasonName(MobilityReason r);
+IRIS_DOCUMENT_API bool mobilityFromName(const std::string &name, Mobility &out);
+IRIS_DOCUMENT_API const char *mobilityReasonName(MobilityReason r);
 
 // -----------------------------------------------------------------------------
 // iris::SceneNode — a document node: its own transform and hierarchy (the
@@ -165,7 +167,7 @@ const char *mobilityReasonName(MobilityReason r);
 // exactly two functions (insertChild / removeChild) touch it. Structure comes
 // from the store, always.
 // -----------------------------------------------------------------------------
-class SceneNode : public std::enable_shared_from_this<SceneNode>
+class IRIS_DOCUMENT_API SceneNode : public std::enable_shared_from_this<SceneNode>
 {
 protected:
     std::vector<AnimationPtr> animations;

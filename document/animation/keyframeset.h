@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef KEYFRAMESET_H
 #define KEYFRAMESET_H
 
+#include "document/export.h"
+
 #include <map>
 #include "irisglfwd.h"
 
@@ -24,7 +26,7 @@ class PropertyAnim;
 /**
  * This class stores float keyframes associated with a QString key
  */
-class KeyFrameSet
+class IRIS_DOCUMENT_API KeyFrameSet
 {
 public:
     ~KeyFrameSet();

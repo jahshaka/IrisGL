@@ -1,6 +1,8 @@
 #ifndef SKELETALANIMATION_H
 #define SKELETALANIMATION_H
 
+#include "document/export.h"
+
 #include "irisglfwd.h"
 #include "document/animation/keyframeanimation.h"
 
@@ -11,7 +13,7 @@
 namespace iris {
 
 // keyframe animation for a single animation for a single bone
-class BoneAnimation
+class IRIS_DOCUMENT_API BoneAnimation
 {
 public:
     std::unique_ptr<Vector3DKeyFrame>    posKeys;
@@ -35,7 +37,7 @@ public:
     bool moves() const;
 };
 
-class SkeletalAnimation
+class IRIS_DOCUMENT_API SkeletalAnimation
 {
     SkeletalAnimation(){}
 public:

@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_POSSESSION_H
 #define IRIS_POSSESSION_H
 
+#include "document/export.h"
+
 // iris::AvatarPossession — the ONE possession slot, the input routing it
 // decides, and the spring-arm follow camera that rides with it
 // (AVATAR_LOCOMOTION_SPEC §8.4 / §8.5, Stage 3).
@@ -82,9 +84,9 @@ enum class ScenePlayMode : int
 
 /// Stable strings for the file and the verb. The enum ints must stay free to be
 /// reordered — the same rule giMode/giQuality are written under.
-const char *playModeName(ScenePlayMode mode);
+IRIS_DOCUMENT_API const char *playModeName(ScenePlayMode mode);
 /// Case-insensitive; false (and `out` untouched) when `name` names no mode.
-bool playModeFromName(const std::string &name, ScenePlayMode &out);
+IRIS_DOCUMENT_API bool playModeFromName(const std::string &name, ScenePlayMode &out);
 
 /// The spring arm. Every field is in world units / degrees.
 struct FollowCameraParams
@@ -100,7 +102,7 @@ struct FollowCameraParams
     float pitchSensitivity = 0.25f;
 };
 
-class AvatarPossession
+class IRIS_DOCUMENT_API AvatarPossession
 {
 public:
     /// `scene` is the owner and outlives this object; never null in practice

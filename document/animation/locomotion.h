@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_LOCOMOTION_H
 #define IRIS_LOCOMOTION_H
 
+#include "document/export.h"
+
 // The locomotion STATE MACHINE — data, not a graph language
 // (AVATAR_LOCOMOTION_SPEC §7, Stage 4).
 //
@@ -98,7 +100,7 @@ enum class LocomotionConditionKind : int
     JumpRequested = 5   ///< `jumpRequested`  — reads §5 jumpRequested (the latch)
 };
 
-struct LocomotionCondition
+struct IRIS_DOCUMENT_API LocomotionCondition
 {
     LocomotionConditionKind kind = LocomotionConditionKind::Grounded;
     /// `x` for the speed forms, the fraction for clipEnded, unused otherwise.
@@ -163,7 +165,7 @@ struct LocomotionTransitionDef
 
 /// The asset. `transitions` ORDER IS THE PRIORITY — there is no priority field
 /// and there never will be one (§7.1).
-struct LocomotionAsset
+struct IRIS_DOCUMENT_API LocomotionAsset
 {
     std::string name;
     std::vector<LocomotionStateDef> states;
@@ -196,14 +198,14 @@ enum class ClipRole : int
 static constexpr int kClipRoleCount = 6;
 
 /// `idle`, `walk`, `run`, `jump-start`, `fall-loop`, `land`.
-const char *clipRoleName(ClipRole role);
+IRIS_DOCUMENT_API const char *clipRoleName(ClipRole role);
 /// Accepts the canonical spelling and the camelCase one the verbs report
 /// (`jumpStart`, `fallLoop`), case-insensitively.
-bool clipRoleFromName(const std::string &name, ClipRole &out);
+IRIS_DOCUMENT_API bool clipRoleFromName(const std::string &name, ClipRole &out);
 
 /// role -> clip name. An UNBOUND role is an empty string, and that is not an
 /// error: §7.4 — "a missing role is not an error", the default asset degrades.
-struct ClipRoles
+struct IRIS_DOCUMENT_API ClipRoles
 {
     std::string names[kClipRoleCount];
 
@@ -229,7 +231,7 @@ struct ClipRoles
 /// clip binds to at most one role, and a role takes the best-scoring unbound
 /// candidate (exact word match beats a substring; ties break on list order, so
 /// the result is deterministic for a given clip list).
-ClipRoles matchClipRoles(const std::vector<std::string> &clipNames);
+IRIS_DOCUMENT_API ClipRoles matchClipRoles(const std::vector<std::string> &clipNames);
 
 // ---------------------------------------------------------------------------
 // THE DEFAULT ASSET (§7.2)
@@ -253,10 +255,10 @@ ClipRoles matchClipRoles(const std::vector<std::string> &clipNames);
 ///
 /// `walkSpeed`/`runSpeed` are the movement component's, so the blend space's
 /// sample positions track the knobs the user actually set.
-LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSpeed,
+IRIS_DOCUMENT_API LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSpeed,
                                             float runSpeed);
 /// The shipped name, in one place: "Biped Locomotion".
-const char *defaultLocomotionAssetName();
+IRIS_DOCUMENT_API const char *defaultLocomotionAssetName();
 
 // ---------------------------------------------------------------------------
 // SERIALIZATION — ONE grammar, shared by `src/io` and by the verbs, so a scene
@@ -265,15 +267,15 @@ const char *defaultLocomotionAssetName();
 // an int would freeze today's enum order (the rule giMode and playMode are
 // written under) and a human reading the scene JSON would learn nothing.
 
-Value locomotionAssetToJson(const LocomotionAsset &asset);
+IRIS_DOCUMENT_API Value locomotionAssetToJson(const LocomotionAsset &asset);
 /// Parses AND validates. On refusal `out` is untouched and `*error` names the
 /// offending transition and condition text (gate S5).
-bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, std::string *error);
+IRIS_DOCUMENT_API bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, std::string *error);
 
 /// clip name -> length in seconds, for one avatar wrapper. The FIRST node in
 /// the subtree (the wrapper included, depth-first) carrying skeletal animations
 /// is the clip host — `SceneMirror::clipHostOf`'s rule read from the other end.
-void collectAvatarClips(const SceneNodePtr &node, std::map<std::string, float> &out);
+IRIS_DOCUMENT_API void collectAvatarClips(const SceneNodePtr &node, std::map<std::string, float> &out);
 
 // ---------------------------------------------------------------------------
 // THE EVALUATOR'S OUTPUT
@@ -290,7 +292,7 @@ struct LocomotionClipWeight
 /// The per-avatar state machine instance. Deterministic under a fixed dt by
 /// construction: no wall clock, no hash iteration, no pointer ordering — the
 /// same dt sequence produces bit-identical output (gate S7).
-class AvatarLocomotion
+class IRIS_DOCUMENT_API AvatarLocomotion
 {
 public:
     AvatarLocomotion();

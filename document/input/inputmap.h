@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef IRIS_INPUTMAP_H
 #define IRIS_INPUTMAP_H
 
+#include "document/export.h"
+
 // InputMap / InputState / InputSystem — the gameplay action layer
 // (AVATAR_LOCOMOTION_SPEC §8.2, Stage 1).
 //
@@ -96,7 +98,7 @@ struct InputState
 };
 
 /// action -> keys. Pure data: no Qt widgets, no engine, no scene.
-class InputMap
+class IRIS_DOCUMENT_API InputMap
 {
 public:
     InputMap();   ///< starts at the §8.2 defaults
@@ -159,7 +161,7 @@ private:
 };
 
 /// The one process-wide input state plus the producers that write it.
-class InputSystem
+class IRIS_DOCUMENT_API InputSystem
 {
 public:
     static InputSystem &instance();
@@ -236,7 +238,7 @@ private:
 /// that gets this wrong silently changes the gizmo mode instead of walking —
 /// and the two viewports drifting apart is exactly how the player page ended up
 /// with no `event()` override at all.
-bool gameplayClaimsKey(bool playing, int key);
+IRIS_DOCUMENT_API bool gameplayClaimsKey(bool playing, int key);
 
 } // namespace iris
 

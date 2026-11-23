@@ -1,6 +1,8 @@
 #ifndef SHADOWMAP_H
 #define SHADOWMAP_H
 
+#include "document/export.h"
+
 namespace iris
 {
 
@@ -24,7 +26,7 @@ enum class ShadowMapType : int
 // the renderer never read it: the depth bias that makes shadows work on this
 // engine is a macroblock constant on the shadow node, and on Vulkan it does
 // not even apply to line primitives. One number nobody could use.)
-class ShadowMap
+class IRIS_DOCUMENT_API ShadowMap
 {
 public:
     ShadowMapType shadowType;

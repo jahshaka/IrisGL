@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef ANIMATION_H
 #define ANIMATION_H
 
+#include "document/export.h"
+
 #include "irisglfwd.h"
 #include <map>
 #include <string>
@@ -27,7 +29,7 @@ enum class AnimationType
     Skeletal
 };
 
-class Animation
+class IRIS_DOCUMENT_API Animation
 {
     std::string name;
     bool loop;

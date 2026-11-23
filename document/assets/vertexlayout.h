@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef VERTEXLAYOUT_H
 #define VERTEXLAYOUT_H
 
+#include "document/export.h"
+
 #include <vector>
 
 namespace iris
@@ -52,7 +54,7 @@ struct VertexAttribute
     int sizeInBytes = 0;
 };
 
-class VertexLayout
+class IRIS_DOCUMENT_API VertexLayout
 {
     std::vector<VertexAttribute> attribs;
     int stride;

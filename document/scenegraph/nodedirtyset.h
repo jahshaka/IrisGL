@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef NODEDIRTYSET_H
 #define NODEDIRTYSET_H
 
+#include "document/export.h"
+
 #include <cstddef>
 #include <vector>
 
@@ -51,7 +53,7 @@ class SceneNode;
 // set says so — a consumer that sees `takeOverflow()` owes one FULL walk (and
 // its stamp sweep), which is exactly the answer that cannot be wrong.
 // -----------------------------------------------------------------------------
-class NodeDirtySet
+class IRIS_DOCUMENT_API NodeDirtySet
 {
 public:
     /// How many evictions are held before the list is dropped for a full walk.

@@ -1,6 +1,8 @@
 #ifndef ANIMFRAMES_H
 #define ANIMFRAMES_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "document/srgbcolor.h"
@@ -14,7 +16,7 @@ namespace iris {
 class FloatKeyFrame;
 class AnimFrameInfo;
 
-struct PropertyAnimInfo
+struct IRIS_DOCUMENT_API PropertyAnimInfo
 {
     std::string name;
     // keyFrame isnt owned by this class
@@ -23,7 +25,7 @@ struct PropertyAnimInfo
     PropertyAnimInfo(std::string name, FloatKeyFrame* keyFrame);
 };
 
-class PropertyAnim
+class IRIS_DOCUMENT_API PropertyAnim
 {
 protected:
     std::string name;
@@ -53,7 +55,7 @@ public:
     }
 };
 
-class FloatPropertyAnim : public PropertyAnim
+class IRIS_DOCUMENT_API FloatPropertyAnim : public PropertyAnim
 {
     FloatKeyFrame* keyFrame;
 public:
@@ -66,7 +68,7 @@ public:
     virtual FloatKeyFrame* getKeyFrame(int index) override;
 };
 
-class Vector3DPropertyAnim : public PropertyAnim
+class IRIS_DOCUMENT_API Vector3DPropertyAnim : public PropertyAnim
 {
     FloatKeyFrame* keyFrames[3];
 public:
@@ -79,7 +81,7 @@ public:
     virtual FloatKeyFrame* getKeyFrame(int index) override;
 };
 
-class ColorPropertyAnim : public PropertyAnim
+class IRIS_DOCUMENT_API ColorPropertyAnim : public PropertyAnim
 {
     FloatKeyFrame* keyFrames[4];
 public:

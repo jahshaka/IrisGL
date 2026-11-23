@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef AVATAR_MOVEMENT_H
 #define AVATAR_MOVEMENT_H
 
+#include "document/export.h"
+
 // iris::AvatarMovement — the character movement component
 // (SPECS/AVATAR_LOCOMOTION_SPEC.md §6, decision L2).
 //
@@ -136,7 +138,7 @@ struct AvatarMovementInput
     bool sprint = false;
 };
 
-class AvatarMovement
+class IRIS_DOCUMENT_API AvatarMovement
 {
 public:
     AvatarMovement();

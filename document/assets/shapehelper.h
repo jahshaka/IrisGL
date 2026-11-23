@@ -1,6 +1,8 @@
 #ifndef SHAPEBUILDER_H
 #define SHAPEBUILDER_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include "irisglfwd.h"
 #include "core/geometry/aabb.h"
@@ -8,7 +10,7 @@
 namespace iris
 {
 
-class ShapeHelper
+class IRIS_DOCUMENT_API ShapeHelper
 {
 public:
 

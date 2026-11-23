@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef PARTICLESYSTEMNODE_H
 #define PARTICLESYSTEMNODE_H
 
+#include "document/export.h"
+
 #include "core/math/vec.h"
 #include <vector>
 
@@ -72,7 +74,7 @@ enum class ParticlePreset : int { Custom, Fire, Embers, Smoke, Rain, Snow, Stead
 /// spawn volume or the particles. The engine applies the node's position and
 /// orientation to emission but not its scale, so the spawn volume is numeric
 /// (`extents`) and the particle size is numeric (`particleScale`).
-class ParticleSystemNode : public SceneNode
+class IRIS_DOCUMENT_API ParticleSystemNode : public SceneNode
 {
 public:
     static ParticleSystemNodePtr create() {

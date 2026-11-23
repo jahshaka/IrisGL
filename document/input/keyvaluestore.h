@@ -1,6 +1,8 @@
 #ifndef IRIS_KEYVALUESTORE_H
 #define IRIS_KEYVALUESTORE_H
 
+#include "document/export.h"
+
 #include "core/value.h"
 
 #include <optional>
@@ -19,7 +21,7 @@ namespace iris {
 /// Values are iris::Value (NOQT-DOCUMENT-1 stage 4): the application converts
 /// them to the form its file holds (a list of strings stays the QStringList the
 /// ini has always held).
-class KeyValueStore
+class IRIS_DOCUMENT_API KeyValueStore
 {
 public:
     virtual ~KeyValueStore() = default;

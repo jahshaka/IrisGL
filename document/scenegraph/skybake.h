@@ -12,6 +12,8 @@ For more information see the LICENSE file
 #ifndef SKYBAKE_H
 #define SKYBAKE_H
 
+#include "document/export.h"
+
 #include "document/assets/image.h"
 #include "document/srgbcolor.h"
 
@@ -33,7 +35,7 @@ namespace iris
 /// the sky in the viewport agreed in the first place. It lives in the IrisGL
 /// library rather than on SceneMirror because the exporter links the document
 /// but not the mirror (which drags in the engine).
-Image bakeGradientSky(const SrgbColor &top, const SrgbColor &mid, const SrgbColor &bottom,
+IRIS_DOCUMENT_API Image bakeGradientSky(const SrgbColor &top, const SrgbColor &mid, const SrgbColor &bottom,
                        float offset, int width = 4, int height = 256);
 
 }
