@@ -23,6 +23,8 @@
 #include <OgreTechnique.h>
 #include <OgrePass.h>
 #include <OgreTextureUnitState.h>
+#include <OgreStagingTexture.h>
+#include <OgreTextureGpuManager.h>
 #include <CommandBuffer/OgreCbShaderBuffer.h>
 #include <CommandBuffer/OgreCommandBuffer.h>
 #include <Vao/OgreConstBufferPacked.h>
@@ -69,7 +71,7 @@ struct AtmoSettingsGpu {
 
 Ogre::TextureGpu *makeLut(Ogre::TextureGpuManager *tm, const std::string &name,
                           Ogre::TextureTypes::TextureTypes type, unsigned w, unsigned h,
-                          unsigned d) {
+                          unsigned d, Ogre::uint16 alphaHalf) {
     Ogre::TextureGpu *t = tm->createTexture(name, Ogre::GpuPageOutStrategy::Discard,
                                             Ogre::TextureFlags::Uav, type);
     t->setResolution(w, h, d);
@@ -78,8 +80,30 @@ Ogre::TextureGpu *makeLut(Ogre::TextureGpuManager *tm, const std::string &name,
     // Resident for good (the probe gather's rule): these tables live as long as
     // the scene's atmosphere does.
     t->_transitionTo(Ogre::GpuResidency::Resident, nullptr);
+    // A DEFINED PLACEHOLDER FROM BIRTH (SHADER-SYSTEM-1 7.0, the train's validation red): a draw can sample a table before
+    // its first build lands - the first frames of a scene, and every frame an ASYNCHRONOUS scene's table jobs are deferred
+    // while their permutations compile (R2 (c)) - so the table is never undefined memory. rgb 0 and the given alpha, one
+    // upload through the copy encoder (no compute: it can never be deferred). For SkyView that is a BLACK sky and for the
+    // Aerial volume (0,0,0,1), no aerial perspective - the aerial job's own identity (JahAtmoAerial_cs.glsl, slice 0): the
+    // loading-time picture the lead ruled (2026-11-23, the owner's to overrule). HOW LONG IT SHOWS, measured: 102 frames
+    // with no app shader cache and the service held 20 ms a job (sky.atmosphere_deferred_layout's control); about 10
+    // frames in the startup gate's warm view on a warm cache (INFERRED: the 10 VUIDs one per frame it drew before this
+    // fix, app.engine_selftest_validation.default at the TRAIN-4 stack); on a cold DRIVER: not measured.
+    Ogre::StagingTexture *staging = tm->getStagingTexture(w, h, d, 1u, Ogre::PFG_RGBA16_FLOAT);
+    staging->startMapRegion();
+    Ogre::TextureBox box = staging->mapRegion(w, h, d, 1u, Ogre::PFG_RGBA16_FLOAT);
+    const Ogre::uint16 texel[4] = { 0u, 0u, 0u, alphaHalf };
+    for (unsigned z = 0; z < d; ++z)
+        for (unsigned y = 0; y < h; ++y)
+            for (unsigned x = 0; x < w; ++x) std::memcpy(box.at(x, y, z), texel, sizeof(texel));
+    staging->stopMapRegion();
+    staging->upload(box, t, 0, nullptr, nullptr);
+    tm->removeStagingTexture(staging);
     return t;
 }
+
+/// The half-float bit patterns of the placeholders' alpha (IEEE binary16).
+constexpr Ogre::uint16 kHalfZero = 0x0000u, kHalfOne = 0x3C00u;
 
 }  // namespace
 
@@ -115,18 +139,18 @@ JahAtmosphere::~JahAtmosphere() {
 void JahAtmosphere::createTextures() {
     Ogre::TextureGpuManager *tm = mRoot->getRenderSystem()->getTextureGpuManager();
     const std::string id = Ogre::StringConverter::toString(mSceneMgr->getId());
-    mTrans = makeLut(tm, "JahAtmo/Transmittance/" + id, Ogre::TextureTypes::Type2D, kTransW, kTransH, 1u);
-    mMs = makeLut(tm, "JahAtmo/MultiScatter/" + id, Ogre::TextureTypes::Type2D, kMsSize, kMsSize, 1u);
-    mSkyView = makeLut(tm, "JahAtmo/SkyView/" + id, Ogre::TextureTypes::Type2D, kSkyW, kSkyH, 1u);
-    mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD + 1u);
+    mTrans = makeLut(tm, "JahAtmo/Transmittance/" + id, Ogre::TextureTypes::Type2D, kTransW, kTransH, 1u, kHalfZero);
+    mMs = makeLut(tm, "JahAtmo/MultiScatter/" + id, Ogre::TextureTypes::Type2D, kMsSize, kMsSize, 1u, kHalfZero);
+    mSkyView = makeLut(tm, "JahAtmo/SkyView/" + id, Ogre::TextureTypes::Type2D, kSkyW, kSkyH, 1u, kHalfZero);
+    mAerial = makeLut(tm, "JahAtmo/Aerial/" + id, Ogre::TextureTypes::Type3D, kApW, kApH, kApD + 1u, kHalfOne);
     // SAMPLEABLE FROM BIRTH (ASYNC-SHADERS-1, a validation defect on base): the
     // sky quad samples SkyView/Aerial in every draw of the scene, and a new
     // scene is drawn BEFORE its first frame's update() builds the tables — the
     // open/create slices' prime and shader warm-up renders. A UAV is born in
     // GENERAL, so those draws read an image in the wrong layout
     // (VUID-vkCmdDraw-None-09600 on every create-after-create). The tables are
-    // handed to the samplers here once; update() rebuilds and hands them over
-    // again before any frame the user sees.
+    // handed to the samplers here once, holding makeLut's placeholder; update()
+    // rebuilds them and hands them over again after every call, built or deferred.
     handOver();
 }
 
@@ -325,7 +349,7 @@ void JahAtmosphere::restoreDrawnObserver() {
 
 void JahAtmosphere::rebuildObserverView() {
     runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u);
-    handOver();
+    handOver();   // built or deferred: a deferred job's barrier left SkyView in the UAV layout (update's rule)
     uploadSettings();
     pushQuadConstants();
 }
@@ -534,24 +558,32 @@ bool JahAtmosphere::update() {
     if (mAirOn && (tables || sun)) {
         Ogre::HlmsManager *hm = mRoot->getHlmsManager();
         Ogre::HlmsCompute *hc = hm ? hm->getComputeHlms() : nullptr;
-        const unsigned long long deferredBefore = hc ? hc->getNumDeferredDispatches() : 0ull;
-        if (trans) {
-            if (runJob("Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u))
-                ++mStatus.transmittanceBuilds;
-        }
-        if (tables) {
-            if (runJob("Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize, kMsSize))
-                ++mStatus.multiScatterBuilds;
-        }
-        if (runJob("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u))
-            ++mStatus.skyViewBuilds;
-        if (runJob("Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u))
-            ++mStatus.aerialBuilds;
-        // A DEFERRED JOB (SHADER-SYSTEM-1 7a): the tables are not a result - a later job read an input not written
-        // this time. The flags stand and the next call runs every job again; nothing is handed to the samplers.
-        built = !hc || hc->getNumDeferredDispatches() == deferredBefore;
+        // THE CHAIN STOPS AT ITS FIRST DEFERRED JOB (SHADER-SYSTEM-1 7a; the train's validation red, 2026-11-23): a job
+        // whose permutation still compiles is deferred by the fork, and every table after it reads that one - so no later
+        // table is computed from an input not written this time. The flags stand and the next call runs the chain again.
+        const auto ran = [&](const char *name, Ogre::TextureGpu *target, Ogre::TextureGpu *in0, Ogre::TextureGpu *in1,
+                             unsigned gx, unsigned gy, unsigned &count) {
+            if (!built) return;
+            const unsigned long long before = hc ? hc->getNumDeferredDispatches() : 0ull;
+            const bool dispatched = runJob(name, target, in0, in1, gx, gy);
+            if (hc && hc->getNumDeferredDispatches() != before) built = false;
+            else if (dispatched) ++count;
+        };
+        if (trans) ran("Jahshaka/AtmoTransmittance", mTrans, nullptr, nullptr, kTransW / 8u, kTransH / 8u,
+                       mStatus.transmittanceBuilds);
+        if (tables) ran("Jahshaka/AtmoMultiScatter", mMs, mTrans, nullptr, kMsSize, kMsSize, mStatus.multiScatterBuilds);
+        ran("Jahshaka/AtmoSkyView", mSkyView, mTrans, mMs, kSkyW / 8u, (kSkyH + 7u) / 8u, mStatus.skyViewBuilds);
+        ran("Jahshaka/AtmoAerial", mAerial, mTrans, mMs, kApW / 8u, kApH / 8u, mStatus.aerialBuilds);
+        // HANDED TO THE SAMPLERS AFTER EVERY CALL, BUILT OR DEFERRED: runJob issues a job's barriers BEFORE its dispatch
+        // (the dispatch decides the deferral), so a deferred SkyView or Aerial job has already moved its table to the UAV
+        // layout; the sky quad (skyViewLut) and every PBS colour pass (jahAtmoAerial) sample it as a texture
+        // (VUID-vkCmdDraw-imageLayout-00344 otherwise). A table keeps its LAST WRITTEN content - makeLut's placeholder
+        // before the first build lands, else the previous build: a STALE sky (the old sun) for the frames a rebuild is
+        // owed, which end when the jobs' permutations land on the background compiler (a Complete frame never defers).
+        // A rebuild for a moved sun defers only while a job's permutation is still unbuilt: runJob sets the job's params
+        // and textures, no property, so once built the permutation serves every later rebuild (INFERRED from runJob).
+        handOver();
         if (built) {
-            handOver();
             mDirtyTrans = mDirtyTables = mDirtySun = false;
         } else {
             ++mStatus.deferredUpdates;
