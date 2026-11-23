@@ -98,7 +98,7 @@ std::string OgreScene::particleRampImage(const std::string &path) {
         rgm.addResourceLocation(dir, "FileSystem", kGroup, false);
     }
     if (!rgm.resourceExists(kGroup, file)) {
-        mError = "particle colour ramp not found: " + path;
+        mError = "Scene::setParticleSystem: particle colour ramp not found: " + path;
         return std::string();
     }
     return file;
@@ -744,15 +744,21 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         topo.quotaBucket = quotaBucketFor(d.quota);
         topo.distortion = d.distortion;
         for (const auto &e : d.emitters) topo.emitterShapes.push_back(int(e.shape));
-        // A ramp whose image is not there is DROPPED from this push (mError
-        // says which file): ColourImageAffector2 cannot initialise without
-        // one, and a missing ramp must not take the whole emitter down.
+        // A ramp whose image is not there is DROPPED from this push:
+        // ColourImageAffector2 cannot initialise without one, and a missing
+        // ramp must not take the whole emitter down - but the call is REFUSED
+        // (SCRIPT-IN-ENGINE-1 2e e1: it answered true), mError naming the file;
+        // the rest of the system is set.
         ParticleSystemDesc pushed = d;
         pushed.affectors.clear();
+        bool rampMissing = false;
         for (const auto &a : d.affectors) {
             if (a.kind == ParticleAffectorDesc::Kind::ColourRamp) {
                 const std::string image = particleRampImage(a.colourRampPath);
-                if (image.empty()) continue;
+                if (image.empty()) {
+                    rampMissing = rampMissing || !a.colourRampPath.empty();
+                    continue;
+                }
                 topo.rampImages.push_back(image);
             }
             pushed.affectors.push_back(a);
@@ -790,7 +796,7 @@ bool OgreScene::setParticleSystem(NodeId id, const ParticleSystemDesc &d) {
         // reaches it.
         n.particleDistortion = d.distortion;
         n.particleDef->setVisibilityFlags(n.shown ? particleVisibilityBits(n) : 0u);
-        return true;
+        return !rampMissing;   // (the system is set either way; a missing ramp is the refusal, its file in mError)
     } JAH_CATCH(mError, false);
 }
 

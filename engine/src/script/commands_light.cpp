@@ -39,7 +39,10 @@ void registerLightCommands(Host &host, const Commands &k)
                             object("profile", {arg("path", Kind::String)})},
             Kind::Bool},
            "The node's IES photometric profile {path} (an absolute .ies path; \"\" clears it): re-applies the LightDesc "
-           "this host last set on the node with the path. FAILS on a node this host set no light on."},
+           "this host last set on the node with the path. A profile shapes SPOT and POINT lights only (a directional or "
+           "area light reads none, and its path is not checked). FAILS on a node this host set no light on, and on a "
+           "profile the engine cannot assign (a file that is not there: the engine's words) - the light keeps the "
+           "profile it had."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               const std::uint32_t node = Call::idOf(c[1]);
@@ -49,7 +52,8 @@ void registerLightCommands(Host &host, const Commands &k)
                   return c.fail("node " + std::to_string(node) + ": this host set no light on it (engine.light.set first)");
               LightDesc d = *was;
               d.iesProfilePath = c[2]["path"].asString();
-              if (!s->setLight(NodeId(node), d)) return c.refuse(k.st->engine->lastError());
+              // (Scene::setLight refuses a profile it cannot assign, in its file check's words - SCRIPT-IN-ENGINE-1 2e e1)
+              if (!s->setLight(NodeId(node), d)) return c.fail(k.st->engine->lastError());
               k.keep(s, KeptKind::Light, node, d);
               return Value(true);
           });
