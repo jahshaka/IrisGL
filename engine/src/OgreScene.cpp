@@ -48,6 +48,8 @@ OgreScene::OgreScene(Ogre::Root *root, Ogre::SceneManager *sm, const std::string
                      std::string &errorSink)
     : mRoot(root), mSceneMgr(sm), mError(errorSink) {
     mIdentityName = name;
+    static std::atomic<unsigned long long> made{0};   // Scene::serial: every scene this process made, never reused
+    mIdentitySerial = made.fetch_add(1, std::memory_order_relaxed) + 1;
     // WHAT THIS SCENE'S PASSES BIND (SceneGiBinding, OgreGi.cpp): nothing yet.
     mGiBinding.lightWriteSerial = &mGiLightWriteSerial;
     mGiBinding.lightsRemoved = &mLightsRemoved;

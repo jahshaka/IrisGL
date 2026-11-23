@@ -102,17 +102,26 @@ std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v)
     });
 }
 
-void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id) { st.made[scene].insert(madeKey(kind, id)); }
+SceneRecord &sceneRecord(EngineState &st, Scene *scene)
+{
+    SceneRecord &r = st.scenes[scene];
+    if (r.serial != scene->serial()) r = SceneRecord{scene->serial(), {}, {}};   // (a dead scene's, at this address)
+    return r;
+}
+
+void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id) { sceneRecord(st, scene).made.insert(madeKey(kind, id)); }
 
 void forgetMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id)
 {
-    const auto it = st.made.find(scene);
-    if (it == st.made.end()) return;
-    it->second.erase(madeKey(kind, id));
-    if (it->second.empty()) st.made.erase(it);
+    const auto it = st.scenes.find(scene);
+    if (it == st.scenes.end()) return;
+    it->second.made.erase(madeKey(kind, id));
+    if (kind == MadeKind::Node)   // its kept records go with it
+        for (const KeptKind k : {KeptKind::Light, KeptKind::ParticleSystem}) it->second.kept.erase(std::uint64_t(k) << 32 | id);
+    if (it->second.made.empty() && it->second.kept.empty()) st.scenes.erase(it);
 }
 
-void forgetScene(EngineState &st, Scene *scene) { st.made.erase(scene); }
+void forgetScene(EngineState &st, Scene *scene) { st.scenes.erase(scene); }
 
 namespace {
 bool ownedBy(const EngineState &st, const Scene *s)
@@ -145,7 +154,7 @@ Scene *Commands::scene(Call &c, const Value &h) const
 {
     Engine *e = engine(c);
     Scene *s = e ? c.object<Scene>(h) : nullptr;
-    if (s && !held(e->scenePresence(s))) {
+    if (s && !held(e->scenePresence(s, c.registry().identityOf(h.asInt())))) {
         c.fail("the scene this handle names was destroyed by the host's owner, which handed it in (what is handed in "
                "outlives the host)");
         return nullptr;
@@ -157,7 +166,7 @@ View *Commands::view(Call &c, const Value &h) const
 {
     Engine *e = engine(c);
     View *v = e ? c.object<View>(h) : nullptr;
-    if (v && !held(e->viewPresence(v))) {
+    if (v && !held(e->viewPresence(v, NodeId(c.registry().identityOf(h.asInt()))))) {
         c.fail("the view this handle names was destroyed by the host's owner, which handed it in (what is handed in "
                "outlives the host)");
         return nullptr;
@@ -188,8 +197,8 @@ bool Commands::engineWide(Call &c) const
 bool Commands::mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const
 {
     if (ownedBy(*st, s)) return true;
-    const auto it = st->made.find(s);
-    if (it != st->made.end() && it->second.count(madeKey(kind, id))) return true;
+    const auto it = st->scenes.find(s);
+    if (it != st->scenes.end() && it->second.serial == s->serial() && it->second.made.count(madeKey(kind, id))) return true;
     static const char *const kWord[] = {"node", "mesh", "material", "texture", "decal image"};
     c.fail(std::string(kWord[int(kind)]) + " " + std::to_string(id) + " is not this host's to " + verb + ": the scene '" +
            s->name() + "' was handed in by the host's owner, and this host did not make it");
@@ -221,7 +230,7 @@ bool Commands::frame(Call &c) const
         DeclaredRoutes &d = st->declared[i];
         // a handed-in view or scene its owner destroyed is never read (Script.h, WHAT IS HANDED IN): the declaration
         // cannot be judged - a failed law of the verdict, by name
-        if (!held(st->engine->viewPresence(d.view)) || !held(st->engine->scenePresence(d.scene))) {
+        if (!held(st->engine->viewPresence(d.view, d.viewId)) || !held(st->engine->scenePresence(d.scene, d.sceneSerial))) {
             const std::string line = "a declared view or its scene was destroyed by the host's owner before the "
                                      "declaration was judged (frame " + std::to_string(d.frames) + ")";
             st->host->law(false, line);
@@ -317,9 +326,9 @@ Commands makeEngineCommands(Host &host, Engine *engine, std::string bootError, b
     host.registry().atEnd([st] {
         if (!engineLive(*st)) return;
         for (const MadeKind kind : {MadeKind::Node, MadeKind::Mesh, MadeKind::Material, MadeKind::Texture, MadeKind::DecalTexture})
-            for (const auto &[scene, keys] : st->made) {
-                if (!held(st->engine->scenePresence(scene))) continue;
-                for (auto it = keys.rbegin(); it != keys.rend(); ++it) {   // (the highest id first)
+            for (const auto &[scene, record] : st->scenes) {
+                if (!held(st->engine->scenePresence(scene, record.serial))) continue;
+                for (auto it = record.made.rbegin(); it != record.made.rend(); ++it) {   // (the highest id first)
                     if (MadeKind(*it >> 32) != kind) continue;
                     const std::uint32_t id = std::uint32_t(*it);
                     if (kind == MadeKind::Node) scene->removeNode(NodeId(id));
@@ -328,13 +337,15 @@ Commands makeEngineCommands(Host &host, Engine *engine, std::string bootError, b
                     else scene->destroyTexture(TextureId(id));
                 }
             }
-        st->made.clear();
+        st->scenes.clear();
     });
     const Commands k(st);
     // THE KINDS BOUND AT REGISTRATION (one kind, one type - never "whoever holds first"): what each held kind's handle
     // names, and the kinds that carry the engine's own ids
-    host.registry().bindKind<Scene>(kScene);
-    host.registry().bindKind<View>(kView);
+    // (a scene and a view carry their IDENTITY from the moment they are held - their serial and id, read while they
+    // live: the guard asks the engine for the pointer AND it, so a later one at a dead one's address is not it)
+    host.registry().bindKind<Scene>(kScene, [](const void *s) { return std::uint64_t(static_cast<const Scene *>(s)->serial()); });
+    host.registry().bindKind<View>(kView, [](const void *v) { return std::uint64_t(static_cast<const View *>(v)->id()); });
     host.registry().bindKind<Image>(kPicture);
     host.registry().bindKind<ImageF>(kRadiance);
     host.registry().nameKind(kNode);
@@ -369,7 +380,8 @@ Commands makeEngineCommands(Host &host, Engine *engine, std::string bootError, b
                       "scene";
                 return false;
             }
-            if (!st->engine || !Engine::isLive(st->engineSerial) || !held(st->engine->scenePresence(s))) {
+            if (!st->engine || !Engine::isLive(st->engineSerial) ||
+                !held(st->engine->scenePresence(s, c.registry().identityOf(c[0].asInt())))) {
                 why = std::string("the ") + kind + "'s scene is gone (its engine ended, or its owner destroyed it)";
                 return false;
             }

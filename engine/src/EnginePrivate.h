@@ -8983,8 +8983,8 @@ public:
     }
 
     void destroyScene(Scene *scene) override;
-    Scene::Presence scenePresence(const Scene *scene) const override;
-    Scene::Presence viewPresence(const View *view) const override;
+    Scene::Presence scenePresence(const Scene *scene, unsigned long long serial) const override;
+    Scene::Presence viewPresence(const View *view, NodeId id) const override;
     /// Destroys whatever a frame asked for while it was running
     /// (mPendingSceneDestroy). Called ONLY from renderOneFrame's frame guard,
     /// after the in-frame flag has been cleared, and never throws — a

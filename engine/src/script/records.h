@@ -32,12 +32,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -111,6 +114,108 @@ inline void flatIn(const Value::Array &a, std::size_t i, Colour &c)
 
 constexpr double kExact = 9007199254740992.0;   // 2^53: a script's number is an exact integer up to it
 
+/// AN ARRAY CARRIED AS BYTES (SCRIPT-IN-ENGINE-1 E0; RULED 3: the big arrays as `bytes`, under the call's byte bound): a
+/// vector or T[N] of a trivially copyable element that is no array itself (never bool) - its elements' bytes as the
+/// engine holds them (this machine's byte order; a record element in its declared layout). Field::bytes() carries a
+/// member so; an array OF such arrays (MeshData::lodIndices, GiVoxelVolume's levels) is always an array of bytes, and
+/// an array of VECTORS of such arrays (GiVoxelVolume::directional[3]) an array of PACKED bytes (PackedOf, below).
+template <class T> struct BytesOf : std::false_type {};
+template <class E, class A>
+struct BytesOf<std::vector<E, A>>
+    : std::integral_constant<bool, std::is_trivially_copyable<E>::value && !std::is_array<E>::value &&
+                                       !IsVector<E>::value && !std::is_same<E, bool>::value> {
+    using Element = E;
+};
+template <class E, std::size_t N>
+struct BytesOf<E[N]> : std::integral_constant<bool, std::is_trivially_copyable<E>::value && !std::is_array<E>::value &&
+                                                       !std::is_same<E, bool>::value> {
+    using Element = E;
+};
+template <class T> Value bytesOut(const T &v)
+{
+    using E = typename BytesOf<T>::Element;
+    Value::Bytes b(std::size(v) * sizeof(E));
+    if (!b.empty()) std::memcpy(b.data(), &v[0], b.size());
+    return Value::bytes(std::move(b));
+}
+/// `v` (Kind::Bytes) into `out`: false with `why` naming `where` when its length is no whole number of elements (or,
+/// for a T[N], not N of them).
+template <class T> bool bytesIn(const Value &v, T &out, const std::string &where, std::string &why)
+{
+    using E = typename BytesOf<T>::Element;
+    const Value::Bytes &b = v.asBytes();
+    if (b.size() % sizeof(E)) {
+        why = where + " holds " + std::to_string(b.size()) + " bytes, not a whole number of its " +
+              std::to_string(sizeof(E)) + "-byte elements";
+        return false;
+    }
+    const std::size_t n = b.size() / sizeof(E);
+    if constexpr (IsVector<T>::value) {
+        out.assign(n, E{});
+    } else if (n != std::extent<T>::value) {
+        why = where + " holds " + std::to_string(n) + " elements, the record's " + std::to_string(std::extent<T>::value);
+        return false;
+    }
+    if (n) std::memcpy(&out[0], b.data(), b.size());
+    return true;
+}
+
+/// A VECTOR OF BYTE-CARRIED VECTORS AS ONE BYTES VALUE - only as the ELEMENT of an array (GiVoxelVolume::directional[3]:
+/// three axes of mip levels): PACKED, a uint32 count n, then n uint32 element counts, then the n vectors' bytes in order.
+template <class T> struct PackedOf : std::false_type {};
+template <class V, class A> struct PackedOf<std::vector<V, A>> : std::integral_constant<bool, BytesOf<V>::value && IsVector<V>::value> {};
+/// The element of an array carried as bytes: an array of elements (BytesOf) or a vector of them (PackedOf).
+template <class E> constexpr bool elementAsBytes() { return BytesOf<E>::value || PackedOf<E>::value; }
+template <class T> Value packedOut(const T &v)
+{
+    using E = typename T::value_type::value_type;
+    std::size_t data = 0;
+    for (const auto &x : v) data += x.size() * sizeof(E);
+    Value::Bytes b(4 * (1 + v.size()) + data);
+    const auto put = [&b](std::size_t at, std::uint32_t u) { std::memcpy(b.data() + at, &u, 4); };
+    put(0, std::uint32_t(v.size()));
+    std::size_t at = 4 * (1 + v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        put(4 * (1 + i), std::uint32_t(v[i].size()));
+        if (!v[i].empty()) std::memcpy(b.data() + at, v[i].data(), v[i].size() * sizeof(E));
+        at += v[i].size() * sizeof(E);
+    }
+    return Value::bytes(std::move(b));
+}
+template <class T> bool packedIn(const Value &v, T &out, const std::string &where, std::string &why)
+{
+    using E = typename T::value_type::value_type;
+    const Value::Bytes &b = v.asBytes();
+    const auto get = [&b](std::size_t at) { std::uint32_t u = 0; std::memcpy(&u, b.data() + at, 4); return u; };
+    const auto bad = [&](const std::string &what) {
+        why = where + " is no packed array of arrays (" + what + ")";
+        return false;
+    };
+    if (b.size() < 4) return bad("no count");
+    const std::size_t n = get(0);
+    if (n > (b.size() - 4) / 4) return bad("its count is past its bytes");
+    std::size_t at = 4 * (1 + n), need = at;
+    for (std::size_t i = 0; i < n; ++i) need += std::size_t(get(4 * (1 + i))) * sizeof(E);
+    if (need != b.size()) return bad(std::to_string(b.size()) + " bytes where its counts say " + std::to_string(need));
+    out.assign(n, typename T::value_type());
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i].assign(get(4 * (1 + i)), E{});
+        if (!out[i].empty()) std::memcpy(out[i].data(), b.data() + at, out[i].size() * sizeof(E));
+        at += out[i].size() * sizeof(E);
+    }
+    return true;
+}
+template <class E> Value elementOut(const E &e)
+{
+    if constexpr (BytesOf<E>::value) return bytesOut(e);
+    else return packedOut(e);
+}
+template <class E> bool elementIn(const Value &v, E &out, const std::string &where, std::string &why)
+{
+    if constexpr (BytesOf<E>::value) return bytesIn(v, out, where, why);
+    else return packedIn(v, out, where, why);
+}
+
 }  // namespace detail
 
 /// THE PARAMETER a C++ type derives (no default: Field gives the record's).
@@ -142,23 +247,30 @@ template <class T> Param paramOf(std::string name)
     } else if constexpr (detail::IsVector<T>::value || std::is_array<T>::value) {
         using E = typename detail::ElementOf<T>::type;
         const unsigned n = std::is_array<T>::value ? unsigned(std::extent<T>::value) : 0u;
-        Param e = paramOf<E>(name);
-        static_assert(!detail::IsVector<E>::value && !std::is_array<E>::value && !detail::IsOptional<E>::value &&
-                          !detail::IsShared<E>::value,
-                      "an array of arrays or of optionals is not carried");
-        Param p = e;
-        p.kind = Kind::Array;
-        p.fallback.reset();
-        if constexpr (detail::flatWidth<E>() != 0) {   // FLAT: an element's numbers in a row
-            p.element = Kind::Number;
-            p.count = n * detail::flatWidth<E>();
-            p.stride = detail::flatWidth<E>();
-        } else {
-            p.element = e.kind;
+        if constexpr (detail::IsVector<E>::value || std::is_array<E>::value) {   // AN ARRAY OF ARRAYS: of bytes
+            static_assert(detail::elementAsBytes<E>(), "an array of arrays is carried as an array of bytes: its inner "
+                                                       "element trivially copyable (and no array, no bool)");
+            Param p = arg(std::move(name), Kind::Array);
+            p.element = Kind::Bytes;
             p.count = n;
+            return p;
+        } else {
+            Param e = paramOf<E>(name);
+            static_assert(!detail::IsOptional<E>::value && !detail::IsShared<E>::value, "an array of optionals is not carried");
+            Param p = e;
+            p.kind = Kind::Array;
+            p.fallback.reset();
+            if constexpr (detail::flatWidth<E>() != 0) {   // FLAT: an element's numbers in a row
+                p.element = Kind::Number;
+                p.count = n * detail::flatWidth<E>();
+                p.stride = detail::flatWidth<E>();
+            } else {
+                p.element = e.kind;
+                p.count = n;
+            }
+            p.maxCount = 0;   // (a vector's maximum is the table's: Field::upTo)
+            return p;
         }
-        p.maxCount = 0;   // (a vector's maximum is the table's: Field::upTo)
-        return p;
     } else {
         return Record<T>::table().param(std::move(name));
     }
@@ -192,7 +304,9 @@ template <class T> Value toValue(const T &v, Call *call = nullptr)
     } else if constexpr (detail::IsVector<T>::value || std::is_array<T>::value) {
         Value::Array a;
         for (const auto &e : v) {
-            if constexpr (detail::flatWidth<typename std::decay<decltype(e)>::type>() != 0) detail::flatOut(e, a);
+            using E = typename std::decay<decltype(e)>::type;
+            if constexpr (detail::flatWidth<E>() != 0) detail::flatOut(e, a);
+            else if constexpr (detail::IsVector<E>::value || std::is_array<E>::value) a.push_back(detail::elementOut(e));
             else a.push_back(toValue(e, call));
         }
         return Value(std::move(a));
@@ -241,8 +355,13 @@ template <class T> bool fromValue(const Value &v, T &out, const std::string &whe
         const std::size_t n = w ? a.size() / w : a.size();   // (a multiple of w: the registry checked the stride)
         if constexpr (detail::IsVector<T>::value) out.assign(n, E{});
         for (std::size_t i = 0; i < n; ++i) {
-            if constexpr (w != 0) detail::flatIn(a, i * w, out[i]);
-            else if (!fromValue(a[i], out[i], where + "[" + std::to_string(i) + "]", why)) return false;
+            if constexpr (w != 0) {
+                detail::flatIn(a, i * w, out[i]);
+            } else if constexpr (detail::IsVector<E>::value || std::is_array<E>::value) {
+                if (!detail::elementIn(a[i], out[i], where + "[" + std::to_string(i) + "]", why)) return false;
+            } else if (!fromValue(a[i], out[i], where + "[" + std::to_string(i) + "]", why)) {
+                return false;
+            }
         }
     } else {
         return Record<T>::table().fromValue(v, out, where, why);
@@ -257,6 +376,8 @@ template <class R> struct Field {
     std::size_t offset = 0;
     std::function<Value(const R &, Call *call)> get;   ///< `call`: the answering call (toValue)
     std::function<bool(const Value &, R &, const std::string &where, std::string &why)> set;
+    /// The member's BYTES form, when it has one (a vector or T[N] of trivially copyable elements: detail::BytesOf).
+    std::function<void(Field &)> bytesForm;
 
     Field range(double lo, double hi) const { return with(param.range(lo, hi)); }
     Field atLeast(double lo) const { return with(param.atLeast(lo)); }
@@ -264,19 +385,33 @@ template <class R> struct Field {
     Field upTo(unsigned elements) const { return with(param.upTo(elements)); }
     Field in(std::string unit) const { return with(param.in(std::move(unit))); }
     Field allowNonFinite() const { return with(param.allowNonFinite()); }
+    /// THE MEMBER AS BYTES (SCRIPT-IN-ENGINE-1 E0, RULED 3: the big arrays - a voxel volume, a card's radiance): a
+    /// vector or T[N] of trivially copyable elements carried as Kind::Bytes, its elements' bytes as the engine holds
+    /// them, bounded by the call's byte bound (Host::Options::callBounds); a length that is no whole number of elements
+    /// (or not N of them) FAILS by its member. A member with no bytes form THROWS at the table's making (a fault of the
+    /// table, never a silent array of numbers).
+    Field bytes() const
+    {
+        if (!bytesForm)
+            throw std::logic_error("the field '" + param.name + "' has no bytes form (a vector or T[N] of trivially "
+                                   "copyable elements)");
+        Field f = *this;
+        bytesForm(f);
+        return f;
+    }
     /// A HANDLE MEMBER (SCRIPT-IN-ENGINE-1 E0): the member is the engine's id of `kind` (an integral id, or a vector of
     /// them) and the script carries it as that kind's TYPED HANDLE - checked at the call by the registry's walk of
     /// object members (the kind's own existence read, asked of the command's first target, its scene), its id taken
-    /// by Call::idOf. A scalar member's default is NONE: null, or a literal 0 (the registry conforms both to null), is
-    /// id 0. ANSWERED (toValue through its call), an id is minted as a handle of `kind` - 0 answers null. Declared after
-    /// the other domain methods (it drops the id's numeric range: a handle is no id).
+    /// by Call::idOf. NONE is id 0: null, or a literal 0 (the registry conforms both to null) - a scalar member's, and
+    /// EACH ELEMENT's of an array member (a vector, or T[N] at its count: its default the record's ids, each 0 a null).
+    /// ANSWERED (toValue through its call), an id is minted as a handle of `kind` - 0 answers null. Declared after the
+    /// other domain methods (it drops the id's numeric range: a handle is no id).
     Field handle(std::string kind) const
     {
         Field f = *this;
         f.param.handle = kind;
         f.param.min.reset();
         f.param.max.reset();
-        f.param.fallback = f.param.kind == Kind::Array ? Value(Value::Array{}) : Value();
         const auto get = f.get;
         const auto set = f.set;
         f.get = [get, kind](const R &r, Call *call) {
@@ -298,6 +433,7 @@ template <class R> struct Field {
             for (const Value &h : v.asArray()) a.push_back(idOf(h));
             return set(Value(std::move(a)), r, where, why);
         };
+        f.param.fallback = f.get(R{}, nullptr);   // the record's default ids (0) as none: null, or a null per element
         return f;
     }
 
@@ -323,7 +459,78 @@ template <class R, class M> Field<R> field(std::string name, M R::*member)
     f.set = [member](const Value &v, R &r, const std::string &where, std::string &why) {
         return fromValue(v, r.*member, where, why);
     };
+    if constexpr (detail::BytesOf<M>::value) {
+        f.bytesForm = [member](Field<R> &g) {
+            Param p = arg(g.param.name, Kind::Bytes);
+            p.fallback = detail::bytesOut(R{}.*member);
+            g.param = std::move(p);
+            g.get = [member](const R &r, Call *) { return detail::bytesOut(r.*member); };
+            g.set = [member](const Value &v, R &r, const std::string &where, std::string &why) {
+                return detail::bytesIn(v, r.*member, where, why);
+            };
+            g.bytesForm = nullptr;
+        };
+    }
     return f;
+}
+
+/// THE FREEZE's PROOF (SCRIPT-IN-ENGINE-1 E0): carried<T>() is true when every member of T, walked down through its
+/// nested records, is a shape paramOf / toValue / fromValue carry - bool, an enum, integers, floats, a string, Vec3 /
+/// Quat / Colour, optional / shared_ptr<const> of a carried shape, a vector or T[N] of one, an array of arrays of
+/// trivially copyable elements (bytes), a record (an aggregate: its fields counted and walked). It needs no table: a
+/// compile-only check (script.commands' script_record_shapes.cpp) asserts it for every record a family will table, so
+/// no lane meets a shape records.h cannot carry after records.h freezes. KEEP IT BESIDE paramOf: a shape added to one
+/// is added to the other.
+template <class T> constexpr bool carried();
+namespace detail {
+/// Converts to every type but std::nullptr_t (declared only: unevaluated) - the field count's probe.
+struct AnyField {
+    template <class T, class = std::enable_if_t<!std::is_same<T, std::nullptr_t>::value>> operator T() const;
+};
+template <class T, std::size_t... I>
+constexpr auto initsWith(std::index_sequence<I...>, int) -> decltype(T{{(void(I), AnyField{})}...}, true)
+{
+    return true;
+}
+template <class T, std::size_t... I> constexpr bool initsWith(std::index_sequence<I...>, long) { return false; }
+/// An aggregate's field count: the most members it takes, each by its own braces (no brace elision: an array member
+/// counts once). A count it gets wrong cannot pass: bindTypes binds exactly that many names.
+template <class T, std::size_t N = 128> constexpr std::size_t fieldCount()
+{
+    if constexpr (N == 0) return 0;
+    else if constexpr (initsWith<T>(std::make_index_sequence<N>(), 0)) return N;
+    else return fieldCount<T, N - 1>();
+}
+template <class Tuple, std::size_t... I> constexpr bool carriedEach(std::index_sequence<I...>)
+{
+    return (true && ... && carried<std::remove_pointer_t<std::tuple_element_t<I, Tuple>>>());
+}
+}  // namespace detail
+template <class T> constexpr bool carried()
+{
+    if constexpr (std::is_same<T, bool>::value || std::is_enum<T>::value || std::is_arithmetic<T>::value ||
+                  std::is_same<T, std::string>::value || detail::flatWidth<T>() != 0) {
+        return true;
+    } else if constexpr (detail::IsOptional<T>::value) {
+        return carried<typename detail::IsOptional<T>::Element>();
+    } else if constexpr (detail::IsShared<T>::value) {
+        return carried<typename detail::IsShared<T>::Element>();
+    } else if constexpr (detail::IsVector<T>::value || std::is_array<T>::value) {
+        using E = typename detail::ElementOf<T>::type;
+        if constexpr (detail::IsVector<E>::value || std::is_array<E>::value) return detail::elementAsBytes<E>();
+        else if constexpr (detail::IsOptional<E>::value || detail::IsShared<E>::value) return false;
+        else return carried<E>();
+    } else if constexpr (std::is_class<T>::value && std::is_aggregate<T>::value) {
+        constexpr std::size_t n = detail::fieldCount<T>();
+        if constexpr (n == 0) {
+            return false;
+        } else {
+            using Fields = decltype(detail::bindTypes(std::declval<const T &>(), std::integral_constant<std::size_t, n>()));
+            return detail::carriedEach<Fields>(std::make_index_sequence<n>());
+        }
+    } else {
+        return false;
+    }
 }
 
 /// A RECORD's TABLE: its fields in declaration order.

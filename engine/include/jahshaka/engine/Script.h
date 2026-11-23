@@ -117,7 +117,8 @@ struct Param {
     /// A HANDLE (Kind::Int; or Kind::Array of them, handles()): the kind of object it must name ("scene", "node",
     /// "mesh"); empty = a plain number. The registry checks the handle's owner and kind at the call - each element's
     /// of an array (Registry, THE HANDLES). A handle whose default is NULL (an optional one: a record's id member,
-    /// records.h Field::handle) is NONE when null or a literal 0 (both conform to null, nothing checked).
+    /// records.h Field::handle) is NONE when null or a literal 0 (both conform to null, nothing checked); so is each
+    /// ELEMENT of a handle array that declares a default (Field::handle's array: SkyDesc's six faces).
     std::string handle;
     /// THE DECLARED DOMAIN (the lead's S2): checked by the host at the call and printed by signatureText - so the strict
     /// host enforces it and the generated documentation shows it, and a command's body never re-checks it.
@@ -226,6 +227,7 @@ public:
     template <class T> T *object(const Value &h) const;
     static unsigned idOf(const Value &h) { return unsigned(std::uint64_t(h.asInt()) & 0xffffffffull); }
     Registry &registry() { return mRegistry; }
+    const Registry &registry() const { return mRegistry; }
 
 private:
     const CommandInfo &mInfo;
@@ -296,9 +298,15 @@ public:
     /// bound THERE (registerEngineCommands binds scene, view and picture), so no hold - whoever makes it, in whatever
     /// order - can claim it for another type; a kind with none (a test's own) binds at its first hold. A kind bound
     /// before to another type is a registry FAULT (the host refuses every run). nameKind marks a NAMED kind (the
-    /// engine's own ids: node, mesh, material): it holds no object.
-    template <class T> void bindKind(const std::string &kind) { bindAs(kind, &typeid(T)); }
-    void nameKind(const std::string &kind) { bindAs(kind, nullptr); }
+    /// engine's own ids: node, mesh, material): it holds no object. `identity` (SCRIPT-IN-ENGINE-1 E0): the object's
+    /// IDENTITY read when it is HELD (a scene's serial, a view's id - live then, whoever holds it): identityOf answers it
+    /// for the handle, so a holder compares what it held with what the engine holds now - never the address alone.
+    using Identity = std::uint64_t (*)(const void *object);
+    template <class T> void bindKind(const std::string &kind, Identity identity = nullptr)
+    {
+        bindAs(kind, &typeid(T), identity);
+    }
+    void nameKind(const std::string &kind) { bindAs(kind, nullptr, nullptr); }
     /// A held object's new handle; `scoped`: released by releaseScoped - NOT at a run's end: a held object lives across
     /// calls and runs until it is released (MCP-ON-HOST-1: a session drives the host call by call). 0, with `why`,
     /// for a kind bound to another type or a named kind, and when the table is full.
@@ -318,6 +326,8 @@ public:
     /// The T of a live held handle - read through its kind's bound type: null when the handle is not live, or its kind
     /// holds another C++ type than T.
     template <class T> T *object(std::int64_t handle) const { return static_cast<T *>(objectAs(handle, typeid(T))); }
+    /// The identity a live held handle's object had when it was held (bindKind's `identity`); 0 for none.
+    std::uint64_t identityOf(std::int64_t handle) const;
     /// True when `h` is a live handle of this registry of kind `kind`; else false with `why` (naming `where`).
     bool checkHandle(std::int64_t h, const std::string &kind, const std::string &where, std::string &why) const;
     /// THE EXISTENCE CHECK of a NAMED kind (its family's: the engine asked whether the id is its scene's now), run at
@@ -338,12 +348,12 @@ private:
     std::unordered_map<std::string, std::size_t> mByName;   // a name's index (call / find by name: MCP's door)
     std::vector<std::string> mFaults;
     std::string mLastError;
-    struct Held { unsigned kind = 0; std::shared_ptr<void> object; bool scoped = false; };
+    struct Held { unsigned kind = 0; std::shared_ptr<void> object; bool scoped = false; std::uint64_t identity = 0; };
     unsigned kindIndex(const std::string &kind);   // interned, 1..255 (0: the 256th kind, refused)
     std::int64_t holdAs(const std::string &kind, const std::type_info &type, std::shared_ptr<void> object, bool scoped,
                         std::string *why);
     void *objectAs(std::int64_t handle, const std::type_info &type) const;
-    void bindAs(const std::string &kind, const std::type_info *type);
+    void bindAs(const std::string &kind, const std::type_info *type, Identity identity);
     bool judgeHandles(const Call &call, const Param &p, const Value &v, std::string &why) const;
     std::uint64_t mSerial = 0;
     std::vector<std::string> mKinds;   // index - 1
@@ -351,6 +361,7 @@ private:
     std::vector<const std::type_info *> mKindType;   // index - 1: the C++ type a held kind is bound to (null: none yet)
     std::vector<bool> mKindNamed;      // index - 1: a NAMED kind (nameKind): it holds no object
     std::vector<HandleCheck> mChecks;  // index - 1
+    std::vector<Identity> mKindIdentity;   // index - 1: a held kind's identity read (bindKind; null: none)
     std::vector<Held> mHeld;           // slot - 1
     std::vector<std::function<void()>> mAtEnd;
     bool mTestDoors = false;
