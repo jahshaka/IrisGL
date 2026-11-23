@@ -28,6 +28,7 @@ set(JAHSHAKA_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreGi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgrePlanar.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreParticles.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreImageCodec.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreDecals.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreFog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/OgreSkeleton.cpp
