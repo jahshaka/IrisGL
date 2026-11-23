@@ -327,8 +327,6 @@ set(SRCS
     document/assets/shippedmeshes.cpp
     document/assets/texture2d.cpp
     document/materials/material.cpp
-    core/geometry/trimesh.cpp
-    core/geometry/trianglebvh.cpp
     document/assets/vertexlayout.cpp
     document/scenegraph/shadowmap.cpp
     document/animation/animation.cpp
@@ -352,7 +350,6 @@ set(SRCS
     document/scenegraph/nodegraph.cpp
     document/scenegraph/scenepicking.cpp
     document/scenegraph/socket.cpp
-    core/geometry/aabb.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
     document/physics/avatarmovement.cpp
@@ -407,8 +404,6 @@ set (HEADERS
     import/nodeclips.h
     import/modelsceneinfo.h
     import/clipfileinfo.h
-    core/geometry/trimesh.h
-    core/geometry/trianglebvh.h
     core/math/mathhelper.h
     irisglfwd.h
     irisgl.h
@@ -439,7 +434,6 @@ set (HEADERS
     document/scenegraph/socket.h
     document/qt/property.h
     core/geometry/boundingsphere.h
-    core/geometry/aabb.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
     document/physics/avatarmovement.h
@@ -621,14 +615,8 @@ set_source_files_properties(import/meshbake.cpp import/atomdag/adjacency.cpp imp
     import/atomdag/groups.cpp import/atomdag/simplify.cpp import/atomdag/measure.cpp import/atomdag/ladder.cpp
     import/atomdag/cards.cpp import/atomdag/build.cpp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
-# THE PICKING INDEX'S BUILD AND WALK TOO (SPEED-CPU): the bake reader builds a
-# TriangleBvh per picking mesh on every open, and at -O0 a 233k-triangle scan's
-# median-split build is the bake's own inner-loop story again. It computes only
-# min/max boxes and box tests (no triangle arithmetic — the hit test stays in
-# trimesh.cpp), so the optimisation level cannot change an answer; the same
-# never-contract rule anyway, so it could not even in principle.
-set_source_files_properties(core/geometry/trianglebvh.cpp
-    PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
+# THE PICKING INDEX (core/geometry/trianglebvh.cpp) keeps the same -O2 / never-contract rule: it builds in IrisCore
+# since NOQT-CORE-1 stage 2, so its property is set there (core/CMakeLists.txt).
 # THE PHYSICS TUs NEVER CONTRACT (BULLET-BATCHING-1): they inline Bullet's header math, which Bullet's own targets
 # compile with -ffp-contract=off (above) — the same rule here, every configuration, at the configuration's level.
 set_source_files_properties(document/physics/avatarmovement.cpp document/physics/environment.cpp

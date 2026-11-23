@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #ifndef TRIANGLEBVH_H
 #define TRIANGLEBVH_H
 
+#include "core/export.h"
 #include "core/math/vec.h"
 
 #include <vector>
@@ -43,7 +44,7 @@ class Triangle;
  * for its index too. Median split on the longest centroid axis, four triangles
  * a leaf, deterministic (ties broken by triangle index).
  */
-class TriangleBvh
+class IRIS_CORE_API TriangleBvh
 {
 public:
     /// Builds over `count` triangles. Replaces any previous index; leaves the

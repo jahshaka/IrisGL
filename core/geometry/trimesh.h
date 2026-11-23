@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define TRIMESH_H
 
 #include "core/geometry/trianglebvh.h"
+#include "core/export.h"
 #include "core/math/vec.h"
 
 #include <vector>
@@ -44,7 +45,7 @@ public:
 /**
  * This class defines a mesh using triangles. It's used for ray-casting and intersection tests
  */
-class TriMesh
+class IRIS_CORE_API TriMesh
 {
 public:
     std::vector<Triangle> triangles;

@@ -1,11 +1,12 @@
 #pragma once
+#include "core/export.h"
 #include "core/math/vec.h"
 #include "core/geometry/boundingsphere.h"
 
 namespace iris
 {
 
-class AABB
+class IRIS_CORE_API AABB
 {
 	iris::Vec3 minPos;
 	iris::Vec3 maxPos;
