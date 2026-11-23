@@ -15,14 +15,15 @@ For more information see the LICENSE file
 // THE ONE COLOUR-SPACE RULE (SKY_LIGHT_SPEC.md §4, owner decision §188e,
 // pick 3 §193a).
 //
-// An 8-bit QColor a user picked in a colour dialog is an sRGB value — the same
+// An 8-bit colour a user picked in a colour dialog is an sRGB value — the same
 // encoding an 8-bit albedo TEXTURE carries. Textures have always been bound
 // sRGB and decoded by the sampler; flat colours went to the renderer RAW, so a
 // "50% grey" material rendered 2.33x brighter than a 50% grey texture of the
 // same colour, and a 72-grey colour sky radiated 0.282 while the same 72 grey
 // painted into an equirect radiated 0.065. Two meanings for one picker.
 //
-// `linearOf` is that decode, and the rule is that EVERY colour a user picks
+// `linearOf` (document/srgbcolor.h, on the colour the document stores, over the
+// table below) is that decode, and the rule is that EVERY colour a user picks
 // passes through it on its way into the renderer: material albedo/emissive/
 // specular/fresnel, the sky (colour, gradient stops), fog, the view background,
 // light colours including the Sky Light's tint, and particle colours. UI
@@ -37,7 +38,6 @@ For more information see the LICENSE file
 // 0 and 255 are fixed points (0.0 and 1.0), so black and white never move: the
 // look change is entirely in the midtones, by design.
 
-#include <QColor>
 #include <cmath>
 
 namespace iris
@@ -74,23 +74,13 @@ struct LinearColor {
     float r = 0.0f, g = 0.0f, b = 0.0f;
 };
 
-inline LinearColor linearOf(const QColor &c)
-{
-    const float *lut = srgbToLinearTable();
-    // QColor's 8-bit accessors are the values the picker showed the user.
-    LinearColor out;
-    out.r = lut[qBound(0, c.red(), 255)];
-    out.g = lut[qBound(0, c.green(), 255)];
-    out.b = lut[qBound(0, c.blue(), 255)];
-    return out;
-}
-
-/// THE INVERSE, and the reason it exists: `linearOf` above is a DECODE applied
+/// THE INVERSE (its colour form is `srgbOf`, document/srgbcolor.h), and the
+/// reason it exists: `linearOf` is a DECODE applied
 /// to every colour on its way into the renderer, so the document's invariant is
-/// "a QColor is sRGB". An IMPORTER reading a format that specifies LINEAR
+/// "a picked colour is sRGB". An IMPORTER reading a format that specifies LINEAR
 /// values — glTF's baseColorFactor, specularColorFactor and emissiveFactor are
 /// all linear by spec, and assimp hands COLOR_DIFFUSE through unchanged — has
-/// a linear number in its hand and must ENCODE it before it becomes a QColor,
+/// a linear number in its hand and must ENCODE it before it becomes a colour,
 /// or the renderer decodes it a second time and every flat-coloured import
 /// darkens by a gamma (round-2 review item 2).
 ///
@@ -101,14 +91,6 @@ inline float srgbOfChannel(float linear)
     if (linear >= 1.0f) return 1.0f;
     return linear <= 0.0031308f ? linear * 12.92f
                                 : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
-}
-
-/// A linear RGB triple as the sRGB QColor the document stores. Alpha is not a
-/// colour and passes through.
-inline QColor srgbOf(float r, float g, float b, float a = 1.0f)
-{
-    return QColor::fromRgbF(qreal(srgbOfChannel(r)), qreal(srgbOfChannel(g)),
-                            qreal(srgbOfChannel(b)), qreal(qBound(0.0f, a, 1.0f)));
 }
 
 }  // namespace iris

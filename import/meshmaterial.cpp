@@ -10,8 +10,8 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "import/meshmaterial.h"
+#include "document/qt/colour.h"
 
-#include <QColor>
 #include <QFileInfo>
 #include <algorithm>
 #include <cmath>
@@ -59,7 +59,7 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // rather than round-tripping through assimp's lossy shininess
         // back-conversion, which is what produced near-mirror imports. A
         // spec-gloss source arrives already converted (MaterialHelper).
-        mat->setValue(QStringLiteral("baseColor"), data.baseColorFactor);
+        mat->setValue(QStringLiteral("baseColor"), iris::toQColor(data.baseColorFactor));
         mat->setValue(QStringLiteral("metallic"), data.metallicFactor);
         mat->setValue(QStringLiteral("roughness"), data.roughnessFactor);
         bindIfFile(QStringLiteral("baseColorMap"), data.baseColorTexture);
@@ -75,10 +75,10 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         mat->setValue(QStringLiteral("workflow"), data.workflow);
         mat->setValue(QStringLiteral("ior"), data.ior);
         if (data.workflow != 0) {
-            mat->setValue(QStringLiteral("specularColor"), data.specularFactor);
+            mat->setValue(QStringLiteral("specularColor"), iris::toQColor(data.specularFactor));
             mat->setValue(QStringLiteral("useFresnelColor"), data.useFresnelColor);
             if (data.useFresnelColor)
-                mat->setValue(QStringLiteral("fresnelColor"), data.fresnelFactor);
+                mat->setValue(QStringLiteral("fresnelColor"), iris::toQColor(data.fresnelFactor));
             // The specular / spec-gloss map binds to the SHARED metallic-specular
             // texture unit — the renderer reinterprets one unit by workflow, so
             // `metallicMap` is the right row and only one of the two sources can
@@ -105,9 +105,9 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // and for a different reason: there the map is the COLOUR.)
         const bool emissiveMap = isFile(data.emissiveTexture);
         const bool emissiveTinted =
-            data.emissionColor.isValid() && data.emissionColor != QColor(Qt::black);
+            data.emissionColor.isValid() && data.emissionColor != SrgbColor(0, 0, 0);
         if (emissiveTinted) {
-            mat->setValue(QStringLiteral("emissiveColor"), data.emissionColor);
+            mat->setValue(QStringLiteral("emissiveColor"), iris::toQColor(data.emissionColor));
             mat->setValue(QStringLiteral("emissiveIntensity"), 1.0f);
         }
 
@@ -123,18 +123,18 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         if (data.unlit) {
             mat->setValue(QStringLiteral("shadingModel"), 1);
             const bool baseIsBlack = !data.baseColorFactor.isValid() ||
-                                     data.baseColorFactor == QColor(Qt::black);
+                                     data.baseColorFactor == SrgbColor(0, 0, 0);
             if (!isFile(data.baseColorTexture) && emissiveMap)
                 mat->setValue(QStringLiteral("baseColorMap"), data.emissiveTexture);
             if (baseIsBlack && (emissiveTinted || emissiveMap))
                 mat->setValue(QStringLiteral("baseColor"),
-                              emissiveTinted ? data.emissionColor : QColor(Qt::white));
+                              iris::toQColor(emissiveTinted ? data.emissionColor : SrgbColor(255, 255, 255)));
         }
         return mat;
     }
 
     mat->setValue(QStringLiteral("baseColor"),
-                  data.diffuseColor.isValid() ? data.diffuseColor : QColor(200, 200, 200));
+                  iris::toQColor(data.diffuseColor.isValid() ? data.diffuseColor : SrgbColor(200, 200, 200)));
     mat->setValue(QStringLiteral("metallic"), 0.0f);
     mat->setValue(QStringLiteral("roughness"), roughnessFromShininess(data.shininess));
     bindIfFile(QStringLiteral("baseColorMap"), data.diffuseTexture);

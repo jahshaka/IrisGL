@@ -1,8 +1,7 @@
 #include "assimp/scene.h"
 #include "import/materialhelper.h"
-#include "core/color.h"
+#include "document/srgbcolor.h"
 #include <QDir>
-#include <QUuid>
 #include <QFileInfo>
 #include <QDateTime>
 #include <QDebug>
@@ -102,15 +101,8 @@ QVector<PendingRetraction> &pendingRetractions()
 }
 }   // namespace
 
-static QString generateTexGUID() {
-    auto id = QUuid::createUuid();
-    auto guid = id.toString().remove(0, 1);
-    guid.chop(1);
-    return guid;
-}
-
 // A MATERIAL COLOUR OUT OF assimp IS LINEAR, and the document's invariant is
-// that a QColor is sRGB (SKY_LIGHT_SPEC.md §4 / round-2 review item 2). glTF
+// that a picked colour is sRGB (SKY_LIGHT_SPEC.md §4 / round-2 review item 2). glTF
 // specifies baseColorFactor, emissiveFactor and specularColorFactor as linear
 // and assimp hands them through unchanged; OBJ/FBX/COLLADA material colours are
 // linear reflectance too. Storing the raw float as if it were an 8-bit sRGB
@@ -119,8 +111,8 @@ static QString generateTexGUID() {
 //
 // ENCODE HERE, once, at the boundary where the linear number is still known to
 // be linear. Every reader of the document downstream then means the same thing
-// by a QColor, which is the whole point of having one rule.
-QColor getAiMaterialColor(aiMaterial* aiMat, const char* pKey, unsigned int type = 0, unsigned int idx = 0)
+// by a colour, which is the whole point of having one rule.
+SrgbColor getAiMaterialColor(aiMaterial* aiMat, const char* pKey, unsigned int type = 0, unsigned int idx = 0)
 {
     aiColor3D col;
     aiMat->Get(pKey, type, idx, col);
@@ -462,7 +454,7 @@ QImage MaterialHelper::loadGLBEmbeddedTexture(const aiScene *scene,
         aiTexture* embeddedTex = scene->mTextures[texIndex];
         QString name = QString(embeddedTex->mFilename.C_Str());
         if (name.isEmpty()) {
-            name = /*generateTexGUID()*/ QString("_") + QString::number(texIndex);
+            name = QString("_") + QString::number(texIndex);
         }
         fileName = name + "." + embeddedTextureExtension(embeddedTex);
         if (embeddedTex->mHeight == 0)
@@ -720,7 +712,7 @@ static float perceivedBrightness(float r, float g, float b)
 void MaterialHelper::specularGlossinessToMetallicRoughness(const float diffuse[4],
                                                            const float specular[3],
                                                            float glossiness,
-                                                           QColor &baseColorOut,
+                                                           SrgbColor &baseColorOut,
                                                            float &metallicOut,
                                                            float &roughnessOut)
 {
@@ -977,7 +969,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
             qBound(0.0f, facts.specularColorFactor[0] * sf, 1.0f),
             qBound(0.0f, facts.specularColorFactor[1] * sf, 1.0f),
             qBound(0.0f, facts.specularColorFactor[2] * sf, 1.0f));
-        mat.specularFactor = QColor(255, 255, 255);   // kS stays inert
+        mat.specularFactor = SrgbColor(255, 255, 255);   // kS stays inert
         mat.metallicFactor = 0.0f;
         mat.specularMapTexture = mat.specularTexture;
     } else if (metalRoughBlock) {
@@ -1117,7 +1109,7 @@ void MaterialHelper::extractMaterialData(const aiScene *scene,
         // under a texture that is really there.
         if (!hasBaseColor && !specGloss) {
             const bool textured = QFileInfo(mat.baseColorTexture).isFile();
-            mat.baseColorFactor = textured || !mat.diffuseColor.isValid() ? QColor(255, 255, 255)
+            mat.baseColorFactor = textured || !mat.diffuseColor.isValid() ? SrgbColor(255, 255, 255)
                                                                          : mat.diffuseColor;
         }
         // OPACITY BELOW 1 IS GLASS: assimp's AI_MATKEY_OPACITY is the file's own

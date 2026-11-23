@@ -2915,7 +2915,7 @@ void SceneMirror::syncVrProxies()
         // the pair needs two of them to tell left from right.
         {
             PbrParams wandModel;
-            const iris::LinearColor grey = iris::linearOf(QColor(110, 110, 110));
+            const iris::LinearColor grey = iris::linearOf(iris::SrgbColor(110, 110, 110));
             wandModel.albedo = Colour(grey.r, grey.g, grey.b, 1.0f);
             wandModel.roughness = 0.6f;
             wandModel.metalness = 0.0f;

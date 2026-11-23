@@ -21,7 +21,7 @@ For more information see the LICENSE file
 // No assimp in this header: assimp is a PRIVATE dependency of IrisGL — the two scene types are forward-declared and
 // the parse a caller may keep is the opaque SceneSource.
 
-#include <QColor>
+#include "document/srgbcolor.h"
 #include <QMap>
 #include <QString>
 #include <functional>
@@ -37,10 +37,10 @@ namespace iris
 
 struct MeshMaterialData
 {
-    QColor diffuseColor;
-    QColor specularColor;
-    QColor ambientColor;
-    QColor emissionColor;
+    SrgbColor diffuseColor;
+    SrgbColor specularColor;
+    SrgbColor ambientColor;
+    SrgbColor emissionColor;
     float shininess = 0.0f;
 
     QString diffuseTexture;
@@ -70,7 +70,7 @@ struct MeshMaterialData
     // and any importer that fills none of these in, lands here: a plain
     // dielectric, half rough, which is the only defensible "unknown surface".
     bool hasPbr = false;
-    QColor baseColorFactor = QColor(255, 255, 255, 255);
+    SrgbColor baseColorFactor = SrgbColor(255, 255, 255, 255);
     float metallicFactor = 0.0f;
     float roughnessFactor = 0.5f;
     /// KHR_materials_unlit: the source says this surface is NOT lit. Imports as
@@ -109,10 +109,10 @@ struct MeshMaterialData
     int    workflow = 0;
     /// kS. From KHR_materials_specular's specularFactor, or a spec-gloss
     /// material's specularFactor. White is inert.
-    QColor specularFactor = QColor(255, 255, 255, 255);
+    SrgbColor specularFactor = SrgbColor(255, 255, 255, 255);
     /// F0 straight from KHR_materials_specular's specularColorFactor. Only
     /// meaningful with `useFresnelColor`; otherwise `ior` supplies F0.
-    QColor fresnelFactor = QColor(10, 10, 10, 255);
+    SrgbColor fresnelFactor = SrgbColor(10, 10, 10, 255);
     bool   useFresnelColor = false;
     /// KHR_materials_ior. 1.5 is the extension's own default and ours.
     float  ior = 1.5f;

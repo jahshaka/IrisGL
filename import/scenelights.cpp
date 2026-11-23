@@ -12,11 +12,10 @@ For more information see the LICENSE file
 #include "import/scenelights.h"
 
 #include "assimp/scene.h"
-#include "core/color.h"
+#include "document/srgbcolor.h"
 #include "core/math/quat.h"
 #include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/cameranode.h"
-#include "document/qt/colour.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/scenenode.h"
 #include "import/scenesource.h"
@@ -69,7 +68,7 @@ LightNodePtr lightFor(const aiLight *l)
     const float r = l->mColorDiffuse.r, g = l->mColorDiffuse.g, b = l->mColorDiffuse.b;
     const float peak = std::max({ r, g, b, 0.0f });
     light->intensity = peak;
-    light->color = toSrgbColor(peak > 0.0f ? srgbOf(r / peak, g / peak, b / peak) : QColor(255, 255, 255));
+    light->color = peak > 0.0f ? srgbOf(r / peak, g / peak, b / peak) : SrgbColor(255, 255, 255);
     if (type == LightType::Point || type == LightType::Spot) {
         // A file lamp states no range; it gets the editor's new lamp's (sceneeditservice).
         light->distance = 40.0f;

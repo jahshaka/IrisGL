@@ -19,7 +19,7 @@ struct aiScene;
 struct aiMaterial;
 struct aiTexture;
 #include "import/importsettings.h"   // FaceCullingImport
-#include <QColor>
+#include "document/srgbcolor.h"
 #include <QFuture>
 #include <QStringList>
 
@@ -61,7 +61,7 @@ public:
     static void specularGlossinessToMetallicRoughness(const float diffuse[4],
                                                       const float specular[3],
                                                       float glossiness,
-                                                      QColor& baseColorOut,
+                                                      SrgbColor& baseColorOut,
                                                       float& metallicOut,
                                                       float& roughnessOut);
     /// Image type from the leading magic bytes ("jpg", "png", "dds", "gif",

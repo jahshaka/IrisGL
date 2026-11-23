@@ -109,6 +109,16 @@ inline LinearColor linearOf(const SrgbColor &c)
     return out;
 }
 
+/// A LINEAR RGB triple (an importer's glTF factor, an assimp colour) as the sRGB colour the document stores
+/// (core/color.h's srgbOfChannel on each channel, then fromRgbF's 16-bit store). Alpha is not a colour: clamped to
+/// 0..1 and passed through.
+inline SrgbColor srgbOf(float r, float g, float b, float a = 1.0f)
+{
+    const float upper = 1.0f < a ? 1.0f : a;            // qBound(0, a, 1)'s exact form: a NaN reads 0
+    const float alpha = 0.0f < upper ? upper : 0.0f;
+    return SrgbColor::fromRgbF(srgbOfChannel(r), srgbOfChannel(g), srgbOfChannel(b), alpha);
+}
+
 }
 
 #endif // IRIS_SRGBCOLOR_H

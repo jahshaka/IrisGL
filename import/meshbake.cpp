@@ -293,7 +293,12 @@ namespace
 // v34 (2026-11-23, NOQT-DOCUMENT-1 stage 2): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — the document's pointers
 // are std::shared_ptr (this file's and scenebuilder.cpp's pointer lines; three comments re-pointed from the split
 // Types.h to Mesh.h): pointer spellings and comments only, no write path edited. Every bake re-bakes.
-constexpr int kFormatVersion = 34;
+// v35 (2026-11-23, NOQT-DOCUMENT-1 stage 3): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — the importer's colours are
+// iris::SrgbColor (QColor's Rgb spec bit for bit: core.colour_qt_parity): writeColor/readColor, MeshMaterialData's
+// colours (scenebuilder.h), materialhelper.cpp's srgbOf callers; its dead generateTexGUID() deleted. Every byte of a
+// blob but this version and the fingerprint is equal to v34's (40 fixtures, spikes/noqt-document-1/s3/). Every bake
+// re-bakes.
+constexpr int kFormatVersion = 35;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -307,18 +312,18 @@ void configure(QDataStream &s)
     s.setFloatingPointPrecision(QDataStream::SinglePrecision);
 }
 
-void writeColor(QDataStream &s, const QColor &c)
+void writeColor(QDataStream &s, const SrgbColor &c)
 {
     s << qint32(c.isValid() ? 1 : 0) << qint32(c.red()) << qint32(c.green())
       << qint32(c.blue()) << qint32(c.alpha());
 }
 
-QColor readColor(QDataStream &s)
+SrgbColor readColor(QDataStream &s)
 {
     qint32 valid = 0, r = 0, g = 0, b = 0, a = 255;
     s >> valid >> r >> g >> b >> a;
-    if (!valid) return QColor();
-    return QColor(r, g, b, a);
+    if (!valid) return SrgbColor();
+    return SrgbColor(r, g, b, a);
 }
 
 void writeMatrix(QDataStream &s, const iris::Mat4 &m)
