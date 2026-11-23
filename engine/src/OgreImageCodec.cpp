@@ -53,8 +53,8 @@ bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &
     } catch (const Ogre::Exception &e) {
         why = "no PNG codec on this engine: " + e.getDescription();
         return false;
-    } catch (const std::exception &e) {
-        why = std::string("no PNG codec on this engine: ") + e.what();
+    } catch (const std::exception &e) {   // (an allocation's failure in the lookup: not "no codec")
+        why = std::string("the PNG codec lookup failed: ") + e.what();
         return false;
     }
     // Ogre's door takes a mutable pointer: the rows are copied (top-left origin, RGBA8: the codec flips them for its own
