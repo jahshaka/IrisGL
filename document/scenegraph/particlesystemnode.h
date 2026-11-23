@@ -17,7 +17,6 @@ For more information see the LICENSE file
 
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
-#include "core/irisutils.h"
 #include "document/assets/texture2d.h"
 #include "document/srgbcolor.h"
 

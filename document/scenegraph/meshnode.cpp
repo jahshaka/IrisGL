@@ -23,7 +23,6 @@ For more information see the LICENSE file
 
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
-#include "core/irisutils.h"
 #include "document/animation/animableproperty.h"
 
 #include "document/assets/skeleton.h"

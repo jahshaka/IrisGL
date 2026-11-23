@@ -23,7 +23,6 @@ For more information see the LICENSE file
 #include "document/scenegraph/scenepicking.h"
 #include "document/assets/mesh.h"
 #include "core/geometry/trimesh.h"
-#include "core/irisutils.h"
 
 #include "document/physics/environment.h"
 #include "core/math/intersectionhelper.h"
