@@ -14,7 +14,7 @@ btTriangleMesh *PhysicsHelper::btTriangleMeshShapeFromMesh(iris::MeshPtr mesh)
 {
     btTriangleMesh *triMesh = new btTriangleMesh;
 
-    for (int i = 0; i < mesh->getTriMesh()->triangles.count(); ++i) {
+    for (int i = 0; i < int(mesh->getTriMesh()->triangles.size()); ++i) {
         auto triangle = mesh->getTriMesh()->triangles[i];
         btVector3 btVertexA(triangle.a.x(), triangle.a.y(), triangle.a.z());
         btVector3 btVertexB(triangle.b.x(), triangle.b.y(), triangle.b.z());
@@ -35,7 +35,7 @@ btConvexHullShape *PhysicsHelper::btConvexHullShapeFromMesh(iris::MeshPtr mesh)
     // every convex-hull body in the scene (deep audit 2026-09, area 4 F4).
     // One recalc at the end is the same AABB in O(n).
     const auto &triangles = mesh->getTriMesh()->triangles;
-    for (int i = 0; i < triangles.count(); ++i) {
+    for (int i = 0; i < int(triangles.size()); ++i) {
         auto triangle = triangles[i];
         btVector3 btVertexA(triangle.a.x(), triangle.a.y(), triangle.a.z());
         btVector3 btVertexB(triangle.b.x(), triangle.b.y(), triangle.b.z());

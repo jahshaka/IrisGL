@@ -14,7 +14,8 @@ For more information see the LICENSE file
 
 #include "core/geometry/trianglebvh.h"
 #include "core/math/vec.h"
-#include <QList>
+
+#include <vector>
 
 namespace iris
 {
@@ -46,7 +47,7 @@ public:
 class TriMesh
 {
 public:
-    QList<Triangle> triangles;
+    std::vector<Triangle> triangles;
 
 
     /**
@@ -65,7 +66,7 @@ public:
      * never built one keeps the brute-force loop.
      */
     void buildIndex();
-    bool hasIndex() const { return index.isBuilt() && index.triangleCount() == triangles.size(); }
+    bool hasIndex() const { return index.isBuilt() && index.triangleCount() == int(triangles.size()); }
     int indexNodeCount() const { return index.nodeCount(); }
 
     /**
@@ -83,7 +84,7 @@ public:
      * Returns number of intersections
      * @return
      */
-    int getSegmentIntersections(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, QList<TriangleIntersectionResult>& results) const;
+    int getSegmentIntersections(const iris::Vec3& segmentStart, const iris::Vec3& segmentEnd, std::vector<TriangleIntersectionResult>& results) const;
 
 private:
     TriangleBvh index;

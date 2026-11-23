@@ -26,7 +26,6 @@ For more information see the LICENSE file
 #include "document/scenegraph/nodedirtyset.h"
 #include "document/scenegraph/shadowmap.h"
 #include "document/scenegraph/simulationclock.h"
-#include "core/geometry/frustum.h"
 
 // temp
 #include <QJsonArray>

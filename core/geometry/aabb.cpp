@@ -88,13 +88,6 @@ void AABB::merge(const iris::Vec3& point)
 	maxPos = getMax(maxPos, point);
 }
 
-void AABB::merge(const QVector<iris::Vec3>& points)
-{
-	for (auto &p : points) {
-		merge(p);
-	}
-}
-
 void AABB::merge(const AABB& aabb)
 {
 	minPos = getMin(minPos, aabb.minPos);

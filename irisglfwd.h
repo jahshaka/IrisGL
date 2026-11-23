@@ -31,7 +31,6 @@ class ParticleSystemNode;
 /// argument for exactly that reason).
 enum class ParticlePreset : int;
 class Mesh;
-class Frustum;
 class Material;
 class MeshNode;
 class SceneNode;

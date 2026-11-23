@@ -353,7 +353,7 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 			    && !collisionContentNodes.contains(child->getGUID())) {
 				auto meshNode = std::static_pointer_cast<iris::MeshNode>(child);
 				auto mesh = meshNode->getMesh();
-				if (mesh && mesh->getTriMesh() && !mesh->getTriMesh()->triangles.isEmpty()) {
+				if (mesh && mesh->getTriMesh() && !mesh->getTriMesh()->triangles.empty()) {
 					btTriangleMesh *tri = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(mesh);
 					// A BVH shape, built once: this is static content and the
 					// sweep is the only thing that ever queries it.

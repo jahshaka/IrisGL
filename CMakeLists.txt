@@ -353,7 +353,6 @@ set(SRCS
     document/scenegraph/nodegraph.cpp
     document/scenegraph/scenepicking.cpp
     document/scenegraph/socket.cpp
-    core/geometry/frustum.cpp
     core/geometry/aabb.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
@@ -441,7 +440,6 @@ set (HEADERS
     document/scenegraph/socket.h
     document/qt/property.h
     core/geometry/boundingsphere.h
-    core/geometry/frustum.h
     core/geometry/aabb.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h

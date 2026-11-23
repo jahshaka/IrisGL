@@ -119,7 +119,7 @@ QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &se
         const Mat4 inv = world.inverted();
         const Vec3 a = inv * segStart, b = inv * segEnd;
 
-        QList<TriangleIntersectionResult> results;
+        std::vector<TriangleIntersectionResult> results;
         if (!mesh->getTriMesh()->getSegmentIntersections(a, b, results)) continue;
         for (const TriangleIntersectionResult &r : results) {
             MeshPick p;

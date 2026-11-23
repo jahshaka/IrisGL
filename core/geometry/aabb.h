@@ -1,6 +1,5 @@
 #pragma once
 #include "core/math/vec.h"
-#include <QVector>
 #include "core/geometry/boundingsphere.h"
 
 namespace iris
@@ -32,12 +31,9 @@ public:
     void scale(float scale, const iris::Vec3& pivot);
 
 	void merge(const iris::Vec3& point);
-	void merge(const QVector<iris::Vec3>& points);
 	void merge(const AABB& aabb);
 
 	BoundingSphere getMinimalEnclosingSphere() const;
-
-	static AABB fromPoints(const QVector<iris::Vec3>& points);
 
 private:
 	iris::Vec3 getMin(const iris::Vec3& a, const iris::Vec3& b) const;

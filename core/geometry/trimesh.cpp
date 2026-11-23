@@ -28,13 +28,13 @@ void TriMesh::addTriangle(const iris::Vec3& a,const iris::Vec3& b,const iris::Ve
 {
     Triangle tri = {a,b,c,iris::Vec3::crossProduct(b-a,c-a)};
 
-    triangles.append(tri);
+    triangles.push_back(tri);
     if (index.isBuilt()) index.clear();
 }
 
 void TriMesh::buildIndex()
 {
-    index.build(triangles.constData(), int(triangles.size()));
+    index.build(triangles.data(), int(triangles.size()));
 }
 
 //https://github.com/qt/qt3d/blob/5476bc6b4b6a12c921da502c24c4e078b04dd3b3/src/render/jobs/pickboundingvolumejob.cpp
@@ -98,18 +98,18 @@ bool TriMesh::segmentHitsTriangle(const Triangle& tri, const iris::Vec3& segment
  * Returns number of intersections
  * @return
  */
-int TriMesh::getSegmentIntersections(const iris::Vec3& segmentStart,const iris::Vec3& segmentEnd,QList<TriangleIntersectionResult>& results) const
+int TriMesh::getSegmentIntersections(const iris::Vec3& segmentStart,const iris::Vec3& segmentEnd,std::vector<TriangleIntersectionResult>& results) const
 {
     // (This counted every hit TWICE once — once in the loop and once after
     // appending — so callers reading the count saw 2, 4, 6... It is the number
     // of results appended.)
     int hits = 0;
-    const Triangle *tris = triangles.constData();
+    const Triangle *tris = triangles.data();
     auto test = [&](int i) {
         TriangleIntersectionResult result;
         if (!segmentHitsTriangle(tris[i], segmentStart, segmentEnd, result.t, result.hitPoint)) return;
         result.triangleIndex = i;
-        results.append(result);
+        results.push_back(result);
         hits++;
     };
     // THE INDEX, when it is there and still describes this list: only the
