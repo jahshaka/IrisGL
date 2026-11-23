@@ -25,6 +25,12 @@ namespace iris
 /// ITS 16-BIT CHANNELS AND ITS ROUNDING ARE QColor's (Rgb spec), BIT FOR BIT, BECAUSE THE STORED BYTES MUST NOT MOVE: it
 /// is the stored format's colour until the saved scene's format is rewritten (plan 0.16) - never a design to copy.
 /// core.colour_qt_parity proves the equality over every channel value and 100,000 seeded floats.
+/// ITS THREE NAMED LIMITS against QColor, each a stated choice: (1) a channel outside 0..1 is CLAMPED (Qt keeps an
+/// ExtendedRgb colour; no producer makes one); (2) every invalid colour crosses the editor's edge as THE invalid colour
+/// (an out-of-range QColor(-1, ...)'s alpha 0 is not carried); (3) == compares validity and the channels ONLY: QColor's
+/// also compares its spec, so an HSV white and an Rgb white, unequal in Qt, are EQUAL here - the answer a saved and
+/// reopened scene always gave (the parity row pins it by name).
+/// Its rounding decides BAKED bytes (meshbake.cpp writeColor): this file is WATCHED by source.bake_key_guard.
 class SrgbColor
 {
 public:

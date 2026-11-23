@@ -65,8 +65,9 @@ public:
     }
 
     /// A cube texture from its six decoded faces (+X, -X, +Y, -Y, +Z, -Z), square and of one size (Studio's
-    /// imagedecode.h decodes and sizes them). NULL when a face is null or the sizes differ.
-    static Texture2DPtr createCubeMap(const Image (&faces)[6]);
+    /// imagedecode.h decodes and sizes them), MOVED in: their buffers become the texture's, no copy.
+    /// NULL when a face is null or the sizes differ.
+    static Texture2DPtr createCubeMap(Image (&&faces)[6]);
 
     /// A LIVE texture (MATERIAL_GAPS_SPEC A-1): pixels a producer writes at
     /// runtime instead of a file on disk. Born opaque black at `width` x
@@ -100,16 +101,19 @@ public:
     /// Replaces the pixels. REFUSES a different size (a live texture's
     /// renderer-side twin cannot resize — destroy and create), a null image
     /// and anything that is not a live texture. Bumps the generation on success.
-    bool writeLive(const Image &rgba);
+    /// Taken BY VALUE: a producer hands its frame over with std::move and the buffer becomes the texture's
+    /// (a video frame pays no copy here).
+    bool writeLive(Image rgba);
 
 private:
     Texture2D();
 
-    /// The pixels the document holds: a live texture's frame, or a cube's +X
-    /// face (its size). load(path) leaves this null: it records the path only.
+    /// The pixels the document holds for a live texture: its frame. load(path)
+    /// leaves this null: it records the path only.
     Image image;
     bool cubeMap = false;
     Image cubeFaceImages[6];
+    int cubeSize = 0;   ///< a cube's face edge (getWidth / getHeight): its faces are the only copy of its pixels
 
     static std::atomic<ReadableProbe> sProbe;
 

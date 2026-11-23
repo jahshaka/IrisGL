@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 
 #include <cassert>
+#include <utility>
 
 #include "core/logger.h"
 #include "document/assets/livetextures.h"
@@ -60,15 +61,15 @@ Texture2DPtr Texture2D::load(QString path)
     return std::shared_ptr<Texture2D>(tex);
 }
 
-std::shared_ptr<Texture2D> Texture2D::createCubeMap(const Image (&faces)[6])
+std::shared_ptr<Texture2D> Texture2D::createCubeMap(Image (&&faces)[6])
 {
     for (const Image &face : faces) {
         if (face.isNull() || face.width != faces[0].width || face.height != faces[0].height) return nullptr;
     }
     auto tex = new Texture2D();
     tex->cubeMap = true;
-    tex->image = faces[0];
-    for (int i = 0; i < 6; ++i) tex->cubeFaceImages[i] = faces[i];
+    tex->cubeSize = faces[0].width;
+    for (int i = 0; i < 6; ++i) tex->cubeFaceImages[i] = std::move(faces[i]);
     return std::shared_ptr<Texture2D>(tex);
 }
 
@@ -95,23 +96,23 @@ Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
     return std::shared_ptr<Texture2D>(tex);
 }
 
-bool Texture2D::writeLive(const Image &rgba)
+bool Texture2D::writeLive(Image rgba)
 {
     if (!live || rgba.isNull()) return false;
     if (rgba.width != image.width || rgba.height != image.height) return false;
-    image = rgba;
+    image = std::move(rgba);
     ++generation;
     return true;
 }
 
 int Texture2D::getWidth()
 {
-    return image.width;
+    return cubeMap ? cubeSize : image.width;
 }
 
 int Texture2D::getHeight()
 {
-    return image.height;
+    return cubeMap ? cubeSize : image.height;
 }
 
 }

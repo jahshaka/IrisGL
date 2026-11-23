@@ -15,7 +15,6 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <QString>
-#include "document/srgbcolor.h"
 
 #include "core/math/bezierhelper.h"
 
@@ -358,21 +357,6 @@ public:
     {
         //slerp instead of lerp
         return iris::Quat::slerp(a,b,t);
-    }
-};
-
-class ColorKeyFrame:public KeyFrame<SrgbColor>
-{
-public:
-    SrgbColor interpolate(SrgbColor a,SrgbColor b,float t)
-    {
-        //return a+(b-a)*t;
-        return SrgbColor(
-                    a.red()+(int)((b.red()-a.red())*t),
-                    a.green()+(int)((b.green()-a.green())*t),
-                    a.blue()+(int)((b.blue()-a.blue())*t),
-                    a.alpha()+(int)((b.alpha()-a.alpha())*t)
-                    );
     }
 };
 

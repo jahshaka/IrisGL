@@ -385,7 +385,7 @@ PropertyRows ParticleSystemNode::getProperties()
     addFloat("Burst Repeat Delay",   "burstRepeatDelay",   burstRepeatDelay);
     addFloat("Start Delay",          "startDelay",         startDelay);
     // ADDENDUM A-4. The fade colours are per-second RATES encoded around
-    // 0.5 grey (0 = -1/s, 128 = 0, 255 = +1/s) — a QColor cannot carry a
+    // 0.5 grey (0 = -1/s, 128 = 0, 255 = +1/s) — a colour cannot carry a
     // negative component and a fade-OUT is exactly that. Said on the row.
     addFloat("Colour Fade Switch (s left)", "colourFadeSwitch", colourFadeSwitch);
     addFloat("Scale Rate",           "scaleRate",          scaleRate);

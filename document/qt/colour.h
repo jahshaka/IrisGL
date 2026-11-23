@@ -14,7 +14,9 @@ For more information see the LICENSE file
 
 // THE COLOUR's QT EDGE (NOQT-DOCUMENT-1 stage 3): iris::SrgbColor <-> QColor, bit for bit for a valid colour (the
 // 16-bit channels pass through as they are); every INVALID colour crosses as THE invalid colour (QColor() /
-// SrgbColor(), alpha 1 - an out-of-range QColor(-1, ...) keeps an alpha of 0 that is not carried). The editor's
+// SrgbColor(), alpha 1 - an out-of-range QColor(-1, ...) keeps an alpha of 0 that is not carried); and a QColor's
+// SPEC does not cross (an HSV colour arrives as its channels: equal to the Rgb colour of the same channels, which in
+// Qt it was not - srgbcolor.h's third named limit). The editor's
 // widgets, its property rows and its file codecs speak
 // QColor; the document stores SrgbColor. A QColor outside 0..1 (Qt's ExtendedRgb) arrives through QColor::rgba64(),
 // Qt's own clamp. This folder is the document's Qt adapter: it goes at NOQT-DOCUMENT-1's last stage.

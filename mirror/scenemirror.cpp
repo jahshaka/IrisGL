@@ -4483,7 +4483,7 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
         a.colourRampPath = ps->colourRampImage.toStdString();
         out.push_back(a);
     } else if (haveFade) {
-        // A QColor cannot carry a NEGATIVE delta, and a fade-out is exactly
+        // A colour cannot carry a NEGATIVE delta, and a fade-out is exactly
         // that, so the components are read as SIGNED rates in [-1, 1] around
         // 0.5: 0 is -1/s, 128 is 0, 255 is +1/s. The panel says so on the row.
         const auto rate = [](const iris::SrgbColor &c) {
@@ -5128,7 +5128,7 @@ void SceneMirror::syncLiveTextures()
 /// EVERY DOCUMENT FIELD `materialSyncFor` AND `toPbrParams` READ, as one hash.
 ///
 /// The memo's validity key (see MaterialSync in the header). All of it is PODs,
-/// QColors (four ints) and the material's own texture map — no allocation, no
+/// iris::SrgbColors (validity + four 16-bit channels) and the material's own texture map — no allocation, no
 /// dynamic_cast (the caller passes the resolved one), no string construction
 /// except the texture map's own keys, which a material without maps does not
 /// have at all.
@@ -5150,7 +5150,7 @@ struct FieldHasher {
     inline FieldHasher &operator<<(float f)
     { quint32 b; std::memcpy(&b, &f, sizeof b); return *this << b; }
     /// AT THE PRECISION THE CONVERSION READS. toPbrParams takes redF()/greenF()
-    /// /blueF(), which come off QColor's 16-BIT storage; rgba() is the 8-bit
+    /// /blueF(), which come off iris::SrgbColor's 16-BIT storage; red()..alpha() are the 8-bit
     /// view, so hashing that would let a sub-1/255 edit slip past the memo.
     /// Nothing in the tree writes a colour that fine today — the panel's picker
     /// and every reader are 8-bit — which is exactly why it would have been a
