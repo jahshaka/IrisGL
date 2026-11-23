@@ -297,9 +297,16 @@ bool OgreScene::setBillboards(NodeId id, const BillboardInstance *data, size_t c
         mError = "setBillboards: node has no billboard set"; return false;
     }
     if (!data && count) { mError = "setBillboards: null data"; return false; }
+    // PAST THE SET'S CAPACITY: REFUSED, naming both, before anything is allocated - the set keeps the quads it had
+    // (SCRIPT-IN-ENGINE-1 2c, the silent-setter class: the count used to be cut to the capacity with true).
+    if (count > size_t(it->second.billboardCapacity)) {
+        mError = "setBillboards: " + std::to_string(count) + " quads past the set's capacity " +
+                 std::to_string(it->second.billboardCapacity);
+        return false;
+    }
     JAH_TRY {
         Node &n = it->second;
-        const size_t want = std::min(count, size_t(n.billboardCapacity));
+        const size_t want = count;
         while (n.billboardHandles.size() < want) {
             Ogre::Billboard b = n.billboards->allocBillboard();
             if (b.mHandle == Ogre::ParticleSystemDef::InvalidHandle) break;

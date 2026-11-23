@@ -201,8 +201,8 @@ void registerEffectsCommands(Host &host, const Commands &k)
             Kind::Bool},
            "Replaces the node's billboards with N quads, as FLAT arrays (the batch's form): positions (3 N numbers, "
            "world-space centres), sizes (N, edge length), rotations (N, about the view axis) and colours (4 N, r g b a, "
-           "multiplying the texture); a part left out is every quad's default (size 1, rotation 0, white). The engine "
-           "draws at most the set's capacity (engine.billboards.create)."},
+           "multiplying the texture); a part left out is every quad's default (size 1, rotation 0, white). More quads than "
+           "the set's capacity (engine.billboards.create) FAIL with the engine's words, the set keeping what it had."},
           [k](Call &c) -> Value {
               const Value &pos = c[2]["positions"], &sz = c[2]["sizes"], &rot = c[2]["rotations"], &col = c[2]["colours"];
               const std::size_t n = pos.asArray().size() / 3;
@@ -222,7 +222,8 @@ void registerEffectsCommands(Host &host, const Commands &k)
                   if (!rot.isNull()) quads[i].rotationRadians = at(rot, i);
                   if (!col.isNull()) quads[i].colour = Colour(at(col, 4 * i), at(col, 4 * i + 1), at(col, 4 * i + 2), at(col, 4 * i + 3));
               }
-              if (!s->setBillboards(NodeId(Call::idOf(c[1])), quads.data(), quads.size())) return c.refuse(k.st->engine->lastError());
+              // (past the set's capacity the engine answers false naming both - the caller's count: FAILED by its words)
+              if (!s->setBillboards(NodeId(Call::idOf(c[1])), quads.data(), quads.size())) return c.fail(k.st->engine->lastError());
               return Value(true);
           });
 
