@@ -3722,6 +3722,8 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     out.rayBuildsJoinedWaiting = rayAheadJoinedWaiting();
     out.rayBuildsLanded = rayAheadLanded();
     out.completed = c->getNumCompleted();
+    out.aheadRun = c->getJahAheadRun();
+    out.aheadPromoted = c->getJahPromoted();
     out.failed    = c->getNumFailed();
     out.submitted = c->getJahNumResolved() + c->getNumOutstanding();
     out.placeholderDraws = mRetiredPlaceholderDraws;

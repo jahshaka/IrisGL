@@ -106,6 +106,13 @@ struct AsyncShaderStats {
     /// THE AHEAD PASSES (P3): colour passes the live scenes' render queues prepared AHEAD of a ray route's landing (the
     /// fork's RenderQueue::getNumAheadPasses; a running total) - 0 at rest: no route owed, no ahead hash.
     unsigned long long aheadPasses = 0;
+    /// THE AHEAD CLASS (SHADER-SYSTEM-1 stage 7; the owner: faster loading over correctness): the background compiler
+    /// serves a frame's OWN requests first and an ahead request (a pass as it will be after a route lands: the ahead
+    /// pass, the request-only hit decode) only when the frame's own queue is empty. `aheadRun` - ahead-class jobs the
+    /// service took; `aheadPromoted` - ahead jobs a pass drawing NOW asked for, moved to the frame's own queue (the
+    /// fork's HlmsAsyncCompiler::getJahAheadRun / getJahPromoted; running totals).
+    unsigned long long aheadRun = 0;
+    unsigned long long aheadPromoted = 0;
     /// THE BUILDS' BURST, "n of m" (SHADER-SYSTEM-1 stage 7; the notice's ONE fact, every host reads it - the app's
     /// toolbar indicator, jahlab's overlay and LAB BUILDING lines, the headset's surround): a burst BEGINS when the pending
     /// count rises from 0, `landed` counts its landings (a failure is a landing), `total` = landed + pending; when pending

@@ -133,6 +133,7 @@
 #include <OgreHlmsCompute.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsAsyncCompiler.h>
 #include <OgreHlmsPbsDatablock.h>
 #include <OgreItem.h>
 #include <OgreResourceTransition.h>
@@ -13079,6 +13080,9 @@ void RayQueryTier::beginHitDecode(const ReflectPassListener *key, OgreView *view
     if (owed) {
         const Ogre::RenderQueue *rq = scene->sceneManager()->getRenderQueue();
         hv.aheadCountsAt = rq->getNumPlaceholderDraws() + rq->getNumPendingSkips();
+        // ...IN THE AHEAD CLASS: the request-only decode asks for what a landing WILL draw, served only when the frame's
+        // own queue is empty (HlmsAsyncCompiler::_jahSetAheadClass; endHitDecode takes it back)
+        hm->getAsyncCompiler()->_jahSetAheadClass(true);
     }
 }
 
@@ -13091,6 +13095,8 @@ void RayQueryTier::endHitDecode(const ReflectPassListener *key) {
     if (!hv.armedSm) return;
     // (H) THE REQUEST-ONLY DECODE's SET (P3): its draws that met an object not built (a placeholder or a skip)
     if (hv.aheadRoutes) {
+        if (Ogre::HlmsManager *ahm = Ogre::Root::getSingleton().getHlmsManager())
+            ahm->getAsyncCompiler()->_jahSetAheadClass(false);   // (the ahead class ends with the decode pass)
         if (OgreScene *scene = sceneOfManager(hv.armedSm)) {
             const Ogre::RenderQueue *rq = hv.armedSm->getRenderQueue();
             scene->noteRouteNotReady(hv.aheadRoutes,
