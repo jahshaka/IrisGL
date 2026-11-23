@@ -17,6 +17,8 @@ add_library(IrisCore SHARED
     guid.h
     json.cpp
     json.h
+    log.cpp
+    log.h
     math/scalar.h
     signal.h
     text.cpp
