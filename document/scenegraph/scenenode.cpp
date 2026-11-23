@@ -11,7 +11,6 @@ For more information see the LICENSE file
 
 #include "jahshaka/engine/Ids.h"
 #include "core/math/trs.h"
-#include "document/qt/qtinterop.h"
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
 #include "core/math/vec.h"
@@ -706,55 +705,61 @@ PropertyRows SceneNode::getProperties()
     return props;
 }
 
-QVariant SceneNode::getPropertyValue(QString valueName)
+Value SceneNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "position") return iris::toQt(getLocalPos());
-    if (valueName == "rotation") return iris::toQt(getLocalRot().toEulerAngles());
-    if (valueName == "scale")	 return iris::toQt(getLocalScale());
-    if (valueName == "name")       return getName();
-    if (valueName == "visible")    return isVisible();
-    if (valueName == "castShadow") return getShadowCastingEnabled();
-    if (valueName == "planarReflector") return getPlanarReflector();
-    if (valueName == "probeGridExcluded") return getProbeGridExcluded();
-    if (valueName == "pickable")   return isPickable();
-    if (valueName == "scaleLock")  return getScaleLock();
+    if (valueName == "position") return vec3ToValue(getLocalPos());
+    if (valueName == "rotation") return vec3ToValue(getLocalRot().toEulerAngles());
+    if (valueName == "scale")    return vec3ToValue(getLocalScale());
+    if (valueName == "name")       return Value(getName().toStdString());
+    if (valueName == "visible")    return Value(isVisible());
+    if (valueName == "castShadow") return Value(getShadowCastingEnabled());
+    if (valueName == "planarReflector") return Value(getPlanarReflector());
+    if (valueName == "probeGridExcluded") return Value(getProbeGridExcluded());
+    if (valueName == "pickable")   return Value(isPickable());
+    if (valueName == "scaleLock")  return Value(getScaleLock());
     // Signed, matching the row above: -1 is "all channels".
-    if (valueName == "lightMask")  return static_cast<int>(lightMask);
-    if (valueName == "mobility")   return static_cast<int>(mMobility);
+    if (valueName == "lightMask")  return Value(static_cast<int>(lightMask));
+    if (valueName == "mobility")   return Value(static_cast<int>(mMobility));
 
-    return QVariant();
+    return Value();
 }
 
-bool SceneNode::setPropertyValue(QString valueName, const QVariant &value)
+bool SceneNode::setPropertyValue(std::string_view valueName, const Value &value)
 {
-    if (valueName == "position") { setLocalPos(iris::fromQt(value.value<QVector3D>()));   return true; }
-    if (valueName == "rotation") { setLocalRot(iris::Quat::fromEulerAngles(iris::fromQt(value.value<QVector3D>()))); return true; }
-    if (valueName == "scale")    { setLocalScale(iris::fromQt(value.value<QVector3D>())); return true; }
-    if (valueName == "name")       { setName(value.toString());                  return true; }
+    // STRICT (NOQT-DOCUMENT-1 stage 4): the value's kind is the row's own (a vector an Array of three numbers, a bool
+    // a Bool, an int an Int, a name a String); anything else is false and nothing moves. The editor converts a Qt
+    // value by the row's kind first (src/app/qtstdgui.h).
+    Vec3 v;
+    if (valueName == "position") { if (!vec3FromValue(value, v)) return false; setLocalPos(v); return true; }
+    if (valueName == "rotation") { if (!vec3FromValue(value, v)) return false; setLocalRot(Quat::fromEulerAngles(v)); return true; }
+    if (valueName == "scale")    { if (!vec3FromValue(value, v)) return false; setLocalScale(v); return true; }
+    if (valueName == "name") {
+        if (value.kind() != Kind::String) return false;
+        setName(QString::fromStdString(value.asString()));
+        return true;
+    }
+    const bool isBool = value.kind() == Kind::Bool;
     // setVisible, not show()/hide(): those cascade to children, which is a
     // different operation from setting this node's own flag.
-    if (valueName == "visible")    { setVisible(value.toBool());                 return true; }
-    if (valueName == "castShadow") { setShadowCastingEnabled(value.toBool());    return true; }
-    if (valueName == "planarReflector") { setPlanarReflector(value.toBool());     return true; }
-    if (valueName == "probeGridExcluded") { setProbeGridExcluded(value.toBool());   return true; }
-    if (valueName == "pickable")   { setPickable(value.toBool());                return true; }
-    if (valueName == "scaleLock")  { setScaleLock(value.toBool());               return true; }
-    // Accepts BOTH spellings of the same 32 bits: -1 (the signed row this node
-    // reflects) and 4294967295 (what an unsigned-minded caller will send).
-    // toInt() alone would turn the latter into 0 with ok=false — i.e. "no
-    // channels at all" — which is the exact opposite of what was asked for, so
-    // the wide read is not a nicety.
+    if (valueName == "visible")    { if (!isBool) return false; setVisible(value.asBool());                 return true; }
+    if (valueName == "castShadow") { if (!isBool) return false; setShadowCastingEnabled(value.asBool());    return true; }
+    if (valueName == "planarReflector") { if (!isBool) return false; setPlanarReflector(value.asBool());     return true; }
+    if (valueName == "probeGridExcluded") { if (!isBool) return false; setProbeGridExcluded(value.asBool());   return true; }
+    if (valueName == "pickable")   { if (!isBool) return false; setPickable(value.asBool());                return true; }
+    if (valueName == "scaleLock")  { if (!isBool) return false; setScaleLock(value.asBool());               return true; }
+    // THE 32 BITS, whichever spelling the int carries: -1 (the signed row this
+    // node reflects) and 4294967295 (what an unsigned-minded caller sends) are
+    // the same mask. The editor's edge converts a JS number with Qt's toInt, which
+    // wraps 4294967295 to -1; an Int past 32 bits keeps its low 32.
     if (valueName == "lightMask") {
-        bool ok = false;
-        const qlonglong wide = value.toLongLong(&ok);
-        if (!ok) return false;
-        setLightMask(static_cast<quint32>(wide & 0xFFFFFFFFll));
+        if (value.kind() != Kind::Int) return false;
+        setLightMask(static_cast<quint32>(value.asInt() & 0xFFFFFFFFll));
         return true;
     }
     if (valueName == "mobility") {
-        bool ok = false;
-        const int m = value.toInt(&ok);
-        if (!ok || m < int(Mobility::Auto) || m > int(Mobility::Movable)) return false;
+        if (value.kind() != Kind::Int) return false;
+        const std::int64_t m = value.asInt();
+        if (m < int(Mobility::Auto) || m > int(Mobility::Movable)) return false;
         setMobility(static_cast<Mobility>(m));
         return true;
     }

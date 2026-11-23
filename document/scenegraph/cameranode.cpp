@@ -105,106 +105,99 @@ const CameraPostKey *cameraPostKeys(int &count)
     return kPostKeys;
 }
 
-const CameraPostKey *cameraPostKey(const QString &id)
+const CameraPostKey *cameraPostKey(std::string_view id)
 {
     for (const CameraPostKey &k : kPostKeys)
-        if (id == QLatin1String(k.id)) return &k;
+        if (id == k.id) return &k;
     return nullptr;
 }
 
-bool CameraNode::hasPostOverride(const QString &id) const
+bool CameraNode::hasPostOverride(std::string_view id) const
 {
-    return postOverrides.contains(id);
+    return postOverrides.find(std::string(id)) != nullptr;
 }
 
-QVariant CameraNode::postOverride(const QString &id) const
+Value CameraNode::postOverride(std::string_view id) const
 {
-    const auto it = postOverrides.constFind(id);
-    if (it == postOverrides.constEnd()) return QVariant();
+    const Value *v = postOverrides.find(std::string(id));
+    if (!v) return Value();
     const CameraPostKey *key = cameraPostKey(id);
-    if (!key) return QVariant();
+    if (!key) return Value();
     // A Stack key has no scalar reading, and returning something plausible
     // (a count? true?) would be a trap for every caller of this function —
     // applyCameraPostFx's num/flag/whole helpers all go through here.
-    if (key->type == CameraPostKeyType::Stack) return QVariant();
-    return key->type == CameraPostKeyType::Number ? QVariant(it->toDouble())
-                                                  : QVariant(it->toInt());
+    if (key->type == CameraPostKeyType::Stack) return Value();
+    double n = 0.0;
+    if (!numberOf(*v, n)) return Value();
+    return key->type == CameraPostKeyType::Number ? Value(n) : Value(static_cast<int>(n));
 }
 
-QJsonArray CameraNode::postOverrideStack(const QString &id) const
+Value CameraNode::postOverrideStack(std::string_view id) const
 {
     const CameraPostKey *key = cameraPostKey(id);
-    if (!key || key->type != CameraPostKeyType::Stack) return QJsonArray();
-    return postOverrides.value(id).toArray();
+    if (!key || key->type != CameraPostKeyType::Stack) return Value(Value::Array{});
+    const Value *v = postOverrides.find(std::string(id));
+    return v && v->kind() == Kind::Array ? *v : Value(Value::Array{});
 }
 
-bool CameraNode::setPostOverride(const QString &id, const QVariant &value)
+bool CameraNode::setPostOverride(std::string_view id, const Value &value)
 {
+    // STRICT (NOQT-DOCUMENT-1 stage 4): the editor converts a Qt value by the key's type first (src/app/qtstdgui.h,
+    // qtstd::toPostValue: Qt's toDouble / toInt with their refusals, a Bool kept); this takes the key's own kind.
     const CameraPostKey *key = cameraPostKey(id);
     if (!key) return false;
+    const std::string name(id);
+    if (postOverrides.kind() != Kind::Object) postOverrides = Value(Value::Object{});
     switch (key->type) {
     case CameraPostKeyType::Number: {
-        bool ok = false;
-        double v = value.toDouble(&ok);
-        if (!ok || !std::isfinite(v)) return false;
+        // A Number, or an Int (one JSON number type: RULED E (1)).
+        double v = 0.0;
+        if (!numberOf(value, v) || !std::isfinite(v)) return false;
         // THE IMAGE BLOCK'S RANGES HOLD FOR A CAMERA TOO (IMAGE-1 fix round): the
         // override is the same quantity as the world's row, so it is clamped to
         // the same table (a contrast of 1000 would be a power the curve never sees).
-        if (const lens::ImageParamDef *d = lens::imageParam(id.toLatin1().constData()))
+        if (const lens::ImageParamDef *d = lens::imageParam(name.c_str()))
             v = std::min(std::max(v, double(d->minValue)), double(d->maxValue));
-        postOverrides.insert(id, v);
+        (void)postOverrides.set(name, Value(v));
         return markedParams();
     }
     case CameraPostKeyType::Toggle: {
-        // A toggle takes a bool or the 0/1 an int row uses — both spellings
+        // A toggle takes a Bool or the Int 0 / 1 (RULED E (2)): both spellings
         // reach here (a checkbox writes one, the row table the other).
-        if (value.typeId() == QMetaType::Bool) {
-            postOverrides.insert(id, value.toBool() ? 1 : 0);
+        if (value.kind() == Kind::Bool) {
+            (void)postOverrides.set(name, Value(value.asBool() ? 1 : 0));
             return markedParams();
         }
-        bool ok = false;
-        const int v = value.toInt(&ok);
-        if (!ok || (v != 0 && v != 1)) return false;
-        postOverrides.insert(id, v);
+        if (value.kind() != Kind::Int || (value.asInt() != 0 && value.asInt() != 1)) return false;
+        (void)postOverrides.set(name, Value(static_cast<int>(value.asInt())));
         return markedParams();
     }
     case CameraPostKeyType::Stack: {
-        // Whatever spelling arrives — a QJsonArray from the reader, a
-        // QVariantList from a script — is normalised by the document's ONE
-        // validator, exactly as the world's stack is. Anything that is not a
-        // list at all is refused; an empty list is legal and MEANS something
-        // (this camera has no looks, over a world that does).
-        QJsonArray stack;
-        if (value.canConvert<QJsonArray>() && value.metaType().id() == QMetaType::QJsonArray)
-            stack = value.toJsonArray();
-        else if (value.metaType().id() == QMetaType::QVariantList)
-            stack = QJsonArray::fromVariantList(value.toList());
-        else if (value.metaType().id() == QMetaType::QJsonValue && value.toJsonValue().isArray())
-            stack = value.toJsonValue().toArray();
-        else
-            return false;
-        postOverrides.insert(id, normalizeLookStack(stack));
+        // An Array, normalised by the document's ONE validator, exactly as the
+        // world's stack is. Anything that is not a list at all is refused; an
+        // empty list is legal and MEANS something (this camera has no looks, over
+        // a world that does).
+        if (value.kind() != Kind::Array) return false;
+        (void)postOverrides.set(name, normalizeLookStack(value));
         return markedParams();
     }
     case CameraPostKeyType::Enum: {
-        bool ok = false;
-        const int v = value.toInt(&ok);
-        if (!ok) return false;
+        if (value.kind() != Kind::Int) return false;
+        const std::int64_t v = value.asInt();
         // THE ONE CROSS-KEY RULE the table cannot express (see kPostKeys):
         // a camera may switch SMAA OFF, but not to another PRESET — that is a
         // shader recompile and would hitch on every cut.
-        if (id == QLatin1String("smaa") && v >= 0) return false;
-        postOverrides.insert(id, v);
+        if (name == "smaa" && v >= 0) return false;
+        (void)postOverrides.set(name, Value(static_cast<int>(v)));
         return markedParams();
     }
     }
     return false;
 }
 
-bool CameraNode::clearPostOverride(const QString &id)
+bool CameraNode::clearPostOverride(std::string_view id)
 {
-    if (!postOverrides.contains(id)) return false;
-    postOverrides.remove(id);
+    if (!postOverrides.erase(std::string(id))) return false;
     return markedParams();
 }
 
@@ -438,57 +431,58 @@ PropertyRows CameraNode::getProperties()
     return props;
 }
 
-QVariant CameraNode::getPropertyValue(QString valueName)
+Value CameraNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "aspectRatio") return aspectRatio;
-    if (valueName == "angle")       return angle;
-    if (valueName == "nearClip")    return nearClip;
-    if (valueName == "farClip")     return farClip;
-    if (valueName == "orthoSize")   return orthoSize;
-    if (valueName == "projMode")    return static_cast<int>(projMode);
+    const auto F = [](float f) { return Value(double(f)); };
+    if (valueName == "aspectRatio") return F(aspectRatio);
+    if (valueName == "angle")       return F(angle);
+    if (valueName == "nearClip")    return F(nearClip);
+    if (valueName == "farClip")     return F(farClip);
+    if (valueName == "orthoSize")   return F(orthoSize);
+    if (valueName == "projMode")    return Value(static_cast<int>(projMode));
 
     // CAMERAS_SPEC §2.
-    if (valueName == "focalLength")     return focalLength();
-    if (valueName == "sensorWidth")     return sensorWidth;
-    if (valueName == "sensorHeight")    return sensorHeight;
-    if (valueName == "authorMode")      return static_cast<int>(authorMode);
+    if (valueName == "focalLength")     return F(focalLength());
+    if (valueName == "sensorWidth")     return F(sensorWidth);
+    if (valueName == "sensorHeight")    return F(sensorHeight);
+    if (valueName == "authorMode")      return Value(static_cast<int>(authorMode));
     // CAMERA_LENS_SPEC §3.
-    if (valueName == "sensorFit")         return static_cast<int>(sensorFit);
-    if (valueName == "anamorphicSqueeze") return anamorphicSqueeze;
-    if (valueName == "lensShiftX")        return lensShiftX;
-    if (valueName == "lensShiftY")        return lensShiftY;
-    if (valueName == "focusOffset")         return focusOffset;
-    if (valueName == "smoothFocus")         return smoothFocus;
-    if (valueName == "focusSmoothingSpeed") return focusSmoothingSpeed;
-    if (valueName == "minFocusDistance")    return minFocusDistance;
-    if (valueName == "bladeCount")          return bladeCount;
-    if (valueName == "focusPlaneVisible")   return focusPlaneVisible;
-    if (valueName == "constrainAspect") return constrainAspect;
-    if (valueName == "dofEnabled")      return dofEnabled;
-    if (valueName == "focusMode")       return static_cast<int>(focusMode);
-    if (valueName == "focusDistance")   return focusDistance;
-    if (valueName == "focusTarget")     return focusTarget;
-    if (valueName == "fStop")           return fStop;
-    if (valueName == "outputHeight")    return outputHeight;
-    if (valueName == "bodyVisible")     return bodyVisible;
+    if (valueName == "sensorFit")         return Value(static_cast<int>(sensorFit));
+    if (valueName == "anamorphicSqueeze") return F(anamorphicSqueeze);
+    if (valueName == "lensShiftX")        return F(lensShiftX);
+    if (valueName == "lensShiftY")        return F(lensShiftY);
+    if (valueName == "focusOffset")         return F(focusOffset);
+    if (valueName == "smoothFocus")         return Value(smoothFocus);
+    if (valueName == "focusSmoothingSpeed") return F(focusSmoothingSpeed);
+    if (valueName == "minFocusDistance")    return F(minFocusDistance);
+    if (valueName == "bladeCount")          return Value(bladeCount);
+    if (valueName == "focusPlaneVisible")   return Value(focusPlaneVisible);
+    if (valueName == "constrainAspect") return Value(constrainAspect);
+    if (valueName == "dofEnabled")      return Value(dofEnabled);
+    if (valueName == "focusMode")       return Value(static_cast<int>(focusMode));
+    if (valueName == "focusDistance")   return F(focusDistance);
+    if (valueName == "focusTarget")     return Value(focusTarget.toStdString());
+    if (valueName == "fStop")           return F(fStop);
+    if (valueName == "outputHeight")    return Value(outputHeight);
+    if (valueName == "bodyVisible")     return Value(bodyVisible);
     // CAMERA_LENS_SPEC §4.
-    if (valueName == "exposureMode")    return static_cast<int>(exposureMode);
-    if (valueName == "exposure")        return exposure;
-    if (valueName == "exposureMin")     return exposureMin;
-    if (valueName == "exposureMax")     return exposureMax;
+    if (valueName == "exposureMode")    return Value(static_cast<int>(exposureMode));
+    if (valueName == "exposure")        return F(exposure);
+    if (valueName == "exposureMin")     return F(exposureMin);
+    if (valueName == "exposureMax")     return F(exposureMax);
     // CAMERA_LENS_SPEC §5: "postFx.<key>" reads the OVERRIDE and nothing else —
-    // an invalid QVariant means "inherited", which is exactly the information a
-    // caller needs and the reason this is not a plain float.
-    if (valueName.startsWith(QLatin1String("postFx."))) {
-        const QString key = valueName.mid(7);
-        // The one STACK key (`looks`) reads back as a list — postOverride is
-        // scalar by contract and returns invalid for it, which would read as
-        // "inherited" and be wrong. Absent still reads as invalid, so the
+    // a Null means "inherited", which is exactly the information a caller needs
+    // and the reason this is not a plain float.
+    if (valueName.substr(0, 7) == "postFx.") {
+        const std::string_view key = valueName.substr(7);
+        // The one STACK key (`looks`) reads back as its Array — postOverride is
+        // scalar by contract and returns Null for it, which would read as
+        // "inherited" and be wrong. Absent still reads as Null, so the
         // tri-state survives (POST_LOOKS_SPEC §7 R8).
         const CameraPostKey *k = cameraPostKey(key);
         if (k && k->type == CameraPostKeyType::Stack) {
-            if (!postOverrides.contains(key)) return QVariant();
-            return postOverrideStack(key).toVariantList();
+            if (!hasPostOverride(key)) return Value();
+            return postOverrideStack(key);
         }
         return postOverride(key);
     }
@@ -496,25 +490,34 @@ QVariant CameraNode::getPropertyValue(QString valueName)
     return SceneNode::getPropertyValue(valueName);
 }
 
-bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
+bool CameraNode::setPropertyValue(std::string_view valueName, const Value &value)
 {
-    if (valueName == "aspectRatio") { setAspectRatio(value.toFloat());          return markedParams(); }
-    if (valueName == "angle")       { setFieldOfViewDegrees(value.toFloat());   return markedParams(); }
-    if (valueName == "nearClip")    { nearClip = value.toFloat();               return markedParams(); }
-    if (valueName == "farClip")     { farClip = value.toFloat();                return markedParams(); }
-    if (valueName == "orthoSize")   { setOrthagonalZoom(value.toFloat());       return markedParams(); }
+    // STRICT: a float a Number (or an Int), an int an Int, a flag a Bool, the focus target a String; anything else
+    // false, nothing moved.
+    double n = 0.0;
+    const bool isNum = numberOf(value, n);
+    const float f = float(n);
+    const bool isInt = value.kind() == Kind::Int;
+    const int i = isInt ? static_cast<int>(value.asInt()) : 0;
+    const bool isBool = value.kind() == Kind::Bool;
+    const bool b = isBool && value.asBool();
+    if (valueName == "aspectRatio") { if (!isNum) return false; setAspectRatio(f);          return markedParams(); }
+    if (valueName == "angle")       { if (!isNum) return false; setFieldOfViewDegrees(f);   return markedParams(); }
+    if (valueName == "nearClip")    { if (!isNum) return false; nearClip = f;               return markedParams(); }
+    if (valueName == "farClip")     { if (!isNum) return false; farClip = f;                return markedParams(); }
+    if (valueName == "orthoSize")   { if (!isNum) return false; setOrthagonalZoom(f);       return markedParams(); }
     // setProjection, not a raw assignment: it keeps isPerspective in lock-step
     // with projMode (an out-of-sync pair renders previews orthographic).
-    if (valueName == "projMode")    { setProjection(static_cast<CameraProjection>(value.toInt())); return markedParams(); }
+    if (valueName == "projMode")    { if (!isInt) return false; setProjection(static_cast<CameraProjection>(i)); return markedParams(); }
 
     // CAMERAS_SPEC §2. The two lens rows go through their setters, which is
     // what keeps `angle` and the focal length the SAME value seen two ways.
-    if (valueName == "focalLength")  { setFocalLength(value.toFloat());              return markedParams(); }
-    if (valueName == "sensorWidth")  { setSensorSize(value.toFloat(), sensorHeight); return markedParams(); }
-    if (valueName == "sensorHeight") { setSensorSize(sensorWidth, value.toFloat());  return markedParams(); }
+    if (valueName == "focalLength")  { if (!isNum) return false; setFocalLength(f);              return markedParams(); }
+    if (valueName == "sensorWidth")  { if (!isNum) return false; setSensorSize(f, sensorHeight); return markedParams(); }
+    if (valueName == "sensorHeight") { if (!isNum) return false; setSensorSize(sensorWidth, f);  return markedParams(); }
     if (valueName == "authorMode") {
-        const int m = value.toInt();
-        authorMode = (m == static_cast<int>(CameraAuthorMode::Millimeters))
+        if (!isInt) return false;
+        authorMode = (i == static_cast<int>(CameraAuthorMode::Millimeters))
                          ? CameraAuthorMode::Millimeters : CameraAuthorMode::Degrees;
         return markedParams();
     }
@@ -523,68 +526,74 @@ bool CameraNode::setPropertyValue(QString valueName, const QVariant &value)
     // length MEANS, so the authored view of the angle has to be the one that
     // survives.
     if (valueName == "sensorFit") {
-        const int f = value.toInt();
-        setSensorFit(f == static_cast<int>(CameraSensorFit::Horizontal) ? CameraSensorFit::Horizontal
-                   : f == static_cast<int>(CameraSensorFit::Auto)       ? CameraSensorFit::Auto
+        if (!isInt) return false;
+        setSensorFit(i == static_cast<int>(CameraSensorFit::Horizontal) ? CameraSensorFit::Horizontal
+                   : i == static_cast<int>(CameraSensorFit::Auto)       ? CameraSensorFit::Auto
                                                                         : CameraSensorFit::Vertical);
         return markedParams();
     }
-    if (valueName == "anamorphicSqueeze") { setAnamorphicSqueeze(value.toFloat()); return markedParams(); }
+    if (valueName == "anamorphicSqueeze") { if (!isNum) return false; setAnamorphicSqueeze(f); return markedParams(); }
     // Shift is clamped to a frame either way: past that the frustum's near rect
     // no longer contains the axis and the projection stops being useful.
-    if (valueName == "lensShiftX") { lensShiftX = qBound(-1.0f, value.toFloat(), 1.0f); return markedParams(); }
-    if (valueName == "lensShiftY") { lensShiftY = qBound(-1.0f, value.toFloat(), 1.0f); return markedParams(); }
-    if (valueName == "focusOffset")         { focusOffset = value.toFloat();               return markedParams(); }
-    if (valueName == "smoothFocus")         { smoothFocus = value.toBool();                return markedParams(); }
-    if (valueName == "focusSmoothingSpeed") { focusSmoothingSpeed = qMax(0.0f, value.toFloat()); return markedParams(); }
-    if (valueName == "minFocusDistance")    { minFocusDistance = qMax(0.0f, value.toFloat()); return markedParams(); }
-    if (valueName == "bladeCount")          { bladeCount = qBound(3, value.toInt(), 16);   return markedParams(); }
-    if (valueName == "focusPlaneVisible")   { focusPlaneVisible = value.toBool();          return markedParams(); }
-    if (valueName == "constrainAspect") { constrainAspect = value.toBool(); return markedParams(); }
-    if (valueName == "dofEnabled")      { dofEnabled = value.toBool();      return markedParams(); }
+    if (valueName == "lensShiftX") { if (!isNum) return false; lensShiftX = iris::bound(-1.0f, f, 1.0f); return markedParams(); }
+    if (valueName == "lensShiftY") { if (!isNum) return false; lensShiftY = iris::bound(-1.0f, f, 1.0f); return markedParams(); }
+    if (valueName == "focusOffset")         { if (!isNum) return false; focusOffset = f;               return markedParams(); }
+    if (valueName == "smoothFocus")         { if (!isBool) return false; smoothFocus = b;              return markedParams(); }
+    if (valueName == "focusSmoothingSpeed") { if (!isNum) return false; focusSmoothingSpeed = std::max(0.0f, f); return markedParams(); }
+    if (valueName == "minFocusDistance")    { if (!isNum) return false; minFocusDistance = std::max(0.0f, f); return markedParams(); }
+    if (valueName == "bladeCount")          { if (!isInt) return false; bladeCount = iris::bound(3, i, 16);   return markedParams(); }
+    if (valueName == "focusPlaneVisible")   { if (!isBool) return false; focusPlaneVisible = b;        return markedParams(); }
+    if (valueName == "constrainAspect") { if (!isBool) return false; constrainAspect = b; return markedParams(); }
+    if (valueName == "dofEnabled")      { if (!isBool) return false; dofEnabled = b;      return markedParams(); }
     if (valueName == "focusMode") {
-        const int m = value.toInt();
-        focusMode = (m == static_cast<int>(CameraFocusMode::Track))   ? CameraFocusMode::Track
-                  : (m == static_cast<int>(CameraFocusMode::Off))     ? CameraFocusMode::Off
+        if (!isInt) return false;
+        focusMode = (i == static_cast<int>(CameraFocusMode::Track))   ? CameraFocusMode::Track
+                  : (i == static_cast<int>(CameraFocusMode::Off))     ? CameraFocusMode::Off
                                                                       : CameraFocusMode::Manual;
         return markedParams();
     }
     // Non-negative: a negative focus distance or f-stop has no meaning and the
     // DOF pass would divide by it.
-    if (valueName == "focusDistance") { focusDistance = qMax(0.0f, value.toFloat()); return markedParams(); }
-    if (valueName == "focusTarget")   { focusTarget = value.toString();              return markedParams(); }
-    if (valueName == "fStop")         { fStop = qMax(0.0f, value.toFloat());         return markedParams(); }
+    if (valueName == "focusDistance") { if (!isNum) return false; focusDistance = std::max(0.0f, f); return markedParams(); }
+    if (valueName == "focusTarget") {
+        if (value.kind() != Kind::String) return false;
+        focusTarget = QString::fromStdString(value.asString());
+        return markedParams();
+    }
+    if (valueName == "fStop")         { if (!isNum) return false; fStop = std::max(0.0f, f);         return markedParams(); }
     // One pixel is the floor; the cap is the largest render anyone can ask for
     // without wedging the machine on the offscreen path.
-    if (valueName == "outputHeight")  { outputHeight = qBound(1, value.toInt(), 16384); return markedParams(); }
-    if (valueName == "bodyVisible")   { bodyVisible = value.toBool();                return markedParams(); }
+    if (valueName == "outputHeight")  { if (!isInt) return false; outputHeight = iris::bound(1, i, 16384); return markedParams(); }
+    if (valueName == "bodyVisible")   { if (!isBool) return false; bodyVisible = b;                return markedParams(); }
 
     // CAMERA_LENS_SPEC §4. The window stays ordered — the one cross-row rule,
     // and the same one world.postFx enforces on the scene's copy.
     if (valueName == "exposureMode") {
-        const int m = value.toInt();
-        exposureMode = (m == static_cast<int>(CameraExposureMode::Auto))   ? CameraExposureMode::Auto
-                     : (m == static_cast<int>(CameraExposureMode::Manual)) ? CameraExposureMode::Manual
+        if (!isInt) return false;
+        exposureMode = (i == static_cast<int>(CameraExposureMode::Auto))   ? CameraExposureMode::Auto
+                     : (i == static_cast<int>(CameraExposureMode::Manual)) ? CameraExposureMode::Manual
                                                                            : CameraExposureMode::Inherit;
         return markedParams();
     }
-    if (valueName == "exposure")    { exposure = value.toFloat();    return markedParams(); }
+    if (valueName == "exposure")    { if (!isNum) return false; exposure = f;    return markedParams(); }
     if (valueName == "exposureMin") {
-        exposureMin = value.toFloat();
+        if (!isNum) return false;
+        exposureMin = f;
         if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
         return markedParams();
     }
     if (valueName == "exposureMax") {
-        exposureMax = value.toFloat();
+        if (!isNum) return false;
+        exposureMax = f;
         if (exposureMax < exposureMin) std::swap(exposureMin, exposureMax);
         return markedParams();
     }
-    // CAMERA_LENS_SPEC §5. A null (or invalid) value CLEARS the override —
-    // "inherit" has to be expressible through the same door that sets, or a
-    // script could turn an override on and never off.
-    if (valueName.startsWith(QLatin1String("postFx."))) {
-        const QString key = valueName.mid(7);
-        if (!value.isValid() || value.isNull()) return clearPostOverride(key);
+    // CAMERA_LENS_SPEC §5. A Null CLEARS the override — "inherit" has to be
+    // expressible through the same door that sets, or a script could turn an
+    // override on and never off.
+    if (valueName.substr(0, 7) == "postFx.") {
+        const std::string_view key = valueName.substr(7);
+        if (value.isNull()) return clearPostOverride(key);
         return setPostOverride(key, value);
     }
 

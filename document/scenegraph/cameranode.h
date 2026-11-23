@@ -19,8 +19,11 @@ For more information see the LICENSE file
 #include "document/scenegraph/cameralens.h"
 #include "document/scenegraph/scenenode.h"
 
-#include <QJsonArray>
-#include <QJsonObject>
+#include "core/value.h"
+
+#include <QPointF>
+
+#include <string_view>
 
 
 namespace iris
@@ -98,7 +101,7 @@ struct CameraPostKey {
 /// as-is.
 const CameraPostKey *cameraPostKeys(int &count);
 /// The entry with this id, or null.
-const CameraPostKey *cameraPostKey(const QString &id);
+const CameraPostKey *cameraPostKey(std::string_view id);
 
 class CameraNode : public SceneNode
 {
@@ -282,29 +285,32 @@ public:
     /// weight that silently snapped at 0.5 would lie (§2, "REJECTED — would
     /// lie"). UE's own bOverride model is the same shape.
     ///
-    /// Keys are `cameraPostKeys()` and nothing else; values are ints for the
-    /// Toggle/Enum kinds, doubles for Number, and a JSON ARRAY for the one
-    /// Stack key (`looks`). Written through setPostOverride, which refuses
-    /// anything else — a QJsonObject read from a file is sanitised the same way
-    /// by the reader.
-    QJsonObject postOverrides;
+    /// Keys are `cameraPostKeys()` and nothing else; values are Ints for the
+    /// Toggle/Enum kinds, Numbers for Number, and an ARRAY for the one Stack key
+    /// (`looks`). An iris::Value Object (members in the order they were set; the
+    /// file writes it through a QJsonObject, which sorts them). Written through
+    /// setPostOverride, which refuses anything else — an object read from a file
+    /// is sanitised the same way by the reader.
+    Value postOverrides = Value(Value::Object{});
 
-    /// Is this key overridden, and what does it say? `postOverride` returns an
-    /// invalid QVariant when the key is absent (i.e. inherited).
-    bool hasPostOverride(const QString &id) const;
-    /// Number/Toggle/Enum keys only. A Stack key (`looks`) has no scalar
-    /// reading and returns an invalid QVariant here even when it is set — read
+    /// Is this key overridden, and what does it say? `postOverride` returns a
+    /// Null when the key is absent (i.e. inherited).
+    bool hasPostOverride(std::string_view id) const;
+    /// Number/Toggle/Enum keys only (a Number, or an Int). A Stack key (`looks`)
+    /// has no scalar reading and returns a Null here even when it is set — read
     /// it with postOverrideStack, whose type is the honest one.
-    QVariant postOverride(const QString &id) const;
-    /// The array a Stack key holds; empty when the key is absent (which is NOT
-    /// the same as an override to the EMPTY stack — use hasPostOverride to tell
-    /// "inherit the world's looks" from "this camera has none").
-    QJsonArray postOverrideStack(const QString &id) const;
-    /// Records an override. Returns false for an unknown key or a value the key
-    /// cannot hold; a valid write always replaces whatever was there.
-    bool setPostOverride(const QString &id, const QVariant &value);
+    Value postOverride(std::string_view id) const;
+    /// The Array a Stack key holds; an empty Array when the key is absent (which
+    /// is NOT the same as an override to the EMPTY stack — use hasPostOverride to
+    /// tell "inherit the world's looks" from "this camera has none").
+    Value postOverrideStack(std::string_view id) const;
+    /// Records an override, STRICT: the key's own kind (Number: a Number or an
+    /// Int; Toggle: a Bool or the Int 0 / 1; Enum: an Int; Stack: an Array). False
+    /// for an unknown key or a value the key cannot hold, nothing changed; a valid
+    /// write always replaces whatever was there.
+    bool setPostOverride(std::string_view id, const Value &value);
     /// Drops an override (back to inherit). False when there was none.
-    bool clearPostOverride(const QString &id);
+    bool clearPostOverride(std::string_view id);
 
     iris::Mat4 viewMatrix;
     iris::Mat4 projMatrix;
@@ -397,8 +403,8 @@ public:
     iris::Vec3 calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
 
     virtual PropertyRows getProperties() override;
-    virtual QVariant getPropertyValue(QString valueName) override;
-    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
+    virtual Value getPropertyValue(std::string_view valueName) override;
+    virtual bool setPropertyValue(std::string_view valueName, const Value &value) override;
 
 	SceneNodePtr createDuplicate() override;
 

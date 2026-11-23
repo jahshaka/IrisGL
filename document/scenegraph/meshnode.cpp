@@ -101,27 +101,32 @@ PropertyRows MeshNode::getProperties()
     return props;
 }
 
-QVariant MeshNode::getPropertyValue(QString valueName)
+Value MeshNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "meshPath")        return meshPath;
-    if (valueName == "meshIndex")       return meshIndex;
-    if (valueName == "faceCullingMode") return static_cast<int>(faceCullingMode);
-    if (valueName == "defaultFloor")    return defaultFloor;
+    if (valueName == "meshPath")        return Value(meshPath.toStdString());
+    if (valueName == "meshIndex")       return Value(meshIndex);
+    if (valueName == "faceCullingMode") return Value(static_cast<int>(faceCullingMode));
+    if (valueName == "defaultFloor")    return Value(defaultFloor);
 
     return SceneNode::getPropertyValue(valueName);
 }
 
-bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
+bool MeshNode::setPropertyValue(std::string_view valueName, const Value &value)
 {
     // Read-only: see getProperties(). Returning false makes the caller report
     // "rejected property" instead of silently reloading geometry.
     if (valueName == "meshPath")  return false;
     if (valueName == "meshIndex") return false;
     if (valueName == "faceCullingMode") {
-        setFaceCullingMode(static_cast<FaceCullingMode>(value.toInt()));
+        if (value.kind() != Kind::Int) return false;
+        setFaceCullingMode(static_cast<FaceCullingMode>(static_cast<int>(value.asInt())));
         return markedParams();
     }
-    if (valueName == "defaultFloor") { defaultFloor = value.toBool(); return markedParams(); }
+    if (valueName == "defaultFloor") {
+        if (value.kind() != Kind::Bool) return false;
+        defaultFloor = value.asBool();
+        return markedParams();
+    }
 
     return SceneNode::setPropertyValue(valueName, value);
 }

@@ -10,8 +10,11 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "document/scenegraph/looks.h"
+#include "document/properties/valueshapes.h"
 
 #include <algorithm>
+#include <string>
+#include <vector>
 
 namespace iris
 {
@@ -105,49 +108,46 @@ const LookDef *lookDef(const QString &id)
     return nullptr;
 }
 
-void lookParamValues(const LookDef &def, const QJsonObject &entry, float out[8])
+void lookParamValues(const LookDef &def, const Value &entry, float out[8])
 {
     for (int i = 0; i < 8; ++i) out[i] = 0.0f;
-    const QJsonObject params = entry.value(QStringLiteral("params")).toObject();
+    const Value &params = entry["params"];
     for (int i = 0; i < def.paramCount && i < 8; ++i) {
         const LookParamDef &p = def.params[i];
-        const QJsonValue v = params.value(QLatin1String(p.id));
-        out[i] = v.isDouble() ? clampParam(p, v.toDouble()) : p.defaultValue;
+        double v = 0.0;
+        out[i] = numberOf(params[p.id], v) ? clampParam(p, v) : p.defaultValue;
     }
 }
 
-QJsonObject makeLookEntry(const LookDef &def, const QJsonObject &params, bool enabled)
+Value makeLookEntry(const LookDef &def, const Value &params, bool enabled)
 {
-    QJsonObject out;
-    out.insert(QStringLiteral("id"), QLatin1String(def.id));
-    out.insert(QStringLiteral("enabled"), enabled);
-    QJsonObject p;
+    Value::Object p;
     for (int i = 0; i < def.paramCount; ++i) {
         const LookParamDef &d = def.params[i];
-        const QJsonValue v = params.value(QLatin1String(d.id));
-        p.insert(QLatin1String(d.id), double(v.isDouble() ? clampParam(d, v.toDouble())
-                                                          : d.defaultValue));
+        double v = 0.0;
+        p.emplace_back(d.id, Value(double(numberOf(params[d.id], v) ? clampParam(d, v) : d.defaultValue)));
     }
-    out.insert(QStringLiteral("params"), p);
-    return out;
+    return Value(Value::Object{{"id", Value(def.id)}, {"enabled", Value(enabled)}, {"params", Value(std::move(p))}});
 }
 
-QJsonArray normalizeLookStack(const QJsonArray &in)
+Value normalizeLookStack(const Value &in)
 {
-    QJsonArray out;
-    QStringList seen;
-    for (const QJsonValue &v : in) {
-        if (!v.isObject()) continue;
-        const QJsonObject entry = v.toObject();
-        const QString id = entry.value(QStringLiteral("id")).toString();
-        const LookDef *def = lookDef(id);
+    Value::Array out;
+    std::vector<std::string> seen;
+    if (in.kind() != Kind::Array) return Value(std::move(out));
+    for (const Value &entry : in.asArray()) {
+        if (entry.kind() != Kind::Object) continue;
+        const Value &idValue = entry["id"];
+        const std::string id = idValue.kind() == Kind::String ? idValue.asString() : std::string();
+        const LookDef *def = lookDef(QString::fromStdString(id));
         if (!def) continue;              // a look this build does not implement
-        if (seen.contains(id)) continue; // ONE INSTANCE PER LOOK (§7 R2)
-        seen.append(id);
-        out.append(makeLookEntry(*def, entry.value(QStringLiteral("params")).toObject(),
-                                 entry.value(QStringLiteral("enabled")).toBool(true)));
+        if (std::find(seen.begin(), seen.end(), id) != seen.end()) continue;   // ONE INSTANCE PER LOOK (§7 R2)
+        seen.push_back(id);
+        const Value &enabled = entry["enabled"];
+        out.push_back(makeLookEntry(*def, entry["params"],
+                                    enabled.kind() == Kind::Bool ? enabled.asBool() : true));
     }
-    return out;
+    return Value(std::move(out));
 }
 
 }   // namespace iris

@@ -9,10 +9,9 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include "document/qt/qtinterop.h"
 #include "core/math/vec.h"
 #include "document/srgbcolor.h"
-#include "document/qt/colour.h"
+#include "document/properties/valueshapes.h"
 
 #include "document/properties/property.h"
 #include "document/scenegraph/particlesystemnode.h"
@@ -439,88 +438,105 @@ PropertyRows ParticleSystemNode::getProperties()
     return props;
 }
 
-QVariant ParticleSystemNode::getPropertyValue(QString valueName)
+Value ParticleSystemNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "particlesPerSecond") return particlesPerSecond;
-    if (valueName == "particleScale")      return particleScale;
-    if (valueName == "gravityComplement")  return gravityComplement;
-    if (valueName == "lifeLength")         return lifeLength;
-    if (valueName == "speed")              return speed;
-    if (valueName == "speedError")         return speedError;
-    if (valueName == "lifeError")          return lifeError;
-    if (valueName == "scaleError")         return scaleError;
-    if (valueName == "dissipate")          return dissipate;
-    if (valueName == "dissipateInv")       return dissipateInv;
-    if (valueName == "randomRotation")     return randomRotation;
-    if (valueName == "blendMode")          return useAdditive;
-    if (valueName == "alphaHash")          return alphaHash;
-    if (valueName == "distortion")         return distortion;
-    if (valueName == "coneAngle")          return coneAngle;
-    if (valueName == "turbulence")         return turbulence;
-    if (valueName == "rotationSpeedMin")   return rotationSpeedMin;
-    if (valueName == "rotationSpeedMax")   return rotationSpeedMax;
-    if (valueName == "burstDuration")      return burstDuration;
-    if (valueName == "burstRepeatDelay")   return burstRepeatDelay;
-    if (valueName == "startDelay")         return startDelay;
-    if (valueName == "maxParticles")       return maxParticles;
-    if (valueName == "shape")              return shapeName(shape);
-    if (valueName == "orientation")        return orientationName(orientation);
-    if (valueName == "preset")             return presetName(preset);
-    if (valueName == "texture")            return !!texture ? texture->getSource() : QString();
-    // Vector rows the panel and the API module edit but the Property system has
-    // no kind for. Returned as iris::Vec3; setPropertyValue accepts the same.
-    if (valueName == "extents")            return iris::toQt(extents);
-    if (valueName == "innerExtents")       return iris::toQt(innerExtents);
-    if (valueName == "wind")               return iris::toQt(wind);
-    if (valueName == "emitColourStart")    return toQColor(emitColourStart);
-    if (valueName == "emitColourEnd")      return toQColor(emitColourEnd);
-    if (valueName == "colourFade1")        return toQColor(colourFade1);
-    if (valueName == "colourFade2")        return toQColor(colourFade2);
-    if (valueName == "colourFadeSwitch")   return colourFadeSwitch;
-    if (valueName == "scaleRate")          return scaleRate;
-    if (valueName == "scaleRateMultiply")  return scaleRateMultiply;
-    if (valueName == "colourRamp")         return colourRampGuid;
+    const auto F = [](float f) { return Value(double(f)); };
+    if (valueName == "particlesPerSecond") return F(particlesPerSecond);
+    if (valueName == "particleScale")      return F(particleScale);
+    if (valueName == "gravityComplement")  return F(gravityComplement);
+    if (valueName == "lifeLength")         return F(lifeLength);
+    if (valueName == "speed")              return F(speed);
+    if (valueName == "speedError")         return F(speedError);
+    if (valueName == "lifeError")          return F(lifeError);
+    if (valueName == "scaleError")         return F(scaleError);
+    if (valueName == "dissipate")          return Value(dissipate);
+    if (valueName == "dissipateInv")       return Value(dissipateInv);
+    if (valueName == "randomRotation")     return Value(randomRotation);
+    if (valueName == "blendMode")          return Value(useAdditive);
+    if (valueName == "alphaHash")          return Value(alphaHash);
+    if (valueName == "distortion")         return Value(distortion);
+    if (valueName == "coneAngle")          return F(coneAngle);
+    if (valueName == "turbulence")         return F(turbulence);
+    if (valueName == "rotationSpeedMin")   return F(rotationSpeedMin);
+    if (valueName == "rotationSpeedMax")   return F(rotationSpeedMax);
+    if (valueName == "burstDuration")      return F(burstDuration);
+    if (valueName == "burstRepeatDelay")   return F(burstRepeatDelay);
+    if (valueName == "startDelay")         return F(startDelay);
+    if (valueName == "maxParticles")       return Value(maxParticles);
+    if (valueName == "shape")              return Value(shapeName(shape).toStdString());
+    if (valueName == "orientation")        return Value(orientationName(orientation).toStdString());
+    if (valueName == "preset")             return Value(presetName(preset).toStdString());
+    if (valueName == "texture")            return Value(!!texture ? texture->getSource().toStdString() : std::string());
+    // The vector and colour rows (their Vec3 / Color rows in getProperties()).
+    if (valueName == "extents")            return vec3ToValue(extents);
+    if (valueName == "innerExtents")       return vec3ToValue(innerExtents);
+    if (valueName == "wind")               return vec3ToValue(wind);
+    // An unset colour (an unset fade above all: the mirror reads its VALIDITY as "no fade") is a Null, never black.
+    if (valueName == "emitColourStart")    return colourRowValue(emitColourStart);
+    if (valueName == "emitColourEnd")      return colourRowValue(emitColourEnd);
+    if (valueName == "colourFade1")        return colourRowValue(colourFade1);
+    if (valueName == "colourFade2")        return colourRowValue(colourFade2);
+    if (valueName == "colourFadeSwitch")   return F(colourFadeSwitch);
+    if (valueName == "scaleRate")          return F(scaleRate);
+    if (valueName == "scaleRateMultiply")  return Value(scaleRateMultiply);
+    if (valueName == "colourRamp")         return Value(colourRampGuid.toStdString());
 
     return SceneNode::getPropertyValue(valueName);
 }
 
-bool ParticleSystemNode::setPropertyValue(QString valueName, const QVariant &value)
+bool ParticleSystemNode::setPropertyValue(std::string_view valueName, const Value &value)
 {
-    if (valueName == "particlesPerSecond") { particlesPerSecond = value.toFloat();   return markedParams(); }
-    if (valueName == "particleScale")      { particleScale      = value.toFloat();   return markedParams(); }
-    if (valueName == "gravityComplement")  { gravityComplement  = value.toFloat();   return markedParams(); }
-    if (valueName == "lifeLength")         { lifeLength         = value.toFloat();   return markedParams(); }
-    if (valueName == "speed")              { speed              = value.toFloat();   return markedParams(); }
-    if (valueName == "speedError")         { speedError         = value.toFloat();   return markedParams(); }
-    if (valueName == "lifeError")          { lifeError          = value.toFloat();   return markedParams(); }
-    if (valueName == "scaleError")         { scaleError         = value.toFloat();   return markedParams(); }
-    if (valueName == "dissipate")          { dissipate          = value.toBool();    return markedParams(); }
-    if (valueName == "dissipateInv")       { dissipateInv       = value.toBool();    return markedParams(); }
-    if (valueName == "randomRotation")     { randomRotation     = value.toBool();    return markedParams(); }
-    if (valueName == "blendMode")          { useAdditive        = value.toBool();    return markedParams(); }
-    if (valueName == "alphaHash")          { alphaHash          = value.toBool();    return markedParams(); }
-    if (valueName == "distortion")         { distortion         = value.toBool();    return markedParams(); }
-    if (valueName == "coneAngle")          { coneAngle          = value.toFloat();   return markedParams(); }
-    if (valueName == "turbulence")         { turbulence         = value.toFloat();   return markedParams(); }
-    if (valueName == "rotationSpeedMin")   { rotationSpeedMin   = value.toFloat();   return markedParams(); }
-    if (valueName == "rotationSpeedMax")   { rotationSpeedMax   = value.toFloat();   return markedParams(); }
-    if (valueName == "burstDuration")      { burstDuration      = value.toFloat();   return markedParams(); }
-    if (valueName == "burstRepeatDelay")   { burstRepeatDelay   = value.toFloat();   return markedParams(); }
-    if (valueName == "startDelay")         { startDelay         = value.toFloat();   return markedParams(); }
-    if (valueName == "maxParticles")       { maxParticles       = value.toInt();     return markedParams(); }
-    if (valueName == "shape")              { shape = shapeFromName(value.toString()); return markedParams(); }
-    if (valueName == "orientation")        { orientation = orientationFromName(value.toString()); return markedParams(); }
-    if (valueName == "preset")             { applyPreset(presetFromName(value.toString())); return markedParams(); }
-    if (valueName == "extents")            { extents      = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
-    if (valueName == "innerExtents")       { innerExtents = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
-    if (valueName == "wind")               { wind         = iris::fromQt(value.value<QVector3D>()); return markedParams(); }
-    if (valueName == "emitColourStart")    { emitColourStart = toSrgbColor(value.value<QColor>()); return markedParams(); }
-    if (valueName == "emitColourEnd")      { emitColourEnd   = toSrgbColor(value.value<QColor>()); return markedParams(); }
-    if (valueName == "colourFade1")        { colourFade1       = toSrgbColor(value.value<QColor>()); return markedParams(); }
-    if (valueName == "colourFade2")        { colourFade2       = toSrgbColor(value.value<QColor>()); return markedParams(); }
-    if (valueName == "colourFadeSwitch")   { colourFadeSwitch  = value.toFloat();   return markedParams(); }
-    if (valueName == "scaleRate")          { scaleRate         = value.toFloat();   return markedParams(); }
-    if (valueName == "scaleRateMultiply")  { scaleRateMultiply = value.toBool();    return markedParams(); }
+    // STRICT: a float a Number (or an Int), an int an Int, a flag a Bool, a name a String, a vector an Array of three
+    // numbers, a colour its Object; anything else false, nothing moved.
+    double n = 0.0;
+    const bool isNum = numberOf(value, n);
+    const bool isBool = value.kind() == Kind::Bool;
+    const auto F = [&](float &field) { if (!isNum) return false; field = float(n); return markedParams(); };
+    const auto B = [&](bool &field) { if (!isBool) return false; field = value.asBool(); return markedParams(); };
+    const auto V = [&](Vec3 &field) { return vec3FromValue(value, field) && markedParams(); };
+    // A Null is THE invalid colour ("no fade"), an Object its colour (colourOfRowValue).
+    const auto C = [&](SrgbColor &field) { return colourOfRowValue(value, field) && markedParams(); };
+    const bool isText = value.kind() == Kind::String;
+    const QString text = isText ? QString::fromStdString(value.asString()) : QString();
+    if (valueName == "particlesPerSecond") return F(particlesPerSecond);
+    if (valueName == "particleScale")      return F(particleScale);
+    if (valueName == "gravityComplement")  return F(gravityComplement);
+    if (valueName == "lifeLength")         return F(lifeLength);
+    if (valueName == "speed")              return F(speed);
+    if (valueName == "speedError")         return F(speedError);
+    if (valueName == "lifeError")          return F(lifeError);
+    if (valueName == "scaleError")         return F(scaleError);
+    if (valueName == "dissipate")          return B(dissipate);
+    if (valueName == "dissipateInv")       return B(dissipateInv);
+    if (valueName == "randomRotation")     return B(randomRotation);
+    if (valueName == "blendMode")          return B(useAdditive);
+    if (valueName == "alphaHash")          return B(alphaHash);
+    if (valueName == "distortion")         return B(distortion);
+    if (valueName == "coneAngle")          return F(coneAngle);
+    if (valueName == "turbulence")         return F(turbulence);
+    if (valueName == "rotationSpeedMin")   return F(rotationSpeedMin);
+    if (valueName == "rotationSpeedMax")   return F(rotationSpeedMax);
+    if (valueName == "burstDuration")      return F(burstDuration);
+    if (valueName == "burstRepeatDelay")   return F(burstRepeatDelay);
+    if (valueName == "startDelay")         return F(startDelay);
+    if (valueName == "maxParticles") {
+        if (value.kind() != Kind::Int) return false;
+        maxParticles = static_cast<int>(value.asInt());
+        return markedParams();
+    }
+    if (valueName == "shape")              { if (!isText) return false; shape = shapeFromName(text); return markedParams(); }
+    if (valueName == "orientation")        { if (!isText) return false; orientation = orientationFromName(text); return markedParams(); }
+    if (valueName == "preset")             { if (!isText) return false; applyPreset(presetFromName(text)); return markedParams(); }
+    if (valueName == "extents")            return V(extents);
+    if (valueName == "innerExtents")       return V(innerExtents);
+    if (valueName == "wind")               return V(wind);
+    if (valueName == "emitColourStart")    return C(emitColourStart);
+    if (valueName == "emitColourEnd")      return C(emitColourEnd);
+    if (valueName == "colourFade1")        return C(colourFade1);
+    if (valueName == "colourFade2")        return C(colourFade2);
+    if (valueName == "colourFadeSwitch")   return F(colourFadeSwitch);
+    if (valueName == "scaleRate")          return F(scaleRate);
+    if (valueName == "scaleRateMultiply")  return B(scaleRateMultiply);
     if (valueName == "texture")            return false;   // read-only, see getProperties()
     // The colour RAMP is an asset BINDING, not a value: it needs a project pin
     // and a CAS resolve, which is particles.setColourRamp's job — the same rule

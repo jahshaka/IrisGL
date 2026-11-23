@@ -47,7 +47,8 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
     mat->setValue("alpha", Value(double(data.alpha)));
     mat->setValue("alphaCutoff", Value(double(data.alphaCutoff)));
     // Every Value below is of its row's own kind (the material's strict setter takes it): the importer's
-    // answers are not read. A colour crosses as its Value shape (valueshapes.h), no Qt.
+    // answers are not read. A colour crosses as a colour property's Value (valueshapes.h colourRowValue: the invalid
+    // colour a Null, as it was), no Qt.
     auto bindIfFile = [&mat](const char *row, const QString &path) {
         if (!path.isEmpty() && QFileInfo(path).isFile()) mat->setValue(row, Value(path.toStdString()));
     };
@@ -61,7 +62,7 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // rather than round-tripping through assimp's lossy shininess
         // back-conversion, which is what produced near-mirror imports. A
         // spec-gloss source arrives already converted (MaterialHelper).
-        mat->setValue("baseColor", colourToValue(data.baseColorFactor));
+        mat->setValue("baseColor", colourRowValue(data.baseColorFactor));
         mat->setValue("metallic", Value(double(data.metallicFactor)));
         mat->setValue("roughness", Value(double(data.roughnessFactor)));
         bindIfFile("baseColorMap", data.baseColorTexture);
@@ -77,10 +78,10 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         mat->setValue("workflow", Value(data.workflow));
         mat->setValue("ior", Value(double(data.ior)));
         if (data.workflow != 0) {
-            mat->setValue("specularColor", colourToValue(data.specularFactor));
+            mat->setValue("specularColor", colourRowValue(data.specularFactor));
             mat->setValue("useFresnelColor", Value(data.useFresnelColor));
             if (data.useFresnelColor)
-                mat->setValue("fresnelColor", colourToValue(data.fresnelFactor));
+                mat->setValue("fresnelColor", colourRowValue(data.fresnelFactor));
             // The specular / spec-gloss map binds to the SHARED metallic-specular
             // texture unit — the renderer reinterprets one unit by workflow, so
             // `metallicMap` is the right row and only one of the two sources can
@@ -109,7 +110,7 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         const bool emissiveTinted =
             data.emissionColor.isValid() && data.emissionColor != SrgbColor(0, 0, 0);
         if (emissiveTinted) {
-            mat->setValue("emissiveColor", colourToValue(data.emissionColor));
+            mat->setValue("emissiveColor", colourRowValue(data.emissionColor));
             mat->setValue("emissiveIntensity", Value(1.0));
         }
 
@@ -130,13 +131,13 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
                 mat->setValue("baseColorMap", Value(data.emissiveTexture.toStdString()));
             if (baseIsBlack && (emissiveTinted || emissiveMap))
                 mat->setValue("baseColor",
-                              colourToValue(emissiveTinted ? data.emissionColor : SrgbColor(255, 255, 255)));
+                              colourRowValue(emissiveTinted ? data.emissionColor : SrgbColor(255, 255, 255)));
         }
         return mat;
     }
 
     mat->setValue("baseColor",
-                  colourToValue(data.diffuseColor.isValid() ? data.diffuseColor : SrgbColor(200, 200, 200)));
+                  colourRowValue(data.diffuseColor.isValid() ? data.diffuseColor : SrgbColor(200, 200, 200)));
     mat->setValue("metallic", Value(0.0));
     mat->setValue("roughness", Value(double(roughnessFromShininess(data.shininess))));
     bindIfFile("baseColorMap", data.diffuseTexture);

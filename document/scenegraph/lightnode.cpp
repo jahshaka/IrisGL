@@ -8,7 +8,7 @@
 #include "document/scenegraph/shadowmap.h"
 #include <algorithm>
 
-#include "document/qt/colour.h"
+#include "document/properties/valueshapes.h"
 
 namespace iris
 {
@@ -131,87 +131,95 @@ PropertyRows LightNode::getProperties()
     return props;
 }
 
-QVariant LightNode::getPropertyValue(QString valueName)
+Value LightNode::getPropertyValue(std::string_view valueName)
 {
     if(valueName == "intensity")
-        return intensity;
+        return Value(double(intensity));
     if(valueName == "lightColor")
-        return toQColor(color);
+        return colourRowValue(color);
     if(valueName == "distance")
-        return distance;
+        return Value(double(distance));
     if(valueName == "sourceRadius")
-        return sourceRadius;
+        return Value(double(sourceRadius));
     if(valueName == "spotCutOff")
-        return spotCutOff;
+        return Value(double(spotCutOff));
     if(valueName == "spotCutOffSoftness")
-        return spotCutOffSoftness;
+        return Value(double(spotCutOffSoftness));
     if(valueName == "spotFalloff")
-        return spotFalloff;
+        return Value(double(spotFalloff));
     if(valueName == "rectWidth")
-        return rectWidth;
+        return Value(double(rectWidth));
     if(valueName == "rectHeight")
-        return rectHeight;
+        return Value(double(rectHeight));
     if(valueName == "lightType")
-        return static_cast<int>(lightType);
+        return Value(static_cast<int>(lightType));
     if(valueName == "shadowMapType")
-        return static_cast<int>(getShadowMapType());
+        return Value(static_cast<int>(getShadowMapType()));
     if(valueName == "shadowMapResolution")
-        return getShadowMapResolution();
+        return Value(getShadowMapResolution());
     if(valueName == "doubleSided")
-        return doubleSided;
+        return Value(doubleSided);
     if(valueName == "forwardShadingPriority")
-        return forwardShadingPriority;
+        return Value(forwardShadingPriority);
     if(valueName == "followsAtmosphere")
-        return followsAtmosphere;
+        return Value(followsAtmosphere);
     // The asset BINDING (the IES profile) is reflected read-only-ish: the guid is the
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
     if(valueName == "iesProfile")
-        return iesProfileGuid;
+        return Value(iesProfileGuid.toStdString());
     if(valueName == "iesProfilePath")
-        return iesProfilePath;
+        return Value(iesProfilePath.toStdString());
     if(valueName == "iesNormalisation")
-        return iesNormalisation;
+        return Value(double(iesNormalisation));
     if(valueName == "iconSize")
-        return iconSize;
+        return Value(double(iconSize));
     if(valueName == "skySource")
-        return static_cast<int>(skySource);
+        return Value(static_cast<int>(skySource));
 
     return SceneNode::getPropertyValue(valueName);
 }
 
-bool LightNode::setPropertyValue(QString valueName, const QVariant &value)
+bool LightNode::setPropertyValue(std::string_view valueName, const Value &value)
 {
-    if (valueName == "intensity")         { intensity = value.toFloat();         return markedParams(); }
-    if (valueName == "lightColor")        { color = toSrgbColor(value.value<QColor>());       return markedParams(); }
-    if (valueName == "distance")          { distance = value.toFloat();          return markedParams(); }
-    if (valueName == "sourceRadius")      { sourceRadius = std::max(value.toFloat(), 0.001f); return markedParams(); }
-    if (valueName == "spotCutOff")        { spotCutOff = value.toFloat();        return markedParams(); }
-    if (valueName == "spotCutOffSoftness"){ spotCutOffSoftness = value.toFloat();return markedParams(); }
-    if (valueName == "spotFalloff")       { spotFalloff = value.toFloat();       return markedParams(); }
-    if (valueName == "rectWidth")         { rectWidth = value.toFloat();         return markedParams(); }
-    if (valueName == "rectHeight")        { rectHeight = value.toFloat();        return markedParams(); }
-    if (valueName == "lightType")         { setLightType(static_cast<LightType>(value.toInt())); return markedParams(); }
+    // STRICT: a float a Number (or an Int), an int an Int, a flag a Bool, the colour its Object, a guid or a path a
+    // String; anything else false, nothing moved.
+    double n = 0.0;
+    const bool isNum = numberOf(value, n);
+    const float f = float(n);
+    const bool isInt = value.kind() == Kind::Int;
+    const int i = isInt ? static_cast<int>(value.asInt()) : 0;
+    const bool isBool = value.kind() == Kind::Bool;
+    const bool isText = value.kind() == Kind::String;
+    if (valueName == "intensity")         { if (!isNum) return false; intensity = f;         return markedParams(); }
+    if (valueName == "lightColor")        { if (!colourOfRowValue(value, color)) return false; return markedParams(); }
+    if (valueName == "distance")          { if (!isNum) return false; distance = f;          return markedParams(); }
+    if (valueName == "sourceRadius")      { if (!isNum) return false; sourceRadius = std::max(f, 0.001f); return markedParams(); }
+    if (valueName == "spotCutOff")        { if (!isNum) return false; spotCutOff = f;        return markedParams(); }
+    if (valueName == "spotCutOffSoftness"){ if (!isNum) return false; spotCutOffSoftness = f; return markedParams(); }
+    if (valueName == "spotFalloff")       { if (!isNum) return false; spotFalloff = f;       return markedParams(); }
+    if (valueName == "rectWidth")         { if (!isNum) return false; rectWidth = f;         return markedParams(); }
+    if (valueName == "rectHeight")        { if (!isNum) return false; rectHeight = f;        return markedParams(); }
+    if (valueName == "lightType")         { if (!isInt) return false; setLightType(static_cast<LightType>(i)); return markedParams(); }
     // The shadow-map fields live on the node's ShadowMap; reflect through it.
     // (a filter only: no value means "no shadow" - ShadowMapType's header; a value outside the three is refused)
     if (valueName == "shadowMapType") {
-        const int t = value.toInt();
-        if (t < int(ShadowMapType::Hard) || t > int(ShadowMapType::VerySoft)) return false;
-        setShadowMapType(static_cast<ShadowMapType>(t));
+        if (!isInt || i < int(ShadowMapType::Hard) || i > int(ShadowMapType::VerySoft)) return false;
+        setShadowMapType(static_cast<ShadowMapType>(i));
         return markedParams();
     }
-    if (valueName == "shadowMapResolution"){ setShadowMapResolution(value.toInt()); return markedParams(); }
-    if (valueName == "doubleSided")       { doubleSided = value.toBool();        return markedParams(); }
-    if (valueName == "forwardShadingPriority") { forwardShadingPriority = qMax(0, value.toInt()); return markedParams(); }
+    if (valueName == "shadowMapResolution"){ if (!isInt) return false; setShadowMapResolution(i); return markedParams(); }
+    if (valueName == "doubleSided")       { if (!isBool) return false; doubleSided = value.asBool();        return markedParams(); }
+    if (valueName == "forwardShadingPriority") { if (!isInt) return false; forwardShadingPriority = std::max(0, i); return markedParams(); }
     // The sun's direct light is tinted by the atmosphere at its own elevation
     // (lightnode.h). A LIGHT change, so the shadow and probe caches see it
     // through the same staleness path a colour edit already travels.
-    if (valueName == "followsAtmosphere") { followsAtmosphere = value.toBool(); return markedParams(); }
-    if (valueName == "iesProfile")        { iesProfileGuid = value.toString();   return markedParams(); }
-    if (valueName == "iesProfilePath")    { iesProfilePath = value.toString();   return markedParams(); }
-    if (valueName == "iesNormalisation")  { iesNormalisation = value.toFloat();  return markedParams(); }
-    if (valueName == "iconSize")          { iconSize = value.toFloat();          return markedParams(); }
-    if (valueName == "skySource")         { skySource = value.toInt() == 1 ? SkyLightSource::Cubemap : SkyLightSource::Sky; return markedParams(); }
+    if (valueName == "followsAtmosphere") { if (!isBool) return false; followsAtmosphere = value.asBool(); return markedParams(); }
+    if (valueName == "iesProfile")        { if (!isText) return false; iesProfileGuid = QString::fromStdString(value.asString()); return markedParams(); }
+    if (valueName == "iesProfilePath")    { if (!isText) return false; iesProfilePath = QString::fromStdString(value.asString()); return markedParams(); }
+    if (valueName == "iesNormalisation")  { if (!isNum) return false; iesNormalisation = f;  return markedParams(); }
+    if (valueName == "iconSize")          { if (!isNum) return false; iconSize = f;          return markedParams(); }
+    if (valueName == "skySource")         { if (!isInt) return false; skySource = i == 1 ? SkyLightSource::Cubemap : SkyLightSource::Sky; return markedParams(); }
 
     return SceneNode::setPropertyValue(valueName, value);
 }

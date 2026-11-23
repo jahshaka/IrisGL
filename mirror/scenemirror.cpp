@@ -7492,16 +7492,16 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
 // apart tomorrow. The document must not include the engine's header, so a
 // static_assert cannot stand in for it — the switch is the seam, and a new look
 // that forgets this line does not compile (-Wswitch).
-static std::vector<LookDesc> resolveLooks(const QJsonArray &stack)
+static std::vector<LookDesc> resolveLooks(const iris::Value &stack)
 {
     std::vector<LookDesc> out;
-    if (stack.isEmpty()) return out;   // the overwhelmingly common case
-    const QJsonArray clean = iris::normalizeLookStack(stack);
-    out.reserve(size_t(clean.size()));
-    for (const QJsonValue &v : clean) {
-        const QJsonObject entry = v.toObject();
-        if (!entry.value(QStringLiteral("enabled")).toBool(true)) continue;
-        const iris::LookDef *def = iris::lookDef(entry.value(QStringLiteral("id")).toString());
+    if (stack.kind() != iris::Kind::Array || stack.asArray().empty()) return out;   // the overwhelmingly common case
+    const iris::Value clean = iris::normalizeLookStack(stack);
+    out.reserve(clean.asArray().size());
+    for (const iris::Value &entry : clean.asArray()) {
+        // The validator's own shape: `enabled` a Bool, `id` a known look's.
+        if (!entry["enabled"].asBool()) continue;
+        const iris::LookDef *def = iris::lookDef(QString::fromStdString(entry["id"].asString()));
         if (!def) continue;
         LookDesc desc;
         switch (def->kind) {
@@ -8727,7 +8727,7 @@ static bool cameraOverridesAnything(const iris::CameraNodePtr &camera)
 {
     if (!camera) return false;
     return camera->exposureMode != iris::CameraExposureMode::Inherit ||
-           !camera->postOverrides.isEmpty();
+           (camera->postOverrides.kind() == iris::Kind::Object && !camera->postOverrides.asObject().empty());
 }
 
 /// Applies the camera's exposure block and override map over `fx`.
@@ -8746,17 +8746,18 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
 
     // ---- §5, the tri-state overrides. Absent = inherit, so every branch below
     // is guarded by hasPostOverride and the world's value survives otherwise.
+    // postOverride answers a Null for an absent key, a Number or an Int otherwise.
     const auto num = [&camera](const char *id, float &field) {
-        const QVariant v = camera->postOverride(QLatin1String(id));
-        if (v.isValid()) field = v.toFloat();
+        const iris::Value v = camera->postOverride(id);
+        if (!v.isNull()) field = float(v.asNumber());
     };
     const auto flag = [&camera](const char *id, bool &field) {
-        const QVariant v = camera->postOverride(QLatin1String(id));
-        if (v.isValid()) field = v.toInt() != 0;
+        const iris::Value v = camera->postOverride(id);
+        if (!v.isNull()) field = v.asNumber() != 0.0;
     };
     const auto whole = [&camera](const char *id, int &field) {
-        const QVariant v = camera->postOverride(QLatin1String(id));
-        if (v.isValid()) field = v.toInt();
+        const iris::Value v = camera->postOverride(id);
+        if (!v.isNull()) field = int(v.asNumber());
     };
     flag("hdr", fx.hdr);
     flag("bloom", fx.bloom);
@@ -8770,10 +8771,10 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
         imageTableFromGrade(fx.image, image);
         for (int i = 0; i < iris::lens::ImageParamCount; ++i) {
             const iris::lens::ImageParamDef &d = iris::lens::imageParams()[i];
-            const QVariant v = camera->postOverride(QLatin1String(d.id));
+            const iris::Value v = camera->postOverride(d.id);
             // Clamped to the table here too: a file or an older writer may hold any number.
-            if (v.isValid() && std::isfinite(v.toDouble()))
-                image[i] = std::min(std::max(v.toFloat(), d.minValue), d.maxValue);
+            if (!v.isNull() && std::isfinite(v.asNumber()))
+                image[i] = std::min(std::max(float(v.asNumber()), d.minValue), d.maxValue);
         }
         imageGradeFromTable(image, fx.image);
     }
@@ -8790,15 +8791,15 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
     // override of 1 (auto) must not be read as "on": it means "whatever the
     // world just resolved", which is precisely what leaving fx alone does.
     {
-        const QVariant v = camera->postOverride(QLatin1String("refractions"));
-        if (v.isValid() && v.toInt() != 1) fx.refractions = v.toInt() == 2;
+        const iris::Value v = camera->postOverride("refractions");
+        if (!v.isNull() && v.asNumber() != 1.0) fx.refractions = v.asNumber() == 2.0;
     }
     // Distortion is the world's three-state mode resolved to a BOOL by the time
     // it reaches the view — exactly like refractions above, including the rule
     // that an override of 1 (auto) means "whatever the world just resolved".
     {
-        const QVariant v = camera->postOverride(QLatin1String("distortion"));
-        if (v.isValid() && v.toInt() != 1) fx.distortion = v.toInt() == 2;
+        const iris::Value v = camera->postOverride("distortion");
+        if (!v.isNull() && v.asNumber() != 1.0) fx.distortion = v.asNumber() == 2.0;
     }
     num("distortionStrength", fx.distortionStrength);
 
@@ -8807,8 +8808,8 @@ static void applyCameraPostFx(const iris::CameraNodePtr &camera, PostFxDesc &fx)
     // "no looks" over a world that has them; absent inherits, so the world's
     // resolved stack survives untouched, which is what keeps the byte-identical
     // negative in tests/cameras true for every camera that says nothing.
-    if (camera->hasPostOverride(QStringLiteral("looks")))
-        fx.looks = resolveLooks(camera->postOverrideStack(QStringLiteral("looks")));
+    if (camera->hasPostOverride("looks"))
+        fx.looks = resolveLooks(camera->postOverrideStack("looks"));
 }
 
 void SceneMirror::applyPip(iris::CameraNodePtr camera, View *view, const ViewPipDesc &desc)

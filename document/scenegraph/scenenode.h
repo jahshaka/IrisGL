@@ -25,7 +25,6 @@ For more information see the LICENSE file
 #include <QHash>
 #include <QList>
 #include <QString>
-#include <QVariant>
 #include <QtGlobal>
 
 namespace iris
@@ -649,12 +648,12 @@ public:
     /// caller keeps it as long as it reads the rows. They used to be bare
     /// `new`'d rows every caller had to qDeleteAll — and the timeline did not.
     virtual PropertyRows getProperties();
-    virtual QVariant getPropertyValue(QString valueName);
+    virtual Value getPropertyValue(std::string_view valueName);
     /// Mirror of getPropertyValue: applies a value by property name. Returns
     /// false when the node has no such property (callers report, not crash).
     /// Base handles position/rotation (euler degrees)/scale; subclasses extend
     /// exactly the set their getProperties() advertises.
-    virtual bool setPropertyValue(QString valueName, const QVariant &value);
+    virtual bool setPropertyValue(std::string_view valueName, const Value &value);
 
     /*
     * This function should return an exact copy of this node

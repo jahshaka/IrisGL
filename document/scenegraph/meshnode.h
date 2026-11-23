@@ -71,8 +71,8 @@ public:
     }
 
     virtual PropertyRows getProperties() override;
-    virtual QVariant getPropertyValue(QString valueName) override;
-    virtual bool setPropertyValue(QString valueName, const QVariant &value) override;
+    virtual Value getPropertyValue(std::string_view valueName) override;
+    virtual bool setPropertyValue(std::string_view valueName, const Value &value) override;
 
     void setMesh(MeshPtr mesh);
 

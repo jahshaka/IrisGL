@@ -463,11 +463,7 @@ bool PbrMaterial::setValue(std::string_view name, const Value &in)
         return true;
     };
     const auto B = [&](bool &field) { if (in.kind() != Kind::Bool) return false; field = in.asBool(); return true; };
-    const auto C = [&](SrgbColor &field) {
-        if (in.kind() != Kind::Object) return false;
-        field = colourFromValue(in);
-        return true;
-    };
+    const auto C = [&](SrgbColor &field) { return colourOfRowValue(in, field); };
     const auto S = [&](QString &field) {
         if (in.kind() != Kind::String) return false;
         field = QString::fromStdString(in.asString());

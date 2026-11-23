@@ -41,8 +41,8 @@ For more information see the LICENSE file
 // second instance would be handed the first one's numbers (§7 R2).
 // normalizeLookStack drops the duplicate, and every write path goes through it.
 
-#include <QJsonArray>
-#include <QJsonObject>
+#include "core/value.h"
+
 #include <QString>
 
 namespace iris
@@ -95,7 +95,7 @@ const LookDef *lookDef(const QString &id);
 
 /// The engine's parameter vector for one stack entry: the entry's values in the
 /// look's own canonical order, clamped, defaulted, and zero-filled to 8.
-void lookParamValues(const LookDef &def, const QJsonObject &entry, float out[8]);
+void lookParamValues(const LookDef &def, const Value &entry, float out[8]);
 
 /// THE ONE VALIDATOR every write path shares (verbs, reader, panel).
 ///
@@ -104,12 +104,13 @@ void lookParamValues(const LookDef &def, const QJsonObject &entry, float out[8])
 /// bool, and every parameter present, in the look's own order, clamped to its
 /// range. Entries keep the order they arrived in — the array order IS the frame
 /// order and is the whole authoring model.
-QJsonArray normalizeLookStack(const QJsonArray &in);
+/// (An iris::Value Array in and out; anything that is not an Array reads as the empty stack.)
+Value normalizeLookStack(const Value &in);
 
 /// One canonical entry for `def`, taking whatever `params` names and defaulting
 /// the rest. The building block the add verb uses.
-QJsonObject makeLookEntry(const LookDef &def, const QJsonObject &params = QJsonObject(),
-                          bool enabled = true);
+/// An Object {id, enabled, params}; `params` an Object (anything else reads as none given).
+Value makeLookEntry(const LookDef &def, const Value &params = Value(Value::Object{}), bool enabled = true);
 
 }   // namespace iris
 

@@ -13,6 +13,7 @@ For more information see the LICENSE file
 #define SCENE_H
 
 #include "core/math/vec.h"
+#include "core/value.h"
 #include <functional>
 #include "document/srgbcolor.h"
 #include <QList>
@@ -890,8 +891,9 @@ public:
     // that knows a look this one does not must survive the trip. Every write
     // path goes through iris::normalizeLookStack (document/scenegraph/looks.h),
     // which is where the rules — known ids only, one instance per look, every
-    // parameter present and clamped — are enforced exactly once.
-    QJsonArray looks;
+    // parameter present and clamped — are enforced exactly once. An iris::Value
+    // Array (NOQT-DOCUMENT-1 stage 4); the editor converts it at its file.
+    Value looks = Value(Value::Array{});
     // ---- Planar reflections (PLANAR_REFLECTIONS_SPEC.md §6) -----------------
     // How many mirror planes may re-render the scene. THE most expensive dial
     // in the world: each active plane is a whole extra scene render every

@@ -274,8 +274,8 @@ public:
     void update(float delta) override;
 
     PropertyRows getProperties() override;
-    QVariant getPropertyValue(QString valueName) override;
-    bool setPropertyValue(QString valueName, const QVariant &value) override;
+    Value getPropertyValue(std::string_view valueName) override;
+    bool setPropertyValue(std::string_view valueName, const Value &value) override;
 
     ~ParticleSystemNode() override;
     SceneNodePtr createDuplicate() override;

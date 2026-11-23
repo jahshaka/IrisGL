@@ -54,6 +54,27 @@ inline SrgbColor colourFromValue(const Value &v, const SrgbColor &absent = SrgbC
                                float(channel("b", 0.0)), float(channel("a", 1.0)));
 }
 
+/// A colour PROPERTY's Value (a row, a node's colour name - NOT the file codec, which writes colourToValue for any
+/// colour): THE invalid colour is a NULL ("none": an unset particle fade is one, and the mirror reads its validity), any
+/// valid colour its Object shape.
+inline Value colourRowValue(const SrgbColor &c)
+{
+    return c.isValid() ? colourToValue(c) : Value();
+}
+
+/// The colour a colour property takes from `v` into `out`: a Null is THE invalid colour; an Object that is empty or
+/// carries any of r / g / b / a is its colour (colourFromValue: a channel absent reads 0, `a` 1); anything else - a
+/// non-empty Object with none of the four (a texture reference, say), a number, a string - is false, out unchanged
+/// (STRICT: the lead's C1).
+inline bool colourOfRowValue(const Value &v, SrgbColor &out)
+{
+    if (v.isNull()) { out = SrgbColor(); return true; }
+    if (v.kind() != Kind::Object) return false;
+    if (!v.asObject().empty() && !v.find("r") && !v.find("g") && !v.find("b") && !v.find("a")) return false;
+    out = colourFromValue(v);
+    return true;
+}
+
 inline Value vec3ToValue(const Vec3 &v)
 {
     return Value(Value::Array{Value(double(v.x())), Value(double(v.y())), Value(double(v.z()))});

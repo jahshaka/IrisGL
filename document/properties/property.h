@@ -205,15 +205,14 @@ struct ColorProperty : public Property
         type = PropertyType::Color;
     }
 
+    /// The colour's Object shape; THE invalid colour a Null (valueshapes.h colourRowValue).
     Value getValue() const override {
-        return colourToValue(value);
+        return colourRowValue(value);
     }
 
-    /// The colour's Object shape (valueshapes.h); an empty object reads as the invalid colour.
+    /// A Null (the invalid colour) or the colour's Object; anything else false (colourOfRowValue).
     bool setValue(const Value &v) override {
-        if (v.kind() != Kind::Object) return false;
-        value = colourFromValue(v);
-        return true;
+        return colourOfRowValue(v, value);
     }
 };
 
