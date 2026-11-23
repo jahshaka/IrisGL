@@ -193,6 +193,11 @@ struct CardCacheStatus {
     /// "cards.demandCount", the readers' hits ( the reflection's that found a card, that found none, the gather's
     /// found, none ).
     unsigned long long admitted = 0ull, evicted = 0ull, compactionMoves = 0ull;
+    /// THE REQUEST-ONLY CAPTURE SLOT (SHADER-SYSTEM-1 stage 7, item 2 (A); SurfaceCache::planRequestOnly): the slot passes
+    /// run (one item's capture drawn to ask for its permutations, nothing copied), cumulative - 0 at rest - and the
+    /// distinct capture keys it has seen drawn with nothing missing.
+    unsigned long long requestOnlyPasses = 0ull;
+    unsigned requestOnlyKeysBuilt = 0u;
     /// ...THE ARRIVALS' STAMPS (PHOTON-7 stage 5, 5-5: what a law after a stop attributes a capture to): the cache's own
     /// frame (`cacheFrame`, the stamps' clock), the newest face mark among its LAST update's arrivals (`arrivalMarkNewest`,
     /// 0 with none), and the demand read-back's period and lag in those frames (OgreSurfaceCache.cpp's kDemandReadEvery;

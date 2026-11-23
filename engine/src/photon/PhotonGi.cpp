@@ -9415,6 +9415,9 @@ void PhotonComponent::updateSurfaceCacheFrame(bool &built) {
         }
     }
     mScene.cardCandidates(mCardSlots, view);
+    // THE REQUEST-ONLY CAPTURE SLOT's OFFER (item 2 (A)): only while a card reader is owed and its round is open
+    if (view.readerOwed && mSurfaceCache->requestRoundOpen())
+        mScene.cardRequestCandidates(mSurfaceCache->requestCursor(), view);
     // THE GI FREEZE (M1's measuring arm): no card is captured, relit or traced.
     if (mEngine && mEngine->armRegistry().on(ArmId::GiFreeze)) {
         mSurfaceCache->freezeFrame();

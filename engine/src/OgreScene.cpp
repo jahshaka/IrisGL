@@ -2449,36 +2449,59 @@ void OgreScene::cardSceneFacts(CardSceneView &view) const {
         view.cloudSun[2] = cs.altitude;    view.cloudSun[3] = cs.invMuSun;
     }
     view.ambientSh = mLastAmbientSh;
+    view.readerOwed = cardReaderOwed();
+}
+
+bool OgreScene::cardReaderOwed() const {
+    // the route bits are RayQueryTier's AheadIds: kAheadReflect (bit 0) and kAheadGather (bit 5, its kGatherRouteBit);
+    // the measuring arm shaders.aheadPassOff turns the ahead work off, this slot with it
+    return (mRouteWantedLast & (1u | (1u << 5))) != 0u && !aheadPassOff();
+}
+
+void OgreScene::cardCandidateAt(uint32_t slot, CardSceneView &view, bool requestOffer) const {
+    if (slot >= mItemNodes.size() || slot >= mCardFeed.filed.size() || !mCardFeed.filed[slot]) return;
+    Node *n = mItemNodes[slot];
+    if (!n || !n->item || !n->node || !n->shown) return;
+    if (!(n->item->getVisibilityFlags() & kGiGeometryBit) || (n->item->getVisibilityFlags() & kMovableBit)) return;
+    const std::vector<MeshCardDesc> *cards = mCardFeed.cardsOf[slot];
+    if (!cards || cards->empty()) return;
+    CardSceneView::Candidate c;
+    c.node = n->selfId;
+    c.itemSlot = n->itemSlot;
+    c.item = n->item;
+    c.sceneNode = n->node;
+    c.material = n->materialRef;
+    c.cards = cards;
+    c.lodBounds = mCardFeed.boundsOf[slot];
+    // After the scene graph (U4 stage 3: the cards plan in `engine.plan`) the cached box IS this frame's — and the
+    // recomputing read would overwrite Ogre's SoA-derived transform with its scalar recompute, which the GPU
+    // scene's table (composed from the SoA one) then disagrees with by an ulp.
+    const bool fresh = !mBoxesCurrent && slot < mCardFeed.changedAt.size() &&
+                       mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
+    c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
+    (requestOffer ? view.requestCandidates : view.candidates).push_back(c);
 }
 
 void OgreScene::cardCandidates(const std::vector<uint32_t> &slots, CardSceneView &view) {
     std::vector<CardSceneView::Candidate> &out = view.candidates;
     view.itemSlots = unsigned(mItemNodes.size());
     out.reserve(slots.size());
-    for (const uint32_t slot : slots) {
-        if (slot >= mItemNodes.size() || slot >= mCardFeed.filed.size() || !mCardFeed.filed[slot]) continue;
-        Node *n = mItemNodes[slot];
-        if (!n || !n->item || !n->node || !n->shown) continue;
-        if (!(n->item->getVisibilityFlags() & kGiGeometryBit) || (n->item->getVisibilityFlags() & kMovableBit)) continue;
-        const std::vector<MeshCardDesc> *cards = mCardFeed.cardsOf[slot];
-        if (!cards || cards->empty()) continue;
-        CardSceneView::Candidate c;
-        c.node = n->selfId;
-        c.itemSlot = n->itemSlot;
-        c.item = n->item;
-        c.sceneNode = n->node;
-        c.material = n->materialRef;
-        c.cards = cards;
-        c.lodBounds = mCardFeed.boundsOf[slot];
-        // After the scene graph (U4 stage 3: the cards plan in `engine.plan`) the cached box IS this frame's — and the
-        // recomputing read would overwrite Ogre's SoA-derived transform with its scalar recompute, which the GPU
-        // scene's table (composed from the SoA one) then disagrees with by an ulp.
-        const bool fresh = !mBoxesCurrent && slot < mCardFeed.changedAt.size() &&
-                           mCardFeed.changedAt[slot] + 1u >= mCardFeed.serial;
-        c.box = fresh ? n->item->getWorldAabbUpdated() : n->item->getWorldAabb();
-        out.push_back(c);
-    }
+    for (const uint32_t slot : slots) cardCandidateAt(slot, view, false);
     ++mCardFeed.serial;
+}
+
+// THE REQUEST-ONLY SLOT's OFFER (SHADER-SYSTEM-1 stage 7, item 2 (A); SurfaceCache::planRequestOnly): the items that can
+// hold cards among kRequestSpan item slots from the slot's cursor, wrapping - a BOUNDED walk a frame, only while a card
+// reader is owed and the slot's round is open (never the whole scene in a frame: ATOM-CPU-WALKS-1).
+void OgreScene::cardRequestCandidates(size_t cursor, CardSceneView &view) {
+    constexpr unsigned kRequestSpan = 64u;
+    const size_t slots = mItemNodes.size();
+    view.requestCandidates.clear();
+    view.requestWalked = 0u;
+    if (!slots) return;
+    const unsigned span = unsigned(std::min<size_t>(kRequestSpan, slots));
+    for (unsigned k = 0; k < span; ++k) cardCandidateAt(uint32_t((cursor + k) % slots), view, true);
+    view.requestWalked = span;
 }
 
 /// THE CANDIDATE PREDICATE, and each clause is the statement the voxel side makes:

@@ -83,6 +83,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <OgrePixelFormatGpu.h>
@@ -314,6 +315,12 @@ struct CardSceneView {
     /// ...and whether each reader RECORDED lately (ScreenProbeGather::kReaderStaleFrames): a reader that went stale makes
     /// no demand - its stamps count for nothing at the decision (the empty-demand rule).
     bool readerActive[2] = { true, true };
+    /// A CARD READER's ROUTE IS OWED (SHADER-SYSTEM-1 stage 7, item 2 (A); OgreScene::cardReaderOwed): the reflection's or
+    /// the gather's consumer refused last frame (its build in flight or its set not built). The landing that completes
+    /// the frame opens the demand window (the completion serial: PhotonGi's demand change) and the first cards are
+    /// captured then - so while a reader is owed the capture pass's permutations are ASKED FOR NOW, in the ahead class
+    /// (SurfaceCache::planRequestOnly), over the items below.
+    bool readerOwed = false;
     /// THE TEST DOOR "cards.force": one card held resident (`forcedCardMode` +1) or absent (-1), by its node and its index
     /// in the instance's layout (0: none).
     NodeId forcedCardNode = 0;
@@ -379,6 +386,11 @@ struct CardSceneView {
     /// THE ITEMS THE CACHE ASKED FOR (SurfaceCache::takeDemand: its resident instances and the items whose faces the
     /// readers marked within the window) that CAN hold cards - never the whole scene (ATOM-CPU-WALKS-1).
     std::vector<Candidate> candidates;
+    /// ...AND THE REQUEST-ONLY SLOT's OFFER (OgreScene::cardRequestCandidates, only while a reader is owed and the slot's
+    /// round is open): the items that CAN hold cards among a BOUNDED span of item slots from the slot's cursor - never the
+    /// whole scene in a frame - and how many slots that span walked (`requestWalked`: the cursor's step).
+    std::vector<Candidate> requestCandidates;
+    unsigned requestWalked = 0u;
 };
 
 /// THE SUN ON THE CARDS (PHOTON-CARDS-4; ATOM-S3-CARDCAP) — what the scene tells the
@@ -491,6 +503,10 @@ public:
     /// measured); the card relight skips while its permutation builds, the cards keeping
     /// their radiance and staying owed. Off (every offscreen and test scene): as before.
     void setAsyncShaders(bool on);
+    /// THE REQUEST-ONLY SLOT's ROUND (planRequestOnly): open while some capture key it has offered has not drawn with
+    /// nothing missing; the item slot its next offer starts at (OgreScene::cardRequestCandidates reads both).
+    bool requestRoundOpen() const { return !mRequestRoundIdle; }
+    size_t requestCursor() const { return mRequestCursor; }
     SurfaceCache();
     ~SurfaceCache();
 
@@ -775,6 +791,12 @@ private:
     /// (update), and records the job over it (workspacePosUpdate, after the
     /// capture's copies, with the frame's lights).
     void planRelights(const CardSceneView &view);
+    /// THE REQUEST-ONLY CAPTURE SLOT (SHADER-SYSTEM-1 stage 7, item 2 (A)): with no real batch, while a card reader is
+    /// owed, in a scene whose captures compile in the background, ONE item a frame from the scene's offer
+    /// (CardSceneView::requestCandidates) whose capture key (its sub-items' Hlms hashes) has not yet drawn with nothing
+    /// missing: its first card's capture is drawn so its permutations are asked for, in the ahead class; nothing is
+    /// copied, no card is marked, no residency moves.
+    void planRequestOnly(const CardSceneView &view);
     void relightCards();
     /// THE SUN ON THE CARDS, in the frame after the capture's copies and before the
     /// relight: the still world's term (the batch just captured, and the cards a
@@ -1079,6 +1101,20 @@ private:
     /// copied a batch photon_update closes.
     bool mPosUpdated = false;
     bool mBatchCopied = false;
+    /// THE REQUEST-ONLY SLOT's state (planRequestOnly): this frame's capture is one; its subject and the card it aims at;
+    /// its key; the keys drawn with nothing missing; the offer's cursor (an item slot); the slots walked since the last ask
+    /// (a whole circle of them with nothing to ask = the round idle); the item slots at the round's start (a new item
+    /// re-opens the round, as a reader no longer owed does); the passes run.
+    bool mRequestOnly = false;
+    Ogre::Item *mRequestItem = nullptr;
+    unsigned char mRequestLod = 0u;
+    uint64_t mRequestKey = 0u;
+    std::unordered_set<uint64_t> mRequestBuilt;
+    size_t mRequestCursor = 0u;
+    size_t mRequestWalkedIdle = 0u;
+    bool mRequestRoundIdle = false;
+    unsigned mRequestItemSlots = 0u;
+    unsigned long long mRequestPasses = 0ull;
 
     std::vector<InstanceRec> mInstances;
     std::vector<CardRec> mCards;

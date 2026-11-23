@@ -15,6 +15,7 @@
 #include <OgreRenderQueue.h>
 #include <OgreHlmsComputeJob.h>
 #include <OgreHlmsManager.h>
+#include <OgreHlmsAsyncCompiler.h>
 #include <OgreHlmsPbs.h>
 #include "photon/voxel/PhotonVoxelLighting.h"
 #include "photon/voxel/PhotonVoxelizerSourceBase.h"
@@ -653,6 +654,11 @@ void SurfaceCache::destroyAll() {
     mInstanceBufferCpu.clear();
     mTableDirty = false;
     mBatch.clear();
+    mRequestOnly = false;
+    mRequestItem = nullptr;
+    mRequestBuilt.clear();   // (a rebuilt cache's round starts again)
+    mRequestRoundIdle = false;
+    mRequestWalkedIdle = 0u;
     mRelight.clear();
     mRelightMode.clear();
     mMoverLast.clear();
@@ -1881,10 +1887,13 @@ void SurfaceCache::workspacePreUpdate(Ogre::CompositorWorkspace *ws) {
     if (mBatchFrame != Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount()) {
         mBatch.clear();
         mRelight.clear();
-            mWs->setExecutionMask(0u);
+        mRequestOnly = false;
+        mWs->setExecutionMask(0u);
     }
-    if (mBatch.empty()) return;
+    if (mBatch.empty() && !mRequestOnly) return;
     gCapturing = true;
+    // THE REQUEST-ONLY SLOT asks in the ahead class: served only when the frame's own queue is empty
+    if (mRequestOnly) Ogre::Root::getSingleton().getHlmsManager()->getAsyncCompiler()->_jahSetAheadClass(true);
     mBatchStart = std::chrono::steady_clock::now();
     const Ogre::RenderQueue *rq = mWs->getSceneManager()->getRenderQueue();
     mBatchPlaceholderAt = rq->getNumPlaceholderDraws();
@@ -1895,6 +1904,14 @@ void SurfaceCache::passPreExecute(Ogre::CompositorPass *pass) {
     const Ogre::uint32 id = pass->getDefinition()->mIdentifier;
     if (id < kCardPassIdentifier || id >= kCardPassIdentifier + kCaptureBatch) return;
     const unsigned slot = id - kCardPassIdentifier;
+    if (mRequestOnly) {   // (the request-only slot's subject: an item that holds no card yet, its first card's LOD)
+        if (slot != 0u || !mRequestItem) return;
+        mSubjectFlags = mRequestItem->getVisibilityFlags();
+        mSubjectLod = mRequestItem->getCurrentMeshLod();
+        mRequestItem->setVisibilityFlags(mSubjectFlags | detail::kCardSubjectBit);
+        mRequestItem->_setCurrentMeshLod(mRequestLod);
+        return;
+    }
     if (slot >= mBatch.size()) return;
     CardRec &card = mCards[mBatch[slot]];
     InstanceRec &inst = mInstances[card.instance];
@@ -1916,6 +1933,12 @@ void SurfaceCache::passPosExecute(Ogre::CompositorPass *pass) {
     const Ogre::uint32 id = pass->getDefinition()->mIdentifier;
     if (id < kCardPassIdentifier || id >= kCardPassIdentifier + kCaptureBatch) return;
     const unsigned slot = id - kCardPassIdentifier;
+    if (mRequestOnly) {
+        if (slot != 0u || !mRequestItem) return;
+        mRequestItem->setVisibilityFlags(mSubjectFlags);
+        mRequestItem->_setCurrentMeshLod(mSubjectLod);
+        return;
+    }
     if (slot >= mBatch.size()) return;
     InstanceRec &inst = mInstances[mCards[mBatch[slot]].instance];
     if (!inst.item) return;
@@ -1928,6 +1951,23 @@ void SurfaceCache::workspacePosUpdate(Ogre::CompositorWorkspace *ws) {
     gCapturing = false;
     // photon_update (the next workspace) traces and relights, whatever happened here.
     mPosUpdated = true;
+    // THE REQUEST-ONLY SLOT (item 2 (A)) IS NEVER A CAPTURE: nothing copied, no card marked, no relight; its key is built
+    // once its draw met nothing missing (its placeholders and skips are the capture's, never the frame's: the acc below)
+    if (mRequestOnly) {
+        Ogre::Root::getSingleton().getHlmsManager()->getAsyncCompiler()->_jahSetAheadClass(false);
+        const Ogre::RenderQueue *rq = mWs->getSceneManager()->getRenderQueue();
+        const unsigned long long placeholders = rq->getNumPlaceholderDraws() - mBatchPlaceholderAt;
+        const unsigned long long skips = rq->getNumPendingSkips() - mBatchSkipsAt;
+        CaptureAsyncDraws &acc = gCaptureAsyncDraws[mWs->getSceneManager()];
+        acc.placeholders += placeholders;
+        acc.skips += skips;
+        if (!placeholders && !skips) mRequestBuilt.insert(mRequestKey);
+        ++mRequestPasses;
+        mRequestOnly = false;
+        mRequestItem = nullptr;
+        mWs->setExecutionMask(0u);
+        return;
+    }
     if (mBatch.empty()) return;
     const auto tB = std::chrono::steady_clock::now();
     // A BATCH THAT WAITED FOR A SHADER IS NOT A CAPTURE (see makeWorkspace): nothing is
@@ -4323,6 +4363,54 @@ void SurfaceCache::update(const CardSceneView &view) {
     mBatchFrame = Ogre::Root::getSingleton().getCompositorManager2()->getFrameCount();
     mWs->setExecutionMask(static_cast<Ogre::uint8>((1u << mBatch.size()) - 1u));
     planRelights(view);
+    planRequestOnly(view);
+}
+
+// THE REQUEST-ONLY CAPTURE SLOT (SHADER-SYSTEM-1 stage 7, item 2 (A); the lead's ruling 2026-11-23). The first cards are
+// captured at THE LANDING THAT COMPLETES THE FRAME (refreshResidency: an arrival needs an open demand window, opened by
+// the completion serial's edge; a held route keeps the frame incomplete), so a cold scene asked the capture pass's
+// permutations of the background compiler only then and captured late by their compile. While a card reader is owed,
+// the slot draws ONE offered item's first card a frame (nothing copied) so those permutations are asked for before the
+// landing, in the ahead class (the frame's own requests first). THE BOUNDS: it runs only while a reader is owed, in a
+// scene whose captures compile in the background, with no real batch; its round stops once every distinct capture key
+// it was offered drew with nothing missing (0 passes at rest); a key is its item's sub-items' Hlms hashes (the
+// ASSUMPTION, proved by gi.route_landing.capture: the capture's permutation depends on the item's renderables and the
+// pass, not on the view). A round of K keys takes at least K frames (and the scene's slots / the offer's span): a
+// completing landing that comes before the round ends asks for the remaining keys at the landing, as before - later
+// for those, never wrong (the owner's rule: faster loading over correctness while shaders stream in).
+void SurfaceCache::planRequestOnly(const CardSceneView &view) {
+    mRequestOnly = false;
+    if (!view.readerOwed || view.itemSlots != mRequestItemSlots) {   // (a new owed period or a new item: a new round)
+        mRequestRoundIdle = false;
+        mRequestWalkedIdle = 0u;
+    }
+    mRequestItemSlots = view.itemSlots;
+    if (!view.readerOwed || !mAsyncShaders || !mBatch.empty() || mRequestRoundIdle || !view.itemSlots) return;
+    std::vector<CardRec> layout;
+    for (const CardSceneView::Candidate &cand : view.requestCandidates) {
+        if (!cand.item) continue;
+        uint64_t key = 1469598103934665603ull;   // FNV-1a over its sub-items' renderable Hlms hashes
+        for (size_t k = 0; k < cand.item->getNumSubItems(); ++k) {
+            key ^= cand.item->getSubItem(k)->getHlmsHash();
+            key *= 1099511628211ull;
+        }
+        if (mRequestBuilt.count(key)) continue;
+        layoutCards(cand, layout);
+        if (layout.empty()) continue;
+        mRequestCursor = (cand.itemSlot + 1u) % view.itemSlots;
+        mRequestWalkedIdle = 0u;
+        mRequestKey = key;
+        mRequestItem = cand.item;
+        mRequestLod = layout.front().lodLevel;
+        mRequestOnly = true;
+        aimCamera(layout.front(), 0u);
+        mWs->setExecutionMask(1u);   // (mBatchFrame is this frame's: update)
+        return;
+    }
+    // nothing to ask in the span walked: the cursor steps past it; a whole circle of slots so = the round idle
+    mRequestCursor = (mRequestCursor + view.requestWalked) % view.itemSlots;
+    mRequestWalkedIdle += view.requestWalked;
+    if (mRequestWalkedIdle >= view.itemSlots) mRequestRoundIdle = true;
 }
 
 unsigned SurfaceCache::rootBit(char kind, unsigned long long frame) {
@@ -4455,6 +4543,8 @@ void SurfaceCache::fillStatus(CardCacheStatus &out) const {
         out.residentHash = h;
     }
     out.admitted = mAdmitted;
+    out.requestOnlyPasses = mRequestPasses;
+    out.requestOnlyKeysBuilt = unsigned(mRequestBuilt.size());
     out.cacheFrame = mFrame;
     out.arrivalMarkNewest = mArrivalMarkNewest;
     out.demandReadEvery = unsigned(kDemandReadEvery);

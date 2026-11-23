@@ -113,6 +113,12 @@ struct AsyncShaderStats {
     /// fork's HlmsAsyncCompiler::getJahAheadRun / getJahPromoted; running totals).
     unsigned long long aheadRun = 0;
     unsigned long long aheadPromoted = 0;
+    /// THE ORDER's COUNT: ahead-class jobs the service took while the frame's own queue still held a job (the fork's
+    /// HlmsAsyncCompiler::getJahAheadOverOwn, counted under its queue's lock: exact). The class's law reads 0.
+    unsigned long long aheadOverOwn = 0;
+    /// The permutations a GRAPHICS pass asked of the background compiler, ever (the fork's
+    /// HlmsAsyncCompiler::getJahSubmittedGraphics; `submitted` counts the compute jobs too).
+    unsigned long long submittedGraphics = 0;
     /// THE BUILDS' BURST, "n of m" (SHADER-SYSTEM-1 stage 7; the notice's ONE fact, every host reads it - the app's
     /// toolbar indicator, jahlab's overlay and LAB BUILDING lines, the headset's surround): a burst BEGINS when the pending
     /// count rises from 0, `landed` counts its landings (a failure is a landing), `total` = landed + pending; when pending

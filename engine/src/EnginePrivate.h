@@ -5136,8 +5136,17 @@ public:
     void updateSurfaceCache() { mPhoton.updateSurfaceCache(); }
     /// THE CARDS' SCENE FACTS (the surface cache is Photon's: PhotonComponent::updateSurfaceCache).
     void cardSceneFacts(CardSceneView &view) const;
+    /// One item slot as the cards' candidate (cardCandidates' predicate), appended to view.candidates - or, for the
+    /// request-only slot's offer, view.requestCandidates; nothing when it cannot hold cards now.
+    void cardCandidateAt(uint32_t slot, CardSceneView &view, bool requestOffer) const;
     /// Fills view.candidates with the slots asked for that can hold cards, and view.itemSlots (PHOTON-7 stage 5, 5-2).
     void cardCandidates(const std::vector<uint32_t> &slots, CardSceneView &view);
+    /// A card reader's route owed last frame (the reflection's or the gather's consumer refused: P3's route bits), the
+    /// measuring arm shaders.aheadPassOff excepted (CardSceneView::readerOwed).
+    bool cardReaderOwed() const;
+    /// The request-only capture slot's offer: the card-eligible items of a bounded span of item slots from `cursor`
+    /// (CardSceneView::requestCandidates, requestWalked; SurfaceCache::planRequestOnly).
+    void cardRequestCandidates(size_t cursor, CardSceneView &view);
     /// A node's place in mItemNodes (npos: no node, or no Item) - the test door cards.force's offer (PhotonGi).
     size_t itemSlotOfNode(NodeId id) const {
         const auto it = mNodes.find(id);
