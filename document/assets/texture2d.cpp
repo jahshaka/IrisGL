@@ -42,7 +42,7 @@ Texture2D::ReadableProbe Texture2D::readableProbe()
     return sProbe.load();
 }
 
-Texture2DPtr Texture2D::load(QString path)
+Texture2DPtr Texture2D::load(std::string path)
 {
     // NO PIXEL DECODE (lane-openasync, 2026-09-03): every consumer of a
     // loaded Texture2D reads `source` (the path) and hands it to the engine,
@@ -51,8 +51,8 @@ Texture2DPtr Texture2D::load(QString path)
     // for pixels nobody read. A null return still means "not a readable
     // image": the host's probe answers that (texture2d.h).
     if (const ReadableProbe probe = sProbe.load()) {
-        if (!probe(path.toStdString())) {
-            iris::log::warn(("error loading image: " + path).toStdString());
+        if (!probe(path)) {
+            iris::log::warn(("error loading image: " + path));
             return Texture2DPtr(nullptr);
         }
     }
@@ -77,10 +77,10 @@ std::shared_ptr<Texture2D> Texture2D::createCubeMap(Image (&&faces)[6])
 // form, not a path, so every existing consumer keeps working on a string:
 // the mirror's slot table sees a non-empty source, the writer sees a live
 // reference and skips the row, and a panel shows something meaningful.
-Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
+Texture2DPtr Texture2D::createLive(const std::string &guid, const std::string &name,
                                    int width, int height, bool mipmaps)
 {
-    if (guid.isEmpty() || width <= 0 || height <= 0) return Texture2DPtr();
+    if (guid.empty() || width <= 0 || height <= 0) return Texture2DPtr();
 
     auto tex = new Texture2D();
     tex->image           = Image::filled(width, height, 0, 0, 0, 255);

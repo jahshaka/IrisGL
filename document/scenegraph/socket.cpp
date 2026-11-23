@@ -54,7 +54,21 @@ bool socketWorldTransform(MeshNode *owner, const std::string &socketName,
     const Socket *socket = owner->findSocket(socketName);
     if (!socket) return false;
 
-    std::unordered_map<std::string, Mat4> bones;
+    if (!source) {
+        // THE BIND POSE OF ONE BONE, NO MAP (batch 3): this built the whole rig's name -> matrix map on every call - 130
+        // heap allocations a call for a 65-bone rig, every frame for a rider on an owner with no engine rig
+        // (spikes/noqt-document-1/s5/socketalloc) - to read one entry. The same matrix bindPoseWorldTransforms writes
+        // for the bone (its LAST bone of the name wins there: the same here), the same product order.
+        const SkeletonPtr skeleton = owner->getSkeleton();
+        if (!skeleton) return false;
+        const Bone *found = nullptr;
+        for (const BonePtr &bone : skeleton->bones)
+            if (bone && bone->name == socket->boneName) found = bone.get();
+        if (!found) return false;
+        out = (owner->getGlobalTransform() * found->meshSpacePoseMatrix) * socket->offsetMatrix();
+        return true;
+    }
+    std::unordered_map<std::string, Mat4> bones;   // an injected source answers in a map (no caller passes one today)
     if (!poseFor(owner, source, bones)) return false;
     const auto bone = bones.find(socket->boneName);
     if (bone == bones.cend()) return false;

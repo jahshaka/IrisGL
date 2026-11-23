@@ -12,13 +12,17 @@ For more information see the LICENSE file
 #include "document/animation/locomotion.h"
 
 #include "document/properties/valueshapes.h"
-#include <QRegularExpression>
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <cmath>
+#include <optional>
+#include <string_view>
 
 #include "document/animation/animation.h"
 #include "document/physics/avatarmovement.h"
 #include "document/scenegraph/scenenode.h"
+#include "core/text.h"
 
 namespace iris
 {
@@ -28,7 +32,22 @@ namespace
 /// The float spelling used in every canonical condition string. 'g' with 6
 /// significant digits round-trips a float exactly for every value a human
 /// types and never grows an exponent for the range conditions live in.
-QString num(float v) { return QString::number(double(v), 'g', 6); }
+std::string num(float v)
+{
+    // (the ruling's call 3: a local std::to_chars) - QString::number(v, 'g', 6)'s text: printf's %g at 6 digits
+    char buf[32];
+    const auto r = std::to_chars(buf, buf + sizeof buf, double(v), std::chars_format::general, 6);
+    return std::string(buf, r.ptr);
+}
+
+/// QString::toFloat's answer for the grammar's numbers: the whole text, a leading '+' allowed (Qt took one).
+std::optional<float> parseNumber(std::string_view s)
+{
+    if (!s.empty() && s.front() == '+') s.remove_prefix(1);
+    const std::optional<double> d = iris::text::parseDouble(s);
+    if (!d) return std::nullopt;
+    return float(*d);
+}
 
 /// The whole vocabulary, in the refusal message. A closed vocabulary is only
 /// usable if being refused tells you what the alternatives are (gate S5).
@@ -39,170 +58,154 @@ const char *kVocabulary =
 // ---------------------------------------------------------------------------
 // CONDITIONS
 
-QString LocomotionCondition::text() const
+std::string LocomotionCondition::text() const
 {
     switch (kind) {
-    case LocomotionConditionKind::SpeedGreater: return QStringLiteral("speed > ") + num(value);
-    case LocomotionConditionKind::SpeedLess:    return QStringLiteral("speed < ") + num(value);
-    case LocomotionConditionKind::Grounded:     return QStringLiteral("grounded");
-    case LocomotionConditionKind::NotGrounded:  return QStringLiteral("!grounded");
+    case LocomotionConditionKind::SpeedGreater: return "speed > " + num(value);
+    case LocomotionConditionKind::SpeedLess:    return "speed < " + num(value);
+    case LocomotionConditionKind::Grounded:     return "grounded";
+    case LocomotionConditionKind::NotGrounded:  return "!grounded";
     case LocomotionConditionKind::ClipEnded:
-        return QStringLiteral("clipEnded(") + num(value) + QLatin1Char(')');
-    case LocomotionConditionKind::JumpRequested: return QStringLiteral("jumpRequested");
+        return "clipEnded(" + num(value) + ')';
+    case LocomotionConditionKind::JumpRequested: return "jumpRequested";
     }
-    return QString();
+    return std::string();
 }
 
-bool LocomotionCondition::parse(const QString &text, LocomotionCondition &out, QString *error)
+bool LocomotionCondition::parse(const std::string &text, LocomotionCondition &out, std::string *error)
 {
-    auto refuse = [&](const QString &why) {
+    auto refuse = [&](const std::string &why) {
         if (error)
-            *error = QStringLiteral("unrecognised condition \"%1\": %2 — the condition "
-                                    "vocabulary is CLOSED, and the six forms are: %3")
-                         .arg(text.trimmed(), why, QLatin1String(kVocabulary));
+            *error = iris::text::cat("unrecognised condition \"", std::string(iris::text::trim(text)), "\": ", why, " — the condition vocabulary is CLOSED, and the six forms are: ", kVocabulary);
         return false;
     };
 
     // Whitespace is not significant anywhere in the grammar, so it is removed
     // once rather than handled per form. Case is not significant either: a user
     // who typed `ClipEnded` meant clipEnded.
-    QString c = text;
-    c.remove(QRegularExpression(QStringLiteral("\\s")));
-    if (c.isEmpty()) return refuse(QStringLiteral("it is empty"));
-    const QString lower = c.toLower();
+    std::string c = text;
+    c.erase(std::remove_if(c.begin(), c.end(), [](unsigned char ch) { return std::isspace(ch) != 0; }), c.end());
+    if (c.empty()) return refuse("it is empty");
+    const std::string lower = iris::text::asciiLower(c);
 
-    if (lower == QLatin1String("grounded")) {
+    if (lower == "grounded") {
         out.kind = LocomotionConditionKind::Grounded;
         out.value = 0.0f;
         return true;
     }
-    if (lower == QLatin1String("!grounded")) {
+    if (lower == "!grounded") {
         out.kind = LocomotionConditionKind::NotGrounded;
         out.value = 0.0f;
         return true;
     }
-    if (lower == QLatin1String("jumprequested")) {
+    if (lower == "jumprequested") {
         out.kind = LocomotionConditionKind::JumpRequested;
         out.value = 0.0f;
         return true;
     }
-    if (lower.startsWith(QLatin1String("speed>")) || lower.startsWith(QLatin1String("speed<"))) {
-        const bool greater = lower.at(5) == QLatin1Char('>');
-        bool ok = false;
-        const float v = lower.mid(6).toFloat(&ok);
-        if (!ok || !std::isfinite(v))
-            return refuse(QStringLiteral("'%1' is not a number").arg(c.mid(6)));
+    if (iris::text::startsWith(lower, "speed>") || iris::text::startsWith(lower, "speed<")) {
+        const bool greater = lower.at(5) == '>';
+        const std::optional<float> parsed = parseNumber(std::string_view(lower).substr(6));
+        const float v = parsed ? *parsed : 0.0f;
+        if (!parsed || !std::isfinite(v))
+            return refuse(iris::text::cat("'", c.substr(6), "' is not a number"));
         out.kind = greater ? LocomotionConditionKind::SpeedGreater
                            : LocomotionConditionKind::SpeedLess;
         out.value = v;
         return true;
     }
-    if (lower.startsWith(QLatin1String("clipended("))) {
-        if (!lower.endsWith(QLatin1Char(')')))
-            return refuse(QStringLiteral("the closing parenthesis is missing"));
-        const QString inner = lower.mid(10, lower.size() - 11);
-        bool ok = false;
-        const float v = inner.toFloat(&ok);
-        if (!ok || !std::isfinite(v))
-            return refuse(QStringLiteral("'%1' is not a number").arg(inner));
+    if (iris::text::startsWith(lower, "clipended(")) {
+        if (!iris::text::endsWith(lower, ")"))
+            return refuse("the closing parenthesis is missing");
+        const std::string inner = lower.substr(10, lower.size() - 11);
+        const std::optional<float> parsed = parseNumber(inner);
+        const float v = parsed ? *parsed : 0.0f;
+        if (!parsed || !std::isfinite(v))
+            return refuse(iris::text::cat("'", inner, "' is not a number"));
         // A fraction OF THE CLIP. Outside [0,1] it either fires on the first
         // step or never fires at all, and both read as a broken state machine.
         if (v < 0.0f || v > 1.0f)
-            return refuse(QStringLiteral("the fraction %1 is outside [0, 1]").arg(num(v)));
+            return refuse(iris::text::cat("the fraction ", num(v), " is outside [0, 1]"));
         out.kind = LocomotionConditionKind::ClipEnded;
         out.value = v;
         return true;
     }
     // `speed >= x`, `speed == x`, `!jumpRequested`, `speed > x && grounded` and
     // every other near-miss lands here, by design: the vocabulary is the fence.
-    return refuse(QStringLiteral("no form of the vocabulary matches it"));
+    return refuse("no form of the vocabulary matches it");
 }
 
 // ---------------------------------------------------------------------------
 // THE ASSET
 
-const LocomotionStateDef *LocomotionAsset::findState(const QString &n) const
+const LocomotionStateDef *LocomotionAsset::findState(const std::string &n) const
 {
     for (const auto &s : states)
         if (s.name == n) return &s;
     return nullptr;
 }
 
-bool LocomotionAsset::validate(QString *error) const
+bool LocomotionAsset::validate(std::string *error) const
 {
-    auto fail = [&](const QString &msg) {
+    auto fail = [&](const std::string &msg) {
         if (error) *error = msg;
         return false;
     };
 
-    if (states.isEmpty()) return fail(QStringLiteral("the asset has no states"));
+    if (states.empty()) return fail("the asset has no states");
 
     for (int i = 0; i < states.size(); ++i) {
         const LocomotionStateDef &s = states[i];
-        if (s.name.isEmpty())
-            return fail(QStringLiteral("state %1 has no name").arg(i));
-        if (s.name == QLatin1String("*"))
-            return fail(QStringLiteral("state %1 is named '*', which is the wildcard "
-                                       "a transition's `from` uses").arg(i));
+        if (s.name.empty())
+            return fail(iris::text::cat("state ", i, " has no name"));
+        if (s.name == "*")
+            return fail(iris::text::cat("state ", i, " is named '*', which is the wildcard a transition's `from` uses"));
         for (int j = 0; j < i; ++j)
             if (states[j].name == s.name)
-                return fail(QStringLiteral("two states are named '%1'").arg(s.name));
+                return fail(iris::text::cat("two states are named '", s.name, "'"));
 
         // R2: "no clip enabled" is a FROZEN pose, not a bind pose. A state that
         // cannot resolve to at least one clip produces a character stuck in a
         // half-pose with no error anywhere, so it is refused here rather than
         // discovered in a demo.
         if (s.kind == LocomotionSourceKind::Clip) {
-            if (s.clip.isEmpty())
-                return fail(QStringLiteral("state '%1' names no clip").arg(s.name));
+            if (s.clip.empty())
+                return fail(iris::text::cat("state '", s.name, "' names no clip"));
             if (!(s.speed > 0.0f))
-                return fail(QStringLiteral("state '%1' has a play speed of %2; it must be "
-                                           "positive").arg(s.name, num(s.speed)));
+                return fail(iris::text::cat("state '", s.name, "' has a play speed of ", num(s.speed), "; it must be positive"));
         } else {
             const auto &sm = s.space.samples;
             if (sm.size() < 2)
-                return fail(QStringLiteral("state '%1' is a blend space with %2 sample(s); "
-                                           "a blend space needs at least 2")
-                                .arg(s.name).arg(sm.size()));
+                return fail(iris::text::cat("state '", s.name, "' is a blend space with ", sm.size(), " sample(s); a blend space needs at least 2"));
             for (int k = 0; k < sm.size(); ++k) {
-                if (sm[k].clip.isEmpty())
-                    return fail(QStringLiteral("state '%1' blend sample %2 names no clip")
-                                    .arg(s.name).arg(k));
+                if (sm[k].clip.empty())
+                    return fail(iris::text::cat("state '", s.name, "' blend sample ", k, " names no clip"));
                 if (k > 0 && !(sm[k].position > sm[k - 1].position))
-                    return fail(QStringLiteral("state '%1' blend sample positions must be "
-                                               "STRICTLY increasing: sample %2 sits at %3, "
-                                               "sample %4 at %5")
-                                    .arg(s.name).arg(k - 1).arg(num(sm[k - 1].position))
-                                    .arg(k).arg(num(sm[k].position)));
+                    return fail(iris::text::cat("state '", s.name, "' blend sample positions must be STRICTLY increasing: sample ", k - 1, " sits at ", num(sm[k - 1].position), ", sample ", k, " at ", num(sm[k].position)));
                 if (sm[k].authoredSpeed < 0.0f)
-                    return fail(QStringLiteral("state '%1' blend sample %2 has a negative "
-                                               "authoredSpeed").arg(s.name).arg(k));
+                    return fail(iris::text::cat("state '", s.name, "' blend sample ", k, " has a negative authoredSpeed"));
             }
         }
     }
 
-    if (entry.isEmpty()) return fail(QStringLiteral("the asset names no entry state"));
+    if (entry.empty()) return fail("the asset names no entry state");
     if (!findState(entry))
-        return fail(QStringLiteral("the entry state '%1' is not one of the asset's states")
-                        .arg(entry));
+        return fail(iris::text::cat("the entry state '", entry, "' is not one of the asset's states"));
 
     for (int i = 0; i < transitions.size(); ++i) {
         const LocomotionTransitionDef &t = transitions[i];
-        if (t.from.isEmpty())
-            return fail(QStringLiteral("transition %1 has no 'from'").arg(i));
-        if (t.from != QLatin1String("*") && !findState(t.from))
-            return fail(QStringLiteral("transition %1: 'from' names '%2', which is not a "
-                                       "state (use '*' for any state)").arg(i).arg(t.from));
-        if (t.to.isEmpty())
-            return fail(QStringLiteral("transition %1 has no 'to'").arg(i));
+        if (t.from.empty())
+            return fail(iris::text::cat("transition ", i, " has no 'from'"));
+        if (t.from != "*" && !findState(t.from))
+            return fail(iris::text::cat("transition ", i, ": 'from' names '", t.from, "', which is not a state (use '*' for any state)"));
+        if (t.to.empty())
+            return fail(iris::text::cat("transition ", i, " has no 'to'"));
         if (!findState(t.to))
-            return fail(QStringLiteral("transition %1: 'to' names '%2', which is not a state")
-                            .arg(i).arg(t.to));
+            return fail(iris::text::cat("transition ", i, ": 'to' names '", t.to, "', which is not a state"));
         if (t.from == t.to)
-            return fail(QStringLiteral("transition %1 goes from '%2' to itself").arg(i).arg(t.from));
+            return fail(iris::text::cat("transition ", i, " goes from '", t.from, "' to itself"));
         if (t.blendDuration < 0.0f || !std::isfinite(t.blendDuration))
-            return fail(QStringLiteral("transition %1 (%2 -> %3) has a blend duration of %4")
-                            .arg(i).arg(t.from, t.to, num(t.blendDuration)));
+            return fail(iris::text::cat("transition ", i, " (", t.from, " -> ", t.to, ") has a blend duration of ", num(t.blendDuration)));
     }
     return true;
 }
@@ -223,19 +226,19 @@ const char *clipRoleName(ClipRole role)
     return "idle";
 }
 
-bool clipRoleFromName(const QString &name, ClipRole &out)
+bool clipRoleFromName(const std::string &name, ClipRole &out)
 {
-    const QString n = name.trimmed().toLower();
-    if (n == QLatin1String("idle")) { out = ClipRole::Idle; return true; }
-    if (n == QLatin1String("walk")) { out = ClipRole::Walk; return true; }
-    if (n == QLatin1String("run"))  { out = ClipRole::Run; return true; }
-    if (n == QLatin1String("jump-start") || n == QLatin1String("jumpstart")) {
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (n == "idle") { out = ClipRole::Idle; return true; }
+    if (n == "walk") { out = ClipRole::Walk; return true; }
+    if (n == "run")  { out = ClipRole::Run; return true; }
+    if (n == "jump-start" || n == "jumpstart") {
         out = ClipRole::JumpStart; return true;
     }
-    if (n == QLatin1String("fall-loop") || n == QLatin1String("fallloop")) {
+    if (n == "fall-loop" || n == "fallloop") {
         out = ClipRole::FallLoop; return true;
     }
-    if (n == QLatin1String("land")) { out = ClipRole::Land; return true; }
+    if (n == "land") { out = ClipRole::Land; return true; }
     return false;
 }
 
@@ -243,7 +246,7 @@ int ClipRoles::boundCount() const
 {
     int n = 0;
     for (int i = 0; i < kClipRoleCount; ++i)
-        if (!names[i].isEmpty()) ++n;
+        if (!names[i].empty()) ++n;
     return n;
 }
 
@@ -271,44 +274,49 @@ const RolePatterns kPatterns[] = {
 
 /// lowercase, punctuation -> spaces. "Falling To Landing" -> "falling to landing",
 /// "mixamo.com" -> "mixamo com", "fall_loop" -> "fall loop".
-QString normalizeClipName(const QString &name)
+std::string normalizeClipName(const std::string &name)
 {
-    QString out;
+    std::string out;
     out.reserve(name.size());
-    for (QChar ch : name) {
-        if (ch.isLetterOrNumber()) out.append(ch.toLower());
-        else out.append(QLatin1Char(' '));
+    // UTF-8 bytes: an ASCII letter or digit lowercased, other ASCII a space; a byte of a non-ASCII character is kept
+    // (the keywords are ASCII; a non-ASCII letter stays part of its word). Then QString::simplified: runs of spaces
+    // one, none at either end.
+    for (const unsigned char ch : name) {
+        if (ch >= 0x80) out.push_back(char(ch));
+        else if (std::isalnum(ch)) out.push_back(char(std::tolower(ch)));
+        else if (!out.empty() && out.back() != ' ') out.push_back(' ');
     }
-    return out.simplified();
+    if (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
 }
 
 /// 3 = the whole name IS the keyword, 2 = a word of it is, 1 = it contains it,
 /// 0 = no match. Higher is a better binding; ties break on list order, so the
 /// matcher is deterministic for a given clip list (gate S7's sibling property).
-int scoreAgainst(const QString &normalized, const QStringList &words, const RolePatterns &p)
+int scoreAgainst(const std::string &normalized, const std::vector<std::string> &words, const RolePatterns &p)
 {
     int best = 0;
     for (int i = 0; p.words[i]; ++i) {
-        const QLatin1String key(p.words[i]);
+        const std::string_view key(p.words[i]);
         if (normalized == key) return 3;
-        if (words.contains(QString(key))) best = std::max(best, 2);
-        else if (normalized.contains(key)) best = std::max(best, 1);
+        if (std::find(words.begin(), words.end(), key) != words.end()) best = std::max(best, 2);
+        else if (normalized.find(key) != std::string::npos) best = std::max(best, 1);
     }
     return best;
 }
 }   // namespace
 
-ClipRoles matchClipRoles(const QStringList &clipNames)
+ClipRoles matchClipRoles(const std::vector<std::string> &clipNames)
 {
     ClipRoles roles;
     const int n = clipNames.size();
-    QVector<QString> normalized(n);
-    QVector<QStringList> words(n);
-    QVector<bool> used(n, false);
+    std::vector<std::string> normalized(n);
+    std::vector<std::vector<std::string>> words(n);
+    std::vector<bool> used(n, false);
     for (int i = 0; i < n; ++i) {
         normalized[i] = normalizeClipName(clipNames[i]);
-        words[i] = normalized[i].split(QLatin1Char(' '), Qt::SkipEmptyParts);
-        if (normalized[i].isEmpty()) used[i] = true;   // an unnamed clip binds to nothing
+        if (!normalized[i].empty()) words[i] = iris::text::split(normalized[i], ' ');   // simplified: no empty word
+        if (normalized[i].empty()) used[i] = true;   // an unnamed clip binds to nothing
     }
 
     for (const RolePatterns &p : kPatterns) {
@@ -336,10 +344,10 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
                                             float runSpeed)
 {
     LocomotionAsset a;
-    a.name = QLatin1String(defaultLocomotionAssetName());
+    a.name = defaultLocomotionAssetName();
 
     // ---- the Grounded blend space (§7.2 row 1) ----------------------------
-    QVector<LocomotionBlendSample> samples;
+    std::vector<LocomotionBlendSample> samples;
     auto addSample = [&](ClipRole r, float position, float authored) {
         if (!roles.has(r)) return;
         LocomotionBlendSample s;
@@ -347,10 +355,10 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
         // STRICTLY increasing, enforced here rather than hoped for: a user who
         // sets walkSpeed to 0 (or runSpeed below walkSpeed) would otherwise
         // build an asset its own validator refuses.
-        s.position = samples.isEmpty() ? std::max(0.0f, position)
-                                       : std::max(position, samples.last().position + 0.01f);
+        s.position = samples.empty() ? std::max(0.0f, position)
+                                       : std::max(position, samples.back().position + 0.01f);
         s.authoredSpeed = authored;
-        samples.append(s);
+        samples.push_back(s);
     };
     // `authoredSpeed` DEFAULTS to the knob the sample sits at — i.e. "this clip
     // was authored to move at exactly the speed I placed it at", which makes
@@ -362,10 +370,10 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
     addSample(ClipRole::Walk, walkSpeed, walkSpeed);
     addSample(ClipRole::Run, runSpeed, runSpeed);
 
-    const bool hasGrounded = !samples.isEmpty();
+    const bool hasGrounded = !samples.empty();
     if (hasGrounded) {
         LocomotionStateDef grounded;
-        grounded.name = QStringLiteral("Grounded");
+        grounded.name = "Grounded";
         grounded.loop = true;
         if (samples.size() >= 2) {
             grounded.kind = LocomotionSourceKind::BlendSpace;
@@ -376,71 +384,71 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
             // space, correctly — there is nothing to blend). A character with
             // only an idle clip idles; that is the degradation, not an error.
             grounded.kind = LocomotionSourceKind::Clip;
-            grounded.clip = samples.first().clip;
+            grounded.clip = samples.front().clip;
         }
-        a.states.append(grounded);
+        a.states.push_back(grounded);
     }
 
     auto addClipState = [&](const char *name, ClipRole role, bool loop) {
         if (!roles.has(role)) return;
         LocomotionStateDef s;
-        s.name = QLatin1String(name);
+        s.name = name;
         s.kind = LocomotionSourceKind::Clip;
         s.clip = roles.get(role);
         s.loop = loop;
-        a.states.append(s);
+        a.states.push_back(s);
     };
     addClipState("JumpStart", ClipRole::JumpStart, false);
     addClipState("Fall", ClipRole::FallLoop, true);
     addClipState("Land", ClipRole::Land, false);
 
-    if (a.states.isEmpty()) return a;   // nothing bound: an EMPTY asset, not a broken one
-    a.entry = a.states.first().name;
+    if (a.states.empty()) return a;   // nothing bound: an EMPTY asset, not a broken one
+    a.entry = a.states.front().name;
 
-    const bool hasJump = a.findState(QStringLiteral("JumpStart")) != nullptr;
-    const bool hasFall = a.findState(QStringLiteral("Fall")) != nullptr;
-    const bool hasLand = a.findState(QStringLiteral("Land")) != nullptr;
+    const bool hasJump = a.findState("JumpStart") != nullptr;
+    const bool hasFall = a.findState("Fall") != nullptr;
+    const bool hasLand = a.findState("Land") != nullptr;
 
     auto cond = [](const char *text) {
         LocomotionCondition c;
-        QString err;
-        LocomotionCondition::parse(QLatin1String(text), c, &err);   // built-in: always parses
+        std::string err;
+        LocomotionCondition::parse(text, c, &err);   // built-in: always parses
         return c;
     };
-    auto addTransition = [&](const QString &from, const QString &to, const char *condition,
+    auto addTransition = [&](const std::string &from, const std::string &to, const char *condition,
                              float blend) {
-        if (from != QLatin1String("*") && !a.findState(from)) return;
+        if (from != "*" && !a.findState(from)) return;
         if (!a.findState(to)) return;
         LocomotionTransitionDef t;
         t.from = from;
         t.to = to;
         t.condition = cond(condition);
         t.blendDuration = blend;
-        a.transitions.append(t);
+        a.transitions.push_back(t);
     };
 
     // §7.2's five transitions, IN ORDER — order is the priority, and the first
     // row is why a jump plays JumpStart rather than falling straight to Fall:
     // the movement component clears `grounded` in the same step it applies the
     // impulse, so both row 1 and row 3 hold on that step and row 1 wins.
-    addTransition(QStringLiteral("Grounded"), QStringLiteral("JumpStart"), "jumpRequested", 0.05f);
+    addTransition("Grounded", "JumpStart", "jumpRequested", 0.05f);
     if (hasFall) {
-        addTransition(QStringLiteral("JumpStart"), QStringLiteral("Fall"), "clipEnded(0.9)", 0.10f);
-        addTransition(QStringLiteral("*"), QStringLiteral("Fall"), "!grounded", 0.15f);
+        addTransition("JumpStart", "Fall", "clipEnded(0.9)", 0.10f);
+        addTransition("*", "Fall", "!grounded", 0.15f);
         if (hasLand) {
-            addTransition(QStringLiteral("Fall"), QStringLiteral("Land"), "grounded", 0.10f);
+            addTransition("Fall", "Land", "grounded", 0.10f);
         } else {
             // §7.4: "No `land` -> transition 4 targets Grounded directly."
-            addTransition(QStringLiteral("Fall"), QStringLiteral("Grounded"), "grounded", 0.10f);
+            addTransition("Fall", "Grounded", "grounded", 0.10f);
         }
     } else if (hasJump) {
         // No fall loop: the jump chain has to come back on its own, and
         // clipEnded is exactly the tool that means no user authors a timer.
-        addTransition(QStringLiteral("JumpStart"),
-                      hasLand ? QStringLiteral("Land") : QStringLiteral("Grounded"),
+        addTransition("JumpStart",
+                      hasLand ? "Land" : "Grounded",
                       "clipEnded(0.9)", 0.10f);
     }
-    addTransition(QStringLiteral("Land"), QStringLiteral("Grounded"), "clipEnded(0.8)", 0.15f);
+    addTransition("Land", "Grounded", "clipEnded(0.8)", 0.15f);
     return a;
 }
 
@@ -451,7 +459,7 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
 
 Value locomotionAssetToJson(const LocomotionAsset &asset)
 {
-    const auto S = [](const QString &q) { return Value(q.toStdString()); };
+    const auto S = [](const std::string &q) { return Value(q); };
     Value::Array states;
     for (const auto &s : asset.states) {
         Value::Object src;
@@ -486,15 +494,15 @@ Value locomotionAssetToJson(const LocomotionAsset &asset)
                                {"states", Value(std::move(states))}, {"transitions", Value(std::move(transitions))}});
 }
 
-bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *error)
+bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, std::string *error)
 {
-    auto fail = [&](const QString &msg) {
+    auto fail = [&](const std::string &msg) {
         if (error) *error = msg;
         return false;
     };
     // A member that is absent or of another kind reads as QJsonValue's default did (valueshapes.h).
     const auto Q = [](const Value &o, const char *key, const std::string &d = std::string()) {
-        return QString::fromStdString(stringOr(o, key, d));
+        return stringOr(o, key, d);
     };
 
     LocomotionAsset a;
@@ -508,8 +516,8 @@ bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *er
         s.name = Q(o, "name");
         s.loop = boolOr(o, "loop", true);
         const Value &src = o["source"];
-        const QString kind = Q(src, "kind").toLower();
-        if (kind == QLatin1String("blendspace")) {
+        const std::string kind = iris::text::asciiLower(Q(src, "kind"));
+        if (kind == "blendspace") {
             s.kind = LocomotionSourceKind::BlendSpace;
             s.space.syncClips = boolOr(src, "syncClips", true);
             const Value samplesIn = arrayOr(src, "samples");   // bound: a temporary's asArray() would not outlive the loop
@@ -518,17 +526,16 @@ bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *er
                 sm.clip = Q(so, "clip");
                 sm.position = float(numberOr(so, "position", 0.0));
                 sm.authoredSpeed = float(numberOr(so, "authoredSpeed", 0.0));
-                s.space.samples.append(sm);
+                s.space.samples.push_back(sm);
             }
-        } else if (kind == QLatin1String("clip") || kind.isEmpty()) {
+        } else if (kind == "clip" || kind.empty()) {
             s.kind = LocomotionSourceKind::Clip;
             s.clip = Q(src, "clip");
             s.speed = float(numberOr(src, "speed", 1.0));
         } else {
-            return fail(QStringLiteral("state '%1': unknown source kind '%2' (known: clip, "
-                                       "blendspace)").arg(s.name, kind));
+            return fail(iris::text::cat("state '", s.name, "': unknown source kind '", kind, "' (known: clip, blendspace)"));
         }
-        a.states.append(s);
+        a.states.push_back(s);
     }
 
     const Value transitions = arrayOr(obj, "transitions");
@@ -538,11 +545,10 @@ bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *er
         t.from = Q(o, "from");
         t.to = Q(o, "to");
         t.blendDuration = float(numberOr(o, "blendDuration", 0.15));
-        QString err;
+        std::string err;
         if (!LocomotionCondition::parse(Q(o, "condition"), t.condition, &err))
-            return fail(QStringLiteral("transition %1 (%2 -> %3): %4")
-                            .arg(i).arg(t.from, t.to, err));
-        a.transitions.append(t);
+            return fail(iris::text::cat("transition ", i, " (", t.from, " -> ", t.to, "): ", err));
+        a.transitions.push_back(t);
     }
 
     if (!a.validate(error)) return false;
@@ -553,7 +559,7 @@ bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *er
 // ---------------------------------------------------------------------------
 // CLIP TABLE
 
-void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out)
+void collectAvatarClips(const SceneNodePtr &node, std::map<std::string, float> &out)
 {
     out.clear();
     if (!node) return;
@@ -579,7 +585,7 @@ void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out)
         if (!anim || !anim->hasSkeletalAnimation()) continue;
         // FIRST WINS on a duplicate name, matching the engine's uniquifying
         // attach: two clips with one name is a content defect, not a crash.
-        if (!out.contains(anim->getName())) out.insert(anim->getName(), anim->getLength());
+        if (!(out.count(anim->getName()) != 0)) out.insert_or_assign(anim->getName(), anim->getLength());
     }
 }
 
@@ -588,7 +594,7 @@ void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out)
 
 AvatarLocomotion::AvatarLocomotion() {}
 
-bool AvatarLocomotion::setAsset(const LocomotionAsset &asset, QString *error)
+bool AvatarLocomotion::setAsset(const LocomotionAsset &asset, std::string *error)
 {
     // The VERB path refuses an empty asset outright; only the degradation path
     // (nothing role-bound) is allowed to install one, through the other setter.
@@ -601,14 +607,14 @@ bool AvatarLocomotion::setAsset(const LocomotionAsset &asset, QString *error)
     return true;
 }
 
-bool AvatarLocomotion::restoreAsset(const LocomotionAsset &asset, bool isDefault, QString *error)
+bool AvatarLocomotion::restoreAsset(const LocomotionAsset &asset, bool isDefault, std::string *error)
 {
     if (!setAssetPreservingDefaultFlag(asset, error)) return false;
     mIsDefault = isDefault;
     return true;
 }
 
-bool AvatarLocomotion::setAssetPreservingDefaultFlag(const LocomotionAsset &asset, QString *error)
+bool AvatarLocomotion::setAssetPreservingDefaultFlag(const LocomotionAsset &asset, std::string *error)
 {
     if (asset.isEmpty()) {
         // An empty asset is a legitimate DEGRADATION (§7.4: nothing bound), not
@@ -637,7 +643,7 @@ void AvatarLocomotion::reset()
     mWeights.clear();
 }
 
-void AvatarLocomotion::setClipRole(ClipRole role, const QString &clip)
+void AvatarLocomotion::setClipRole(ClipRole role, const std::string &clip)
 {
     mRoles.set(role, clip);
     mRoleIsManual[int(role)] = true;
@@ -647,7 +653,7 @@ void AvatarLocomotion::setClipRole(ClipRole role, const QString &clip)
     }
 }
 
-void AvatarLocomotion::bindRolesFromClips(const QStringList &clipNames, float walkSpeed,
+void AvatarLocomotion::bindRolesFromClips(const std::vector<std::string> &clipNames, float walkSpeed,
                                           float runSpeed)
 {
     mDefaultWalkSpeed = walkSpeed;
@@ -673,7 +679,7 @@ void AvatarLocomotion::refreshDefaultAsset(float walkSpeed, float runSpeed)
     mDefaultWalkSpeed = walkSpeed;
     mDefaultRunSpeed = runSpeed;
     if (!mIsDefault) return;
-    const QString wasIn = mCurrent;
+    const std::string wasIn = mCurrent;
     mAsset = buildDefaultLocomotionAsset(mRoles, walkSpeed, runSpeed);
     // The blend-space POSITIONS moved, not the state graph, so a running
     // character must not be thrown back to the entry state by a knob edit.
@@ -691,7 +697,7 @@ void AvatarLocomotion::markRolesFromFile(const ClipRoles &roles, bool isDefaultA
 {
     mRoles = roles;
     for (int i = 0; i < kClipRoleCount; ++i)
-        mRoleIsManual[i] = !roles.names[i].isEmpty();
+        mRoleIsManual[i] = !roles.names[i].empty();
     mIsDefault = isDefaultAsset;
 }
 
@@ -706,18 +712,18 @@ void AvatarLocomotion::setDefaultAsset(const ClipRoles &roles, float walkSpeed, 
 }
 
 void AvatarLocomotion::sampleState(const LocomotionStateDef &st, float speed,
-                                   const QMap<QString, float> &clipLengths,
-                                   QVector<Sample> &out) const
+                                   const std::map<std::string, float> &clipLengths,
+                                   std::vector<Sample> &out) const
 {
     out.clear();
-    auto lengthOf = [&clipLengths](const QString &clip) {
+    auto lengthOf = [&clipLengths](const std::string &clip) {
         // A clip the document does not know is ZERO-LENGTH here. It is still
         // published (the boundary pads a zero-length clip rather than refusing
         // it, Types.h:138-141) but it is excluded from the blended cycle length
         // and from phase advance — §7.3's rule, and the reason a Mixamo
         // character's single-frame "mixamo.com" T-pose cannot divide by zero.
-        const auto it = clipLengths.constFind(clip);
-        return it == clipLengths.constEnd() ? 0.0f : std::max(0.0f, *it);
+        const auto it = clipLengths.find(clip);
+        return it == clipLengths.cend() ? 0.0f : std::max(0.0f, it->second);
     };
 
     if (st.kind == LocomotionSourceKind::Clip) {
@@ -726,12 +732,12 @@ void AvatarLocomotion::sampleState(const LocomotionStateDef &st, float speed,
         s.weight = 1.0f;
         s.length = lengthOf(st.clip);
         s.authoredSpeed = 0.0f;
-        out.append(s);
+        out.push_back(s);
         return;
     }
 
     const auto &sm = st.space.samples;
-    if (sm.isEmpty()) return;
+    if (sm.empty()) return;
     out.reserve(sm.size());
     for (const auto &b : sm) {
         Sample s;
@@ -739,14 +745,14 @@ void AvatarLocomotion::sampleState(const LocomotionStateDef &st, float speed,
         s.weight = 0.0f;
         s.length = lengthOf(b.clip);
         s.authoredSpeed = b.authoredSpeed;
-        out.append(s);
+        out.push_back(s);
     }
 
     // BRACKET, clamp, lerp — and NO EXTRAPOLATION, ever (§7.3): below the first
     // sample or above the last, one clip carries weight 1.
-    const float v = std::min(std::max(speed, sm.first().position), sm.last().position);
-    if (v <= sm.first().position) { out[0].weight = 1.0f; return; }
-    if (v >= sm.last().position) { out.last().weight = 1.0f; return; }
+    const float v = std::min(std::max(speed, sm.front().position), sm.back().position);
+    if (v <= sm.front().position) { out[0].weight = 1.0f; return; }
+    if (v >= sm.back().position) { out.back().weight = 1.0f; return; }
     for (int i = 0; i + 1 < sm.size(); ++i) {
         if (v >= sm[i].position && v <= sm[i + 1].position) {
             const float span = sm[i + 1].position - sm[i].position;
@@ -756,17 +762,17 @@ void AvatarLocomotion::sampleState(const LocomotionStateDef &st, float speed,
             return;
         }
     }
-    out.last().weight = 1.0f;   // unreachable with a validated space; never empty (R2)
+    out.back().weight = 1.0f;   // unreachable with a validated space; never empty (R2)
 }
 
-float AvatarLocomotion::advancePhase(const LocomotionStateDef &st, const QVector<Sample> &samples,
+float AvatarLocomotion::advancePhase(const LocomotionStateDef &st, const std::vector<Sample> &samples,
                                      float phase, float speed, float dt)
 {
-    if (samples.isEmpty() || dt <= 0.0f) return phase;
+    if (samples.empty() || dt <= 0.0f) return phase;
 
     float delta = 0.0f;
     if (st.kind == LocomotionSourceKind::Clip) {
-        const float len = samples.first().length;
+        const float len = samples.front().length;
         if (len <= 0.0f) return phase;
         delta = dt * st.speed / len;
     } else {
@@ -798,7 +804,7 @@ float AvatarLocomotion::advancePhase(const LocomotionStateDef &st, const QVector
     return next;
 }
 
-void AvatarLocomotion::emitWeights(const LocomotionStateDef &st, const QVector<Sample> &samples,
+void AvatarLocomotion::emitWeights(const LocomotionStateDef &st, const std::vector<Sample> &samples,
                                    float phase, float scale)
 {
     for (const auto &s : samples) {
@@ -825,7 +831,7 @@ void AvatarLocomotion::emitWeights(const LocomotionStateDef &st, const QVector<S
         cw.weight = w;
         cw.time = t;
         cw.looping = st.loop;
-        mWeights.append(cw);
+        mWeights.push_back(cw);
     }
 }
 
@@ -844,7 +850,7 @@ bool AvatarLocomotion::conditionHolds(const LocomotionCondition &c,
 }
 
 void AvatarLocomotion::step(const AvatarLocomotionState &params,
-                            const QMap<QString, float> &clipLengths, float dt)
+                            const std::map<std::string, float> &clipLengths, float dt)
 {
     if (mAsset.isEmpty()) {
         mWeights.clear();
@@ -879,12 +885,12 @@ void AvatarLocomotion::step(const AvatarLocomotionState &params,
     }
 
     // ---- 2. phases ---------------------------------------------------------
-    QVector<Sample> curSamples;
+    std::vector<Sample> curSamples;
     sampleState(*cur, params.speed, clipLengths, curSamples);
     mPhase = advancePhase(*cur, curSamples, mPhase, params.speed, dt);
 
     const LocomotionStateDef *prev = mTransitioning ? mAsset.findState(mPrevious) : nullptr;
-    QVector<Sample> prevSamples;
+    std::vector<Sample> prevSamples;
     if (prev) {
         // BOTH states evaluate during a transition (§7.1) — the outgoing one
         // keeps running rather than freezing on the frame it was left, which is
@@ -901,7 +907,7 @@ void AvatarLocomotion::step(const AvatarLocomotionState &params,
     if (!mTransitioning) {
         for (const auto &t : mAsset.transitions) {
             if (t.to == mCurrent) continue;
-            if (t.from != QLatin1String("*")) {
+            if (t.from != "*") {
                 if (t.from != mCurrent) continue;
             } else if (hasExplicitTransition(mCurrent, t.to)) {
                 // THE WILDCARD MEANS "ANY OTHER STATE", and this line is what
@@ -953,20 +959,20 @@ void AvatarLocomotion::step(const AvatarLocomotionState &params,
     // something rather than freezing a character mid-stride.
     float total = 0.0f;
     for (const auto &w : mWeights) total += w.weight;
-    if (mWeights.isEmpty() || total <= 1e-6f) {
-        if (!curSamples.isEmpty()) {
+    if (mWeights.empty() || total <= 1e-6f) {
+        if (!curSamples.empty()) {
             mWeights.clear();
             LocomotionClipWeight cw;
-            cw.clip = curSamples.first().clip;
+            cw.clip = curSamples.front().clip;
             cw.weight = 1.0f;
-            cw.time = curSamples.first().length > 0.0f ? mPhase * curSamples.first().length : 0.0f;
+            cw.time = curSamples.front().length > 0.0f ? mPhase * curSamples.front().length : 0.0f;
             cw.looping = cur->loop;
-            mWeights.append(cw);
+            mWeights.push_back(cw);
         }
     }
 }
 
-bool AvatarLocomotion::hasExplicitTransition(const QString &from, const QString &to) const
+bool AvatarLocomotion::hasExplicitTransition(const std::string &from, const std::string &to) const
 {
     for (const auto &t : mAsset.transitions)
         if (t.from == from && t.to == to) return true;
@@ -986,7 +992,7 @@ void AvatarLocomotion::refreshClips(const SceneNodePtr &node, float walkSpeed, f
     // only when the document's clip set actually moved. Rebuilding it every
     // frame would be correct but would allocate per avatar per frame for a set
     // that changes when a file is loaded and at no other time.
-    QMap<QString, float> fresh;
+    std::map<std::string, float> fresh;
     collectAvatarClips(node, fresh);
     if (fresh == mClipLengths) return;
     mClipLengths = fresh;
@@ -1001,7 +1007,10 @@ void AvatarLocomotion::refreshClips(const SceneNodePtr &node, float walkSpeed, f
         // matcher's tie-break is list order, so the list has to be one every
         // machine and every load agrees on. The clip table's insertion order is
         // the importer's, and that is not stable across formats.
-        bindRolesFromClips(mClipLengths.keys(), walkSpeed, runSpeed);
+        std::vector<std::string> names;   // the map's keys, in its (byte) order
+        names.reserve(mClipLengths.size());
+        for (const auto &[clipName, length] : mClipLengths) names.push_back(clipName);
+        bindRolesFromClips(names, walkSpeed, runSpeed);
     }
 }
 

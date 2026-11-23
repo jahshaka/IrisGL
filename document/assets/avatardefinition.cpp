@@ -13,29 +13,30 @@ For more information see the LICENSE file
 
 #include "document/properties/valueshapes.h"
 
-#include <QSet>
+#include <unordered_set>
 
 #include <algorithm>
 #include <vector>
+#include "core/text.h"
 
 namespace iris
 {
 
-const AvatarClipEntry *AvatarDefinition::findClip(const QString &displayName) const
+const AvatarClipEntry *AvatarDefinition::findClip(const std::string &displayName) const
 {
     for (const auto &clip : clips)
         if (clip.name == displayName) return &clip;
     return nullptr;
 }
 
-QStringList AvatarDefinition::dependencyGuids() const
+std::vector<std::string> AvatarDefinition::dependencyGuids() const
 {
-    QStringList out;
-    QSet<QString> seen;
-    const auto add = [&](const QString &guid) {
-        if (guid.isEmpty() || seen.contains(guid)) return;
+    std::vector<std::string> out;
+    std::unordered_set<std::string> seen;
+    const auto add = [&](const std::string &guid) {
+        if (guid.empty() || (seen.count(guid) != 0)) return;
         seen.insert(guid);
-        out.append(guid);
+        out.push_back(guid);
     };
     add(modelAsset);
     for (const auto &clip : clips) add(clip.asset);
@@ -44,9 +45,9 @@ QStringList AvatarDefinition::dependencyGuids() const
 
 Value avatarDefinitionToJson(const AvatarDefinition &def)
 {
-    const auto S = [](const QString &q) { return Value(q.toStdString()); };
+    const auto S = [](const std::string &q) { return Value(q); };
     Value::Array boneNames;
-    for (const QString &b : def.rig.boneNames) boneNames.push_back(S(b));
+    for (const std::string &b : def.rig.boneNames) boneNames.push_back(S(b));
     // the SLOT, written as null when there is no unit scale
     const Value unitScale = def.rig.hasUnitScale ? Value(def.rig.unitScale) : Value();
 
@@ -99,47 +100,44 @@ Value avatarDefinitionToJson(const AvatarDefinition &def)
         {"blendshapes", def.hasBlendshapes ? def.blendshapes : Value()}});
 }
 
-bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, QString *error)
+bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, std::string *error)
 {
-    const auto refuse = [&](const QString &message) {
+    const auto refuse = [&](const std::string &message) {
         if (error) *error = message;
         return false;
     };
     // A member that is absent or of another kind reads as QJsonValue's default did (valueshapes.h).
-    const auto Q = [](const Value &o, const char *key) { return QString::fromStdString(stringOr(o, key)); };
+    const auto Q = [](const Value &o, const char *key) { return stringOr(o, key); };
 
-    const QString format = Q(obj, "format");
-    if (format != QStringLiteral("jah-avatar"))
-        return refuse(QStringLiteral("not an avatar definition: format is '%1', expected "
-                                     "'jah-avatar'").arg(format));
+    const std::string format = Q(obj, "format");
+    if (format != "jah-avatar")
+        return refuse(iris::text::cat("not an avatar definition: format is '", format, "', expected 'jah-avatar'"));
     const int version = intOr(obj, "version", 0);
     // FORWARD refusal, not a silent partial read: a v2 file this build cannot
     // understand must say so rather than load as an avatar missing whatever v2
     // added.
     if (version <= 0 || version > AvatarDefinition::kFormatVersion)
-        return refuse(QStringLiteral("avatar definition version %1 is not readable by this "
-                                     "build (it understands up to %2)")
-                          .arg(version).arg(AvatarDefinition::kFormatVersion));
+        return refuse(iris::text::cat("avatar definition version ", version, " is not readable by this build (it understands up to ", AvatarDefinition::kFormatVersion, ")"));
 
     AvatarDefinition def;
     def.name = Q(obj, "name");
     def.modelAsset = Q(obj["model"], "asset");
-    if (def.modelAsset.isEmpty())
-        return refuse(QStringLiteral("the avatar definition names no model asset"));
+    if (def.modelAsset.empty())
+        return refuse("the avatar definition names no model asset");
 
     const Value &rig = obj["rig"];
     def.rig.rigId = Q(rig, "rigId");
     def.rig.bones = intOr(rig, "bones", 0);
     const Value boneNamesIn = arrayOr(rig, "boneNames");   // bound: a temporary's asArray() would not outlive the loop
     for (const Value &v : boneNamesIn.asArray())
-        def.rig.boneNames.append(v.kind() == Kind::String ? QString::fromStdString(v.asString()) : QString());
+        def.rig.boneNames.push_back(v.kind() == Kind::String ? v.asString() : std::string());
     const Value &unitScale = rig["unitScale"];
     if (unitScale.kind() == Kind::Number || unitScale.kind() == Kind::Int) {
         def.rig.hasUnitScale = true;
         def.rig.unitScale = unitScale.asNumber();
     }
 
-    QSet<QString> names;
+    std::unordered_set<std::string> names;
     const Value clipsIn = arrayOr(obj, "clips");   // bound: a temporary's asArray() would not outlive the loop
     for (const Value &entry : clipsIn.asArray()) {
         AvatarClipEntry clip;
@@ -148,44 +146,43 @@ bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, QString *
         clip.name = Q(entry, "name");
         clip.looping = boolOr(entry, "looping", true);
         clip.rootMotion = boolOr(entry, "rootMotion", false);
-        if (clip.name.isEmpty())
-            return refuse(QStringLiteral("a clip entry has no name"));
-        if (clip.asset.isEmpty())
-            return refuse(QStringLiteral("clip '%1' names no asset").arg(clip.name));
+        if (clip.name.empty())
+            return refuse("a clip entry has no name");
+        if (clip.asset.empty())
+            return refuse(iris::text::cat("clip '", clip.name, "' names no asset"));
         // The display name is the KEY every consumer joins on (the scene plays
         // clips by name, roles bind by name) — two entries sharing one would
         // make "remove the walk" ambiguous forever.
-        if (names.contains(clip.name))
-            return refuse(QStringLiteral("two clips are both called '%1'").arg(clip.name));
+        if ((names.count(clip.name) != 0))
+            return refuse(iris::text::cat("two clips are both called '", clip.name, "'"));
         names.insert(clip.name);
-        def.clips.append(clip);
+        def.clips.push_back(clip);
     }
 
     def.defaultClip = Q(obj["defaults"], "activeClip");
-    if (!def.defaultClip.isEmpty() && !names.contains(def.defaultClip))
-        return refuse(QStringLiteral("the default clip '%1' is not one of this avatar's clips")
-                          .arg(def.defaultClip));
+    if (!def.defaultClip.empty() && !(names.count(def.defaultClip) != 0))
+        return refuse(iris::text::cat("the default clip '", def.defaultClip, "' is not one of this avatar's clips"));
 
     const Value &loco = obj["locomotion"];
     if (loco.kind() == Kind::Object) {
-        QString locoError;
+        std::string locoError;
         if (loco.find("asset")
             && !locomotionAssetFromJson(objectOr(loco, "asset"), def.locomotion, &locoError))
-            return refuse(QStringLiteral("the locomotion asset is not readable: %1").arg(locoError));
+            return refuse(iris::text::cat("the locomotion asset is not readable: ", locoError));
         // In the order a QJsonObject held them (sorted by name): the first unknown role is the one named.
         const Value roles = objectOr(loco, "roles");
         std::vector<const Value::Member *> sorted;
         for (const Value::Member &m : roles.asObject()) sorted.push_back(&m);
         std::sort(sorted.begin(), sorted.end(), [](const Value::Member *a, const Value::Member *b) {
-            return QString::fromStdString(a->first) < QString::fromStdString(b->first);
+            return a->first < b->first;
         });
         for (const Value::Member *m : sorted) {
             ClipRole role;
-            const QString key = QString::fromStdString(m->first);
+            const std::string key = m->first;
             if (!clipRoleFromName(key, role))
-                return refuse(QStringLiteral("'%1' is not a clip role").arg(key));
-            def.locomotionRoles.set(role, m->second.kind() == Kind::String ? QString::fromStdString(m->second.asString())
-                                                                           : QString());
+                return refuse(iris::text::cat("'", key, "' is not a clip role"));
+            def.locomotionRoles.set(role, m->second.kind() == Kind::String ? m->second.asString()
+                                                                           : std::string());
         }
         def.hasLocomotion = true;
     }

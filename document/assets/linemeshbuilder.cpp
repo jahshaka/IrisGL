@@ -14,8 +14,8 @@ void LineMeshBuilder::addLine(iris::Vec3 a, iris::Vec3 b)
 
 void LineMeshBuilder::addLine(iris::Vec3 a, SrgbColor aCol, iris::Vec3 b, SrgbColor bCol)
 {
-	lineData.append({ a, iris::Vec4(aCol.redF(), aCol.greenF(), aCol.blueF(), aCol.alphaF()) });
-	lineData.append({ b, iris::Vec4(bCol.redF(), bCol.greenF(), bCol.blueF(), bCol.alphaF()) });
+	lineData.push_back({ a, iris::Vec4(aCol.redF(), aCol.greenF(), aCol.blueF(), aCol.alphaF()) });
+	lineData.push_back({ b, iris::Vec4(bCol.redF(), bCol.greenF(), bCol.blueF(), bCol.alphaF()) });
 }
 
 MeshPtr LineMeshBuilder::build()

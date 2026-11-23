@@ -11,8 +11,7 @@ For more information see the LICENSE file
 
 #include "document/assets/shippedmeshes.h"
 
-#include <QMutex>
-#include <QMutexLocker>
+#include <mutex>
 
 #include "document/assets/mesh.h"
 
@@ -23,9 +22,9 @@ namespace ShippedMeshes
 
 namespace
 {
-QMutex &lock()
+std::mutex &lock()
 {
-    static QMutex m;
+    static std::mutex m;
     return m;
 }
 
@@ -38,21 +37,21 @@ Resolver &installed()
 
 void setResolver(Resolver resolver)
 {
-    QMutexLocker locked(&lock());
+    std::lock_guard<std::mutex> locked(lock());
     installed() = std::move(resolver);
 }
 
 bool hasResolver()
 {
-    QMutexLocker locked(&lock());
+    std::lock_guard<std::mutex> locked(lock());
     return bool(installed());
 }
 
-MeshPtr mesh(const QString &seedKey)
+MeshPtr mesh(const std::string &seedKey)
 {
     Resolver resolver;
     {
-        QMutexLocker locked(&lock());
+        std::lock_guard<std::mutex> locked(lock());
         resolver = installed();
     }
     // Called OUTSIDE the lock: the resolver reads the catalog and the bake, and

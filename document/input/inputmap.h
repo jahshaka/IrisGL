@@ -39,11 +39,10 @@ For more information see the LICENSE file
 
 #include "core/value.h"
 
-#include <QHash>
-#include <QSet>
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <unordered_map>
+#include <unordered_set>
+#include <string>
+#include <vector>
 
 namespace iris { class KeyValueStore; }
 
@@ -61,13 +60,19 @@ enum class InputActionType { Axis2D, Button };
 /// the key matters.
 struct InputKeyBinding
 {
-    int   key = 0;      ///< a Qt::Key value (int, so this header needs no QtGui)
+    int   key = 0;      ///< a Qt::Key value; the document stores the number and never spells it (src/app/keynames.h does)
     float x   = 0.f;
     float y   = 0.f;
 
     bool operator==(const InputKeyBinding &o) const
     { return key == o.key && x == o.x && y == o.y; }
 };
+
+/// The Qt::Key values the defaults bind (Qt's own numbers: src/app/keynames.h static_asserts each against Qt::Key).
+namespace inputkeys {
+constexpr int Space = 0x20, A = 0x41, D = 0x44, S = 0x53, W = 0x57;
+constexpr int Left = 0x01000012, Up = 0x01000013, Right = 0x01000014, Down = 0x01000015, Shift = 0x01000020;
+}
 
 struct InputAxis2D
 {
@@ -103,27 +108,19 @@ public:
     /// True for Look only — its primary producer is the mouse, so an empty key
     /// list is CORRECT rather than "unbound".
     static bool usesMouse(InputAction a);
-    static QString actionName(InputAction a);              ///< "Move" / "Look" / "Jump" / "Sprint"
-    static bool actionFromName(const QString &name, InputAction &out);  ///< case-insensitive
-    static QVector<InputAction> allActions();
-
-    // ---- key names --------------------------------------------------------
-    /// "W", "Space", "Shift", … Round-trips with keyFromName. Uses
-    /// QKeySequence's portable text for ordinary keys and an explicit table
-    /// for the bare modifiers (QKeySequence spells Qt::Key_Shift "Shift+").
-    static QString keyName(int key);
-    /// 0 when `name` names no key.
-    static int keyFromName(const QString &name);
+    static std::string actionName(InputAction a);              ///< "Move" / "Look" / "Jump" / "Sprint"
+    static bool actionFromName(const std::string &name, InputAction &out);  ///< case-insensitive
+    static std::vector<InputAction> allActions();
 
     // ---- bindings ---------------------------------------------------------
-    const QVector<InputKeyBinding> &bindings(InputAction a) const;
+    const std::vector<InputKeyBinding> &bindings(InputAction a) const;
     /// Replaces the WHOLE key list for `a`. Refused (false, nothing written)
     /// when one of `keys` is already bound to a DIFFERENT action — the
-    /// out-params then name the offender. Rebinding a key inside the same
+    /// out-params then name the offender (its action, and its key CODE: the editor spells it). Rebinding a key inside the same
     /// action is not a conflict, and neither is a duplicate inside `keys`
     /// (W = forward twice is silly, not wrong).
-    bool bind(InputAction a, const QVector<InputKeyBinding> &keys,
-              QString *conflictAction = nullptr, QString *conflictKey = nullptr);
+    bool bind(InputAction a, const std::vector<InputKeyBinding> &keys,
+              std::string *conflictAction = nullptr, int *conflictKey = nullptr);
     /// Clears every key on `a` (Look keeps working: it is mouse-driven).
     void unbind(InputAction a);
 
@@ -136,18 +133,15 @@ public:
     void resetToDefaults();
     static InputMap defaults();
 
-    /// A human display string for one action ("W / S / A / D", "Mouse",
-    /// "Space") — what the Preferences fixed rows show.
-    QString displayText(InputAction a) const;
-
     // ---- persistence ------------------------------------------------------
-    /// { "Move": ["W:0,1", "S:0,-1", …], "Jump": ["Space"], … } as an iris::Value
+    /// { "Move": ["87:0,1", "83:0,-1", …], "Jump": ["32"], … } as an iris::Value
     /// Object of Arrays of Strings, the actions in their own order. Axis keys
-    /// carry their contribution; button keys are the bare name.
+    /// carry their contribution; button keys are the bare key code (the document never spells a key).
     Value toValue() const;
     /// Tolerant: an unknown action name or an unparseable key is SKIPPED, not
     /// an error — a settings file written by a future build must not brick the
-    /// input layer. Returns false when nothing at all was understood.
+    /// input layer. An action whose rows ALL fail to decode keeps what it has (a row written before the keys were
+    /// stored as numbers is such a row). Returns false when nothing at all was understood.
     bool fromValue(const Value &m);
 
     /// jahsettings.ini "input/<Action>" — the same shape ShortcutRegistry uses
@@ -161,7 +155,7 @@ public:
     static void clearPersisted(KeyValueStore &settings);
 
 private:
-    QVector<InputKeyBinding> mBindings[kInputActionCount];
+    std::vector<InputKeyBinding> mBindings[kInputActionCount];
 };
 
 /// The one process-wide input state plus the producers that write it.
@@ -209,8 +203,8 @@ public:
     /// persistence, everything else works). Loads immediately when set.
     void setSettings(KeyValueStore *settings);
     /// map().bind() plus a save(). Returns false, changing nothing, on conflict.
-    bool bind(InputAction a, const QVector<InputKeyBinding> &keys,
-              QString *conflictAction = nullptr, QString *conflictKey = nullptr);
+    bool bind(InputAction a, const std::vector<InputKeyBinding> &keys,
+              std::string *conflictAction = nullptr, int *conflictKey = nullptr);
     void resetBindings();
 
     /// Test seam ONLY: back to defaults, no held keys, empty state, settings
@@ -226,7 +220,7 @@ private:
 
     InputMap  mMap;
     InputState mState;
-    QSet<int> mHeld;
+    std::unordered_set<int> mHeld;
     KeyValueStore *mSettings = nullptr;
 };
 

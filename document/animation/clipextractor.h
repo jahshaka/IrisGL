@@ -16,10 +16,9 @@ For more information see the LICENSE file
 #include "core/math/vec.h"
 #include "irisglfwd.h"
 
-#include <QHash>
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <unordered_map>
+#include <string>
+#include <vector>
 
 namespace iris
 {
@@ -39,17 +38,17 @@ struct ClipBoneKey
 struct ClipBoneTrack
 {
     int                  bone = -1;
-    QString              boneName;
-    QVector<ClipBoneKey> keys;
+    std::string              boneName;
+    std::vector<ClipBoneKey> keys;
 };
 
 /// A clip translated out of the document's scene-node channels into per-bone,
 /// bone-parent-local tracks — the only shape an engine skeleton can consume.
 struct ExtractedClip
 {
-    QString                 name;
+    std::string                 name;
     float                   length = 0.0f;   ///< seconds; 0 for a single-key clip
-    QVector<ClipBoneTrack>  tracks;
+    std::vector<ClipBoneTrack>  tracks;
 
     /// Diagnostics (ANIMATION_ENGINE_MIGRATION_SPEC §9 R9 asked for these to be
     /// measured, not guessed): how many document keys the clip carried on the
@@ -66,7 +65,7 @@ struct ExtractedClip
     /// coincide, because the exporter writes the bind pose as the rest pose.
     /// When they do not, a bone a clip does not touch lands somewhere else than
     /// the document put it — so this is reported rather than silently absorbed.
-    QStringList restDiffersFromBind;
+    std::vector<std::string> restDiffersFromBind;
 };
 
 /// "Compose then resample" (ANIMATION_ENGINE_MIGRATION_SPEC §3.1).
@@ -102,7 +101,7 @@ public:
         iris::Vec3   scale{1, 1, 1};
     };
     /// The authored local TRS of every node of a subtree, by node POINTER.
-    using RestPose = QHash<const SceneNode *, RestLocal>;
+    using RestPose = std::unordered_map<const SceneNode *, RestLocal>;
 
     /// Snapshots the subtree's current local transforms. Take this ONCE, while
     /// the tree is at rest — after the document evaluator has run, a node the
@@ -123,11 +122,11 @@ public:
                         const SceneNodePtr &meshNode,
                         const SkeletonPtr &rig,
                         const SkeletalAnimationPtr &clip,
-                        const QString &clipName,
+                        const std::string &clipName,
                         float length,
                         const RestPose *rest,
                         ExtractedClip &out,
-                        QString *error = nullptr);
+                        std::string *error = nullptr);
 };
 
 } // namespace iris

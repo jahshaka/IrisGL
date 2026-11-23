@@ -32,7 +32,7 @@ For more information see the LICENSE file
 // THREADS: the resolver reads the catalog, whose connections are per-thread, so
 // `mesh` is a UI-thread call. The installed function itself is guarded.
 
-#include <QString>
+#include <string>
 #include <functional>
 
 #include "irisglfwd.h"
@@ -42,7 +42,7 @@ namespace iris
 namespace ShippedMeshes
 {
 
-using Resolver = std::function<MeshPtr(const QString &seedKey)>;
+using Resolver = std::function<MeshPtr(const std::string &seedKey)>;
 
 /// Install (or, with an empty function, remove) the host's resolver.
 void setResolver(Resolver resolver);
@@ -51,7 +51,7 @@ void setResolver(Resolver resolver);
 bool hasResolver();
 
 /// The baked mesh for `seedKey`, or null.
-MeshPtr mesh(const QString &seedKey);
+MeshPtr mesh(const std::string &seedKey);
 
 }   // namespace ShippedMeshes
 }   // namespace iris

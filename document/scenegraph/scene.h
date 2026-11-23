@@ -1259,7 +1259,7 @@ public:
 
     void setSkyTexture(Texture2DPtr tex);
     void setSkyTextureSource(std::string src) {
-        skyTexture->source = QString::fromStdString(src);
+        skyTexture->source = src;
     }
 
     std::string getSkyTextureSource();

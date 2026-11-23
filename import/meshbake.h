@@ -339,6 +339,9 @@ public:
         /// Metres per source unit as the FILE declares it — what a rig's UNIT
         /// OVERRIDE is resolved against (import/scenesource.h) without a probe.
         double declaredUnitScale = 1.0;
+        /// Why a read refused the blob, when the refusal has a NAME (its checksum; a node's parent out of range);
+        /// empty for a plain miss (a stale version, another key, a truncated file). Model::refusal's twin.
+        std::string refusal;
     };
 
     /// The clip bake's key for a source whose content id is `sourceOid`.

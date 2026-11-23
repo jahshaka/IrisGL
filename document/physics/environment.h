@@ -15,9 +15,9 @@
 #include "document/physics/physicshelper.h"
 #include "document/scenegraph/nodegraph.h"
 
-#include <QVector>
-#include <QHash>
-#include <QSet>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "btBulletDynamicsCommon.h"
 
@@ -73,7 +73,7 @@ public:
     /// the scheduler's thread count when the world is built — are indexed by it (btCollisionDispatcherMt.cpp:31,73).
     /// So index 0 must be the game thread (this call takes it: btSetTaskScheduler refuses any other), Bullet's own
     /// workers take 1..threads-1, and NO other thread may ever step or ray-test a world: a Qt-pool or render thread
-    /// taking an index would push a worker past the arrays. stepSimulation dies (qFatal) on any other thread.
+    /// taking an index would push a worker past the arrays. stepSimulation dies (fatal: logged, then abort) on any other thread.
     ///
     /// A process that never binds (a tool, a test with no physics frame) builds the single-threaded world.
     static void bindGameThread(int threads);
@@ -99,8 +99,8 @@ public:
     ///   solved in parallel (the solver pool), each by one solver. Game thread, between steps.
     static void setIslandBatching(bool on);
 
-	QHash<QString, btCollisionObject*> collisionObjects;
-    QHash<QString, btRigidBody*> hashBodies;
+	std::unordered_map<std::string, btCollisionObject*> collisionObjects;
+    std::unordered_map<std::string, btRigidBody*> hashBodies;
     /// The pre-play LOCAL transform of every body and avatar, restored on
     /// Stop bit-exactly. It used to be the global MATRIX, put back through
     /// setGlobalTransform's decomposition — a lossy round trip that left a
@@ -110,7 +110,7 @@ public:
     /// written in world space during the step and lands back in local space
     /// through the same parent it had.
     struct SavedLocal { iris::Vec3 pos, scale; iris::Quat rot; };
-    QHash<QString, SavedLocal> nodeTransforms;
+    std::unordered_map<std::string, SavedLocal> nodeTransforms;
 
 	void addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &node);
 	/// Adds the body AND takes ownership of every allocation behind it (the
@@ -118,7 +118,7 @@ public:
 	/// This is the only overload that leaves the world leak-free.
 	void addBodyToWorld(PhysicsBody &owned, const iris::SceneNodePtr &node);
 	void removeBodyFromWorld(btRigidBody *body);
-	void removeBodyFromWorld(const QString &guid);
+	void removeBodyFromWorld(const std::string &guid);
 
     void storeCollisionShape(btCollisionShape *shape);
     void storeMeshInterface(btStridingMeshInterface *iface);
@@ -150,7 +150,7 @@ public:
 	// freeze), and there is no `break` — the defect that made "which of two
 	// characters walks" depend on QHash iteration order is not reproduced.
 	void addAvatarToWorld(const iris::SceneNodePtr &node);
-	void removeAvatarFromWorld(const QString &guid);
+	void removeAvatarFromWorld(const std::string &guid);
 	void removeAllAvatarsFromWorld();
 	int avatarCount() const { return avatars.size(); }
 	/// Steps every registered avatar's movement component. Called from
@@ -220,12 +220,12 @@ public:
 
 	// These manage a unique picking constraint that is used to manipulate a rigid body about a scene
 	// Primarily used in the 3D viewport, the constraint can be loosened to behave more interactively
-	void createPickingConstraint(PickingHandleType handleType, const QString &pickedNodeGUID, const btVector3 &hitPoint, const iris::Vec3 &segStart, const iris::Vec3 &segEnd);
+	void createPickingConstraint(PickingHandleType handleType, const std::string &pickedNodeGUID, const btVector3 &hitPoint, const iris::Vec3 &segStart, const iris::Vec3 &segEnd);
 	void updatePickingConstraint(PickingHandleType handleType, const btVector3 &rayDirection, const btVector3 &cameraPosition);
 	void updatePickingConstraint(PickingHandleType handleType, const iris::Mat4 &handTransformation);
 	void cleanupPickingConstraint(PickingHandleType handleType);
 
-	void createConstraintBetweenNodes(iris::SceneNodePtr node, const QString &to, const iris::PhysicsConstraintType &type);
+	void createConstraintBetweenNodes(iris::SceneNodePtr node, const std::string &to, const iris::PhysicsConstraintType &type);
 	void setWorldGravity(float gravity);
 	float getWorldGravity();
 
@@ -247,21 +247,21 @@ private:
     int                          worldThreads = 0;
     btDynamicsWorld             *world = nullptr;
 	
-	QHash<int, PickingHandle> pickingHandles;
+	std::unordered_map<int, PickingHandle> pickingHandles;
 
 	/// THE WRITE-BACK'S BOOKKEEPING, per body (see writeBack).
 	struct BodyRecord
 	{
-		QString guid;
+		std::string guid;
 		int depth = 0;                 ///< ancestors of the node: parents are written first
 		bool nested = false;           ///< a body ancestor, or a node whose writes are not movement
 		bool moved = false;            ///< active in one of this frame's steps
 		bool pinned = false;           ///< `witness` holds the node as the last write left it
 		graph::PoseWitness witness;
 	};
-	QHash<const btRigidBody *, BodyRecord> bodyRecords;
-	QVector<btRigidBody *> movedBodies;     ///< this frame's, de-duplicated by BodyRecord::moved
-	QVector<btRigidBody *> nestedBodies;    ///< re-checked every frame, shallowest first
+	std::unordered_map<const btRigidBody *, BodyRecord> bodyRecords;
+	std::vector<btRigidBody *> movedBodies;     ///< this frame's, de-duplicated by BodyRecord::moved
+	std::vector<btRigidBody *> nestedBodies;    ///< re-checked every frame, shallowest first
 	unsigned long long writesAfterWriteBack = 0;
 	bool writeBackValid = false;           ///< false until a write-back ran over every body
 	int lastWrites = 0;
@@ -279,18 +279,18 @@ private:
     /// world the thing that keeps a deleted avatar alive, and "delete a moving
     /// avatar mid-play" (gate M7) would then be a leak rather than a removal.
     /// Expired entries are pruned by updateAvatarMovement.
-    QVector<iris::SceneNodeWPtr> avatars;
+    std::vector<iris::SceneNodeWPtr> avatars;
     /// The guids of the nodes `buildCollisionContent` gave a static collider,
     /// so a second call is idempotent.
-    QSet<QString> collisionContentNodes;
+    std::unordered_set<std::string> collisionContentNodes;
 
-    QVector<btTypedConstraint*> constraints;
+    std::vector<btTypedConstraint*> constraints;
     /// Owned. Destroyed front-to-back at teardown, so a compound shape comes
     /// before its children (PhysicsHelper::createPhysicsBody builds it so).
     btAlignedObjectArray<btCollisionShape*>	collisionShapes;
     /// Owned, and destroyed AFTER collisionShapes: a btConvexTriangleMeshShape
     /// reads its striding interface in its own destructor path.
-    QVector<btStridingMeshInterface*> meshInterfaces;
+    std::vector<btStridingMeshInterface*> meshInterfaces;
     /// The ghost-pair callback the broadphase's pair cache points at but does
     /// NOT own. One per world; deleted after the broadphase.
     btGhostPairCallback *ghostPairCallback = nullptr;

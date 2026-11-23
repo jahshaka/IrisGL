@@ -14,6 +14,8 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 #include "core/log.h"
 #include "document/properties/property.h"
+#include "core/text.h"
+#include "core/math/scalar.h"
 
 
 namespace iris
@@ -134,7 +136,7 @@ void PbrMaterial::setWorkflow(int w)                    { workflow = w; touch();
 void PbrMaterial::setDetailMap(int layer, Texture2DPtr tex)
 {
     if (layer < 0 || layer >= kDetailLayers) return;
-    const QString key = QStringLiteral("u_detail%1Map").arg(layer);
+    const std::string key = iris::text::cat("u_detail", layer, "Map");
     if (!!tex) { detail[layer].map = tex->source; addTexture(key, tex); }
     else       { detail[layer].map.clear();       removeTexture(key); }
 }
@@ -142,61 +144,61 @@ void PbrMaterial::setDetailMap(int layer, Texture2DPtr tex)
 void PbrMaterial::setDetailNormalMap(int layer, Texture2DPtr tex)
 {
     if (layer < 0 || layer >= kDetailLayers) return;
-    const QString key = QStringLiteral("u_detail%1NormalMap").arg(layer);
+    const std::string key = iris::text::cat("u_detail", layer, "NormalMap");
     if (!!tex) { detail[layer].normalMap = tex->source; addTexture(key, tex); }
     else       { detail[layer].normalMap.clear();       removeTexture(key); }
 }
 
 void PbrMaterial::setDetailWeightMap(Texture2DPtr tex)
 {
-    if (!!tex) { detailWeightMap = tex->source; addTexture(QStringLiteral("u_detailWeightMap"), tex); }
-    else       { detailWeightMap.clear();       removeTexture(QStringLiteral("u_detailWeightMap")); }
+    if (!!tex) { detailWeightMap = tex->source; addTexture("u_detailWeightMap", tex); }
+    else       { detailWeightMap.clear();       removeTexture("u_detailWeightMap"); }
 }
 
-const QVector<const char *> &PbrMaterial::addressModeNames()
+const std::vector<const char *> &PbrMaterial::addressModeNames()
 {
     // Index is the stored value and is permanent, like every other enum row.
-    static const QVector<const char *> kNames = { "Wrap", "Clamp", "Mirror", "Border" };
+    static const std::vector<const char *> kNames = { "Wrap", "Clamp", "Mirror", "Border" };
     return kNames;
 }
 
-QString PbrMaterial::addressRow(const QString &mapRow)
+std::string PbrMaterial::addressRow(const std::string &mapRow)
 {
-    return mapRow + QStringLiteral("Address");
+    return mapRow + "Address";
 }
 
 // EVERY MAP ROW, in the order the panel shows them. The one list the address
 // rows, the panel and the mirror's slot mapping are all generated from — a
 // second spelling of these names is how a picker and a renderer drift apart.
-const QVector<QString> &PbrMaterial::mapRowNames()
+const std::vector<std::string> &PbrMaterial::mapRowNames()
 {
-    static const QVector<QString> kRows = [] {
-        QVector<QString> rows = {
-            QStringLiteral("baseColorMap"), QStringLiteral("normalMap"),
-            QStringLiteral("metallicMap"),  QStringLiteral("roughnessMap"),
-            QStringLiteral("emissiveMap"),
+    static const std::vector<std::string> kRows = [] {
+        std::vector<std::string> rows = {
+            "baseColorMap", "normalMap",
+            "metallicMap",  "roughnessMap",
+            "emissiveMap",
         };
         for (int i = 0; i < kDetailLayers; ++i) {
-            rows << detailRow(i, "Map");
-            rows << detailRow(i, "NormalMap");
+            rows.push_back(detailRow(i, "Map"));
+            rows.push_back(detailRow(i, "NormalMap"));
         }
-        rows << QStringLiteral("detailWeightMap");
+        rows.push_back("detailWeightMap");
         return rows;
     }();
     return kRows;
 }
 
-QString PbrMaterial::detailRow(int layer, const char *suffix)
+std::string PbrMaterial::detailRow(int layer, const char *suffix)
 {
-    return QStringLiteral("detail%1%2").arg(layer).arg(QLatin1String(suffix));
+    return iris::text::cat("detail", layer, suffix);
 }
 
 // THE THIRTEEN BLEND MODES, in the renderer's own index order
 // (OgreHlmsPbsPrerequisites.h PbsBlendModes). Index is the stored value and is
 // permanent — the renderer's order, not ours to reshuffle.
-const QVector<const char *> &PbrMaterial::detailBlendNames()
+const std::vector<const char *> &PbrMaterial::detailBlendNames()
 {
-    static const QVector<const char *> kNames = {
+    static const std::vector<const char *> kNames = {
         "NormalNonPremul", "NormalPremul", "Add", "Subtract", "Multiply",
         "Multiply2x", "Screen", "Overlay", "Lighten", "Darken",
         "GrainExtract", "GrainMerge", "Difference"
@@ -221,9 +223,9 @@ void PbrMaterial::setEmissiveAsLightmap(bool asLightmap){ emissiveAsLightmap = a
 //
 // INDEX IS THE STORED VALUE AND IT IS PERMANENT: appending is safe, reordering
 // or removing a row silently re-points every saved material.
-const QVector<PbrMaterial::BrdfName> &PbrMaterial::brdfNames()
+const std::vector<PbrMaterial::BrdfName> &PbrMaterial::brdfNames()
 {
-    static const QVector<BrdfName> kNames = {
+    static const std::vector<BrdfName> kNames = {
         { "Default",                            "Default" },
         { "CookTorrance",                       "Cook-Torrance" },
         { "BlinnPhong",                         "Blinn-Phong" },
@@ -234,11 +236,11 @@ const QVector<PbrMaterial::BrdfName> &PbrMaterial::brdfNames()
     return kNames;
 }
 
-QString PbrMaterial::brdfEngineName(int index)
+std::string PbrMaterial::brdfEngineName(int index)
 {
     const auto &names = brdfNames();
-    if (index < 0 || index >= names.size()) return QStringLiteral("Default");
-    return QString::fromLatin1(names[index].engineName);
+    if (index < 0 || index >= names.size()) return "Default";
+    return names[index].engineName;
 }
 
 bool PbrMaterial::brdfSupportsClearCoat(int index)
@@ -248,14 +250,14 @@ bool PbrMaterial::brdfSupportsClearCoat(int index)
     // variants of Default qualify and Cook-Torrance / Blinn-Phong do not.
     // Expressed on the names because the bit layout is the renderer's, not
     // the document's.
-    return brdfEngineName(index).startsWith(QStringLiteral("Default"));
+    return iris::text::startsWith(brdfEngineName(index), "Default");
 }
 
 // The shading-model vocabulary. Two values today; the index is the stored value
 // and is permanent, exactly like brdfNames().
-const QVector<const char *> &PbrMaterial::shadingModelNames()
+const std::vector<const char *> &PbrMaterial::shadingModelNames()
 {
-    static const QVector<const char *> kNames = { "Lit", "Unlit", "Distortion" };
+    static const std::vector<const char *> kNames = { "Lit", "Unlit", "Distortion" };
     return kNames;
 }
 
@@ -263,9 +265,9 @@ const QVector<const char *> &PbrMaterial::shadingModelNames()
 // like brdfNames(). "Specular (Fresnel)" is what most PBRs simply call
 // "specular" — the renderer's own header says so — so it is worth the longer
 // label rather than shipping two rows a user cannot tell apart.
-const QVector<const char *> &PbrMaterial::workflowNames()
+const std::vector<const char *> &PbrMaterial::workflowNames()
 {
-    static const QVector<const char *> kNames = { "Metallic", "Specular",
+    static const std::vector<const char *> kNames = { "Metallic", "Specular",
                                                   "Specular (Fresnel)" };
     return kNames;
 }
@@ -290,18 +292,18 @@ bool PbrMaterial::sharedMapIsSrgb(int workflow)
 // and the metallic factor is not read in the two specular workflows. Grey them
 // out rather than let a user drag a slider that reaches nothing. The VALUES are
 // untouched either way, so switching workflow restores them.
-const QVector<QString> &PbrMaterial::rowsUnusedWhenMetallic()
+const std::vector<std::string> &PbrMaterial::rowsUnusedWhenMetallic()
 {
-    static const QVector<QString> kRows = {
-        QStringLiteral("ior"), QStringLiteral("fresnelColor"),
-        QStringLiteral("useFresnelColor"), QStringLiteral("separateFresnel"),
+    static const std::vector<std::string> kRows = {
+        "ior", "fresnelColor",
+        "useFresnelColor", "separateFresnel",
     };
     return kRows;
 }
 
-const QVector<QString> &PbrMaterial::rowsUnusedWhenSpecular()
+const std::vector<std::string> &PbrMaterial::rowsUnusedWhenSpecular()
 {
-    static const QVector<QString> kRows = { QStringLiteral("metallic") };
+    static const std::vector<std::string> kRows = { "metallic" };
     return kRows;
 }
 
@@ -323,20 +325,20 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenSpecular()
 //                                                    (decision D-P4a)
 // The VALUES are untouched — the panel greys the rows, the document keeps them,
 // and switching back to Lit restores every one.
-const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
+const std::vector<std::string> &PbrMaterial::rowsUnusedWhenUnlit()
 {
-    static const QVector<QString> kRows = {
-        QStringLiteral("metallic"), QStringLiteral("roughness"),
-        QStringLiteral("roughnessLowerBound"), QStringLiteral("roughnessUpperBound"),
-        QStringLiteral("normalFactor"),
-        QStringLiteral("emissiveColor"), QStringLiteral("emissiveIntensity"),
-        QStringLiteral("brdf"), QStringLiteral("clearCoat"), QStringLiteral("clearCoatRoughness"),
-        QStringLiteral("receiveShadows"), QStringLiteral("emissiveAsLightmap"),
-        QStringLiteral("textureScale"), QStringLiteral("textureScaleV"),
-        QStringLiteral("textureOffsetU"), QStringLiteral("textureOffsetV"),
-        QStringLiteral("textureRotation"),
-        QStringLiteral("normalMap"), QStringLiteral("metallicMap"),
-        QStringLiteral("roughnessMap"), QStringLiteral("emissiveMap"),
+    static const std::vector<std::string> kRows = {
+        "metallic", "roughness",
+        "roughnessLowerBound", "roughnessUpperBound",
+        "normalFactor",
+        "emissiveColor", "emissiveIntensity",
+        "brdf", "clearCoat", "clearCoatRoughness",
+        "receiveShadows", "emissiveAsLightmap",
+        "textureScale", "textureScaleV",
+        "textureOffsetU", "textureOffsetV",
+        "textureRotation",
+        "normalMap", "metallicMap",
+        "roughnessMap", "emissiveMap",
             "reflectionMap",   // the engine's unlit path returns before the reflection branch (code review 2026-09-10)
     };
     return kRows;
@@ -355,17 +357,16 @@ const QVector<QString> &PbrMaterial::rowsUnusedWhenUnlit()
 //   twoSided        as always: whether the back faces of the volume displace too
 // Everything else — the base colour and its map, every PBR term, the BRDF, the
 // coat, shadows, tiling — is untouched on the document and greyed in the panel.
-const QVector<QString> &PbrMaterial::rowsUnusedWhenDistortion()
+const std::vector<std::string> &PbrMaterial::rowsUnusedWhenDistortion()
 {
-    static const QVector<QString> kRows = [] {
-        QVector<QString> rows = rowsUnusedWhenUnlit();
+    static const std::vector<std::string> kRows = [] {
+        std::vector<std::string> rows = rowsUnusedWhenUnlit();
         // ...minus the normal map, which is the one thing Distortion DOES read.
-        rows.removeAll(QStringLiteral("normalMap"));
-        rows.removeAll(QStringLiteral("normalFactor"));
+        for (const char *drop : { "normalMap", "normalFactor" })
+            rows.erase(std::remove(rows.begin(), rows.end(), std::string(drop)), rows.end());
         // ...plus everything an unlit surface still shows and this does not.
-        rows << QStringLiteral("baseColor") << QStringLiteral("baseColorFactor")
-             << QStringLiteral("baseColorMap") << QStringLiteral("alphaMode")
-             << QStringLiteral("alphaCutoff") << QStringLiteral("castShadows");
+        rows.insert(rows.end(), { "baseColor", "baseColorFactor", "baseColorMap", "alphaMode",
+                                  "alphaCutoff", "castShadows" });
         return rows;
     }();
     return kRows;
@@ -412,13 +413,13 @@ void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees
 // The generated-piece paths are stored, never opened here: the renderer's
 // boundary registers the file's directory with its resource system and reads
 // it, and nothing in the document model has any business parsing shader source.
-void PbrMaterial::setCustomPiecePixel(const QString& path)  { customPiecePixel = path; touch(); }
-void PbrMaterial::setCustomPieceVertex(const QString& path) { customPieceVertex = path; touch(); }
+void PbrMaterial::setCustomPiecePixel(const std::string& path)  { customPiecePixel = path; touch(); }
+void PbrMaterial::setCustomPieceVertex(const std::string& path) { customPieceVertex = path; touch(); }
 // Empty path clears the slot; a missing file yields a null texture, which the
 // set*Map functions treat as "no map" rather than failing.
-Texture2DPtr PbrMaterial::loadTexture(const QString& path)
+Texture2DPtr PbrMaterial::loadTexture(const std::string& path)
 {
-    if (path.isEmpty()) return Texture2DPtr();
+    if (path.empty()) return Texture2DPtr();
     // A LIVE REFERENCE ("live://<guid>") names pixels a producer owns for this
     // session, not a file (MATERIAL_GAPS_SPEC A-1). A MISS IS ORDINARY and is
     // not an error: it is what a scene saved by some other session, or a row
@@ -428,7 +429,7 @@ Texture2DPtr PbrMaterial::loadTexture(const QString& path)
     if (LiveTextures::isLiveRef(path)) {
         Texture2DPtr live = LiveTextures::find(path);
         if (!live)
-            iris::log::warn(("live texture not in this session, slot left empty: " + path).toStdString());
+            iris::log::warn(("live texture not in this session, slot left empty: " + path));
         return live;
     }
     return Texture2D::load(path);
@@ -464,17 +465,17 @@ bool PbrMaterial::setValue(std::string_view name, const Value &in)
     };
     const auto B = [&](bool &field) { if (in.kind() != Kind::Bool) return false; field = in.asBool(); return true; };
     const auto C = [&](SrgbColor &field) { return colourOfRowValue(in, field); };
-    const auto S = [&](QString &field) {
+    const auto S = [&](std::string &field) {
         if (in.kind() != Kind::String) return false;
-        field = QString::fromStdString(in.asString());
+        field = in.asString();
         return true;
     };
     // A map's file: the texture row's path (set above), else a bare path String.
-    QString path;
+    std::string path;
     const auto T = [&]() {
-        if (textureRow) { path = QString::fromStdString(static_cast<TextureProperty *>(row)->value); return true; }
+        if (textureRow) { path = static_cast<TextureProperty *>(row)->value; return true; }
         if (in.kind() != Kind::String) return false;
-        path = QString::fromStdString(in.asString());
+        path = in.asString();
         return true;
     };
 
@@ -526,10 +527,10 @@ bool PbrMaterial::setValue(std::string_view name, const Value &in)
         if (field == 1) anisotropy = float(1 << iris::bound(0, index, 4));
     }
     else if (name.size() > 7 && name.substr(name.size() - 7) == "Address" &&
-             mapRowNames().contains(QString::fromUtf8(name.data(), qsizetype(name.size() - 7)))) {
+             std::find(mapRowNames().begin(), mapRowNames().end(), std::string(name.substr(0, name.size() - 7))) != mapRowNames().end()) {
         int mode = 0;
         take(I(mode));
-        if (field == 1) mapAddress[QString::fromUtf8(name.data(), qsizetype(name.size() - 7))] = mode;
+        if (field == 1) mapAddress[std::string(name.substr(0, name.size() - 7))] = mode;
     }
     else if (name == "brdf")               take(I(brdf));
     else if (name == "receiveShadows")     take(B(receiveShadows));
@@ -954,19 +955,19 @@ void PbrMaterial::createProperties()
         auto mapProp         = std::make_unique<TextureProperty>();
         mapProp->id          = id++;
         mapProp->displayName = label + "Map";
-        mapProp->name        = detailRow(layer, "Map").toStdString();
+        mapProp->name        = detailRow(layer, "Map");
         addProperty(std::move(mapProp));
 
         auto nmProp         = std::make_unique<TextureProperty>();
         nmProp->id          = id++;
         nmProp->displayName = label + "Normal Map";
-        nmProp->name        = detailRow(layer, "NormalMap").toStdString();
+        nmProp->name        = detailRow(layer, "NormalMap");
         addProperty(std::move(nmProp));
 
         auto blendProp         = std::make_unique<ListProperty>();
         blendProp->id          = id++;
         blendProp->displayName = label + "Blend";
-        blendProp->name        = detailRow(layer, "Blend").toStdString();
+        blendProp->name        = detailRow(layer, "Blend");
         for (const char *n : detailBlendNames()) blendProp->labels.push_back(n);
         blendProp->value       = detail[layer].blend;
         addProperty(std::move(blendProp));
@@ -989,7 +990,7 @@ void PbrMaterial::createProperties()
             auto p         = std::make_unique<FloatProperty>();
             p->id          = id++;
             p->displayName = label + sc.label;
-            p->name        = detailRow(layer, sc.suffix).toStdString();
+            p->name        = detailRow(layer, sc.suffix);
             p->minValue    = sc.lo;
             p->maxValue    = sc.hi;
             p->value       = sc.value;
@@ -1024,13 +1025,13 @@ void PbrMaterial::createProperties()
     }
     addProperty(std::move(anisoProp));
 
-    for (const QString &mapRow : mapRowNames()) {
+    for (const std::string &mapRow : mapRowNames()) {
         auto addrProp         = std::make_unique<ListProperty>();
         addrProp->id          = id++;
         // "Base Color Map Address" would be a fifth column of noise; the row
         // sits directly under its map and says only what it varies.
         addrProp->displayName = "  Address";
-        addrProp->name        = addressRow(mapRow).toStdString();
+        addrProp->name        = addressRow(mapRow);
         for (const char *n : addressModeNames()) addrProp->labels.push_back(n);
         addrProp->value       = addressFor(mapRow);
         addProperty(std::move(addrProp));

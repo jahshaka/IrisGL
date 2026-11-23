@@ -311,10 +311,14 @@ namespace
 // version. The document's names and containers are std (UTF-8 std::string names, std::map / std::vector members: this
 // file's crossings write each name as the QString they wrote before, so the stream's name bytes are unchanged); three
 // index guards compare UNSIGNED (an index of 2^31 or more passed `int(x) >= count`). Every bake re-bakes.
+// v39 (2026-11-23, NOQT-DOCUMENT-1 stage 5, "5b"): THE CLIP BAKE's OUTPUT CHANGES - a .jcb ENDS with the same XXH3 64-bit
+// checksum the .jmb carries (a flipped byte refused by name before any field past the version), and readClipInfo refuses
+// a node whose PARENT is not -1 or an earlier node (the hierarchy is pre-order: listHierarchy) by name. The .jmb's
+// bytes are unchanged. Every clip bake re-bakes.
 // v38 (2026-11-23, NOQT-DOCUMENT-1 stage 5, "5a"): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED - MeshNode::meshPath is
 // a std::string now, so its two writers here (buildFragment's) and four in import/scenebuilder.cpp take
 // `filePath.toStdString()`; meshPath is never serialized. Every library re-bakes once (forward-only).
-constexpr int kFormatVersion = 38;
+constexpr int kFormatVersion = 39;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -1045,7 +1049,7 @@ void writeClipInfo(QDataStream &s, const ClipFileInfo &info)
     }
 }
 
-bool readClipInfo(QDataStream &s, ClipFileInfo &info)
+bool readClipInfo(QDataStream &s, ClipFileInfo &info, std::string *refusal)
 {
     qint32 parsed = 0, meshes = 0, animations = 0, clipCount = 0;
     s >> parsed >> meshes >> animations >> clipCount;
@@ -1070,6 +1074,13 @@ bool readClipInfo(QDataStream &s, ClipFileInfo &info)
     for (qint32 i = 0; i < parents; ++i) {
         qint32 parent = -1;
         s >> parent;
+        // THE PARENT's BOUND (v39): the hierarchy is PRE-ORDER (clipfileinfo.cpp listHierarchy), so a parent is -1 (the
+        // root) or an EARLIER node: never past the count, never itself, never a cycle. src/services/animationfile.cpp's
+        // posePlanar indexes a pose with it and walks no further: it assumed exactly this.
+        if (parent < -1 || parent >= i) {
+            if (refusal) *refusal = "a node's parent index is out of range";
+            return false;
+        }
         info.nodeParents.append(parent);
     }
     qint32 poseCount = 0;
@@ -2885,23 +2896,36 @@ QByteArray MeshBake::serializeClip(const Clip &clip)
     writeF64(s, clip.declaredUnitScale);
     writeAnimations(s, clip.animations);
     s << quint32(kClipMagic);
+    // THE PAYLOAD CHECKSUM (v39): serialize's own, the same law and the same eight little-endian bytes, last.
+    const std::uint64_t sum = XXH3_64bits(blob.constData(), size_t(blob.size()));
+    for (int i = 0; i < 8; ++i) blob.append(char((sum >> (8 * i)) & 0xffu));
     return blob;
 }
 
 MeshBake::Clip MeshBake::deserializeClip(const QByteArray &blob, const QString &expectFingerprint)
 {
     Clip clip;
-    if (blob.size() < 16) return clip;
+    if (blob.size() < 16 + 8) return clip;
     QDataStream s(blob);
     configure(s);
     quint32 magic = 0;
     qint32 version = 0;
     s >> magic >> version;
-    if (magic != kClipMagic || version != kFormatVersion) return clip;
+    if (magic != kClipMagic || version != kFormatVersion) return clip;   // stale or not a clip bake: a re-bake
+    // THE CHECKSUM BEFORE ANY OTHER FIELD (v39): a flipped byte anywhere is refused BY NAME, never partly read.
+    if (!checksumHolds(blob)) {
+        clip.refusal = "its checksum does not match";
+        return clip;
+    }
     s >> clip.fingerprint;
     if (s.status() != QDataStream::Ok) return Clip();
     if (!expectFingerprint.isEmpty() && clip.fingerprint != expectFingerprint) return Clip();
-    if (!readClipInfo(s, clip.info)) return Clip();
+    std::string refusal;
+    if (!readClipInfo(s, clip.info, &refusal)) {
+        Clip refused;
+        refused.refusal = refusal;
+        return refused;
+    }
     clip.declaredUnitScale = readF64(s);
     if (!readAnimations(s, QString(), clip.animations)) return Clip();
     quint32 tail = 0;
@@ -2918,7 +2942,11 @@ MeshBake::Clip MeshBake::readClip(const QString &path, const QString &expectFing
     if (!file.open(QIODevice::ReadOnly)) return Clip();
     const QByteArray blob = file.readAll();
     file.close();
-    return deserializeClip(blob, expectFingerprint);
+    Clip clip = deserializeClip(blob, expectFingerprint);
+    if (!clip.refusal.empty())
+        iris::log::warn("clip bake: the bake " + path.toStdString() + " is corrupt: " + clip.refusal +
+                        ": re-import the asset");
+    return clip;
 }
 
 bool MeshBake::writeClip(const QString &path, const Clip &clip, QString *errorOut)

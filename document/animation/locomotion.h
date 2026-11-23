@@ -71,10 +71,9 @@ For more information see the LICENSE file
 // exactly what gate S3 forbids. Unreal draws the same fence around its Any
 // State node. See the comment at the evaluation site.
 
-#include <QMap>
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <map>
+#include <string>
+#include <vector>
 #include <functional>
 
 #include "irisglfwd.h"
@@ -108,12 +107,12 @@ struct LocomotionCondition
     /// The canonical spelling. Round-trips through `parse` byte for byte, which
     /// is what makes the save/load gate (S6) an equality check on strings
     /// rather than a structural walk.
-    QString text() const;
+    std::string text() const;
     /// Parses one of the six forms. On failure returns false and writes a
     /// message that NAMES the offending text (gate S5) plus the whole
     /// vocabulary — a closed vocabulary is only usable if the refusal says
     /// what the alternatives are.
-    static bool parse(const QString &text, LocomotionCondition &out, QString *error);
+    static bool parse(const std::string &text, LocomotionCondition &out, std::string *error);
 };
 
 // ---------------------------------------------------------------------------
@@ -125,7 +124,7 @@ struct LocomotionCondition
 /// runSpeed from 5.5 to 8 makes the feet slide.
 struct LocomotionBlendSample
 {
-    QString clip;
+    std::string clip;
     float position = 0.0f;        ///< the `speed` value this sample sits at
     float authoredSpeed = 0.0f;   ///< 0 = "unmeasured", which disables rate scaling
 };
@@ -134,7 +133,7 @@ struct LocomotionBlendSample
 /// it is not stored: there is nothing else it could be.
 struct LocomotionBlendSpace
 {
-    QVector<LocomotionBlendSample> samples;   ///< sorted by position, strictly increasing
+    std::vector<LocomotionBlendSample> samples;   ///< sorted by position, strictly increasing
     bool syncClips = true;
 };
 
@@ -146,9 +145,9 @@ enum class LocomotionSourceKind : int
 
 struct LocomotionStateDef
 {
-    QString name;
+    std::string name;
     LocomotionSourceKind kind = LocomotionSourceKind::Clip;
-    QString clip;                 ///< kind == Clip
+    std::string clip;                 ///< kind == Clip
     float speed = 1.0f;           ///< kind == Clip: play-rate multiplier
     LocomotionBlendSpace space;   ///< kind == BlendSpace
     bool loop = true;
@@ -156,8 +155,8 @@ struct LocomotionStateDef
 
 struct LocomotionTransitionDef
 {
-    QString from;                 ///< a state name, or "*" for any state
-    QString to;
+    std::string from;                 ///< a state name, or "*" for any state
+    std::string to;
     LocomotionCondition condition;
     float blendDuration = 0.15f;  ///< seconds; 0 is an instant cut
 };
@@ -166,20 +165,20 @@ struct LocomotionTransitionDef
 /// and there never will be one (§7.1).
 struct LocomotionAsset
 {
-    QString name;
-    QVector<LocomotionStateDef> states;
-    QVector<LocomotionTransitionDef> transitions;
-    QString entry;
+    std::string name;
+    std::vector<LocomotionStateDef> states;
+    std::vector<LocomotionTransitionDef> transitions;
+    std::string entry;
 
-    bool isEmpty() const { return states.isEmpty(); }
-    const LocomotionStateDef *findState(const QString &name) const;
+    bool isEmpty() const { return states.empty(); }
+    const LocomotionStateDef *findState(const std::string &name) const;
     /// Structural validation (§10 `setLocomotionAsset`): every from/to names a
     /// state (or "*" for from), the entry exists, every state resolves to at
     /// least one clip (R2), a blend space has >= 2 samples with STRICTLY
     /// increasing positions, no blend duration is negative. The condition
     /// vocabulary is checked at PARSE time, not here — a LocomotionCondition
     /// that exists is by construction one of the six forms.
-    bool validate(QString *error) const;
+    bool validate(std::string *error) const;
 };
 
 // ---------------------------------------------------------------------------
@@ -200,17 +199,17 @@ static constexpr int kClipRoleCount = 6;
 const char *clipRoleName(ClipRole role);
 /// Accepts the canonical spelling and the camelCase one the verbs report
 /// (`jumpStart`, `fallLoop`), case-insensitively.
-bool clipRoleFromName(const QString &name, ClipRole &out);
+bool clipRoleFromName(const std::string &name, ClipRole &out);
 
 /// role -> clip name. An UNBOUND role is an empty string, and that is not an
 /// error: §7.4 — "a missing role is not an error", the default asset degrades.
 struct ClipRoles
 {
-    QString names[kClipRoleCount];
+    std::string names[kClipRoleCount];
 
-    bool has(ClipRole r) const { return !names[int(r)].isEmpty(); }
-    const QString &get(ClipRole r) const { return names[int(r)]; }
-    void set(ClipRole r, const QString &clip) { names[int(r)] = clip; }
+    bool has(ClipRole r) const { return !names[int(r)].empty(); }
+    const std::string &get(ClipRole r) const { return names[int(r)]; }
+    void set(ClipRole r, const std::string &clip) { names[int(r)] = clip; }
     int boundCount() const;
 };
 
@@ -230,7 +229,7 @@ struct ClipRoles
 /// clip binds to at most one role, and a role takes the best-scoring unbound
 /// candidate (exact word match beats a substring; ties break on list order, so
 /// the result is deterministic for a given clip list).
-ClipRoles matchClipRoles(const QStringList &clipNames);
+ClipRoles matchClipRoles(const std::vector<std::string> &clipNames);
 
 // ---------------------------------------------------------------------------
 // THE DEFAULT ASSET (§7.2)
@@ -269,12 +268,12 @@ const char *defaultLocomotionAssetName();
 Value locomotionAssetToJson(const LocomotionAsset &asset);
 /// Parses AND validates. On refusal `out` is untouched and `*error` names the
 /// offending transition and condition text (gate S5).
-bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *error);
+bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, std::string *error);
 
 /// clip name -> length in seconds, for one avatar wrapper. The FIRST node in
 /// the subtree (the wrapper included, depth-first) carrying skeletal animations
 /// is the clip host — `SceneMirror::clipHostOf`'s rule read from the other end.
-void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out);
+void collectAvatarClips(const SceneNodePtr &node, std::map<std::string, float> &out);
 
 // ---------------------------------------------------------------------------
 // THE EVALUATOR'S OUTPUT
@@ -282,7 +281,7 @@ void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out);
 /// One entry of the per-frame push. `time` is ABSOLUTE seconds into `clip`.
 struct LocomotionClipWeight
 {
-    QString clip;
+    std::string clip;
     float weight = 0.0f;
     float time = 0.0f;
     bool looping = true;
@@ -304,17 +303,17 @@ public:
     const LocomotionAsset &asset() const { return mAsset; }
     /// Validates and installs. On refusal nothing changes and `*error` names
     /// what was wrong (gate S5). Resets the runtime to the entry state.
-    bool setAsset(const LocomotionAsset &asset, QString *error);
+    bool setAsset(const LocomotionAsset &asset, std::string *error);
     /// The same, WITHOUT clearing the "this is the generated default" flag —
     /// the scene reader and the node-duplication path both restore an asset
     /// that may legitimately still be the default one, and marking it authored
     /// would stop it ever tracking a later role bind or knob change.
-    bool setAssetPreservingDefaultFlag(const LocomotionAsset &asset, QString *error);
+    bool setAssetPreservingDefaultFlag(const LocomotionAsset &asset, std::string *error);
     /// Restores an asset AND the flag together — what an undo needs, since
     /// undoing an authored asset back to the generated default has to restore
     /// "this is the default" too, or the next role bind would refuse to
     /// regenerate it.
-    bool restoreAsset(const LocomotionAsset &asset, bool isDefault, QString *error);
+    bool restoreAsset(const LocomotionAsset &asset, bool isDefault, std::string *error);
     /// True while the asset is the generated default — the flag that lets a
     /// role rebind or a knob change REGENERATE it, without ever silently
     /// overwriting an asset the user authored.
@@ -326,10 +325,10 @@ public:
     /// Binds one role by hand. Regenerates the default asset when that is what
     /// is installed. An empty `clip` UNBINDS the role, which is how a user
     /// tells the default asset to skip a state.
-    void setClipRole(ClipRole role, const QString &clip);
+    void setClipRole(ClipRole role, const std::string &clip);
     /// Runs the tolerant matcher over `clipNames` and installs the default
     /// asset built from the result. This is what spawn and load call.
-    void bindRolesFromClips(const QStringList &clipNames, float walkSpeed, float runSpeed);
+    void bindRolesFromClips(const std::vector<std::string> &clipNames, float walkSpeed, float runSpeed);
     /// Rebuilds the default asset from the CURRENT roles (after a knob change).
     /// A no-op when the installed asset is not the default, and it KEEPS the
     /// running state rather than throwing a walking character back to entry.
@@ -353,7 +352,7 @@ public:
     /// is treated as zero-length: it is still published (the engine pads a
     /// zero-length clip rather than refusing it) but it is excluded from the
     /// blended cycle length and from phase advance, exactly as §7.3 requires.
-    void step(const AvatarLocomotionState &params, const QMap<QString, float> &clipLengths,
+    void step(const AvatarLocomotionState &params, const std::map<std::string, float> &clipLengths,
               float dt);
     /// The same step, with the clip table refreshed from the node's own
     /// animations first — what the physics tick calls, so a clip loaded onto an
@@ -363,7 +362,7 @@ public:
     /// Rebuilds the cached clip table from `node` IF it changed. Public because
     /// the verbs report clip lengths and must not report a stale table.
     void refreshClips(const SceneNodePtr &node, float walkSpeed, float runSpeed);
-    const QMap<QString, float> &clipLengths() const { return mClipLengths; }
+    const std::map<std::string, float> &clipLengths() const { return mClipLengths; }
     /// Back to the entry state with a zero phase and no transition in flight.
     void reset();
 
@@ -372,9 +371,9 @@ public:
     /// The state the machine is IN. During a transition this is already the
     /// DESTINATION — that is the Unreal/Unity reading and it is what makes
     /// "the sequence of states a speed ramp produced" a well-defined list.
-    const QString &currentState() const { return mCurrent; }
+    const std::string &currentState() const { return mCurrent; }
     /// The state being blended OUT of, empty when no transition is in flight.
-    const QString &previousState() const { return mPrevious; }
+    const std::string &previousState() const { return mPrevious; }
     bool isTransitioning() const { return mTransitioning; }
     /// `u` in [0,1]: 0 at the instant the transition was taken, 1 the step it
     /// completes. 1 when nothing is in flight.
@@ -387,12 +386,12 @@ public:
     /// state is active (R2). Ordered: the destination state's clips first, in
     /// blend-sample order, then the outgoing state's — a stable order, so two
     /// identical runs produce identical arrays.
-    const QVector<LocomotionClipWeight> &weights() const { return mWeights; }
+    const std::vector<LocomotionClipWeight> &weights() const { return mWeights; }
 
 private:
     struct Sample
     {
-        QString clip;
+        std::string clip;
         float weight = 0.0f;
         float length = 0.0f;
         float authoredSpeed = 0.0f;
@@ -401,18 +400,18 @@ private:
     /// The clips a state contributes at `speed`, with their weights (summing to
     /// 1 before the cross-fade scales them).
     void sampleState(const LocomotionStateDef &st, float speed,
-                     const QMap<QString, float> &clipLengths, QVector<Sample> &out) const;
+                     const std::map<std::string, float> &clipLengths, std::vector<Sample> &out) const;
     /// Advances one state's phase by `dt` and returns the new phase.
-    static float advancePhase(const LocomotionStateDef &st, const QVector<Sample> &samples,
+    static float advancePhase(const LocomotionStateDef &st, const std::vector<Sample> &samples,
                               float phase, float speed, float dt);
-    void emitWeights(const LocomotionStateDef &st, const QVector<Sample> &samples, float phase,
+    void emitWeights(const LocomotionStateDef &st, const std::vector<Sample> &samples, float phase,
                      float scale);
     bool conditionHolds(const LocomotionCondition &c, const AvatarLocomotionState &params,
                         float phase) const;
     /// True when `from` carries a non-wildcard transition to `to` — the test
     /// behind the "a wildcard means any OTHER state" rule at the top of this
     /// file.
-    bool hasExplicitTransition(const QString &from, const QString &to) const;
+    bool hasExplicitTransition(const std::string &from, const std::string &to) const;
 
     LocomotionAsset mAsset;
     ClipRoles mRoles;
@@ -422,10 +421,10 @@ private:
     bool mIsDefault = true;
     float mDefaultWalkSpeed = 2.0f;
     float mDefaultRunSpeed = 5.5f;
-    QMap<QString, float> mClipLengths;
+    std::map<std::string, float> mClipLengths;
 
-    QString mCurrent;
-    QString mPrevious;
+    std::string mCurrent;
+    std::string mPrevious;
     float mPhase = 0.0f;        ///< the CURRENT state's normalized phase
     float mPrevPhase = 0.0f;    ///< the outgoing state's, while blending
 
@@ -434,7 +433,7 @@ private:
     float mBlendDuration = 0.0f;
     float mBlendU = 1.0f;
 
-    QVector<LocomotionClipWeight> mWeights;
+    std::vector<LocomotionClipWeight> mWeights;
 };
 
 }   // namespace iris

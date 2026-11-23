@@ -434,7 +434,7 @@ PropertyRows ParticleSystemNode::getProperties()
     // manager (guid -> file), which the document layer has no access to. The
     // texture's source path is exposed for inspection only; setPropertyValue
     // refuses it.
-    addString("Texture", "texture", !!texture ? texture->getSource().toStdString() : std::string(), true);
+    addString("Texture", "texture", !!texture ? texture->getSource() : std::string(), true);
 
     return props;
 }
@@ -467,7 +467,7 @@ Value ParticleSystemNode::getPropertyValue(std::string_view valueName)
     if (valueName == "shape")              return Value(shapeName(shape));
     if (valueName == "orientation")        return Value(orientationName(orientation));
     if (valueName == "preset")             return Value(presetName(preset));
-    if (valueName == "texture")            return Value(!!texture ? texture->getSource().toStdString() : std::string());
+    if (valueName == "texture")            return Value(!!texture ? texture->getSource() : std::string());
     // The vector and colour rows (their Vec3 / Color rows in getProperties()).
     if (valueName == "extents")            return vec3ToValue(extents);
     if (valueName == "innerExtents")       return vec3ToValue(innerExtents);

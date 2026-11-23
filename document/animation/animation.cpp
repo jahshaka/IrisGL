@@ -15,8 +15,11 @@ For more information see the LICENSE file
 #include "document/animation/propertyanim.h"
 #include "document/animation/skeletalanimation.h"
 #include "irisglfwd.h"
-#include <QDebug>
+#include "core/log.h"
+#include "core/text.h"
 #include <cmath>
+#include <algorithm>
+#include "document/mapvalue.h"
 
 namespace iris
 {
@@ -55,17 +58,17 @@ void Animation::calculateAnimationLength()
 {
     float maxLength = 0;
     // calculate length of keys
-    for (auto propAnim : properties) {
+    for (auto[propAnimKey, propAnim] : properties) {
         for (auto& frames : propAnim->getKeyFrames()) {
             auto length = frames.keyFrame->getLength();
-            maxLength = qMax(maxLength, length);
+            maxLength = std::max(maxLength, length);
         }
     }
 
     // calculate length of each bone in the skeletal animation
     if (!!skeletalAnimation) {
         for (const auto &boneAnim : skeletalAnimation->boneAnimations) {
-            maxLength = qMax(maxLength, boneAnim.second->getLength());
+            maxLength = std::max(maxLength, boneAnim.second->getLength());
         }
         // Keys that span NO time — a one-frame clip whose identical keys the
         // import preset collapsed to one (SkeletalAnimation::declaredLength) —
@@ -78,7 +81,7 @@ void Animation::calculateAnimationLength()
     length = maxLength;
 }
 
-Animation::Animation(QString name)
+Animation::Animation(std::string name)
 {
     this->name = name;
     loop = true;
@@ -91,16 +94,16 @@ Animation::~Animation()
     // The tracks are OWNED here (the header's raw pointers are the 2016 shape):
     // every clip destroyed used to leak its whole curve tree, and an overwrite
     // in addPropertyAnim leaked the replaced track (platform audit B10.1).
-    qDeleteAll(properties);
+    for (auto &[propName, prop] : properties) delete prop;   // qDeleteAll(QMap) deleted the VALUES
     properties.clear();
 }
 
-QString Animation::getName() const
+std::string Animation::getName() const
 {
     return name;
 }
 
-void Animation::setName(const QString &value)
+void Animation::setName(const std::string &value)
 {
     name = value;
 }
@@ -130,13 +133,13 @@ void Animation::addPropertyAnim(PropertyAnim *anim)
     //Q_ASSERT(!properties.contains(name));
     
     if (!anim) return;
-    if (PropertyAnim *old = properties.value(anim->getName(), nullptr); old && old != anim)
+    if (PropertyAnim *old = iris::valueOr(properties, anim->getName(), nullptr); old && old != anim)
         delete old;
-    properties.insert(anim->getName(), anim);
+    properties.insert_or_assign(anim->getName(), anim);
     calculateAnimationLength();
 }
 
-void Animation::removePropertyAnim(QString name)
+void Animation::removePropertyAnim(std::string name)
 {
     // QMap::operator[] on a non-const map INSERTS a default-constructed value
     // when the key is missing — so the old `auto prop = properties[name]` put a
@@ -145,12 +148,14 @@ void Animation::removePropertyAnim(QString name)
     // and every missed lookup left a null entry behind for the next iteration
     // over properties to trip on. take() removes and hands back in one step,
     // and default-constructs nothing when the key is absent.
-    if (!properties.contains(name)) {
-        qDebug() << "Animation property " << name << " doesnt exist";
+    if (!(properties.count(name) != 0)) {
+        iris::log::info(iris::text::cat("Animation property ", name, " doesnt exist"));   // was a qDebug
         return;
     }
 
-    delete properties.take(name);
+    const auto at = properties.find(name);   // present: checked above
+    delete at->second;
+    properties.erase(at);
 }
 
 // Every getter below reads with QMap::value(), NEVER with operator[]: on a
@@ -161,34 +166,34 @@ void Animation::removePropertyAnim(QString name)
 // a null PropertyAnim. Every caller guarded the read with hasPropertyAnim()
 // precisely because the getter could not be trusted; now a miss returns
 // nullptr and leaves the map alone, and callers null-check instead.
-PropertyAnim* Animation::getPropertyAnim(QString name)
+PropertyAnim* Animation::getPropertyAnim(std::string name)
 {
-    return properties.value(name, nullptr);
+    return iris::valueOr(properties, name, nullptr);
 }
 
-FloatPropertyAnim *Animation::getFloatPropertyAnim(QString name)
+FloatPropertyAnim *Animation::getFloatPropertyAnim(std::string name)
 {
-    return (FloatPropertyAnim*)properties.value(name, nullptr);
+    return (FloatPropertyAnim*)iris::valueOr(properties, name, nullptr);
 }
 
-Vector3DPropertyAnim *Animation::getVector3PropertyAnim(QString name)
+Vector3DPropertyAnim *Animation::getVector3PropertyAnim(std::string name)
 {
-    return (Vector3DPropertyAnim*)properties.value(name, nullptr);
+    return (Vector3DPropertyAnim*)iris::valueOr(properties, name, nullptr);
 }
 
-ColorPropertyAnim *Animation::getColorPropertyAnim(QString name)
+ColorPropertyAnim *Animation::getColorPropertyAnim(std::string name)
 {
-    return (ColorPropertyAnim*)properties.value(name, nullptr);
+    return (ColorPropertyAnim*)iris::valueOr(properties, name, nullptr);
 }
 
-bool Animation::hasPropertyAnim(QString name)
+bool Animation::hasPropertyAnim(std::string name)
 {
-    return properties.contains(name);
+    return (properties.count(name) != 0);
 }
 
 AnimationPtr Animation::createFromSkeletalAnimation(SkeletalAnimationPtr skelAnim)
 {
-    auto anim = new Animation(QString::fromStdString(skelAnim->name));
+    auto anim = new Animation(skelAnim->name);
     anim->setSkeletalAnimation(skelAnim);
     return AnimationPtr(anim);
 }
@@ -198,8 +203,8 @@ AnimationPtr Animation::clone() const
     auto copy = AnimationPtr(new Animation(name));
     copy->loop = loop;
     copy->frameRate = frameRate;
-    for (auto it = properties.constBegin(); it != properties.constEnd(); ++it) {
-        PropertyAnim *src = it.value();
+    for (auto it = properties.cbegin(); it != properties.cend(); ++it) {
+        PropertyAnim *src = it->second;
         if (!src) continue;
         PropertyAnim *dst = nullptr;
         if (dynamic_cast<FloatPropertyAnim *>(src)) dst = new FloatPropertyAnim();
@@ -217,7 +222,7 @@ AnimationPtr Animation::clone() const
             b->length = a->length;
             for (const auto *key : a->keys) b->keys.push_back(new Key<float>(*key));
         }
-        copy->properties.insert(it.key(), dst);
+        copy->properties.insert_or_assign(it->first, dst);
     }
     copy->skeletalAnimation = skeletalAnimation;   // shared clip data, same reference
     copy->length = length;

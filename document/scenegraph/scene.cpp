@@ -547,7 +547,7 @@ void Scene::setWorldGravity(float gravity)
 
 std::string Scene::getSkyTextureSource()
 {
-    return skyTexture->getSource().toStdString();   // Texture2D is 5b's
+    return skyTexture->getSource();   // Texture2D is 5b's
 }
 
 void Scene::clearSkyTexture()

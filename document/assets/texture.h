@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #define TEXTURE_H
 
 #include <memory>
-#include <QString>
+#include <string>
 
 namespace iris
 {
@@ -25,7 +25,7 @@ namespace iris
 class Texture
 {
 public:
-    QString source;
+    std::string source;
 
     virtual int getWidth() { return 0; }
     virtual int getHeight() { return 0; }

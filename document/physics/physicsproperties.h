@@ -4,8 +4,8 @@
 
 #include "core/math/vec.h"
 
-#include <QString>
-#include <QVector>
+#include <string>
+#include <vector>
 
 namespace iris
 {
@@ -41,8 +41,8 @@ struct ConstraintProperty
         constraintType = PhysicsConstraintType::None;
     }
 
-    QString constraintFrom;
-    QString constraintTo;
+    std::string constraintFrom;
+    std::string constraintTo;
     PhysicsConstraintType constraintType;
 };
 
@@ -73,7 +73,7 @@ struct PhysicsProperty
     iris::Vec3 centerOfMass;
     iris::Vec3 pivotPoint;
 
-    QVector<ConstraintProperty> constraints;
+    std::vector<ConstraintProperty> constraints;
 };
 
 }

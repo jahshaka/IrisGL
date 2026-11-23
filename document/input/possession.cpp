@@ -11,7 +11,7 @@ For more information see the LICENSE file
 
 #include "document/input/possession.h"
 
-#include <QtGlobal>
+#include <utility>
 #include <cmath>
 
 #include "core/log.h"
@@ -23,6 +23,9 @@ For more information see the LICENSE file
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/socket.h"
+#include "core/text.h"
+#include "core/math/scalar.h"
+#include <algorithm>
 
 namespace iris
 {
@@ -39,12 +42,12 @@ const char *playModeName(ScenePlayMode mode)
     return "explorer";
 }
 
-bool playModeFromName(const QString &name, ScenePlayMode &out)
+bool playModeFromName(const std::string &name, ScenePlayMode &out)
 {
-    const QString n = name.trimmed().toLower();
-    if (n == QLatin1String("explorer"))     { out = ScenePlayMode::Explorer;    return true; }
-    if (n == QLatin1String("third-person")) { out = ScenePlayMode::ThirdPerson; return true; }
-    if (n == QLatin1String("camera"))       { out = ScenePlayMode::Camera;      return true; }
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (n == "explorer")     { out = ScenePlayMode::Explorer;    return true; }
+    if (n == "third-person") { out = ScenePlayMode::ThirdPerson; return true; }
+    if (n == "camera")       { out = ScenePlayMode::Camera;      return true; }
     return false;
 }
 
@@ -56,12 +59,12 @@ namespace
 /// The first skinned mesh in the subtree that carries `socketName`, depth-first.
 /// A character's wrapper is the node the movement writes; the rig may be
 /// several levels down (that is what avatar.spawn produces).
-MeshNode *findSocketOwner(const SceneNodePtr &node, const QString &socketName)
+MeshNode *findSocketOwner(const SceneNodePtr &node, const std::string &socketName)
 {
     if (!node) return nullptr;
     if (node->getSceneNodeType() == SceneNodeType::Mesh) {
         auto *mesh = static_cast<MeshNode *>(node.get());
-        if (mesh->hasSkeleton() && mesh->findSocket(socketName.toStdString())) return mesh;
+        if (mesh->hasSkeleton() && mesh->findSocket(socketName)) return mesh;
     }
     const int kids = node->childCount();
     for (int i = 0; i < kids; ++i) {
@@ -91,9 +94,9 @@ SceneNodePtr AvatarPossession::possessed() const
     return node;
 }
 
-QString AvatarPossession::possessedGuid() const
+std::string AvatarPossession::possessedGuid() const
 {
-    return !possessed() ? QString() : mPossessedGuid;
+    return !possessed() ? std::string() : mPossessedGuid;
 }
 
 bool AvatarPossession::possess(const SceneNodePtr &node)
@@ -110,7 +113,7 @@ bool AvatarPossession::possess(const SceneNodePtr &node)
     unpossess();
 
     mPossessed = std::weak_ptr(node);
-    mPossessedGuid = QString::fromStdString(node->getGUID());
+    mPossessedGuid = node->getGUID();
     captureOffsetReference(node);
 
     // Start the arm behind the character rather than wherever the previous
@@ -141,8 +144,8 @@ bool AvatarPossession::unpossess()
 void AvatarPossession::setFollow(const FollowCameraParams &p)
 {
     mFollow = p;
-    mFollow.armLength = qMax(0.0f, mFollow.armLength);
-    if (mFollow.maxPitch < mFollow.minPitch) qSwap(mFollow.minPitch, mFollow.maxPitch);
+    mFollow.armLength = std::max(0.0f, mFollow.armLength);
+    if (mFollow.maxPitch < mFollow.minPitch) std::swap(mFollow.minPitch, mFollow.maxPitch);
     setPitch(mPitch);
 }
 
@@ -156,7 +159,7 @@ void AvatarPossession::setYaw(float degrees)
 
 void AvatarPossession::setPitch(float degrees)
 {
-    mPitch = qBound(mFollow.minPitch, degrees, mFollow.maxPitch);
+    mPitch = iris::bound(mFollow.minPitch, degrees, mFollow.maxPitch);
 }
 
 Vec3 AvatarPossession::moveToWorld(float x, float y) const
@@ -179,8 +182,8 @@ void AvatarPossession::captureOffsetReference(const SceneNodePtr &node)
     if (auto *movement = node->avatar()) {
         // A capsule-height pivot is already better than a constant: a 1.8 u
         // human and a 0.6 u critter want different arms.
-        p.heightOffset = qMax(0.2f, movement->params().capsuleHeight * 0.9f);
-        p.armLength = qMax(1.0f, movement->params().capsuleHeight * 2.2f);
+        p.heightOffset = std::max(0.2f, movement->params().capsuleHeight * 0.9f);
+        p.armLength = std::max(1.0f, movement->params().capsuleHeight * 2.2f);
         p.lateralOffset = 0.0f;
     }
 
@@ -188,9 +191,9 @@ void AvatarPossession::captureOffsetReference(const SceneNodePtr &node)
     // rendered frame, no per-frame bone ride — socketWorldTransform falls back
     // to bindPoseWorldTransforms when no pose source is installed, and that is
     // exactly the pose we want (the character's proportions, not its gait).
-    if (MeshNode *owner = findSocketOwner(node, QStringLiteral("shoulder"))) {
+    if (MeshNode *owner = findSocketOwner(node, "shoulder")) {
         Mat4 socketWorld;
-        if (socketWorldTransform(owner, (QStringLiteral("shoulder")).toStdString(), BonePoseSource(), socketWorld)) {
+        if (socketWorldTransform(owner, ("shoulder"), BonePoseSource(), socketWorld)) {
             const Vec4 t = socketWorld.column(3);
             const Vec3 origin = node->getGlobalPosition();
             const float dy = t.y() - origin.y();
@@ -246,7 +249,7 @@ void AvatarPossession::updateFollowCamera()
 
 void AvatarPossession::routeInput(float dt)
 {
-    Q_UNUSED(dt);
+    (void)dt;
     const SceneNodePtr node = possessed();
     if (!node) return;
     auto *movement = node->avatar();

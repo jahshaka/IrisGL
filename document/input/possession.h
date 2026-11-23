@@ -60,7 +60,7 @@ For more information see the LICENSE file
 // actually renders through are not always the same CameraNode in this tree
 // (measured — see the .cpp), and only the host knows which one it draws with.
 
-#include <QString>
+#include <string>
 
 #include "core/math/quat.h"
 #include "core/math/vec.h"
@@ -84,7 +84,7 @@ enum class ScenePlayMode : int
 /// reordered — the same rule giMode/giQuality are written under.
 const char *playModeName(ScenePlayMode mode);
 /// Case-insensitive; false (and `out` untouched) when `name` names no mode.
-bool playModeFromName(const QString &name, ScenePlayMode &out);
+bool playModeFromName(const std::string &name, ScenePlayMode &out);
 
 /// The spring arm. Every field is in world units / degrees.
 struct FollowCameraParams
@@ -128,7 +128,7 @@ public:
     SceneNodePtr possessed() const;
     /// The possessed node's guid, or an empty string. Cheaper than possessed()
     /// for the verbs, and it survives the node dying.
-    QString possessedGuid() const;
+    std::string possessedGuid() const;
     bool isPossessing() const { return !!possessed(); }
 
     // ---- the follow camera ------------------------------------------------
@@ -215,7 +215,7 @@ private:
 
     Scene *mScene = nullptr;
     SceneNodeWPtr mPossessed;
-    QString mPossessedGuid;
+    std::string mPossessedGuid;
 
     FollowCameraParams mFollow;
     float mYaw = 0.0f;

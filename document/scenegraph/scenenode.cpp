@@ -1040,12 +1040,8 @@ void SceneNode::remapNodeReferences(const std::unordered_map<std::string, std::s
     // as the socket owner — an endpoint outside the copy is deliberately left
     // alone, because a constraint to a fixed anchor is a real authoring shape.
     for (auto &constraint : physicsProperty.constraints) {
-        // (the constraint's guids are QString until physics converts, 5b: across the edge here)
-        std::string from = constraint.constraintFrom.toStdString(), to = constraint.constraintTo.toStdString();
-        through(from);
-        through(to);
-        constraint.constraintFrom = QString::fromStdString(from);
-        constraint.constraintTo = QString::fromStdString(to);
+        through(constraint.constraintFrom);
+        through(constraint.constraintTo);
     }
 
     // Per-type references (a camera's focus target). Virtual rather than a
@@ -1116,7 +1112,7 @@ SceneNodePtr SceneNode::duplicateInto(std::unordered_map<std::string, std::strin
 		auto copy = AvatarLocomotionPtr(new AvatarLocomotion());
 		copy->markRolesFromFile(this->avatarLocomotion->roles(),
 		                        this->avatarLocomotion->usesDefaultAsset());
-		QString err;   // locomotion is 5b's
+		std::string err;
 		copy->setAssetPreservingDefaultFlag(this->avatarLocomotion->asset(), &err);
 		node->setLocomotionComponent(copy);
 	}

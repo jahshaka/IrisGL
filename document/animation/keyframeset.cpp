@@ -12,6 +12,7 @@ For more information see the LICENSE file
 #include "document/animation/keyframeset.h"
 #include "document/animation/keyframeanimation.h"
 #include "document/animation/propertyanim.h"
+#include <cassert>
 
 namespace iris
 {
@@ -23,27 +24,27 @@ KeyFrameSet::~KeyFrameSet()
 
 void KeyFrameSet::addKeyFrame(PropertyAnim *anim)
 {
-    Q_ASSERT(!keyFrames.contains(anim->getName()));
+    assert(!(keyFrames.count(anim->getName()) != 0));
 
-    keyFrames.insert(anim->getName(), anim);
+    keyFrames.insert_or_assign(anim->getName(), anim);
 }
 
-PropertyAnim* KeyFrameSet::getOrCreateFrame(QString name)
+PropertyAnim* KeyFrameSet::getOrCreateFrame(std::string name)
 {
-    if(keyFrames.contains(name))
+    if((keyFrames.count(name) != 0))
     {
         return keyFrames[name];
     }
 
     auto propAnim = new FloatPropertyAnim();
     propAnim->setName(name);
-    keyFrames.insert(name, propAnim);
+    keyFrames.insert_or_assign(name, propAnim);
     return propAnim;
 }
 
-PropertyAnim* KeyFrameSet::getKeyFrame(QString name)
+PropertyAnim* KeyFrameSet::getKeyFrame(std::string name)
 {
-    if(keyFrames.contains(name))
+    if((keyFrames.count(name) != 0))
     {
         return keyFrames[name];
     }
@@ -51,9 +52,9 @@ PropertyAnim* KeyFrameSet::getKeyFrame(QString name)
     return nullptr;
 }
 
-bool KeyFrameSet::hasKeyFrame(QString name)
+bool KeyFrameSet::hasKeyFrame(std::string name)
 {
-    return keyFrames.contains(name);
+    return (keyFrames.count(name) != 0);
 }
 
 KeyFrameSetPtr KeyFrameSet::create()

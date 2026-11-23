@@ -15,10 +15,10 @@ enum class AnimablePropertyType
 
 struct AnimableProperty
 {
-    QString name;
+    std::string name;
     AnimablePropertyType type;
 
-    AnimableProperty(QString name,AnimablePropertyType type)
+    AnimableProperty(std::string name,AnimablePropertyType type)
     {
         this->name = name;
         this->type = type;

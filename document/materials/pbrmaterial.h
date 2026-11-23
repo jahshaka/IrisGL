@@ -16,9 +16,9 @@ For more information see the LICENSE file
 #include "document/materials/material.h"
 #include "document/properties/property.h"
 #include "document/srgbcolor.h"
-#include <QHash>
-#include <QList>
-#include <QVector>
+#include <unordered_map>
+#include <vector>
+#include "document/mapvalue.h"
 
 namespace iris
 {
@@ -227,8 +227,8 @@ public:
     // throws away EVERY cached shader if one referenced piece file is missing,
     // so project-local pieces would mean opening project B discarded every
     // shader project A compiled. One stable directory keeps them all valid.
-    void setCustomPiecePixel(const QString& path);
-    void setCustomPieceVertex(const QString& path);
+    void setCustomPiecePixel(const std::string& path);
+    void setCustomPieceVertex(const std::string& path);
 
 
     // Applies a value by property name, bridging the editor-facing `properties`
@@ -254,10 +254,10 @@ public:
         const char *engineName = nullptr;   ///< what crosses the engine boundary
         const char *displayName = nullptr;  ///< what the picker shows
     };
-    static const QVector<BrdfName> &brdfNames();
+    static const std::vector<BrdfName> &brdfNames();
     /// The engine-boundary name for a stored index; "Default" for any index
     /// outside the table (a document from a newer build must still open).
-    static QString brdfEngineName(int index);
+    static std::string brdfEngineName(int index);
     /// Whether `brdf` index can carry a clear coat. The renderer gates the
     /// whole clear-coat shader path on the DEFAULT FAMILY — the diffuse-fresnel
     /// variants are modifier bits on top of Default, so they qualify too, while
@@ -267,12 +267,12 @@ public:
 
     /// The shading-model vocabulary, in `shadingModel` index order — the same
     /// one-table discipline as brdfNames().
-    static const QVector<const char *> &shadingModelNames();
+    static const std::vector<const char *> &shadingModelNames();
 
     /// The WORKFLOW vocabulary, in `workflow` index order. Same one-table rule
     /// as brdfNames()/shadingModelNames(): the panel's labels, the mirror's
     /// index -> engine mapping and anyone reporting the row read this.
-    static const QVector<const char *> &workflowNames();
+    static const std::vector<const char *> &workflowNames();
     /// The display name of the SHARED metallic/specular map row for a workflow.
     /// PBSM_METALLIC and PBSM_SPECULAR are ONE renderer texture slot
     /// reinterpreted by the workflow, so the document has one `metallicMap`
@@ -290,28 +290,28 @@ public:
     /// and the one a SPECULAR material cannot (metallic factor) — the same
     /// grey-out affordance rowsUnusedWhenUnlit() provides, for the same reason:
     /// a knob that silently does nothing is worse than a disabled one.
-    static const QVector<QString> &rowsUnusedWhenMetallic();
-    static const QVector<QString> &rowsUnusedWhenSpecular();
+    static const std::vector<std::string> &rowsUnusedWhenMetallic();
+    static const std::vector<std::string> &rowsUnusedWhenSpecular();
 
     /// The THIRTEEN detail blend-mode names, in the renderer's own index order.
     /// Same one-table rule as brdfNames(): the enum row's labels, the verbs'
     /// vocabulary and the index the mirror sends are all this list.
-    static const QVector<const char *> &detailBlendNames();
+    static const std::vector<const char *> &detailBlendNames();
     /// The flat row names for one detail layer: `detail0Map`, `detail0Blend`,
     /// … The rows are FLAT and not an array because the property model is a
     /// flat list of named rows — the panel renders it, material.set writes it,
     /// the reader skips absent names and the graph baker targets it by key.
     /// Ugly in a header, correct in all four places (MATERIAL_GAPS_SPEC §3.4).
-    static QString detailRow(int layer, const char *suffix);
+    static std::string detailRow(int layer, const char *suffix);
     /// The property names an UNLIT material cannot honour, so the panel can grey
     /// them out with a reason instead of letting a user discover that half the
     /// rows do nothing. Every entry is justified in the ShadingModel comment in
     /// the engine's Types.h — this list and that comment are the same claim.
-    static const QVector<QString> &rowsUnusedWhenUnlit();
+    static const std::vector<std::string> &rowsUnusedWhenUnlit();
     /// The same list for the DISTORTION shading model (POST_LOOKS_SPEC §5.2),
     /// which keeps only three rows: the normal map (read as the screen-space
     /// displacement field), the opacity (its own strength) and two-sidedness.
-    static const QVector<QString> &rowsUnusedWhenDistortion();
+    static const std::vector<std::string> &rowsUnusedWhenDistortion();
 
     // THE SIX `use*Map` FLAGS ARE GONE (render audit I-6, CRUD law): a
     // material's maps are the `textures` map itself — the mirror binds from it,
@@ -426,8 +426,8 @@ public:
     // grow a divergent shader artifact we own forever, for a strictly worse
     // knob than the renderer's own per-layer offsetScale.
     struct DetailLayer {
-        QString map;            ///< the layer's diffuse map (a resolved path)
-        QString normalMap;      ///< optional; needs tangents on the mesh
+        std::string map;            ///< the layer's diffuse map (a resolved path)
+        std::string normalMap;      ///< optional; needs tangents on the mesh
         int     blend = 0;      ///< index into detailBlendNames()
         float   offsetU = 0.0f, offsetV = 0.0f;
         float   scaleU  = 1.0f, scaleV  = 1.0f;
@@ -437,7 +437,7 @@ public:
     DetailLayer detail[kDetailLayers];
     /// One mask whose R/G/B/A channels scale layers 0/1/2/3. A single texture,
     /// not per layer — that is the renderer's shape (PBSM_DETAIL_WEIGHT).
-    QString detailWeightMap;
+    std::string detailWeightMap;
 
     // ---- Sampler control (ADDENDUM A-2) ----------------------------------
     //
@@ -458,24 +458,24 @@ public:
     /// way — a tiled detail layer over a clamped base map is the ordinary case.
     /// Row names are `<mapRow>Address`: baseColorMapAddress, normalMapAddress,
     /// detail0MapAddress, …
-    static const QVector<const char *> &addressModeNames();
+    static const std::vector<const char *> &addressModeNames();
     /// The `<mapRow>Address` row name for a map row, and the map rows in
     /// slot order. ONE table: the panel, the verbs and the mirror read it.
-    static QString addressRow(const QString &mapRow);
-    static const QVector<QString> &mapRowNames();
+    static std::string addressRow(const std::string &mapRow);
+    static const std::vector<std::string> &mapRowNames();
     /// The address index for a map row (0 = Wrap when unset).
-    int addressFor(const QString &mapRow) const { return mapAddress.value(mapRow, 0); }
-    void setAddressFor(const QString &mapRow, int mode) { mapAddress[mapRow] = mode; touch(); }
+    int addressFor(const std::string &mapRow) const { return iris::valueOr(mapAddress, mapRow, 0); }
+    void setAddressFor(const std::string &mapRow, int mode) { mapAddress[mapRow] = mode; touch(); }
     /// Row -> address index. A hash rather than N declared fields because the
     /// row NAMES are already the slot vocabulary (mapRowNames) and a second
     /// spelling of them is how a picker and a renderer drift apart.
-    QHash<QString, int> mapAddress;
+    std::unordered_map<std::string, int> mapAddress;
 
     /// Generated shader pieces (HLMS_ADOPTION P5) — absolute paths into the
     /// per-user piece cache, empty for an ordinary baked material. See the
     /// setters above for why these are a cache reference rather than content.
-    QString customPiecePixel;
-    QString customPieceVertex;
+    std::string customPiecePixel;
+    std::string customPieceVertex;
     /// THE UV SCROLL (TORNADO-1): UV units per second of the shader clock,
     /// added after the texture transform — what a graph's constant-speed
     /// `panner` feeding every sampler folds to (GraphBaker's animated UV fold).
@@ -546,7 +546,7 @@ private:
     /// come through setValue() has to say so here or the saved file disagrees
     /// with the material that is rendering (SMOKE_FIX S11).
     void syncProperty(std::string_view name, const Value &value);
-    static Texture2DPtr loadTexture(const QString& path);
+    static Texture2DPtr loadTexture(const std::string& path);
 };
 
 }

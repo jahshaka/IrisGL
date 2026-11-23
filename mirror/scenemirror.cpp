@@ -2778,7 +2778,7 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     if (path.isEmpty()) return 0;
 
     // ONE baked mesh (the vendoring merged the parts; the seed baked it).
-    const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path);
+    const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path.toStdString());
     MeshData data;
     if (!baked || !toMeshData(baked.get(), data) || data.positions.empty()
         || data.indices.empty()) {
@@ -3393,7 +3393,7 @@ void SceneMirror::syncLightIcon(Entry &e, iris::LightNode *light)
     if (!e.wireNode) return;
     // The document loads a per-light icon (mainwindow/scenereader); its source
     // path doubles as the image path. Fall back by light type.
-    QString path = light->icon ? light->icon->getSource() : QString();
+    QString path = light->icon ? QString::fromStdString(light->icon->getSource()) : QString();
     if (path.isEmpty()) {
         switch (light->lightType) {
         case iris::LightType::Directional: path = QStringLiteral(":/icons/light.png"); break;    // the sun glyph
@@ -4610,7 +4610,7 @@ ParticleSystemDesc SceneMirror::toParticleDesc(iris::ParticleSystemNode *ps, Tex
 void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
 {
     if (!e.node) return;
-    const QString texPath = ps->texture ? ps->texture->getSource() : QString();
+    const QString texPath = ps->texture ? QString::fromStdString(ps->texture->getSource()) : QString();
 
     // Every authored value, folded into one 64-bit hash. A still emitter costs
     // this fold and nothing else — no engine call, no allocation, no
@@ -4906,12 +4906,12 @@ void SceneMirror::syncCustomPieces(iris::Material *material, MaterialId id)
     if (!pbr) return;
     // A scrolling material (TORNADO-1) reads the clock with or without a piece.
     if (pbr->textureVelocityU != 0.0f || pbr->textureVelocityV != 0.0f) mAnyCustomPiece = true;
-    if (pbr->customPiecePixel.isEmpty() && pbr->customPieceVertex.isEmpty()) return;
-    if (!pbr->customPiecePixel.isEmpty())
-        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPiecePixel.toStdString(),
+    if (pbr->customPiecePixel.empty() && pbr->customPieceVertex.empty()) return;
+    if (!pbr->customPiecePixel.empty())
+        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPiecePixel,
                                         CustomPieceStage::PixelPreLights);
-    if (!pbr->customPieceVertex.isEmpty())
-        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPieceVertex.toStdString(),
+    if (!pbr->customPieceVertex.empty())
+        postCall(&jahshaka::engine::Scene::setMaterialCustomPiece, id, pbr->customPieceVertex,
                                         CustomPieceStage::VertexPreTransform);
     // One scene-wide clock, pushed from here on because a piece exists to read
     // it. A scene with no generated piece never calls setShaderTime at all —
@@ -5066,8 +5066,8 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     // producer bumps the generation. Born through createTexture rather than
     // loadTexture because only createTexture-born ids may be written to — the
     // engine refuses updateTexture on a file-loaded (pooled) texture by name.
-    if (iris::LiveTextures::isLiveRef(path)) {
-        iris::Texture2DPtr live = iris::LiveTextures::find(path);
+    if (iris::LiveTextures::isLiveRef(path.toStdString())) {
+        iris::Texture2DPtr live = iris::LiveTextures::find(path.toStdString());
         if (!live || !live->isLive()) return 0;
         const iris::Image &img = live->liveImage();
         if (img.isNull()) return 0;
@@ -5099,7 +5099,7 @@ void SceneMirror::syncLiveTextures()
         // same live texture bound in both colour spaces is two engine textures
         // and both are kept current.
         const QString path = it.key().mid(2);
-        iris::Texture2DPtr live = iris::LiveTextures::find(path);
+        iris::Texture2DPtr live = iris::LiveTextures::find(path.toStdString());
         if (!live || !live->isLive()) continue;
         const quint64 gen = live->liveGeneration();
         if (gen == it.value()) continue;
@@ -5169,6 +5169,13 @@ struct FieldHasher {
         return *this << quint32(c.red16() << 16 | c.green16())
                      << quint32(c.blue16() << 16 | c.alpha16());
     }
+    /// A UTF-8 name: its length, then a word a byte (the fingerprint is compared within one run).
+    FieldHasher &operator<<(const std::string &s)
+    {
+        *this << quint32(s.size());
+        for (const unsigned char c : s) *this << quint32(c);
+        return *this;
+    }
     FieldHasher &operator<<(const QString &s)
     {
         *this << quint32(s.size());
@@ -5186,9 +5193,9 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
     // The texture MAP, first and for both material classes: the slot table
     // below reads `textures`, and a map bound or cleared has to move the hash.
     h << quint32(material->textures.size());
-    for (auto t = material->textures.constBegin(); t != material->textures.constEnd(); ++t) {
-        h << t.key();
-        h << (t.value() ? t.value()->source : QString());
+    for (auto t = material->textures.cbegin(); t != material->textures.cend(); ++t) {
+        h << t->first;
+        h << (t->second ? t->second->source : std::string());   // no QString a map a sync
     }
     if (pbr) {
         h << quint32(1);
@@ -5213,8 +5220,8 @@ quint64 SceneMirror::materialFingerprint(iris::Material *material, iris::PbrMate
         // absent-means-Wrap rule), so the overwhelming majority of materials
         // pay nothing for this loop.
         h << quint32(pbr->mapAddress.size());
-        for (auto a = pbr->mapAddress.constBegin(); a != pbr->mapAddress.constEnd(); ++a)
-            h << a.key() << a.value();
+        for (auto a = pbr->mapAddress.cbegin(); a != pbr->mapAddress.cend(); ++a)
+            h << a->first << a->second;
         for (int i = 0; i < iris::PbrMaterial::kDetailLayers; ++i) {
             const auto &d = pbr->detail[i];
             h << d.blend << d.offsetU << d.offsetV << d.scaleU << d.scaleV
@@ -5280,7 +5287,7 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
             // "something was written without touch()" is useless without them.
             const QByteArray reason =
                 QStringLiteral("material '%1' written without touch()")
-                    .arg(material->getName().isEmpty() ? material->getGuid()
+                    .arg(material->getName().empty() ? material->getGuid()
                                                        : material->getName())
                     .toUtf8();
             notePush(nullptr, reason.constData());
@@ -5317,24 +5324,24 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // rule that makes I-2's cache-key fix load-bearing: a detail DIFFUSE map is
     // an sRGB colour and a detail NORMAL map is linear data, and nothing stops
     // a user binding the same file to both.
-    struct Slot { QLatin1StringView name; PbrTextureSlot slot = PbrTextureSlot::Albedo;
+    struct Slot { const char *name = nullptr; PbrTextureSlot slot = PbrTextureSlot::Albedo;
                   bool srgb = false; };
     static const Slot kSlots[] = {
-        { QLatin1StringView("u_baseColorMap"),  PbrTextureSlot::Albedo,    true  },
-        { QLatin1StringView("u_normalMap"),     PbrTextureSlot::Normal,    false },
-        { QLatin1StringView("u_metallicMap"),   PbrTextureSlot::Metalness, false },
-        { QLatin1StringView("u_roughnessMap"),  PbrTextureSlot::Roughness, false },
-        { QLatin1StringView("u_emissiveMap"),   PbrTextureSlot::Emissive,  true  },
-        { QLatin1StringView("u_detail0Map"),       PbrTextureSlot::Detail0,      true  },
-        { QLatin1StringView("u_detail1Map"),       PbrTextureSlot::Detail1,      true  },
-        { QLatin1StringView("u_detail0NormalMap"), PbrTextureSlot::Detail0Nm,    false },
-        { QLatin1StringView("u_detail1NormalMap"), PbrTextureSlot::Detail1Nm,    false },
+        { "u_baseColorMap",   PbrTextureSlot::Albedo,    true  },
+        { "u_normalMap",      PbrTextureSlot::Normal,    false },
+        { "u_metallicMap",    PbrTextureSlot::Metalness, false },
+        { "u_roughnessMap",   PbrTextureSlot::Roughness, false },
+        { "u_emissiveMap",    PbrTextureSlot::Emissive,  true  },
+        { "u_detail0Map",        PbrTextureSlot::Detail0,      true  },
+        { "u_detail1Map",        PbrTextureSlot::Detail1,      true  },
+        { "u_detail0NormalMap",  PbrTextureSlot::Detail0Nm,    false },
+        { "u_detail1NormalMap",  PbrTextureSlot::Detail1Nm,    false },
         // The weight MASK is data (per-channel scalars), never a colour.
-        { QLatin1StringView("u_detailWeightMap"),  PbrTextureSlot::DetailWeight, false },
+        { "u_detailWeightMap",   PbrTextureSlot::DetailWeight, false },
         // THE REFLECTION CUBEMAP OVERRIDE (ADDENDUM A-5). An sRGB colour like
         // the sky it replaces; the bind takes the cubemap route below rather
         // than textureFor, because the slot holds a cube and not a 2D image.
-        { QLatin1StringView("u_reflectionMap"),    PbrTextureSlot::Reflection,   true  },
+        { "u_reflectionMap",     PbrTextureSlot::Reflection,   true  },
     };
     static_assert(int(iris::PbrMaterial::kDetailLayers) == int(kDetailLayerCount),
                   "the document and the engine boundary must agree on how many "
@@ -5351,10 +5358,10 @@ const SceneMirror::MaterialSync &SceneMirror::materialSyncFor(iris::Material *ma
     // Resolve every candidate path: the textures map (Texture2D::source), then
     // shader-graph texture properties (a file path in the property value).
     for (const Slot &sl : kSlots) {
-        auto tit = material->textures.constFind(sl.name);
-        if (tit != material->textures.constEnd() && tit.value() && !tit.value()->source.isEmpty())
+        auto tit = material->textures.find(sl.name);
+        if (tit != material->textures.cend() && tit->second && !tit->second->source.empty())
             ms.binds.push_back({ sl.slot,
-                                 tit.value()->source,
+                                 QString::fromStdString(tit->second->source),
                                  sl.slot == PbrTextureSlot::Metalness ? sharedSrgb : sl.srgb });
     }
     // (The CustomMaterial branch that scraped texture PATHS out of a shader
@@ -5489,7 +5496,7 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
         out.shadingModel = pbr->shadingModel == 2 ? ShadingModel::Distortion
                          : pbr->shadingModel == 1 ? ShadingModel::Unlit
                                                   : ShadingModel::Lit;
-        out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf).toStdString();
+        out.brdf               = iris::PbrMaterial::brdfEngineName(pbr->brdf);
         out.clearCoat          = pbr->clearCoat;
         out.clearCoatRoughness = pbr->clearCoatRoughness;
         out.receiveShadows     = pbr->receiveShadows;
@@ -5533,7 +5540,7 @@ bool SceneMirror::toPbrParams(iris::Material *material, PbrParams &out)
                 { "detailWeightMap",   PbrTextureSlot::DetailWeight },
             };
             for (const auto &r : kAddrRows) {
-                const int mode = pbr->addressFor(QLatin1String(r.row));
+                const int mode = pbr->addressFor(r.row);
                 out.address[size_t(r.slot)] =
                     mode == 1 ? PbrParams::AddressMode::Clamp
                   : mode == 2 ? PbrParams::AddressMode::Mirror
@@ -6267,8 +6274,8 @@ bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string 
                              ClipDesc &out)
 {
     out = ClipDesc();
-    if (clip.tracks.isEmpty()) return false;
-    out.name = clip.name.toStdString();
+    if (clip.tracks.empty()) return false;
+    out.name = clip.name;
     out.length = clip.length;
 
     // The engine's clip-def cache is process-lifetime and keyed by NAME, so the
@@ -6278,7 +6285,7 @@ bool SceneMirror::toClipDesc(const iris::ExtractedClip &clip, const std::string 
     // the name, the length, and every key of every track.
     StructureHash hash;
     hash(rigId);
-    hash(clip.name.toStdString());
+    hash(clip.name);
     hash(clip.length);
     out.tracks.reserve(size_t(clip.tracks.size()));
     for (const iris::ClipBoneTrack &track : clip.tracks) {
@@ -6587,25 +6594,25 @@ void SceneMirror::attachClipsFor(Entry &e)
         if (const auto *c = mTarget->published().factsBlock().clipsOf(e.node)) carried = *c;
     e.engineClipsFresh = false;
     for (int i = 0; i < clips.size(); ++i) {
-        QString err;
+        std::string err;
         if (!iris::ClipExtractor::extract(host->weak_from_this().lock(), e.docNode->weak_from_this().lock(),
                                           e.rigSkeleton, clips[i]->getSkeletalAnimation(),
                                           clips[i]->getName(), clips[i]->getLength(),
                                           nullptr, extracted[i], &err)) {
             qWarning("SceneMirror: clip '%s' did not translate: %s",
-                     qUtf8Printable(clips[i]->getName()), qUtf8Printable(err));
+                     clips[i]->getName().c_str(), err.c_str());
             continue;
         }
-        if (!extracted[i].restDiffersFromBind.isEmpty()) {
+        if (!extracted[i].restDiffersFromBind.empty()) {
             // Not fatal, and worth saying out loud: the document composes an
             // untouched bone from its authored REST transform, while an engine
             // skeleton resets one to its BIND pose. They coincide in every file
             // we have; where they do not, a bone no clip mentions lands
             // somewhere other than the document put it.
             qWarning("SceneMirror: clip '%s' — %lld bone(s) whose authored rest differs from "
-                     "their bind pose (first: %s)", qUtf8Printable(clips[i]->getName()),
+                     "their bind pose (first: %s)", clips[i]->getName().c_str(),
                      (long long)extracted[i].restDiffersFromBind.size(),
-                     qUtf8Printable(extracted[i].restDiffersFromBind.first()));
+                     extracted[i].restDiffersFromBind.front().c_str());
         }
         ClipDesc desc;
         if (!toClipDesc(extracted[i], e.rigId, desc)) continue;
@@ -6668,7 +6675,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // `collectAvatarClips` applies at the other end.
     e.clipNameMap.clear();
     for (const auto &entry : pushed) {
-        const QString docName = entry.first->getName();
+        const QString docName = QString::fromStdString(entry.first->getName());
         if (docName.isEmpty() || e.clipNameMap.contains(docName)) continue;
         const auto engineName = e.clipIdMap.constFind(entry.second);
         if (engineName != e.clipIdMap.constEnd())
@@ -7371,7 +7378,7 @@ void SceneMirror::syncClips()
                 // fewer animation for the engine to sample and is exactly what a
                 // zero weight means.
                 if (w.weight <= 1e-6f) continue;
-                const auto engineName = e.clipNameMap.constFind(w.clip);
+                const auto engineName = e.clipNameMap.constFind(QString::fromStdString(w.clip));
                 // A clip the machine names that this rig does not carry. Not
                 // fatal and not worth a per-frame warning: the state machine
                 // degrades on missing roles by design, and the remaining
@@ -8153,7 +8160,7 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
     SkySource src;
     if (scene.skyType == iris::SkyType::EQUIRECTANGULAR && scene.skyTexture) {
         src.kind = SkySource::Kind::Equirect;
-        src.equirectPath = scene.skyTexture->source;
+        src.equirectPath = QString::fromStdString(scene.skyTexture->source);
     } else if (scene.skyType == iris::SkyType::CUBEMAP && scene.skyTexture &&
                scene.skyTexture->isCubeMap()) {
         src.kind = SkySource::Kind::Cubemap;
@@ -8240,7 +8247,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
         mSkyDesc = SkyDesc();
         switch (src.kind) {
         case SkySource::Kind::Equirect: {
-            const TextureId t = textureFor(mSource->skyTexture->source, true);
+            const TextureId t = textureFor(QString::fromStdString(mSource->skyTexture->source), true);
             mSkyTexture = t;   // held against reclaimUnused for as long as the sky stands
             if (t) {
                 mSkyDesc.mode = SkyMode::Equirectangular;
@@ -8442,7 +8449,7 @@ void SceneMirror::applyCloudLayer()
     // The weather map's pixels follow its FILE, uploaded once per change.
     const QString weatherPath = (doc.enabled && !imageSky && !doc.weatherMapGuid.empty() &&
                                  mSource->cloudWeatherMap)
-                                    ? mSource->cloudWeatherMap->source : QString();
+                                    ? QString::fromStdString(mSource->cloudWeatherMap->source) : QString();
     if (weatherPath != mCloudWeatherPath) {
         if (mCloudWeatherTexture) postCall(&jahshaka::engine::Scene::destroyTexture, mCloudWeatherTexture);
         mCloudWeatherTexture = 0;
@@ -8615,7 +8622,7 @@ bool SceneMirror::buildEquirectCubeFaces(const QImage &equirect, TextureId ids[6
 TextureId SceneMirror::reflectionCubeFor(const QString &path)
 {
     if (path.isEmpty() || !mTarget) return 0;
-    if (iris::LiveTextures::isLiveRef(path)) return 0;
+    if (iris::LiveTextures::isLiveRef(path.toStdString())) return 0;
     // Its own key space: this entry is a CUBE, and handing it to a 2D slot
     // (or vice versa) would be a silently wrong bind rather than a miss.
     const QString key = QStringLiteral("cube|") + path;

@@ -35,7 +35,7 @@ void addVecTrack(Animation &anim, const char *property, const Vector3DKeyFrame &
 {
     if (keys.keys.empty()) return;
     auto *track = new Vector3DPropertyAnim();
-    track->setName(QString::fromLatin1(property));
+    track->setName(QString::fromLatin1(property).toStdString());
     for (const auto *k : keys.keys)
         for (int c = 0; c < 3; ++c) track->getKeyFrame(c)->addKey(k->value[c], k->time);
     anim.addPropertyAnim(track);
@@ -48,7 +48,7 @@ void addRotTrack(Animation &anim, const QuaternionKeyFrame &keys)
 {
     if (keys.keys.empty()) return;
     auto *track = new Vector3DPropertyAnim();
-    track->setName(QStringLiteral("rotation"));
+    track->setName((QStringLiteral("rotation")).toStdString());
     Vec3 prev;
     bool first = true;
     for (const auto *k : keys.keys) {
@@ -119,7 +119,7 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
     }
     // The clips that keyed no rig leave the root: their channels play on their nodes.
     for (const AnimationPtr &clip : fragment->getAnimations()) {
-        if (!clip || !!clip->skeletalAnimation || !clip->properties.isEmpty()) continue;
+        if (!clip || !!clip->skeletalAnimation || !clip->properties.empty()) continue;
         if (fragment->getAnimation() == clip) fragment->setAnimation(AnimationPtr());
         fragment->deleteAnimation(clip);
         ++out.clipsRemoved;

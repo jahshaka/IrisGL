@@ -15,15 +15,14 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/properties/property.h"
 
-#include <QMap>
-#include <QSet>
-#include <QString>
-#include <QtGlobal>
+#include <map>
+#include <unordered_set>
+#include <string>
 #include <atomic>
 #include <memory>
-#include <string>
 #include <string_view>
 #include <vector>
+#include <cstdint>
 
 namespace iris
 {
@@ -41,7 +40,7 @@ struct RenderLayer
 
 struct MaterialTexture {
     Texture2DPtr texture;
-    QString name;
+    std::string name;
 };
 
 // Document-side material base: a property bag, texture map and render states.
@@ -55,7 +54,7 @@ class Material
 public:
     int renderLayer;
 
-    QMap<QString, Texture2DPtr> textures;
+    std::map<std::string, Texture2DPtr> textures;
 
     /// The editor-facing parameter rows, in order. Declared on the base so any
     /// material can be rendered by the material property panel. The material
@@ -70,12 +69,12 @@ public:
     /// PbrMaterial simply could not be named, so panels, exporters and the
     /// scripting surface had to special-case which class they were holding.
     /// With one material class (HLMS_ADOPTION P4b) they belong here.
-    QString name;
-    QString guid;
-    void    setName(const QString &n) { name = n; }
-    QString getName() const { return name; }
-    void    setGuid(const QString &g) { guid = g; }
-    QString getGuid() const { return guid; }
+    std::string name;
+    std::string guid;
+    void    setName(const std::string &n) { name = n; }
+    std::string getName() const { return name; }
+    void    setGuid(const std::string &g) { guid = g; }
+    std::string getGuid() const { return guid; }
 
     // Applies a value by property name. Virtual so the property panel and the
     // scene reader can drive any material without knowing its concrete type.
@@ -131,7 +130,7 @@ public:
     // (SceneMirror::materialFingerprint): a counter is only as good as the
     // writer that remembers to bump it, so the mirror's verifier re-reads the
     // fields of a few materials a frame and COUNTS anything this missed.
-    quint32 revision() const { return mRevision; }
+    std::uint32_t revision() const { return mRevision; }
     /// "Something in this material changed." Called by every setter below and
     /// by host code that writes a field by hand.
     void touch()
@@ -141,7 +140,7 @@ public:
     }
     /// How many material writes this process has made, ever. Relaxed: the only
     /// requirement is that a change moves it, never that it orders anything.
-    static quint64 globalRevision()
+    static std::uint64_t globalRevision()
     {
         return sGlobalRevision.load(std::memory_order_relaxed);
     }
@@ -164,9 +163,9 @@ public:
 	// Preprocessor-define flags (only "SKINNING_ENABLED", set by MeshNode).
 	// They used to be forwarded to the GLSL carrier; with that gone nothing
 	// reads them back. Kept as a bare set - recorded debt, not a capability.
-	bool isFlagEnabled(QString flag);
-	void enableFlag(QString flag);
-	void disableFlag(QString flag);
+	bool isFlagEnabled(std::string flag);
+	void enableFlag(std::string flag);
+	void disableFlag(std::string flag);
 
     /**
      * Adds texture to the material by name
@@ -174,13 +173,13 @@ public:
      * @param name name of the texture uniform in the shader
      * @param textures texture pointer
      */
-    void addTexture(QString name,Texture2DPtr textures);
+    void addTexture(std::string name,Texture2DPtr textures);
 
     /**
      * Removes texture from material
      * @param name
      */
-    void removeTexture(QString name);
+    void removeTexture(std::string name);
 
     /// A FULL, INDEPENDENT COPY of this material — what a duplicated node
     /// carries. Pure because the base cannot copy what it does not know: this
@@ -200,15 +199,15 @@ public:
     virtual MaterialPtr duplicate() const = 0;
 
 protected:
-	QSet<QString> flags;
+	std::unordered_set<std::string> flags;
 
     /// Registers a row; the material owns it from here on. Returns the row.
     Property *addProperty(std::unique_ptr<Property> row) { return mRows.add(std::move(row)); }
 
 private:
     PropertyRows mRows;
-    quint32 mRevision = 1;
-    static std::atomic<quint64> sGlobalRevision;
+    std::uint32_t mRevision = 1;
+    static std::atomic<std::uint64_t> sGlobalRevision;
 };
 
 }

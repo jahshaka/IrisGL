@@ -12,67 +12,71 @@ For more information see the LICENSE file
 #include "document/assets/livetextures.h"
 
 #include "document/assets/texture2d.h"
+#include "core/text.h"
+
+#include <algorithm>
+#include "document/mapvalue.h"
 
 namespace iris
 {
 
-static const QLatin1String kScheme("live://");
+static constexpr std::string_view kScheme = "live://";
 
-QHash<QString, Texture2DPtr> &LiveTextures::table()
+std::unordered_map<std::string, Texture2DPtr> &LiveTextures::table()
 {
-    static QHash<QString, Texture2DPtr> t;
+    static std::unordered_map<std::string, Texture2DPtr> t;
     return t;
 }
 
-QStringList &LiveTextures::order()
+std::vector<std::string> &LiveTextures::order()
 {
-    static QStringList o;
+    static std::vector<std::string> o;
     return o;
 }
 
-QString LiveTextures::refFor(const QString &guid)
+std::string LiveTextures::refFor(const std::string &guid)
 {
-    return guid.isEmpty() ? QString() : kScheme + guid;
+    return guid.empty() ? std::string() : std::string(kScheme) + guid;
 }
 
-bool LiveTextures::isLiveRef(const QString &ref)
+bool LiveTextures::isLiveRef(const std::string &ref)
 {
-    return ref.startsWith(kScheme);
+    return iris::text::startsWith(ref, kScheme);
 }
 
-QString LiveTextures::guidOf(const QString &ref)
+std::string LiveTextures::guidOf(const std::string &ref)
 {
-    return isLiveRef(ref) ? ref.mid(QString(kScheme).size()) : QString();
+    return isLiveRef(ref) ? ref.substr(kScheme.size()) : std::string();
 }
 
-Texture2DPtr LiveTextures::create(const QString &guid, const QString &name,
+Texture2DPtr LiveTextures::create(const std::string &guid, const std::string &name,
                                   int width, int height, bool mipmaps)
 {
-    if (guid.isEmpty() || width <= 0 || height <= 0) return Texture2DPtr();
-    if (table().contains(guid)) return Texture2DPtr();
+    if (guid.empty() || width <= 0 || height <= 0) return Texture2DPtr();
+    if ((table().count(guid) != 0)) return Texture2DPtr();
     Texture2DPtr tex = Texture2D::createLive(guid, name, width, height, mipmaps);
     if (!tex) return Texture2DPtr();
-    table().insert(guid, tex);
-    order().append(guid);
+    table().insert_or_assign(guid, tex);
+    order().push_back(guid);
     return tex;
 }
 
-Texture2DPtr LiveTextures::find(const QString &guidOrRef)
+Texture2DPtr LiveTextures::find(const std::string &guidOrRef)
 {
-    const QString guid = isLiveRef(guidOrRef) ? guidOf(guidOrRef) : guidOrRef;
-    return table().value(guid);
+    const std::string guid = isLiveRef(guidOrRef) ? guidOf(guidOrRef) : guidOrRef;
+    return iris::valueOr(table(), guid);
 }
 
-bool LiveTextures::destroy(const QString &guidOrRef)
+bool LiveTextures::destroy(const std::string &guidOrRef)
 {
-    const QString guid = isLiveRef(guidOrRef) ? guidOf(guidOrRef) : guidOrRef;
-    if (!table().contains(guid)) return false;
-    table().remove(guid);
-    order().removeAll(guid);
+    const std::string guid = isLiveRef(guidOrRef) ? guidOf(guidOrRef) : guidOrRef;
+    if (!(table().count(guid) != 0)) return false;
+    table().erase(guid);
+    order().erase(std::remove(order().begin(), order().end(), guid), order().end());
     return true;
 }
 
-QStringList LiveTextures::guids()
+std::vector<std::string> LiveTextures::guids()
 {
     return order();
 }

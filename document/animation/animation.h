@@ -13,7 +13,8 @@ For more information see the LICENSE file
 #define ANIMATION_H
 
 #include "irisglfwd.h"
-#include <QMap>
+#include <map>
+#include <string>
 
 namespace iris
 {
@@ -28,7 +29,7 @@ enum class AnimationType
 
 class Animation
 {
-    QString name;
+    std::string name;
     bool loop;
     float length;
 
@@ -36,28 +37,28 @@ class Animation
     int frameRate;
 
 public:
-    QMap<QString,PropertyAnim*> properties;
+    std::map<std::string,PropertyAnim*> properties;
     SkeletalAnimationPtr skeletalAnimation;
 
-    explicit Animation(QString name = "Animation");
+    explicit Animation(std::string name = "Animation");
     ~Animation();
     Animation(const Animation &) = delete;              // owns raw PropertyAnim tracks
     Animation &operator=(const Animation &) = delete;
 
     void addPropertyAnim(PropertyAnim* anim);
-    void removePropertyAnim(QString name);
+    void removePropertyAnim(std::string name);
 
-    PropertyAnim* getPropertyAnim(QString name);
+    PropertyAnim* getPropertyAnim(std::string name);
 
-    FloatPropertyAnim* getFloatPropertyAnim(QString name);
+    FloatPropertyAnim* getFloatPropertyAnim(std::string name);
 
-    Vector3DPropertyAnim* getVector3PropertyAnim(QString name);
+    Vector3DPropertyAnim* getVector3PropertyAnim(std::string name);
 
-    ColorPropertyAnim* getColorPropertyAnim(QString name);
+    ColorPropertyAnim* getColorPropertyAnim(std::string name);
 
-    bool hasPropertyAnim(QString name);
+    bool hasPropertyAnim(std::string name);
 
-    static AnimationPtr create(QString name)
+    static AnimationPtr create(std::string name)
     {
         return AnimationPtr(new Animation(name));
     }
@@ -70,8 +71,8 @@ public:
     /// {assetGuid, name} reference is what both nodes persist.
     AnimationPtr clone() const;
 
-    QString getName() const;
-    void setName(const QString &value);
+    std::string getName() const;
+    void setName(const std::string &value);
 
     float getLength() const;
     void setLength(float value);

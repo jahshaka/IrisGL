@@ -19,14 +19,14 @@ float FloatPropertyAnim::getValue(float time)
     return keyFrame->getValueAt(time);
 }
 
-QList<PropertyAnimInfo> FloatPropertyAnim::getKeyFrames()
+std::vector<PropertyAnimInfo> FloatPropertyAnim::getKeyFrames()
 {
-    QList<PropertyAnimInfo> frames;
-    frames.append(PropertyAnimInfo(name,keyFrame));
+    std::vector<PropertyAnimInfo> frames;
+    frames.push_back(PropertyAnimInfo(name,keyFrame));
     return frames;
 }
 
-FloatKeyFrame *FloatPropertyAnim::getKeyFrame(QString name)
+FloatKeyFrame *FloatPropertyAnim::getKeyFrame(std::string name)
 {
     //returns keyframe regardless of name
     return keyFrame;
@@ -62,16 +62,16 @@ iris::Vec3 Vector3DPropertyAnim::getValue(float time)
                 );
 }
 
-QList<PropertyAnimInfo> Vector3DPropertyAnim::getKeyFrames()
+std::vector<PropertyAnimInfo> Vector3DPropertyAnim::getKeyFrames()
 {
-    QList<PropertyAnimInfo> frames;
-    frames.append(PropertyAnimInfo("X",keyFrames[0]));
-    frames.append(PropertyAnimInfo("Y",keyFrames[1]));
-    frames.append(PropertyAnimInfo("Z",keyFrames[2]));
+    std::vector<PropertyAnimInfo> frames;
+    frames.push_back(PropertyAnimInfo("X",keyFrames[0]));
+    frames.push_back(PropertyAnimInfo("Y",keyFrames[1]));
+    frames.push_back(PropertyAnimInfo("Z",keyFrames[2]));
     return frames;
 }
 
-FloatKeyFrame *Vector3DPropertyAnim::getKeyFrame(QString name)
+FloatKeyFrame *Vector3DPropertyAnim::getKeyFrame(std::string name)
 {
     if (name=="X") return keyFrames[0];
     if (name=="Y") return keyFrames[1];
@@ -120,17 +120,17 @@ SrgbColor ColorPropertyAnim::getValue(float time)
                 );
 }
 
-QList<PropertyAnimInfo> ColorPropertyAnim::getKeyFrames()
+std::vector<PropertyAnimInfo> ColorPropertyAnim::getKeyFrames()
 {
-    QList<PropertyAnimInfo> frames;
-    frames.append(PropertyAnimInfo("R",keyFrames[0]));
-    frames.append(PropertyAnimInfo("G",keyFrames[1]));
-    frames.append(PropertyAnimInfo("B",keyFrames[2]));
-    frames.append(PropertyAnimInfo("A",keyFrames[3]));
+    std::vector<PropertyAnimInfo> frames;
+    frames.push_back(PropertyAnimInfo("R",keyFrames[0]));
+    frames.push_back(PropertyAnimInfo("G",keyFrames[1]));
+    frames.push_back(PropertyAnimInfo("B",keyFrames[2]));
+    frames.push_back(PropertyAnimInfo("A",keyFrames[3]));
     return frames;
 }
 
-FloatKeyFrame *ColorPropertyAnim::getKeyFrame(QString name)
+FloatKeyFrame *ColorPropertyAnim::getKeyFrame(std::string name)
 {
     if (name=="R") return keyFrames[0];
     if (name=="G") return keyFrames[1];
@@ -150,18 +150,18 @@ FloatKeyFrame *ColorPropertyAnim::getKeyFrame(int index)
     return keyFrames[index];
 }
 
-PropertyAnimInfo::PropertyAnimInfo(QString name, FloatKeyFrame *keyFrame)
+PropertyAnimInfo::PropertyAnimInfo(std::string name, FloatKeyFrame *keyFrame)
 {
     this->name = name;
     this->keyFrame = keyFrame;
 }
 
-QString PropertyAnim::getName() const
+std::string PropertyAnim::getName() const
 {
     return name;
 }
 
-void PropertyAnim::setName(const QString &value)
+void PropertyAnim::setName(const std::string &value)
 {
     name = value;
 }

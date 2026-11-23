@@ -2,13 +2,12 @@
 #define PHYSICS_HELPER
 
 #include "core/math/vec.h"
-#include <QVector>
+#include <vector>
 
 #include "btBulletDynamicsCommon.h"
 #include "BulletCollision/CollisionShapes/btConvexHullShape.h"
 #include "BulletCollision/CollisionShapes/btShapeHull.h"
 #include "BulletCollision/CollisionShapes/btConvexTriangleMeshShape.h"
-#include "BulletCollision/CollisionShapes/btConvexHullShape.h"
 #include "BulletCollision/CollisionShapes/btTriangleMesh.h"
 
 #include "document/assets/mesh.h"
@@ -36,10 +35,10 @@ struct PhysicsBody
 {
     btRigidBody *body = nullptr;
     /// The body's collision shape first, then any compound children.
-    QVector<btCollisionShape *> shapes;
+    std::vector<btCollisionShape *> shapes;
     /// The triangle data behind btConvexTriangleMeshShape — must outlive the
     /// shape that reads it, so it is destroyed after `shapes`.
-    QVector<btStridingMeshInterface *> meshInterfaces;
+    std::vector<btStridingMeshInterface *> meshInterfaces;
 };
 
 class PhysicsHelper

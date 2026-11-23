@@ -2,7 +2,7 @@
 #define LINEMESHBUILDER_H
 
 #include "core/math/vec.h"
-#include <QVector>
+#include <vector>
 #include "irisglfwd.h"
 #include "document/srgbcolor.h"
 
@@ -16,7 +16,7 @@ class LineMeshBuilder
 		iris::Vec4 color;
 	};
 
-    QVector<LineData> lineData;
+    std::vector<LineData> lineData;
 
 public:
     void addLine(iris::Vec3 a, iris::Vec3 b);

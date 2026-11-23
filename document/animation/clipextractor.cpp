@@ -18,9 +18,10 @@ For more information see the LICENSE file
 #include "document/assets/skeleton.h"
 #include "document/scenegraph/scenenode.h"
 
-#include <QSet>
+#include <unordered_set>
 #include <algorithm>
 #include <cmath>
+#include "document/mapvalue.h"
 
 namespace iris
 {
@@ -47,14 +48,14 @@ inline iris::Mat4 composeRest(const ClipExtractor::RestLocal &r)
 
 /// Every ancestor of `node` up to and including `root`, nearest first, with
 /// `node` itself at the front. Empty if `root` is not an ancestor.
-QVector<SceneNode *> pathToRoot(SceneNode *node, SceneNode *root)
+std::vector<SceneNode *> pathToRoot(SceneNode *node, SceneNode *root)
 {
-    QVector<SceneNode *> path;
+    std::vector<SceneNode *> path;
     for (SceneNode *n = node; n; n = n->getParent().get()) {
-        path.append(n);
+        path.push_back(n);
         if (n == root) return path;
     }
-    return QVector<SceneNode *>();
+    return std::vector<SceneNode *>();
 }
 
 } // namespace
@@ -63,28 +64,29 @@ ClipExtractor::RestPose ClipExtractor::captureRest(const SceneNodePtr &root)
 {
     RestPose out;
     if (!root) return out;
-    QVector<SceneNode *> stack;
-    stack.append(root.get());
-    while (!stack.isEmpty()) {
-        SceneNode *n = stack.takeLast();
+    std::vector<SceneNode *> stack;
+    stack.push_back(root.get());
+    while (!stack.empty()) {
+        SceneNode *n = stack.back();
+        stack.pop_back();
         RestLocal r;
         r.pos = n->getLocalPos();
         r.rot = n->getLocalRot();
         r.scale = n->getLocalScale();
-        out.insert(n, r);
+        out.insert_or_assign(n, r);
         const int cn = n->childCount();
-        for (int i = 0; i < cn; ++i) if (iris::SceneNode *c = n->childAt(i)) stack.append(c);
+        for (int i = 0; i < cn; ++i) if (iris::SceneNode *c = n->childAt(i)) stack.push_back(c);
     }
     return out;
 }
 
 bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNode,
                             const SkeletonPtr &rig, const SkeletalAnimationPtr &clip,
-                            const QString &clipName, float length, const RestPose *rest,
-                            ExtractedClip &out, QString *error)
+                            const std::string &clipName, float length, const RestPose *rest,
+                            ExtractedClip &out, std::string *error)
 {
     const auto fail = [error](const char *why) {
-        if (error) *error = QString::fromLatin1(why);
+        if (error) *error = why;
         return false;
     };
 
@@ -102,15 +104,15 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     // stores skeleton-space matrices in a QMap keyed by name, so a duplicate
     // name means the last node visited in the depth-first walk wins. Mirrored
     // here exactly, duplicates and all: parity is the point.
-    QHash<QString, SceneNode *> byName;
+    std::unordered_map<std::string, SceneNode *> byName;
     {
-        QVector<SceneNode *> order;
-        order.append(root.get());
+        std::vector<SceneNode *> order;
+        order.push_back(root.get());
         for (int i = 0; i < order.size(); ++i) {
             SceneNode *n = order[i];
-            byName.insert(QString::fromStdString(n->name), n);
+            byName.insert_or_assign(n->name, n);
             const int cn = n->childCount();
-            for (int k = 0; k < cn; ++k) if (iris::SceneNode *c = n->childAt(k)) order.append(c);
+            for (int k = 0; k < cn; ++k) if (iris::SceneNode *c = n->childAt(k)) order.push_back(c);
         }
     }
 
@@ -122,8 +124,8 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     const auto restOf = [&](SceneNode *n) {
         RestLocal r;
         if (rest) {
-            const auto rit = rest->constFind(n);
-            if (rit != rest->constEnd()) return *rit;
+            const auto rit = rest->find(n);
+            if (rit != rest->cend()) return rit->second;
         }
         if (n->hasRest) { r.pos = n->restPos; r.rot = n->restRot; r.scale = n->restScale; return r; }
         r.pos = n->getLocalPos(); r.rot = n->getLocalRot(); r.scale = n->getLocalScale();
@@ -148,7 +150,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
 
     // The product of `path[startIndex] … path[0]`, parent first — the path
     // arrives nearest-first, so it is walked backwards.
-    const auto chainBelow = [&](const QVector<SceneNode *> &path, int startIndex, float t) {
+    const auto chainBelow = [&](const std::vector<SceneNode *> &path, int startIndex, float t) {
         iris::Mat4 m;
         m.setToIdentity();
         for (int i = startIndex; i >= 0; --i) m = m * localAt(path[i], t);
@@ -156,18 +158,18 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     };
 
     SceneNode *rootNode = root.get();
-    const QVector<SceneNode *> meshPath = pathToRoot(meshNode.get(), rootNode);
-    if (meshPath.isEmpty()) return fail("clip extraction: the mesh node is not in the subtree");
+    const std::vector<SceneNode *> meshPath = pathToRoot(meshNode.get(), rootNode);
+    if (meshPath.empty()) return fail("clip extraction: the mesh node is not in the subtree");
 
     const std::vector<BonePtr> &bones = rig->bones;
     out.tracks.reserve(bones.size());
 
     for (int i = 0; i < bones.size(); ++i) {
         const BonePtr &bone = bones[i];
-        SceneNode *boneNode = byName.value(QString::fromStdString(bone->name), nullptr);
+        SceneNode *boneNode = iris::valueOr(byName, bone->name, nullptr);
         if (!boneNode) continue;                       // a bone with no scene node moves nothing
-        const QVector<SceneNode *> bonePath = pathToRoot(boneNode, rootNode);
-        if (bonePath.isEmpty()) continue;
+        const std::vector<SceneNode *> bonePath = pathToRoot(boneNode, rootNode);
+        if (bonePath.empty()) continue;
 
         // The FRAME: the parent bone's node, or — for a root bone — the mesh
         // node, which is the frame SceneMirror::toSkeletonDesc authors root
@@ -178,10 +180,10 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
             if (pit != rig->boneMap.cend() && pit->second != i) parentIndex = pit->second;
         }
         SceneNode *frameNode = nullptr;
-        if (parentIndex >= 0) frameNode = byName.value(QString::fromStdString(bones[parentIndex]->name), nullptr);
+        if (parentIndex >= 0) frameNode = iris::valueOr(byName, bones[parentIndex]->name, nullptr);
         if (!frameNode) frameNode = meshNode.get();
-        const QVector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
-        if (framePath.isEmpty()) continue;
+        const std::vector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
+        if (framePath.empty()) continue;
 
         // The two paths share a suffix (at minimum the subtree root itself),
         // and in
@@ -205,9 +207,9 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         --boneDepth;
 
         // ---- step 1+2: the channel set and its key-time union ------------
-        QSet<long long> timeSet;
+        std::unordered_set<long long> timeSet;
         int sourceKeys = 0;
-        const auto collect = [&](const QVector<SceneNode *> &path, int startIndex) {
+        const auto collect = [&](const std::vector<SceneNode *> &path, int startIndex) {
             for (int k = startIndex; k >= 0; --k) {
                 const auto it = clip->boneAnimations.find(path[k]->name);
                 if (it == clip->boneAnimations.cend() || !it->second) continue;
@@ -220,7 +222,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         collect(bonePath, boneDepth);
         collect(framePath, frameDepth);
 
-        if (timeSet.isEmpty()) continue;               // this clip does not drive this bone
+        if (timeSet.empty()) continue;               // this clip does not drive this bone
 
         // R4 — END-OF-CLIP SEMANTICS. Our keyframes HOLD the last value past
         // the last key (keyframeanimation.h getKeyFramesAtTime); a v1 engine
@@ -232,12 +234,12 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         timeSet.insert(quantiseTime(0.0f));
         if (out.length > 0.0f) timeSet.insert(quantiseTime(out.length));
 
-        QVector<long long> times(timeSet.begin(), timeSet.end());
+        std::vector<long long> times(timeSet.begin(), timeSet.end());
         std::sort(times.begin(), times.end());
 
         ClipBoneTrack track;
         track.bone = i;
-        track.boneName = QString::fromStdString(bone->name);
+        track.boneName = bone->name;
         track.keys.reserve(times.size());
         for (long long q : times) {
             const float t = unquantiseTime(q);
@@ -249,11 +251,11 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
             ClipBoneKey key;
             key.time = t;
             decomposeTRS(local, key.position, key.rotation, key.scale);
-            track.keys.append(key);
+            track.keys.push_back(key);
         }
         out.sourceKeyCount += sourceKeys;
         out.emittedKeyCount += track.keys.size();
-        out.tracks.append(track);
+        out.tracks.push_back(track);
     }
 
     // ---- rest-vs-bind diagnostic ----------------------------------------
@@ -261,7 +263,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     // the one place that holds the rig, the subtree and the rest pose at once.)
     for (int i = 0; i < bones.size(); ++i) {
         const BonePtr &bone = bones[i];
-        SceneNode *boneNode = byName.value(QString::fromStdString(bone->name), nullptr);
+        SceneNode *boneNode = iris::valueOr(byName, bone->name, nullptr);
         if (!boneNode) continue;
         int parentIndex = -1;
         if (!bone->parentBone.expired()) {
@@ -273,14 +275,14 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
             : bone->meshSpacePoseMatrix;
 
         SceneNode *frameNode = parentIndex >= 0
-            ? byName.value(QString::fromStdString(bones[parentIndex]->name), nullptr) : nullptr;
+            ? iris::valueOr(byName, bones[parentIndex]->name, nullptr) : nullptr;
         if (!frameNode) frameNode = meshNode.get();
-        const QVector<SceneNode *> bonePath = pathToRoot(boneNode, rootNode);
-        const QVector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
-        if (bonePath.isEmpty() || framePath.isEmpty()) continue;
+        const std::vector<SceneNode *> bonePath = pathToRoot(boneNode, rootNode);
+        const std::vector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
+        if (bonePath.empty() || framePath.empty()) continue;
 
         // The rest local is the same composition with NO clip driving it.
-        const auto restChain = [&](const QVector<SceneNode *> &path) {
+        const auto restChain = [&](const std::vector<SceneNode *> &path) {
             iris::Mat4 m;
             m.setToIdentity();
             for (int k = path.size() - 1; k >= 0; --k) m = m * composeRest(restOf(path[k]));
@@ -290,7 +292,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         float worst = 0.0f;
         for (int c = 0; c < 16; ++c)
             worst = std::max(worst, std::fabs(restLocal.constData()[c] - bindLocal.constData()[c]));
-        if (worst > 1e-3f) out.restDiffersFromBind.append(QString::fromStdString(bone->name));
+        if (worst > 1e-3f) out.restDiffersFromBind.push_back(bone->name);
     }
 
     return true;

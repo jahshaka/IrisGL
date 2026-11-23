@@ -36,9 +36,9 @@ For more information see the LICENSE file
 // texture is a session object and outlives every project it was bound in
 // (scripting.e2e.live_textures asserts it); the registry dies with the process.
 
-#include <QHash>
-#include <QString>
-#include <QStringList>
+#include <unordered_map>
+#include <string>
+#include <vector>
 
 #include "irisglfwd.h"
 
@@ -51,32 +51,32 @@ public:
     /// The scheme every live reference carries. A material row holding one of
     /// these is what tells the writer to skip the row and the mirror to look
     /// here instead of on disk.
-    static QString refFor(const QString &guid);
-    static bool isLiveRef(const QString &ref);
+    static std::string refFor(const std::string &guid);
+    static bool isLiveRef(const std::string &ref);
     /// The guid inside a "live://<guid>" reference; an empty string for
     /// anything else (including a bare guid — a reference is a reference).
-    static QString guidOf(const QString &ref);
+    static std::string guidOf(const std::string &ref);
 
     /// Registers a new live texture, `width` x `height`, initially opaque
     /// black. Returns null if the guid is already taken or the size is not
     /// positive. `mipmaps` is fixed here because the renderer fixes it at
     /// creation: a write replaces the whole chain, it cannot grow one.
-    static Texture2DPtr create(const QString &guid, const QString &name,
+    static Texture2DPtr create(const std::string &guid, const std::string &name,
                                int width, int height, bool mipmaps = false);
 
     /// The live texture behind a guid OR a "live://<guid>" reference; null
     /// when there is none. THE MISS IS ORDINARY: it is what a scene written
     /// against an older session looks like.
-    static Texture2DPtr find(const QString &guidOrRef);
+    static Texture2DPtr find(const std::string &guidOrRef);
 
-    static bool destroy(const QString &guidOrRef);
+    static bool destroy(const std::string &guidOrRef);
     /// Every live guid, in creation order.
-    static QStringList guids();
+    static std::vector<std::string> guids();
     static void clear();
 
 private:
-    static QHash<QString, Texture2DPtr> &table();
-    static QStringList &order();
+    static std::unordered_map<std::string, Texture2DPtr> &table();
+    static std::vector<std::string> &order();
 };
 
 }

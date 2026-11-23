@@ -13,9 +13,8 @@ For more information see the LICENSE file
 #define IRIS_AVATARDEFINITION_H
 
 #include "core/value.h"
-#include <QString>
-#include <QStringList>
-#include <QVector>
+#include <string>
+#include <vector>
 
 #include "document/animation/locomotion.h"
 #include "document/physics/avatarmovement.h"
@@ -51,9 +50,9 @@ namespace iris
 /// format, because a clip is referenced by GUID and never by type.
 struct AvatarClipEntry
 {
-    QString asset;        ///< the clip asset's guid (the model's own guid for in-file clips)
-    QString rawName;      ///< the clip's name INSIDE the file ("mixamo.com" and friends)
-    QString name;         ///< the display name the scene plays it under
+    std::string asset;        ///< the clip asset's guid (the model's own guid for in-file clips)
+    std::string rawName;      ///< the clip's name INSIDE the file ("mixamo.com" and friends)
+    std::string name;         ///< the display name the scene plays it under
     bool looping = true;
     bool rootMotion = false;
 };
@@ -63,9 +62,9 @@ struct AvatarClipEntry
 /// disagree about what "the same rig" is.
 struct AvatarRigInfo
 {
-    QString rigId;             ///< rigsignature.h's hash of the sorted bone names
+    std::string rigId;             ///< rigsignature.h's hash of the sorted bone names
     int bones = 0;
-    QStringList boneNames;
+    std::vector<std::string> boneNames;
     /// SLOT (§7 R4): no per-asset import unit scale exists in the tree yet, so
     /// nothing applies this. `hasUnitScale == false` means "the file's own
     /// units", which is what every avatar does today.
@@ -77,11 +76,11 @@ struct AvatarDefinition
 {
     static constexpr int kFormatVersion = 1;
 
-    QString name;
-    QString modelAsset;                 ///< the rigged Object's guid
+    std::string name;
+    std::string modelAsset;                 ///< the rigged Object's guid
     AvatarRigInfo rig;
-    QVector<AvatarClipEntry> clips;
-    QString defaultClip;                ///< `defaults.activeClip`; empty = none
+    std::vector<AvatarClipEntry> clips;
+    std::string defaultClip;                ///< `defaults.activeClip`; empty = none
 
     /// SLOT: null = "generate the default asset at spawn, as today" (which is
     /// what keeps every shipped locomotion suite green). Non-null = the
@@ -106,11 +105,11 @@ struct AvatarDefinition
     bool hasBlendshapes = false;
 
     /// The clip entry with this display name, or nullptr.
-    const AvatarClipEntry *findClip(const QString &displayName) const;
+    const AvatarClipEntry *findClip(const std::string &displayName) const;
     /// Every distinct asset guid this definition depends on (model + clips) —
     /// the dependency rows `AvatarAssets::save` reconciles to.
-    QStringList dependencyGuids() const;
-    bool isValid() const { return !modelAsset.isEmpty(); }
+    std::vector<std::string> dependencyGuids() const;
+    bool isValid() const { return !modelAsset.empty(); }
 };
 
 /// Serialization. `toJson` always writes every key (nulls included).
@@ -119,7 +118,7 @@ Value avatarDefinitionToJson(const AvatarDefinition &def);
 /// Parses AND validates: on refusal `out` is untouched and `*error` says what
 /// is wrong in the file's own vocabulary. A definition with no model is a
 /// refusal, not an empty avatar — nothing downstream can do anything with one.
-bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, QString *error);
+bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, std::string *error);
 
 }   // namespace iris
 

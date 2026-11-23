@@ -11,53 +11,44 @@ For more information see the LICENSE file
 
 #include "document/input/inputmap.h"
 
-#include <QKeySequence>
 #include "document/input/keyvaluestore.h"
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <string_view>
+#include "core/text.h"
 
 namespace iris {
 
 namespace {
 
-/// QKeySequence spells a BARE modifier as "Shift+" / "Ctrl+" (it treats the
-/// value as a modifier with no key), which does not round-trip. Sprint's
-/// default is a bare modifier, so the table is load-bearing, not cosmetic.
-struct NamedKey { int key = 0; const char *name = nullptr; };
-const NamedKey kNamedKeys[] = {
-    { Qt::Key_Shift,   "Shift"   },
-    { Qt::Key_Control, "Ctrl"    },
-    { Qt::Key_Alt,     "Alt"     },
-    { Qt::Key_Meta,    "Meta"    },
-    { Qt::Key_Space,   "Space"   },
-};
-
 const char *kActionNames[kInputActionCount] = { "Move", "Look", "Jump", "Sprint" };
 
-QString encodeKey(const InputKeyBinding &b, bool axis)
+std::string encodeKey(const InputKeyBinding &b, bool axis)
 {
-    const QString name = InputMap::keyName(b.key);
-    if (name.isEmpty()) return QString();
-    if (!axis) return name;
-    return QStringLiteral("%1:%2,%3").arg(name).arg(b.x).arg(b.y);
+    if (b.key == 0) return std::string();
+    if (!axis) return iris::text::cat(b.key);
+    return iris::text::cat(b.key, ":", b.x, ",", b.y);   // a contribution in its shortest round-trip text
 }
 
-bool decodeKey(const QString &text, bool axis, InputKeyBinding &out)
+bool decodeKey(const std::string &text, bool axis, InputKeyBinding &out)
 {
-    QString name = text;
+    std::string name = text;
     float x = 0.f, y = 0.f;
     if (axis) {
-        const int colon = text.lastIndexOf(':');
-        if (colon < 0) return false;
-        name = text.left(colon);
-        const QStringList parts = text.mid(colon + 1).split(',');
+        const size_t colon = text.rfind(':');
+        if (colon == std::string::npos) return false;
+        name = text.substr(0, colon);
+        const std::vector<std::string> parts = iris::text::split(std::string_view(text).substr(colon + 1), ',');
         if (parts.size() != 2) return false;
-        bool okX = false, okY = false;
-        x = parts[0].toFloat(&okX);
-        y = parts[1].toFloat(&okY);
-        if (!okX || !okY) return false;
+        const std::optional<double> px = iris::text::parseDouble(parts[0]), py = iris::text::parseDouble(parts[1]);
+        if (!px || !py) return false;
+        x = float(*px);
+        y = float(*py);
     }
-    const int key = InputMap::keyFromName(name);
-    if (key == 0) return false;
+    const std::optional<std::int64_t> code = iris::text::parseInt(name);   // the key's number: never a name
+    if (!code || *code <= 0 || *code > 0x7fffffff) return false;
+    const int key = int(*code);
     out = InputKeyBinding{ key, x, y };
     return true;
 }
@@ -88,21 +79,21 @@ void InputMap::resetToDefaults()
     // `input.resetBindings` brings them back — an alias table would have been
     // a second, invisible source of truth.
     mBindings[int(InputAction::Move)] = {
-        { Qt::Key_W,     0.f, +1.f },
-        { Qt::Key_S,     0.f, -1.f },
-        { Qt::Key_A,    -1.f,  0.f },
-        { Qt::Key_D,    +1.f,  0.f },
-        { Qt::Key_Up,    0.f, +1.f },
-        { Qt::Key_Down,  0.f, -1.f },
-        { Qt::Key_Left, -1.f,  0.f },
-        { Qt::Key_Right,+1.f,  0.f },
+        { inputkeys::W,     0.f, +1.f },
+        { inputkeys::S,     0.f, -1.f },
+        { inputkeys::A,    -1.f,  0.f },
+        { inputkeys::D,    +1.f,  0.f },
+        { inputkeys::Up,    0.f, +1.f },
+        { inputkeys::Down,  0.f, -1.f },
+        { inputkeys::Left, -1.f,  0.f },
+        { inputkeys::Right,+1.f,  0.f },
     };
     // Look is the mouse. An empty key list here is the DEFAULT, not "unbound"
     // — a user may still bind keys to it (arrow-key look) and they will sum
     // with the mouse delta.
     mBindings[int(InputAction::Look)].clear();
-    mBindings[int(InputAction::Jump)]   = { { Qt::Key_Space, 0.f, 0.f } };
-    mBindings[int(InputAction::Sprint)] = { { Qt::Key_Shift, 0.f, 0.f } };
+    mBindings[int(InputAction::Jump)]   = { { inputkeys::Space, 0.f, 0.f } };
+    mBindings[int(InputAction::Sprint)] = { { inputkeys::Shift, 0.f, 0.f } };
 }
 
 InputActionType InputMap::typeOf(InputAction a)
@@ -119,17 +110,17 @@ InputActionType InputMap::typeOf(InputAction a)
 bool InputMap::isLatched(InputAction a) { return a == InputAction::Jump; }
 bool InputMap::usesMouse(InputAction a) { return a == InputAction::Look; }
 
-QString InputMap::actionName(InputAction a)
+std::string InputMap::actionName(InputAction a)
 {
     const int i = int(a);
-    if (i < 0 || i >= kInputActionCount) return QString();
-    return QString::fromLatin1(kActionNames[i]);
+    if (i < 0 || i >= kInputActionCount) return std::string();
+    return kActionNames[i];
 }
 
-bool InputMap::actionFromName(const QString &name, InputAction &out)
+bool InputMap::actionFromName(const std::string &name, InputAction &out)
 {
     for (int i = 0; i < kInputActionCount; ++i) {
-        if (name.compare(QString::fromLatin1(kActionNames[i]), Qt::CaseInsensitive) == 0) {
+        if (iris::text::iequalsAscii(name, kActionNames[i])) {
             out = InputAction(i);
             return true;
         }
@@ -137,46 +128,18 @@ bool InputMap::actionFromName(const QString &name, InputAction &out)
     return false;
 }
 
-QVector<InputAction> InputMap::allActions()
+std::vector<InputAction> InputMap::allActions()
 {
     return { InputAction::Move, InputAction::Look, InputAction::Jump, InputAction::Sprint };
 }
 
-QString InputMap::keyName(int key)
-{
-    if (key == 0) return QString();
-    for (const auto &nk : kNamedKeys)
-        if (nk.key == key) return QString::fromLatin1(nk.name);
-    const QString s = QKeySequence(key).toString(QKeySequence::PortableText);
-    return s;
-}
-
-int InputMap::keyFromName(const QString &name)
-{
-    const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty()) return 0;
-    for (const auto &nk : kNamedKeys)
-        if (trimmed.compare(QString::fromLatin1(nk.name), Qt::CaseInsensitive) == 0)
-            return nk.key;
-    const QKeySequence seq = QKeySequence::fromString(trimmed, QKeySequence::PortableText);
-    if (seq.count() != 1) return 0;
-    // Strip the modifier bits: a gameplay binding is one physical key.
-    const int key = seq[0].toCombined() & ~Qt::KeyboardModifierMask;
-    // fromString does NOT fail on garbage — "Nonsense" comes back as a
-    // one-element sequence holding Qt::Key_unknown (0x01ffffff). Without this
-    // line every unparseable name would bind a real, unreachable key code, and
-    // a corrupt settings file would silently steal a binding.
-    if (key == Qt::Key_unknown) return 0;
-    return key;
-}
-
-const QVector<InputKeyBinding> &InputMap::bindings(InputAction a) const
+const std::vector<InputKeyBinding> &InputMap::bindings(InputAction a) const
 {
     return mBindings[int(a)];
 }
 
-bool InputMap::bind(InputAction a, const QVector<InputKeyBinding> &keys,
-                    QString *conflictAction, QString *conflictKey)
+bool InputMap::bind(InputAction a, const std::vector<InputKeyBinding> &keys,
+                    std::string *conflictAction, int *conflictKey)
 {
     for (const auto &b : keys) {
         if (b.key == 0) continue;
@@ -185,15 +148,15 @@ bool InputMap::bind(InputAction a, const QVector<InputKeyBinding> &keys,
             for (const auto &other : mBindings[i]) {
                 if (other.key != b.key) continue;
                 if (conflictAction) *conflictAction = actionName(InputAction(i));
-                if (conflictKey)    *conflictKey    = keyName(b.key);
+                if (conflictKey)    *conflictKey    = b.key;
                 return false;   // nothing written — the refusal is atomic
             }
         }
     }
-    QVector<InputKeyBinding> clean;
+    std::vector<InputKeyBinding> clean;
     clean.reserve(keys.size());
     for (const auto &b : keys)
-        if (b.key != 0) clean.append(b);
+        if (b.key != 0) clean.push_back(b);
     mBindings[int(a)] = clean;
     return true;
 }
@@ -221,19 +184,6 @@ InputAction InputMap::actionForKey(int key, bool *found) const
     return InputAction::Move;
 }
 
-QString InputMap::displayText(InputAction a) const
-{
-    QStringList names;
-    for (const auto &b : mBindings[int(a)]) {
-        const QString n = keyName(b.key);
-        if (!n.isEmpty()) names << n;
-    }
-    if (usesMouse(a))
-        names.prepend(QStringLiteral("Mouse"));
-    if (names.isEmpty()) return QStringLiteral("(unbound)");
-    return names.join(QStringLiteral(" / "));
-}
-
 Value InputMap::toValue() const
 {
     Value::Object m;
@@ -242,10 +192,10 @@ Value InputMap::toValue() const
         const bool axis = typeOf(a) == InputActionType::Axis2D;
         Value::Array encoded;
         for (const auto &b : mBindings[i]) {
-            const QString s = encodeKey(b, axis);
-            if (!s.isEmpty()) encoded.push_back(Value(s.toStdString()));
+            const std::string s = encodeKey(b, axis);
+            if (!s.empty()) encoded.push_back(Value(s));
         }
-        m.emplace_back(actionName(a).toStdString(), Value(std::move(encoded)));
+        m.emplace_back(actionName(a), Value(std::move(encoded)));
     }
     return Value(std::move(m));
 }
@@ -256,9 +206,9 @@ bool InputMap::fromValue(const Value &m)
     if (m.kind() != Kind::Object) return false;
     for (const Value::Member &member : m.asObject()) {
         InputAction a;
-        if (!actionFromName(QString::fromStdString(member.first), a)) continue;   // tolerant: a future action
+        if (!actionFromName(member.first, a)) continue;   // tolerant: a future action
         const bool axis = typeOf(a) == InputActionType::Axis2D;
-        QVector<InputKeyBinding> keys;
+        std::vector<InputKeyBinding> keys;
         // The rows: an Array of Strings; ONE String is one row (a one-entry list the settings file hands back as a
         // single string, which QVariant::toStringList read the same way). An element that is NOT a String is skipped
         // where toStringList converted it (5 -> "5"): only a hand-made value can carry one (the lead's F15).
@@ -269,8 +219,9 @@ bool InputMap::fromValue(const Value &m)
                 if (row.kind() == Kind::String) rows.push_back(row.asString());
         for (const std::string &row : rows) {
             InputKeyBinding b;
-            if (decodeKey(QString::fromStdString(row), axis, b)) keys.append(b);
+            if (decodeKey(row, axis, b)) keys.push_back(b);
         }
+        if (!rows.empty() && keys.empty()) continue;   // every row undecodable: the action keeps what it has
         mBindings[int(a)] = keys;
         understoodAny = true;
     }
@@ -281,7 +232,7 @@ void InputMap::load(const KeyValueStore &settings)
 {
     Value::Object m;
     for (int i = 0; i < kInputActionCount; ++i) {
-        const std::string name = actionName(InputAction(i)).toStdString();
+        const std::string name = actionName(InputAction(i));
         const std::optional<Value> row = settings.value("input/" + name);
         if (!row) continue;                       // no row = keep the default
         m.emplace_back(name, *row);
@@ -299,7 +250,7 @@ void InputMap::save(KeyValueStore &settings) const
 void InputMap::clearPersisted(KeyValueStore &settings)
 {
     for (int i = 0; i < kInputActionCount; ++i)
-        settings.remove("input/" + actionName(InputAction(i)).toStdString());
+        settings.remove("input/" + actionName(InputAction(i)));
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +287,7 @@ void InputSystem::recomputeHeld()
 bool InputSystem::keyPressed(int key)
 {
     if (!mMap.isBound(key)) return false;
-    const bool wasHeld = mHeld.contains(key);
+    const bool wasHeld = (mHeld.count(key) != 0);
     mHeld.insert(key);
     if (!wasHeld) {
         // The LATCH edge. A second press with no release in between (an
@@ -351,7 +302,7 @@ bool InputSystem::keyPressed(int key)
 bool InputSystem::keyReleased(int key)
 {
     if (!mMap.isBound(key)) return false;
-    mHeld.remove(key);
+    mHeld.erase(key);
     recomputeHeld();
     return true;
 }
@@ -400,8 +351,8 @@ void InputSystem::setSettings(KeyValueStore *settings)
     if (mSettings) mMap.load(*mSettings);
 }
 
-bool InputSystem::bind(InputAction a, const QVector<InputKeyBinding> &keys,
-                       QString *conflictAction, QString *conflictKey)
+bool InputSystem::bind(InputAction a, const std::vector<InputKeyBinding> &keys,
+                       std::string *conflictAction, int *conflictKey)
 {
     if (!mMap.bind(a, keys, conflictAction, conflictKey)) return false;
     // A rebind can orphan a held key (the user rebound the key they are holding

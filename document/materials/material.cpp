@@ -12,11 +12,12 @@ For more information see the LICENSE file
 #include "document/materials/material.h"
 #include "document/assets/texture2d.h"
 #include "document/properties/property.h"
+#include <cstdint>
 
 namespace iris
 {
 
-std::atomic<quint64> Material::sGlobalRevision{1};
+std::atomic<std::uint64_t> Material::sGlobalRevision{1};
 
 Value Material::textureRef(const std::string &path, const std::string &guid)
 {
@@ -41,38 +42,38 @@ Value Material::textureRefOf(std::string_view row) const
     return textureRef(std::string(), std::string());
 }
 
-void Material::addTexture(QString name,Texture2DPtr texture)
+void Material::addTexture(std::string name,Texture2DPtr texture)
 {
     // remove texture if it already exists
-    if (textures.contains(name)) {
-        textures.remove(name);
+    if ((textures.count(name) != 0)) {
+        textures.erase(name);
     }
 
-    textures.insert(name, texture);
+    textures.insert_or_assign(name, texture);
     touch();
 }
 
-void Material::removeTexture(QString name)
+void Material::removeTexture(std::string name)
 {
-    if (textures.contains(name)) {
-        textures.remove(name);
+    if ((textures.count(name) != 0)) {
+        textures.erase(name);
         touch();
     }
 }
 
-bool Material::isFlagEnabled(QString flag)
+bool Material::isFlagEnabled(std::string flag)
 {
-	return flags.contains(flag);
+	return (flags.count(flag) != 0);
 }
 
-void Material::enableFlag(QString flag)
+void Material::enableFlag(std::string flag)
 {
 	flags.insert(flag);
 }
 
-void Material::disableFlag(QString flag)
+void Material::disableFlag(std::string flag)
 {
-	flags.remove(flag);
+	flags.erase(flag);
 }
 
 }

@@ -1,7 +1,7 @@
 #include "core/math/vec.h"
 #include "document/assets/shapehelper.h"
 #include "document/assets/linemeshbuilder.h"
-#include <qmath.h>
+#include <cmath>
 
 namespace iris
 {
@@ -45,10 +45,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
+        iris::Vec3 a = iris::Vec3(std::sin(iris::degreesToRadians(angle)), std::cos(iris::degreesToRadians(angle)), 0) * radius;
 
         angle = (i+1) * arcWidth;
-        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle)), 0) * radius;
+        iris::Vec3 b = iris::Vec3(std::sin(iris::degreesToRadians(angle)), std::cos(iris::degreesToRadians(angle)), 0) * radius;
 
         builder.addLine(a, b);
     }
@@ -57,10 +57,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 a = iris::Vec3(std::sin(iris::degreesToRadians(angle)), 0, std::cos(iris::degreesToRadians(angle))) * radius;
 
         angle = (i+1) * arcWidth;
-        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), 0, qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 b = iris::Vec3(std::sin(iris::degreesToRadians(angle)), 0, std::cos(iris::degreesToRadians(angle))) * radius;
 
         builder.addLine(a, b);
     }
@@ -69,10 +69,10 @@ MeshPtr ShapeHelper::createWireSphere(float radius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        iris::Vec3 a = iris::Vec3(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 a = iris::Vec3(0, std::sin(iris::degreesToRadians(angle)), std::cos(iris::degreesToRadians(angle))) * radius;
 
         angle = (i+1) * arcWidth;
-        iris::Vec3 b = iris::Vec3(0, qSin(qDegreesToRadians(angle)), qCos(qDegreesToRadians(angle))) * radius;
+        iris::Vec3 b = iris::Vec3(0, std::sin(iris::degreesToRadians(angle)), std::cos(iris::degreesToRadians(angle))) * radius;
 
         builder.addLine(a, b);
     }
@@ -91,10 +91,10 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 a = iris::Vec3(std::sin(iris::degreesToRadians(angle)), -1, std::cos(iris::degreesToRadians(angle))) * baseRadius;
 
         angle = (i+1) * arcWidth;
-        iris::Vec3 b = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 b = iris::Vec3(std::sin(iris::degreesToRadians(angle)), -1, std::cos(iris::degreesToRadians(angle))) * baseRadius;
 
         builder.addLine(a, b);
     }
@@ -105,7 +105,7 @@ MeshPtr ShapeHelper::createWireCone(float baseRadius)
     for(int i=0;i<divisions;i++)
     {
         float angle = i * arcWidth;
-        iris::Vec3 a = iris::Vec3(qSin(qDegreesToRadians(angle)), -1, qCos(qDegreesToRadians(angle))) * baseRadius;
+        iris::Vec3 a = iris::Vec3(std::sin(iris::degreesToRadians(angle)), -1, std::cos(iris::degreesToRadians(angle))) * baseRadius;
 
         iris::Vec3 b = iris::Vec3(0, 0, 0);
 

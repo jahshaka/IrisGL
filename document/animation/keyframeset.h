@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef KEYFRAMESET_H
 #define KEYFRAMESET_H
 
-#include <QMap>
+#include <map>
 #include "irisglfwd.h"
 
 namespace iris
@@ -30,15 +30,15 @@ public:
     ~KeyFrameSet();
 
     //QMap preserves insertion order,QHash doesnt
-    QMap<QString,PropertyAnim*> keyFrames;
+    std::map<std::string,PropertyAnim*> keyFrames;
 
     void addKeyFrame(PropertyAnim* anim);
 
-    PropertyAnim* getOrCreateFrame(QString name);
+    PropertyAnim* getOrCreateFrame(std::string name);
 
-    PropertyAnim* getKeyFrame(QString name);
+    PropertyAnim* getKeyFrame(std::string name);
 
-    bool hasKeyFrame(QString name);
+    bool hasKeyFrame(std::string name);
 
     static std::shared_ptr<KeyFrameSet> create();
 };

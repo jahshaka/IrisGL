@@ -4,7 +4,9 @@
 #include "core/geometry/trimesh.h"
 #include "document/physics/environment.h"
 
-#include <QDebug>
+#include "core/log.h"
+#include "core/text.h"
+#include "document/mapvalue.h"
 
 namespace iris
 {
@@ -213,9 +215,8 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             if (!hasMeshGeometry) {
-                qWarning("PhysicsHelper: '%s' asks for a convex-hull body but carries no mesh "
-                         "geometry — building an empty shape instead",
-                         sceneNode->getName().c_str());
+                iris::log::warn(iris::text::cat("PhysicsHelper: '", sceneNode->getName(), "' asks for a convex-hull body but "
+                                                "carries no mesh geometry — building an empty shape instead"));
                 buildEmptyShapeBody(transform, mass, shape, motionState, body);
                 break;
             }
@@ -264,9 +265,8 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             transform.setRotation(quat);
 
             if (!hasMeshGeometry) {
-                qWarning("PhysicsHelper: '%s' asks for a triangle-mesh body but carries no mesh "
-                         "geometry — building an empty shape instead",
-                         sceneNode->getName().c_str());
+                iris::log::warn(iris::text::cat("PhysicsHelper: '", sceneNode->getName(), "' asks for a triangle-mesh body but "
+                                                "carries no mesh geometry — building an empty shape instead"));
                 buildEmptyShapeBody(transform, mass, shape, motionState, body);
                 break;
             }
@@ -274,7 +274,7 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
             // convert triangle mesh into convex shape
 
             auto triMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(meshNode->getMesh());
-            owned.meshInterfaces.append(triMesh);   // outlives the shape below
+            owned.meshInterfaces.push_back(triMesh);   // outlives the shape below
 
             shape = new btConvexTriangleMeshShape(triMesh, true);
             shape->setLocalScaling(iris::PhysicsHelper::btVector3FromVec3(sceneNode->getLocalScale()));
@@ -307,14 +307,14 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 				auto childMeshNode = std::dynamic_pointer_cast<iris::MeshNode>(node);
 				if (!childMeshNode || !childMeshNode->getMesh()
 				    || !childMeshNode->getMesh()->getTriMesh()) {
-					qWarning("PhysicsHelper: compound child '%s' carries no mesh geometry — skipped",
-					         node->getName().c_str());
+					iris::log::warn(iris::text::cat("PhysicsHelper: compound child '", node->getName(),
+					                                "' carries no mesh geometry — skipped"));
 					return;
 				}
 				auto *childTriMesh = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(childMeshNode->getMesh());
-				owned.meshInterfaces.append(childTriMesh);
+				owned.meshInterfaces.push_back(childTriMesh);
 				auto childShape = new btConvexTriangleMeshShape(childTriMesh, true);
-				owned.shapes.append(childShape);   // a compound does not own its children
+				owned.shapes.push_back(childShape);   // a compound does not own its children
 				childShape->setMargin(margin);
 
 				auto shapeTransform = rootTransformInverse * childMeshNode->getGlobalTransform();
@@ -352,9 +352,8 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 			if (static_cast<btCompoundShape *>(shape)->getNumChildShapes() == 0) {
 				delete shape;
 				shape = nullptr;
-				qWarning("PhysicsHelper: '%s' asks for a compound body but no node in its subtree "
-				         "carries mesh geometry — building an empty shape instead",
-				         sceneNode->getName().c_str());
+				iris::log::warn(iris::text::cat("PhysicsHelper: '", sceneNode->getName(), "' asks for a compound body but no "
+				                                "node in its subtree carries mesh geometry — building an empty shape instead"));
 				buildEmptyShapeBody(transform, mass, shape, motionState, body);
 				break;
 			}
@@ -383,12 +382,12 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
     if (shape) {
         // The body's own shape goes FIRST: destroyPhysicsWorld deletes the
         // array in order and a compound must die before its children.
-        owned.shapes.prepend(shape);
+        owned.shapes.insert(owned.shapes.begin(), shape);
     } else {
         // No body was built (unknown shape kind): nothing to hand back, and
         // nothing was allocated past this point.
         owned.shapes.clear();
-        qDeleteAll(owned.meshInterfaces);
+        for (auto *meshInterface : owned.meshInterfaces) delete meshInterface;
         owned.meshInterfaces.clear();
     }
     return owned;
@@ -396,10 +395,10 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 
 btTypedConstraint * PhysicsHelper::createConstraintFromProperty(Environment *environment, const iris::ConstraintProperty & prop)
 {
-    btTypedConstraint *constraint = Q_NULLPTR;
+    btTypedConstraint *constraint = nullptr;
 
-    auto bodyA = environment->hashBodies.value(prop.constraintFrom);
-    auto bodyB = environment->hashBodies.value(prop.constraintTo);
+    auto bodyA = iris::valueOr(environment->hashBodies, prop.constraintFrom);
+    auto bodyB = iris::valueOr(environment->hashBodies, prop.constraintTo);
     // A saved constraint can name a node that no longer has a physics body
     // (deleted, or its isPhysicsBody flag cleared): hashBodies.value() then
     // returns null and the pivot reads below dereferenced it.

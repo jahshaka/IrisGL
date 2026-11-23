@@ -5,8 +5,8 @@
 #include "irisglfwd.h"
 #include "document/srgbcolor.h"
 
-#include <QList>
-#include <QString>
+#include <vector>
+#include <string>
 
 namespace iris {
 
@@ -16,25 +16,25 @@ class AnimFrameInfo;
 
 struct PropertyAnimInfo
 {
-    QString name;
+    std::string name;
     // keyFrame isnt owned by this class
     FloatKeyFrame* keyFrame = nullptr;
 
-    PropertyAnimInfo(QString name, FloatKeyFrame* keyFrame);
+    PropertyAnimInfo(std::string name, FloatKeyFrame* keyFrame);
 };
 
 class PropertyAnim
 {
 protected:
-    QString name;
+    std::string name;
 public:
-    virtual QList<PropertyAnimInfo> getKeyFrames()
+    virtual std::vector<PropertyAnimInfo> getKeyFrames()
     {
-        QList<PropertyAnimInfo> list;
+        std::vector<PropertyAnimInfo> list;
         return list;
     }
 
-    virtual FloatKeyFrame* getKeyFrame(QString name)
+    virtual FloatKeyFrame* getKeyFrame(std::string name)
     {
         return nullptr;
     }
@@ -44,8 +44,8 @@ public:
         return nullptr;
     }
 
-    QString getName() const;
-    void setName(const QString &value);
+    std::string getName() const;
+    void setName(const std::string &value);
 
     virtual ~PropertyAnim()
     {
@@ -61,8 +61,8 @@ public:
     ~FloatPropertyAnim();
 
     float getValue(float time);
-    virtual QList<PropertyAnimInfo> getKeyFrames() override;
-    virtual FloatKeyFrame* getKeyFrame(QString name) override;
+    virtual std::vector<PropertyAnimInfo> getKeyFrames() override;
+    virtual FloatKeyFrame* getKeyFrame(std::string name) override;
     virtual FloatKeyFrame* getKeyFrame(int index) override;
 };
 
@@ -74,8 +74,8 @@ public:
     ~Vector3DPropertyAnim();
 
     iris::Vec3 getValue(float time);
-    virtual QList<PropertyAnimInfo> getKeyFrames() override;
-    virtual FloatKeyFrame* getKeyFrame(QString name) override;
+    virtual std::vector<PropertyAnimInfo> getKeyFrames() override;
+    virtual FloatKeyFrame* getKeyFrame(std::string name) override;
     virtual FloatKeyFrame* getKeyFrame(int index) override;
 };
 
@@ -87,8 +87,8 @@ public:
     ~ColorPropertyAnim();
 
     SrgbColor getValue(float time);
-    virtual QList<PropertyAnimInfo> getKeyFrames() override;
-    virtual FloatKeyFrame* getKeyFrame(QString name) override;
+    virtual std::vector<PropertyAnimInfo> getKeyFrames() override;
+    virtual FloatKeyFrame* getKeyFrame(std::string name) override;
     virtual FloatKeyFrame* getKeyFrame(int index) override;
 };
 

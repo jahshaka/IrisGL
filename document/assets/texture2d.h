@@ -19,6 +19,7 @@ For more information see the LICENSE file
 #include "document/assets/image.h"
 #include "document/assets/texture.h"
 #include "irisglfwd.h"
+#include <cstdint>
 
 namespace iris
 {
@@ -46,7 +47,7 @@ public:
     /// contract callers depend on: a null load is "no map".
     /// WITH NO PROBE INSTALLED (a Qt-free process: jahlab, jahengine) the path is recorded as it is and THE ENGINE's
     /// OWN LOAD IS THE VERDICT: OgreScene::loadTexture refuses a file that is no image by name (its error sink).
-    static Texture2DPtr load(QString path);
+    static Texture2DPtr load(std::string path);
 
     /// THE READABLE-IMAGE PROBE (NOQT-DOCUMENT-1 stage 3): the document reads no file, so whether a path is a
     /// readable image is asked of the host. Studio installs its probe (src/services/imagedecode.h) ONCE at boot,
@@ -60,7 +61,7 @@ public:
      * Returns the path to the source file of the texture
      * @return
      */
-    QString getSource() {
+    std::string getSource() {
         return source;
     }
 
@@ -75,7 +76,7 @@ public:
     /// (material rows, the mirror, the writer) recognises. Created through
     /// LiveTextures::create, which owns the session table — this is its
     /// constructor, not a second registry.
-    static Texture2DPtr createLive(const QString &guid, const QString &name,
+    static Texture2DPtr createLive(const std::string &guid, const std::string &name,
                                    int width, int height, bool mipmaps);
 
     int getWidth() override;
@@ -88,14 +89,14 @@ public:
 
     // ---- live textures (MATERIAL_GAPS_SPEC A-1) --------------------------
     bool isLive() const { return live; }
-    QString liveGuid() const { return liveTextureGuid; }
-    QString liveName() const { return liveTextureName; }
+    std::string liveGuid() const { return liveTextureGuid; }
+    std::string liveName() const { return liveTextureName; }
     bool liveMipmaps() const { return liveMips; }
     /// Moves on every accepted write and NEVER back. The whole synchronisation
     /// contract between a producer and the renderer: the mirror uploads when
     /// this number differs from the one it last uploaded, so a still image
     /// costs one integer compare per frame and no engine call at all.
-    quint64 liveGeneration() const { return generation; }
+    std::uint64_t liveGeneration() const { return generation; }
     /// The current frame, always 8-bit RGBA and always the creation size.
     const Image &liveImage() const { return image; }
     /// Replaces the pixels. REFUSES a different size (a live texture's
@@ -120,9 +121,9 @@ private:
 
     bool     live = false;
     bool     liveMips = false;
-    QString  liveTextureGuid;
-    QString  liveTextureName;
-    quint64  generation = 0;
+    std::string  liveTextureGuid;
+    std::string  liveTextureName;
+    std::uint64_t  generation = 0;
 };
 
 }
