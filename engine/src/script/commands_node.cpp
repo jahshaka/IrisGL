@@ -1,5 +1,6 @@
 // THE NODE FAMILY (SCRIPT-IN-ENGINE-1): engine.node.* - a scene's nodes, by the engine's own ids.
 #include "script/commands.h"
+#include "script/records_node.h"
 #include "jahshaka/engine/Ids.h"
 #include "jahshaka/engine/Math.h"
 
@@ -94,6 +95,46 @@ void registerNodeCommands(Host &host, const Commands &k)
                                       rot.isNull() ? Quat() : Quat(at(rot, 4 * i), at(rot, 4 * i + 1), at(rot, 4 * i + 2),
                                                                    at(rot, 4 * i + 3)),
                                       scl.isNull() ? Vec3(1, 1, 1) : Vec3(at(scl, 3 * i), at(scl, 3 * i + 1), at(scl, 3 * i + 2)));
+              return Value();
+          });
+    // THE NODE's FLAGS (2c, builder P): one bool (or the face cull) a command, each on a node this host may change
+    // (Commands::mine) - the engine's own setter, no record.
+    const auto flag = [&r, k](const char *name, const char *member, const char *doc, void (Scene::*set)(NodeId, bool)) {
+        r.add({name, {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode)), arg(member, Kind::Bool)},
+                      Kind::Null},
+               doc},
+              [k, set](Call &c) -> Value {
+                  Scene *s = k.scene(c, c[0]);
+                  if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "change")) return Value();
+                  (s->*set)(NodeId(Call::idOf(c[1])), c[2].asBool());
+                  return Value();
+              });
+    };
+    flag("engine.node.setVisible", "visible",
+         "The node's OWN visibility (Scene::setNodeVisible): a node is drawn when it and every ancestor are visible; "
+         "hiding it hides its subtree (geometry, lights, decals, particles, GI), showing it restores each descendant to "
+         "its own flag.",
+         &Scene::setNodeVisible);
+    flag("engine.node.setMovable", "movable",
+         "Whether the node MOVES (Scene::setNodeMovable): a mover's items take the movers' channel (the probes do not "
+         "capture them); the voxels hold it at its pose either way.",
+         &Scene::setNodeMovable);
+    flag("engine.node.setHelper", "helper",
+         "Whether the node is an EDITOR HELPER (Scene::setNodeHelper): drawn in the views, never captured by a "
+         "reflection probe, a shadow map or the GI. Not inherited: set on each node that carries helper geometry.",
+         &Scene::setNodeHelper);
+    r.add({"engine.node.setFaceCull",
+           {Access::Changes, {target(handle("scene", kScene)), target(handle("node", kNode)), paramOf<FaceCull>("cull")},
+            Kind::Null},
+           "Which faces of the node's mesh are culled (Scene::setNodeFaceCull): \"material\" (its material's own "
+           "culling), \"back\", \"front\" or \"twoSided\" (none)."},
+          [k](Call &c) -> Value {
+              Scene *s = k.scene(c, c[0]);
+              if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "change")) return Value();
+              FaceCull cull = FaceCull::Material;
+              std::string why;
+              if (!fromValue(c[2], cull, "cull", why)) return c.fail(why);
+              s->setNodeFaceCull(NodeId(Call::idOf(c[1])), cull);
               return Value();
           });
 }
