@@ -171,7 +171,8 @@ void registerViewCommands(Host &host, const Commands &k)
               return Value();
           });
     r.add({"engine.view.isOffscreen", {Access::Reads, {target(handle("view", kView))}, Kind::Bool},
-           "Whether the view's target is a texture (an offscreen view), fixed at its creation."},
+           "Whether the view's target is a texture (an offscreen view), fixed at its creation. The target is a "
+           "texture; this is not what a route reads: see engine.view.routes."},
           [k](Call &c) -> Value {
               const View *v = k.view(c, c[0]);
               if (!v) return Value();
