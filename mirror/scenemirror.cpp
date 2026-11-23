@@ -5045,16 +5045,12 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     const QString key = (srgb ? QStringLiteral("s|") : QStringLiteral("l|")) + path;
     auto it = mTextures.constFind(key);
     if (it != mTextures.constEnd()) return it.value();
-    // Qt resources are not files the engine can read. This test used to be
-    // QFileInfo::exists() alone, whose comment claimed to cover them and did
-    // not: exists() is TRUE for ":assets/…", so the path went to the engine,
-    // Ogre's resource group could not find it, and the boundary recorded
-    // "loadTexture: file not found: :assets/textures/default_particle.jpg"
-    // into a sink nobody read. (Every fresh emitter does this: the document's
-    // ParticleSystemNode ctor defaults its texture to that resource, and
-    // SceneEditService only copies the real file into the project a moment
-    // later.) Found the day the error pump landed — STABILITY_PROGRAM_SPEC
-    // Lane 1, which is what it is for.
+    // Qt resources are not files the engine can read: Studio binds its editor
+    // glyphs from them (a light's icon, ":/icons/light.png"). QFileInfo::exists()
+    // is TRUE for a ':' path, so without this test the path would reach the
+    // engine, Ogre's resource group could not find it, and the boundary would
+    // record "loadTexture: file not found: :/…" into its error sink (found the
+    // day the error pump landed — STABILITY_PROGRAM_SPEC Lane 1).
     if (path.startsWith(QLatin1Char(':'))) return 0;
     // A LIVE TEXTURE (ADDENDUM A-1) has no file behind it: its pixels live in
     // the document and are re-uploaded by syncLiveTextures whenever the
@@ -5064,10 +5060,10 @@ TextureId SceneMirror::textureFor(const QString &path, bool srgb)
     if (iris::LiveTextures::isLiveRef(path)) {
         iris::Texture2DPtr live = iris::LiveTextures::find(path);
         if (!live || !live->isLive()) return 0;
-        const QImage &img = live->liveImage();
+        const iris::Image &img = live->liveImage();
         if (img.isNull()) return 0;
-        TextureId live_id = newTexture(unsigned(img.width()), unsigned(img.height()),
-                                                   img.constBits(), srgb, live->liveMipmaps());
+        TextureId live_id = newTexture(unsigned(img.width), unsigned(img.height),
+                                                   img.rgba.data(), srgb, live->liveMipmaps());
         if (live_id) {
             mTextures.insert(key, live_id);
             mLiveGenerations.insert(key, live->liveGeneration());
@@ -5100,7 +5096,7 @@ void SceneMirror::syncLiveTextures()
         if (gen == it.value()) continue;
         const auto tex = mTextures.constFind(it.key());
         if (tex == mTextures.constEnd()) continue;
-        const QImage &img = live->liveImage();
+        const iris::Image &img = live->liveImage();
         if (img.isNull()) continue;
         // A REFUSED write leaves the recorded generation alone deliberately:
         // the pixels the engine holds are still the ones from the generation
@@ -5109,8 +5105,8 @@ void SceneMirror::syncLiveTextures()
         // writeLive already refuses on the document side.)
         // THE MESSAGE OWNS THE PIXELS (U3 stage 3, decision 8): copied here; a refusal is a frame error.
         {
-            const unsigned w = unsigned(img.width()), h = unsigned(img.height());
-            std::vector<unsigned char> px(img.constBits(), img.constBits() + size_t(w) * size_t(h) * 4u);
+            const unsigned w = unsigned(img.width), h = unsigned(img.height);
+            std::vector<unsigned char> px(img.rgba.begin(), img.rgba.end());
             post([t = tex.value(), w, h, px = std::move(px)](jahshaka::engine::Scene &s) {
                 s.updateTexture(t, w, h, px.data());
             });
@@ -7825,15 +7821,15 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         EnvironmentDesc env;
         const std::shared_ptr<iris::Texture2D> cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
                                                          ? skyLight->skyCubeTexture : std::shared_ptr<iris::Texture2D>();
-        const QImage *faces = cube ? cube->cubeFaces() : nullptr;
+        const iris::Image *faces = cube ? cube->cubeFaces() : nullptr;
         if (cube != mDomeSource) {
             releaseDome();
             if (faces) {
                 bool ok = true;
                 for (int i = 0; ok && i < 6; ++i) {
-                    const QImage img = faces[i].convertToFormat(QImage::Format_RGBA8888);
-                    mDomeFaceTextures[i] = img.isNull() ? 0 : newTexture(unsigned(img.width()), unsigned(img.height()),
-                                                                         img.constBits(), true);
+                    const iris::Image &img = faces[i];
+                    mDomeFaceTextures[i] = img.isNull() ? 0 : newTexture(unsigned(img.width), unsigned(img.height),
+                                                                         img.rgba.data(), true);
                     ok = mDomeFaceTextures[i] != 0;
                 }
                 if (!ok) releaseDome();
@@ -8246,12 +8242,12 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
         }
         case SkySource::Kind::Cubemap: {
             // The document keeps the six face images (+X,-X,+Y,-Y,+Z,-Z); upload them.
-            const QImage *faces = mSource->skyTexture->cubeFaces();
+            const iris::Image *faces = mSource->skyTexture->cubeFaces();
             bool ok = faces != nullptr;
             for (int i = 0; ok && i < 6; ++i) {
-                const QImage img = faces[i].convertToFormat(QImage::Format_RGBA8888);
+                const iris::Image &img = faces[i];
                 if (img.isNull()) { ok = false; break; }
-                mSkyFaceTextures[i] = newTexture(unsigned(img.width()), unsigned(img.height()), img.constBits(), true);
+                mSkyFaceTextures[i] = newTexture(unsigned(img.width), unsigned(img.height), img.rgba.data(), true);
                 if (!mSkyFaceTextures[i]) ok = false;
             }
             if (ok) {

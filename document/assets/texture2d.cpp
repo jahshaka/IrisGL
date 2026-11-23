@@ -11,91 +11,60 @@ For more information see the LICENSE file
 
 #include "document/assets/texture2d.h"
 
-#include <QColor>
-#include <QImageReader>
-#include <QDebug>
+#include <cassert>
+
 #include "core/logger.h"
 #include "document/assets/livetextures.h"
 
 namespace iris
 {
 
+std::atomic<Texture2D::ReadableProbe> Texture2D::sProbe{nullptr};
+
 Texture2D::Texture2D()
 {
 }
 
+bool Texture2D::installReadableProbe(ReadableProbe probe)
+{
+    ReadableProbe expected = nullptr;
+    if (sProbe.compare_exchange_strong(expected, probe)) return true;
+    if (expected == probe) return true;   // the same function again: nothing changes
+    irisLog("Texture2D::installReadableProbe: REFUSED - a different readable-image probe is already installed "
+            "(the probe is installed once, at boot, never swapped)");
+    assert(!"Texture2D::installReadableProbe: a second, different probe");
+    return false;
+}
+
+Texture2D::ReadableProbe Texture2D::readableProbe()
+{
+    return sProbe.load();
+}
+
 Texture2DPtr Texture2D::load(QString path)
 {
-    return load(path,true);
-}
-
-Texture2DPtr Texture2D::load(QString path,bool flipY)
-{
-    // NO PIXEL DECODE (lane-openasync, 2026-09-03). This used to decode the
-    // whole image and then MIRROR it vertically — the legacy GL renderer's
-    // flipY convention. Nothing reads those pixels any more: since the
-    // rendering half of IrisGL was deleted, every consumer of a loaded
-    // Texture2D reads `source` (the path) and hands it to the engine, which
-    // decodes and uploads it itself (SceneMirror::textureFor, the sky's
-    // QImage(source), the export walkers). `image` was write-only.
-    //
-    // Measured: 31 built-in material presets each set up to four textures,
-    // and AssetWidget::trigger() rebuilds them on EVERY scene open —
-    // 1.11 SECONDS per open of decode-then-mirror whose result was thrown
-    // away. A header probe keeps the ONE contract callers depend on (a null
-    // return means "not a readable image", which is how
-    // CustomMaterial::setTextureWithUniform decides to remove the slot) at
-    // roughly zero cost.
-    //
-    // flipY is therefore now a no-op for the file path. It stays in the
-    // signature because create(QImage) callers still express the convention,
-    // and because the sky/decal/mask paths that DO need pixels build their
-    // QImage themselves.
-    Q_UNUSED(flipY);
-    QImageReader probe(path);
-    if (!probe.canRead()) {
-        irisLog("error loading image: "+path);
-        return Texture2DPtr(nullptr);
+    // NO PIXEL DECODE (lane-openasync, 2026-09-03): every consumer of a
+    // loaded Texture2D reads `source` (the path) and hands it to the engine,
+    // which decodes and uploads it itself (SceneMirror::textureFor, the export
+    // walkers). Measured then: decoding here cost 1.11 SECONDS per scene open
+    // for pixels nobody read. A null return still means "not a readable
+    // image": the host's probe answers that (texture2d.h).
+    if (const ReadableProbe probe = sProbe.load()) {
+        if (!probe(path.toStdString())) {
+            irisLog("error loading image: " + path);
+            return Texture2DPtr(nullptr);
+        }
     }
-
-    auto tex = create(QImage());
-    tex->source = path;
-
-    return tex;
-}
-
-Texture2DPtr Texture2D::create(QImage image)
-{
     auto tex = new Texture2D();
-    tex->image = image;
+    tex->source = path;
     return std::shared_ptr<Texture2D>(tex);
 }
 
-std::shared_ptr<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
-                                                   QString posY, QString negY,
-                                                   QString negX, QString posX,
-                                                   QImage *info)
+std::shared_ptr<Texture2D> Texture2D::createCubeMap(const Image (&faces)[6])
 {
-    QImage faces[6] = {
-        QImage(posX).convertToFormat(QImage::Format_RGBA8888),
-        QImage(negX).convertToFormat(QImage::Format_RGBA8888),
-        QImage(posY).convertToFormat(QImage::Format_RGBA8888),
-        QImage(negY).convertToFormat(QImage::Format_RGBA8888),
-        QImage(posZ).convertToFormat(QImage::Format_RGBA8888),
-        QImage(negZ).convertToFormat(QImage::Format_RGBA8888)
-    };
-    for (auto &face : faces) {
-        if (face.isNull()) {
-            return nullptr;
-        }
+    for (const Image &face : faces) {
+        if (face.isNull() || face.width != faces[0].width || face.height != faces[0].height) return nullptr;
     }
-    int size = faces[0].width();
-    for (auto &face : faces) {
-        if (face.width() != size || face.height() != size) {
-            face = face.scaled(size, size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-        }
-    }
-
     auto tex = new Texture2D();
     tex->cubeMap = true;
     tex->image = faces[0];
@@ -111,11 +80,9 @@ Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
                                    int width, int height, bool mipmaps)
 {
     if (guid.isEmpty() || width <= 0 || height <= 0) return Texture2DPtr();
-    QImage black(width, height, QImage::Format_RGBA8888);
-    black.fill(QColor(0, 0, 0, 255));
 
     auto tex = new Texture2D();
-    tex->image           = black;
+    tex->image           = Image::filled(width, height, 0, 0, 0, 255);
     tex->live            = true;
     tex->liveMips        = mipmaps;
     tex->liveTextureGuid = guid;
@@ -128,25 +95,23 @@ Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
     return std::shared_ptr<Texture2D>(tex);
 }
 
-bool Texture2D::writeLive(const QImage &rgba)
+bool Texture2D::writeLive(const Image &rgba)
 {
     if (!live || rgba.isNull()) return false;
-    if (rgba.width() != image.width() || rgba.height() != image.height()) return false;
-    image = rgba.format() == QImage::Format_RGBA8888
-                ? rgba
-                : rgba.convertToFormat(QImage::Format_RGBA8888);
+    if (rgba.width != image.width || rgba.height != image.height) return false;
+    image = rgba;
     ++generation;
     return true;
 }
 
 int Texture2D::getWidth()
 {
-    return image.width();
+    return image.width;
 }
 
 int Texture2D::getHeight()
 {
-    return image.height();
+    return image.height;
 }
 
 }

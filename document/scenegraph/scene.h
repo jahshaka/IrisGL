@@ -14,6 +14,7 @@ For more information see the LICENSE file
 
 #include "core/math/vec.h"
 #include <functional>
+#include <QColor>
 #include <QList>
 #include <QStringList>
 #include <QVector>

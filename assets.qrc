@@ -1,7 +1,6 @@
 <RCC>
     <qresource prefix="/">
         <file>assets/models/sky.obj</file>
-        <file>assets/textures/default_particle.jpg</file>
         <file>assets/models/cube.obj</file>
         <file>assets/shaders/surface.vert</file>
         <file>assets/shaders/surface.frag</file>

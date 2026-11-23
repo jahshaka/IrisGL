@@ -12,19 +12,21 @@ For more information see the LICENSE file
 #ifndef TEXTURE2D_H
 #define TEXTURE2D_H
 
+#include <atomic>
 #include <memory>
-#include <QImage>
+#include <string>
 
+#include "document/assets/image.h"
 #include "document/assets/texture.h"
 #include "irisglfwd.h"
 
 namespace iris
 {
 
-// GL-free texture asset. Holds the source path and (for images loaded or
-// generated on the CPU) the pixel data, which is what the engine-backed
-// viewport reads: SceneMirror re-loads by `source`, and cube skies read the
-// six face images via cubeFaces().
+// GL-free texture asset. Holds the source path and, for the pixels the document
+// itself holds (a cube sky's faces, a live texture's frame), an iris::Image,
+// which is what the engine-backed viewport reads: SceneMirror re-loads by
+// `source`, and cube skies read the six face images via cubeFaces().
 class Texture2D: public Texture
 {
 
@@ -39,26 +41,20 @@ public:
         return Texture2DPtr(nullptr);
     }
 
-    /**
-     * Loads a texture. The image is flipped on the y-axis.
-     * @param path
-     * @return
-     */
+    /// A texture that names a FILE: records `path` as `source`; no pixel is read (the engine decodes the file
+    /// itself). NULL when the process's readable-image probe (below) says the file is no readable image - the one
+    /// contract callers depend on: a null load is "no map".
+    /// WITH NO PROBE INSTALLED (a Qt-free process: jahlab, jahengine) the path is recorded as it is and THE ENGINE's
+    /// OWN LOAD IS THE VERDICT: OgreScene::loadTexture refuses a file that is no image by name (its error sink).
     static Texture2DPtr load(QString path);
 
-    /**
-     * Loads a texture. Setting flipY to true flips the image on the y-axis
-     * @param path
-     * @return
-     */
-    static Texture2DPtr load(QString path, bool flipY);
-
-    /**
-     * Created texture from QImage
-     * @param image
-     * @return
-     */
-    static Texture2DPtr create(QImage image);
+    /// THE READABLE-IMAGE PROBE (NOQT-DOCUMENT-1 stage 3): the document reads no file, so whether a path is a
+    /// readable image is asked of the host. Studio installs its probe (src/services/imagedecode.h) ONCE at boot,
+    /// before any thread that loads exists; it is read from any thread. A second install of the SAME function is a
+    /// no-op; a DIFFERENT one is refused by name (an assertion in Debug, a logged error and `false` in Release).
+    using ReadableProbe = bool (*)(const std::string &path);
+    static bool installReadableProbe(ReadableProbe probe);
+    static ReadableProbe readableProbe();
 
     /**
      * Returns the path to the source file of the texture
@@ -68,7 +64,9 @@ public:
         return source;
     }
 
-    static Texture2DPtr createCubeMap(QString, QString, QString, QString, QString, QString, QImage *i = nullptr);
+    /// A cube texture from its six decoded faces (+X, -X, +Y, -Y, +Z, -Z), square and of one size (Studio's
+    /// imagedecode.h decodes and sizes them). NULL when a face is null or the sizes differ.
+    static Texture2DPtr createCubeMap(const Image (&faces)[6]);
 
     /// A LIVE texture (MATERIAL_GAPS_SPEC A-1): pixels a producer writes at
     /// runtime instead of a file on disk. Born opaque black at `width` x
@@ -85,7 +83,7 @@ public:
     /// For cubemaps: the six face images (+X, -X, +Y, -Y, +Z, -Z), kept so a renderer
     /// without GL can rebuild the sky. Null for other textures.
     bool isCubeMap() const { return cubeMap; }
-    const QImage *cubeFaces() const { return cubeMap ? cubeFaceImages : nullptr; }
+    const Image *cubeFaces() const { return cubeMap ? cubeFaceImages : nullptr; }
 
     // ---- live textures (MATERIAL_GAPS_SPEC A-1) --------------------------
     bool isLive() const { return live; }
@@ -97,22 +95,23 @@ public:
     /// this number differs from the one it last uploaded, so a still image
     /// costs one integer compare per frame and no engine call at all.
     quint64 liveGeneration() const { return generation; }
-    /// The current frame, always RGBA8888 and always the creation size.
-    const QImage &liveImage() const { return image; }
+    /// The current frame, always 8-bit RGBA and always the creation size.
+    const Image &liveImage() const { return image; }
     /// Replaces the pixels. REFUSES a different size (a live texture's
-    /// renderer-side twin cannot resize — destroy and create) and anything
-    /// that is not a live texture. Bumps the generation on success.
-    bool writeLive(const QImage &rgba);
+    /// renderer-side twin cannot resize — destroy and create), a null image
+    /// and anything that is not a live texture. Bumps the generation on success.
+    bool writeLive(const Image &rgba);
 
 private:
     Texture2D();
 
-    /// The decoded pixels — populated ONLY by create(QImage) (skies, decals,
-    /// light masks, thumbnails build from memory). load(path) deliberately
-    /// leaves this null: see the note there.
-    QImage image;
+    /// The pixels the document holds: a live texture's frame, or a cube's +X
+    /// face (its size). load(path) leaves this null: it records the path only.
+    Image image;
     bool cubeMap = false;
-    QImage cubeFaceImages[6];
+    Image cubeFaceImages[6];
+
+    static std::atomic<ReadableProbe> sProbe;
 
     bool     live = false;
     bool     liveMips = false;

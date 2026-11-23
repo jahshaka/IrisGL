@@ -21,7 +21,6 @@ namespace iris
 
 ParticleSystemNode::ParticleSystemNode() {
     sceneNodeType = SceneNodeType::ParticleSystem;
-    texture = iris::Texture2D::load(":assets/textures/default_particle.jpg");
     // A rendering-mode flag, NOT an authoring default: a preset (which resets
     // the authoring fields) leaves a distortion emitter a distortion emitter.
     distortion = false;

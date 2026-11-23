@@ -20,7 +20,8 @@ namespace iris
 
 // Document-side texture asset base: an asset path plus dimensions. The GL
 // object half died with the legacy renderer at step 14; the engine loads
-// textures itself from `source` (or from the kept QImage for generated ones).
+// textures itself from `source` (or from the kept iris::Image for the pixels
+// the document holds).
 class Texture
 {
 public:

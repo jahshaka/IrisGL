@@ -372,6 +372,7 @@ set (HEADERS
     document/scenegraph/decalnode.h
     document/assets/livetextures.h
     document/assets/shippedmeshes.h
+    document/assets/image.h
     document/assets/texture2d.h
     document/assets/texture.h
     document/scenegraph/shadowmap.h
