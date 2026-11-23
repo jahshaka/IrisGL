@@ -1,6 +1,8 @@
 #pragma once
 // THE ENGINE's IDS TYPES - engine-neutral values, one subject (ENGINE-HEADERS-1: split from Types.h by
 // declaration name). NOTHING here may reference Ogre, Qt or GL; a new subject is a new header, never an append here.
+#include "core/ids.h"
+
 #include <atomic>
 
 namespace jahshaka { namespace engine {
@@ -68,16 +70,7 @@ struct WindowTargetShape {
 /// node before the engine built it and no two scenes' ids collide. The GPU's 32-bit node key is Ogre's own IdType
 /// (OgreScene's gpuKeyOf), never this.
 using NodeId = unsigned long long;
-/// One counter for the process: a function-local static of an inline function is ONE object across the shared
-/// libraries and the executable (GCC's unique-object binding on ELF; a coalesced weak definition on Mach-O) while it is
-/// VISIBLE: libIrisDocument's -fvisibility-inlines-hidden would make its copy local, a second counter (NOQT-DOCUMENT-1).
-#if defined(__GNUC__)
-__attribute__((visibility("default")))
-#endif
-inline NodeId reserveNodeId()
-{
-    static std::atomic<NodeId> next{1};
-    return next.fetch_add(1, std::memory_order_relaxed);
-}
+/// One counter for the process, on every platform: IrisCore's (core/ids.h: defined once, in libIrisCore).
+inline NodeId reserveNodeId() { return NodeId(iris::nextNodeId()); }
 
 }}  // namespace jahshaka::engine

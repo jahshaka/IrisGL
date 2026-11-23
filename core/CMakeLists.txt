@@ -21,6 +21,8 @@ add_library(IrisCore SHARED
     geometry/trimesh.h
     guid.cpp
     guid.h
+    ids.cpp
+    ids.h
     json.cpp
     json.h
     log.cpp

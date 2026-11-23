@@ -969,8 +969,9 @@ target_include_directories(JahshakaEngine
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${JAHSHAKA_ENGINE_BUILD_ID_DIR})
 # THE Qt-FREE CORE (NOQT-CORE-1): the engine links IrisCore, the ONE shared library below the editor (irisgl/core), for
 # its caches' file I/O (core/files.h) and the one core budget (core/threadbudget.h, THREADING-1); its include root comes
-# with it. The engine still links no IrisGL (the document library) and includes nothing else of irisgl.
-target_link_libraries(JahshakaEngine PRIVATE IrisCore)
+# with it. The engine still links no IrisGL (the document library) and includes nothing else of irisgl. PUBLIC since
+# NOQT-DOCUMENT-1 stage 6: the public Ids.h's reserveNodeId() forwards to IrisCore's ONE node-id counter (core/ids.h).
+target_link_libraries(JahshakaEngine PUBLIC IrisCore)
 # OgreNext is PRIVATE on purpose: Ogre must not leak into Studio's include path.
 target_link_libraries(JahshakaEngine PRIVATE OgreNext)
 if(UNIX AND NOT APPLE)
