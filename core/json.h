@@ -9,9 +9,11 @@
 //     to write, naming its path.
 //   * A control character and `\n` are always written escaped: a string never holds a raw newline (`write`: one message
 //     a line).
-//   * An integer literal reads as an Int (outside int64: refused); a literal with a fraction or an exponent as a Number
-//     (past a double's range, either way: refused - an UNDERFLOW too: "1e-400", whose nearest double is a zero, is
-//     refused, never read as 0; a subnormal such as "4.9e-324" reads exactly).
+//   * An integer literal reads as an Int - THE TEXT's integer (2^60 written "1152921504606847000" reads Int
+//     1152921504606847000: equal to the double as a number, a Number written above 2^53 round-trips by VALUE, not by kind)
+//     - and past int64 as the Number nearest it (what the writer and Qt write for an integral double past 2^63 reads back);
+//     a literal with a fraction or an exponent as a Number (past a double's range, either way: refused - an UNDERFLOW too:
+//     "1e-400", whose nearest double is a zero, is refused, never read as 0; a subnormal such as "4.9e-324" reads exactly).
 //   * ONE NUMBER TEXT (NOQT-CORE-1 OPEN CALL 2, the lead's ruling: OPTION B, Qt's - measured on QJsonDocument): a Number
 //     that is integral and of magnitude <= 2^53 is written as an integer ("1", "-3", "9007199254740992"; -0.0 as "0", its
 //     sign dropped as Qt drops it); any other Number as the shortest text that reads back to the same bits, the shorter of

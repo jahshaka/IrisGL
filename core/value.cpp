@@ -52,6 +52,30 @@ const Value &Value::operator[](const std::string &name) const
     return v ? *v : null;
 }
 
+bool Value::set(const std::string &name, Value value)
+{
+    if (kind() != Kind::Object) return false;
+    for (Member &m : asObject())
+        if (m.first == name) {
+            m.second = std::move(value);
+            return true;
+        }
+    asObject().emplace_back(name, std::move(value));
+    return true;
+}
+
+bool Value::erase(const std::string &name)
+{
+    if (kind() != Kind::Object) return false;
+    Object &o = asObject();
+    for (auto it = o.begin(); it != o.end(); ++it)
+        if (it->first == name) {
+            o.erase(it);
+            return true;
+        }
+    return false;
+}
+
 bool Value::operator==(const Value &o) const
 {
     const Kind a = kind(), b = o.kind();

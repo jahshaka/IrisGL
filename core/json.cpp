@@ -608,10 +608,12 @@ private:
         if (integral) {
             std::int64_t i = 0;
             const std::from_chars_result r = std::from_chars(first, last, i);
-            if (r.ec != std::errc() || r.ptr != last)
-                return failAt(start, "the integer " + std::string(first, last) + " is outside a 64-bit integer");
-            out = Value(i);
-            return true;
+            if (r.ec == std::errc() && r.ptr == last) {
+                out = Value(i);
+                return true;
+            }
+            // PAST int64: the Number nearest it (the writer writes an integral double past 2^63 in its fixed form, as Qt does:
+            // what we write we read). Past a double's range it is refused below, as any number is.
         }
         double d = 0;
         const std::from_chars_result r = std::from_chars(first, last, d);

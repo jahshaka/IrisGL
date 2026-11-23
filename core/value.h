@@ -61,6 +61,13 @@ public:
     const Value *find(const std::string &name) const;
     /// The same, a null Value when absent.
     const Value &operator[](const std::string &name) const;
+    /// AN OBJECT's MEMBER SET (NOQT-CORE-1 stage 3, for the document's overrides): replaced IN PLACE when the object has it
+    /// (its position kept), else appended - the members stay in the order the type holds them, INSERTION order (the compact
+    /// writer keeps it; writePretty sorts by name, so the saved form is the same whatever order the members were set in).
+    /// False, nothing changed, when this is not an object (as `find` answers null for one).
+    bool set(const std::string &name, Value value);
+    /// The member removed: true when one went, false when this is not an object or holds no such member.
+    bool erase(const std::string &name);
 
     /// Equal kinds and contents, except that an Int and a Number are equal when their numbers are (a script cannot
     /// tell them apart).
