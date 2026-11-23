@@ -95,10 +95,12 @@ else
     #
     # $ORIGIN/.. is for lib/OGRE-Next/*.so (RenderSystem_Vulkan and friends),
     # which are dlopen'd from a subdirectory and need to reach lib/ above them.
-    # Single quotes: $ORIGIN must reach the linker literally, not be expanded
-    # by this shell. CMake applies it at INSTALL time, so the build tree is
-    # unaffected.
-    PLATFORM_FLAGS="-DCMAKE_INSTALL_RPATH=\$ORIGIN;\$ORIGIN/.."
+    # $ORIGIN/../lib is for the build tree's own bin/ (OGRE_SAMPLES=1: build/bin
+    # beside build/lib). Single quotes: $ORIGIN must reach the linker literally,
+    # not be expanded by this shell. The build tree takes the same RPATH at LINK
+    # time (CMAKE_BUILD_WITH_INSTALL_RPATH, below: URGENT #175) - never an
+    # absolute build dir that the install then NUL-pads over in place.
+    PLATFORM_FLAGS="-DCMAKE_INSTALL_RPATH=\$ORIGIN;\$ORIGIN/..;\$ORIGIN/../lib -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON"
 fi
 
 [ -f "$SRC/CMakeLists.txt" ] || {
@@ -278,11 +280,19 @@ fi
 RENDERER_FLAGS="-DOGRE_BUILD_RENDERSYSTEM_GL3PLUS=OFF -DOGRE_BUILD_RENDERSYSTEM_VULKAN=ON -DOGRE_BUILD_TOOLS=OFF"
 
 # Compiler cache when installed (2026-09-11): each tree builds its own Ogre, so a shared
-# ccache turns every tree's build after the first into cache hits.
+# ccache turns every tree's build after the first into cache hits - ONLY IF NO COMPILE
+# LINE NAMES THE TREE (URGENT #175, measured 2026-11-23: a fresh tree's fork build hit
+# 1 of 478, spikes/audit-fixes/B11-ccache-175.txt). ccache's base_dir (~/Developer)
+# rewrites a path relative to the compiler's cwd, and ninja's cwd is the PHYSICAL
+# spelling (/mnt/work/...), so every path became ../(x11)/home/.../worktrees/<tree>/...
+# The launcher runs ccache with PWD = the build dir in its ~/Developer spelling (the
+# Studio build's own launcher, CMakeLists.txt "env PWD"), and -ffile-prefix-map takes
+# the source dir out of __FILE__ and the debug info (comp_dir too).
 CCACHE_FLAGS=""
 if command -v ccache >/dev/null 2>&1 && [ "${JAH_NO_CCACHE:-0}" != "1" ]; then
-    CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+    CCACHE_FLAGS="-DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/env;PWD=$SRC/build;ccache -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/env;PWD=$SRC/build;ccache"
 fi
+PREFIX_MAP_FLAGS="-DCMAKE_C_FLAGS=-ffile-prefix-map=$SRC/= -DCMAKE_CXX_FLAGS=-ffile-prefix-map=$SRC/="
 
 # GPU TIMESTAMPS (was fork 1a81f866a+1bccc3f93 (was 0027), now the fork's M03 commit) — DEV BUILDS
 # ONLY, the first of the two
@@ -301,7 +311,7 @@ if [ "${JAH_PRODUCTION:-0}" = "1" ]; then
 fi
 
 cmake -S "$SRC" -B "$SRC/build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo $CCACHE_FLAGS $GPU_TIMESTAMP_FLAGS \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo $CCACHE_FLAGS $PREFIX_MAP_FLAGS $GPU_TIMESTAMP_FLAGS \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   -DOGRE_SHADER_COMPILATION_THREADING_MODE=2 \
