@@ -383,9 +383,17 @@ struct StillnessRun::Impl {
         engine.request([&](Engine &e) { ok = e.setArm(name, value); });
         return ok;
     }
+    // THE MONITOR IS SWITCHED AS A HOST SWITCHES IT (the app's own capture idiom, src/services/framemonitor.cpp): the
+    // host's call - its record (Engine::frameMonitor) written AT THE CALL in both shapes, with host records (a message)
+    // and without (applied at once) - then an empty request, which applies the pending message before the run's next
+    // frame. Never from inside a request: there the engine side applies the level and the host's record, which only the
+    // host side writes (decision 45 D5), would stay at the old level - under records the restore below then never
+    // switched the monitor off (the app left recording after world.stillness). ONE TRUTH: frameMonitor() is the level
+    // applied now for every level a host-side caller set.
     void setMonitor(MonitorLevel level)
     {
-        engine.request([&](Engine &e) { e.setFrameMonitor(level); });
+        engine.setFrameMonitor(level);
+        engine.request([](Engine &) {});
     }
 
     void restore()
@@ -398,7 +406,11 @@ struct StillnessRun::Impl {
         if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
         // flushes everything waiting into the queue (and the tee); a level the host set since is the host's. THE LEVEL
         // IS THE HOST's OWN RECORD (Engine::frameMonitor), never the published frame's: on the calling thread (no host
-        // records: jahlab, jahengine) a request applies at the call and the published record says so only a frame later
+        // records: jahlab, jahengine) a request applies at the call and the published record says so only a frame later.
+        // THE LIMIT (a premise of both run loops: the app's EngineSceneViewport::runStillness and jahlab's stillness
+        // verb drive every frame SYNCHRONOUSLY on the host thread, so no host call can start a capture inside a run): a
+        // host capture started DURING a run would read as this run's Review here and be switched off. A run made
+        // asynchronous must first give a host capture its own mark.
         if (monitorOurs && engine.frameMonitor() == monitorSet) setMonitor(monitorWas);
         drainRecords();
         if (tee) {
