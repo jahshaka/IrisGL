@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <mutex>
 #include <string>
-#include <utility>
 
 namespace iris::log {
 
@@ -45,7 +44,9 @@ void setSink(Sink sink)
 {
     State &s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
-    s.sink = std::move(sink);
+    // A SWAP, never an assignment: the OLD sink (now in `sink`) is destroyed with the parameter, after the lock is
+    // released - a captured object whose destructor logs, or takes a lock a logging thread holds, cannot deadlock here.
+    s.sink.swap(sink);
 }
 
 void info(std::string_view text)  { emit(Severity::Info, "[info] ", text); }

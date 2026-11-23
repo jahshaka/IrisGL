@@ -24,7 +24,8 @@ using Sink = std::function<void(Severity, std::string_view)>;
 
 /// Installs `sink` in place of the one before it (an empty Sink: back to stderr). The sink is called UNDER the log's
 /// mutex, one record at a time. A SINK MUST NEVER LOG: the mutex is not recursive, so a sink that calls info / warn /
-/// error deadlocks. A slow sink blocks every logging thread (accepted: the one sink is the host's queueing write).
+/// error deadlocks. A slow sink blocks every logging thread (accepted: the one sink is the host's queueing write). The
+/// sink it replaces is destroyed AFTER the mutex is released, so the old sink's captures may log as they die.
 IRIS_CORE_API void setSink(Sink sink);
 
 IRIS_CORE_API void info(std::string_view text);    ///< status, timing, a wait
