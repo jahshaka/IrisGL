@@ -56,7 +56,9 @@ namespace {
 /// A VIEW THIS HOST MADE (the R lane's audit, 3): enabled, asynchronous shaders, size and sample count are the view's
 /// OWNER's - a view lent to a script (lab.view(), a handed-in view) gets them back from nobody (the owner's give-back
 /// re-asserts camera, background and post-fx only) - so on a view this host did not make they FAIL by name, the test
-/// engine.view.destroy uses. Asked of the handle's pointer before anything is read of the view.
+/// engine.view.destroy uses. AND ITS SHADOWS (the tail, the lead's ruling 2026-11-23): the owner's too - the lab's
+/// mirror re-asserts them every frame (scenemirror.cpp windowPass / buildViewPostFx: part.shadows), so a script's set
+/// there would last one frame. Asked of the handle's pointer before anything is read of the view.
 bool madeHere(Call &c, const Commands &k, const char *what)
 {
     const View *v = c.object<View>(c[0]);
@@ -193,8 +195,11 @@ void registerViewCommands(Host &host, const Commands &k)
               return Value();
           });
     r.add({"engine.view.setShadows", {Access::Changes, {target(handle("view", kView)), arg("on", Kind::Bool)}, Kind::Null},
-           "Shadow maps for the view on or off (lights opt in with castShadows); a change rebuilds its workspace."},
+           "Shadow maps for the view on or off (lights opt in with castShadows); a change rebuilds its workspace. A view "
+           "this host did not make FAILS by name (its shadows are its owner's: the lab's mirror re-asserts them every "
+           "frame)."},
           [k](Call &c) -> Value {
+              if (!madeHere(c, k, "shadows")) return Value();
               View *v = k.view(c, c[0]);
               if (!v) return Value();
               v->setShadows(c[1].asBool());
