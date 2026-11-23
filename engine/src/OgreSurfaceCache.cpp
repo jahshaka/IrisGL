@@ -1871,7 +1871,17 @@ void SurfaceCache::aimCamera(const CardRec &card, unsigned slot) {
 // workspace inside its own frame (makeWorkspace says why that is the shadow
 // fix), and these four hooks do the per-card work around each pass and the
 // copies after the last one.
-void SurfaceCache::allWorkspacesBeforeBeginUpdate() { gCapturing = false; }
+void SurfaceCache::allWorkspacesBeforeBeginUpdate() {
+    gCapturing = false;
+    // ...AND THE AHEAD CLASS, for the same throw: the request-only slot sets it in workspacePreUpdate and takes it back
+    // in workspacePosUpdate, which a throw inside the workspace's _update never reaches; a class left on would send
+    // every later request of the frame's own to the ahead queue - the owner's order law (gi.route_landing.order) off,
+    // silently. No row: the throw is not reachable in a fixture (the slot runs only where captures compile in the
+    // background). The decode's own setting (RayQueryTier::beginHitDecode) runs inside a view's workspace, after this.
+    if (Ogre::Root *root = Ogre::Root::getSingletonPtr())
+        if (Ogre::HlmsManager *hm = root->getHlmsManager())
+            if (Ogre::HlmsAsyncCompiler *compiler = hm->getAsyncCompiler()) compiler->_jahSetAheadClass(false);
+}
 
 void SurfaceCache::setAsyncShaders(bool on) {
     mAsyncShaders = on;
@@ -4378,6 +4388,13 @@ void SurfaceCache::update(const CardSceneView &view) {
 // pass, not on the view). A round of K keys takes at least K frames (and the scene's slots / the offer's span): a
 // completing landing that comes before the round ends asks for the remaining keys at the landing, as before - later
 // for those, never wrong (the owner's rule: faster loading over correctness while shaders stream in).
+// ITS COST WHILE A READER IS OWED (a named leftover, measured as a count, its ms UNMEASURED): ONE capture pass a frame -
+// slot 0's PrePassCreate scene pass (no shadow node, no Forward+), the six-layer clear of its slice, ONE item drawn, and
+// the scene pass's cull walk over the scene - REPEATED for the same key every frame until it draws with nothing missing
+// (the draw is the status check: workspacePosUpdate's placeholders and skips). gi.route_landing.capture's cold room: 563
+// slot passes before its landing for ONE key (the room's cold backlog drains in 941 frames), 0 at rest. A pass that
+// only asked and then waited on the key's own requests would need the capture pass's pass cache outside its pass (it
+// exists only while the pass runs, under gCapturing): not a few lines, so the draw stays the check.
 void SurfaceCache::planRequestOnly(const CardSceneView &view) {
     mRequestOnly = false;
     if (!view.readerOwed || view.itemSlots != mRequestItemSlots) {   // (a new owed period or a new item: a new round)
