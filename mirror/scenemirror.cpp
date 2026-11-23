@@ -683,45 +683,67 @@ std::function<void(const std::string &)> SceneMirror::entryRefusal(iris::SceneNo
 // A MISSING OPTIONAL FILE MUST NOT TAKE THE LAMP OR THE EMITTER OUT OF THE PICTURE (the lead's ruling C1; what "a missing
 // ramp must not take the whole emitter down" said of the particles before the engine's refusal became atomic): the
 // engine refuses the push whole and finally (Engine.h, setLight / setParticleSystem), the mirror says it once and pushes
-// the same object once more with that file dropped - and keeps the refused path, so the next pushes drop it too.
+// the same object once more with that file dropped.
+// THE FALLBACK's OWN ANSWER DECIDES (the confirm's D2, the lead's ruling - never the refusal's words): the path is latched
+// as refused (Entry::lightProfileRefused / particleRampRefused: dropped from every later push while the document names it)
+// ONLY WHEN THE FALLBACK IS ACCEPTED - that acceptance is the proof the path was the cause. A fallback refused too means
+// another cause (a broken texture, an exception): nothing is latched, nothing stays dropped, and the next change of the
+// document's value pushes the whole value again, its path included.
+// EVERYTHING THE ANSWERS SAY IS BUILT HERE, WHILE THE NODE LIVES (the confirm's D1): the answers run at a sync's top,
+// before the entries of nodes that left are released (consumeEvicted) - they read nothing of the node then, only the
+// entry found by its address AND its engine id.
 std::function<void(const std::string &)> SceneMirror::lightRefusal(iris::SceneNode *node, LightDesc pushed)
 {
     auto said = entryRefusal(node, "light", nullptr, false);
+    auto fallbackSaid = entryRefusal(node, "light (its fallback without the profile)", nullptr, false);
     const auto it = mEntries.constFind(node);
     const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
-    // (the entry found by the node AND its engine id: a node gone, or another made at its address, is not ours)
-    return [this, said, key = node, id, pushed](const std::string &why) {
+    return [this, said, fallbackSaid, key = node, id, pushed](const std::string &why) {
         said(why);
         if (pushed.iesProfilePath.empty()) return;
         const auto e = mEntries.find(key);
         if (e == mEntries.end() || e->node != id) return;
-        e->lightProfileRefused = pushed.iesProfilePath;
         LightDesc lamp = pushed;
         lamp.iesProfilePath.clear();   // the lamp drawn, its lobe dropped
-        postOk(entryRefusal(key, "light", nullptr, false), &jahshaka::engine::Scene::setLight, e->node, lamp);
+        postAnswered(scenecmd::bindCall(&jahshaka::engine::Scene::setLight, id, lamp),
+                     [this, fallbackSaid, key, id, path = pushed.iesProfilePath](bool ok, const std::string &why2) {
+                         if (!ok) {   // another cause: nothing latched
+                             fallbackSaid(why2);
+                             return;
+                         }
+                         const auto f = mEntries.find(key);
+                         if (f != mEntries.end() && f->node == id) f->lightProfileRefused = path;
+                     });
     };
 }
 
 std::function<void(const std::string &)> SceneMirror::particleRefusal(iris::SceneNode *node, ParticleSystemDesc pushed)
 {
     auto said = entryRefusal(node, "particle system", nullptr, false);
+    auto fallbackSaid = entryRefusal(node, "particle system (its fallback without the ramp)", nullptr, false);
     const auto it = mEntries.constFind(node);
     const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
-    return [this, said, key = node, id, pushed](const std::string &why) {
+    return [this, said, fallbackSaid, key = node, id, pushed](const std::string &why) {
         said(why);
         const auto e = mEntries.find(key);
         if (e == mEntries.end() || e->node != id) return;
         ParticleSystemDesc emitter = pushed;
-        bool dropped = false;
+        std::string ramp;
         for (ParticleAffectorDesc &a : emitter.affectors)
             if (a.kind == ParticleAffectorDesc::Kind::ColourRamp && !a.colourRampPath.empty()) {
-                e->particleRampRefused = a.colourRampPath;
+                ramp = a.colourRampPath;
                 a.colourRampPath.clear();   // the emitter drawn, its ramp dropped (an empty path: no ramp yet)
-                dropped = true;
             }
-        if (dropped)
-            postOk(entryRefusal(key, "particle system", nullptr, false), &jahshaka::engine::Scene::setParticleSystem,
-                   e->node, emitter);
+        if (ramp.empty()) return;
+        postAnswered(scenecmd::bindCall(&jahshaka::engine::Scene::setParticleSystem, id, emitter),
+                     [this, fallbackSaid, key, id, ramp](bool ok, const std::string &why2) {
+                         if (!ok) {   // another cause: nothing latched
+                             fallbackSaid(why2);
+                             return;
+                         }
+                         const auto f = mEntries.find(key);
+                         if (f != mEntries.end() && f->node == id) f->particleRampRefused = ramp;
+                     });
     };
 }
 
