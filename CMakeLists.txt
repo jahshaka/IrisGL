@@ -562,9 +562,12 @@ target_include_directories(IrisGL PRIVATE
 # Ids.h (reserveNodeId), the counter every Scene::createNode draws from too. PRIVATE, and Ids.h only.
 target_include_directories(IrisGL PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
 
-target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
+target_link_libraries (IrisGL PUBLIC zip Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
 target_link_libraries (IrisGL PUBLIC IrisCore)   # the Qt-free core (NOQT-CORE-1)
-target_link_libraries (IrisGL PUBLIC IrisDocument)   # the Qt-free document (NOQT-DOCUMENT-1 stage 6)
+# The Qt-free document (NOQT-DOCUMENT-1 stage 6), and with it Bullet: Bullet's archives are linked into libIrisDocument
+# ALONE (document/CMakeLists.txt) - a second link here would give libIrisGL its own copy of Bullet's state (btThreads.cpp's
+# file-static thread counter) the first time the importer or the mirror named a Bullet symbol.
+target_link_libraries (IrisGL PUBLIC IrisDocument)
 target_compile_definitions(IrisGL PUBLIC BT_THREADSAFE=1)   # Bullet's multi-threaded build (above)
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
