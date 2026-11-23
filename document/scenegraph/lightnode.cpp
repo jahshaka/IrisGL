@@ -167,9 +167,9 @@ Value LightNode::getPropertyValue(std::string_view valueName)
     // document's state, the resolved path and the normalisation are the host's
     // (they come from the asset store, which irisgl cannot reach).
     if(valueName == "iesProfile")
-        return Value(iesProfileGuid.toStdString());
+        return Value(iesProfileGuid);
     if(valueName == "iesProfilePath")
-        return Value(iesProfilePath.toStdString());
+        return Value(iesProfilePath);
     if(valueName == "iesNormalisation")
         return Value(double(iesNormalisation));
     if(valueName == "iconSize")
@@ -215,8 +215,8 @@ bool LightNode::setPropertyValue(std::string_view valueName, const Value &value)
     // (lightnode.h). A LIGHT change, so the shadow and probe caches see it
     // through the same staleness path a colour edit already travels.
     if (valueName == "followsAtmosphere") { if (!isBool) return false; followsAtmosphere = value.asBool(); return markedParams(); }
-    if (valueName == "iesProfile")        { if (!isText) return false; iesProfileGuid = QString::fromStdString(value.asString()); return markedParams(); }
-    if (valueName == "iesProfilePath")    { if (!isText) return false; iesProfilePath = QString::fromStdString(value.asString()); return markedParams(); }
+    if (valueName == "iesProfile")        { if (!isText) return false; iesProfileGuid = value.asString(); return markedParams(); }
+    if (valueName == "iesProfilePath")    { if (!isText) return false; iesProfilePath = value.asString(); return markedParams(); }
     if (valueName == "iesNormalisation")  { if (!isNum) return false; iesNormalisation = f;  return markedParams(); }
     if (valueName == "iconSize")          { if (!isNum) return false; iconSize = f;          return markedParams(); }
     if (valueName == "skySource")         { if (!isInt) return false; skySource = i == 1 ? SkyLightSource::Cubemap : SkyLightSource::Sky; return markedParams(); }

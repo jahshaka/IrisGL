@@ -15,7 +15,9 @@ For more information see the LICENSE file
 
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/scenenode.h"
+#include "core/log.h"
 #include "core/math/trs.h"
+#include "core/text.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,7 +29,6 @@ For more information see the LICENSE file
 #include <unordered_set>
 #include <vector>
 
-#include <QDebug>
 
 namespace iris
 {
@@ -68,8 +69,8 @@ void setOwnerById(long long id, SceneNode *owner)
         static bool warned = false;
         if (!warned) {
             warned = true;
-            qWarning("iris::graph: the document node id space is exhausted (id %lld) — nodes created from here on "
-                     "are not journaled.", id);
+            iris::log::warn(iris::text::cat("iris::graph: the document node id space is exhausted (id ", id,
+                                            ") — nodes created from here on are not journaled."));
         }
         return;
     }
@@ -231,8 +232,8 @@ void markMoved(DocNode &n)
             any = true;
         }
         if (any)
-            qWarning("iris::graph: a scene ROOT node was moved — every static subtree under it has been demoted, "
-                     "because a static node cannot follow a moving parent (SCENEGRAPH_SPEC §6 rule 2).");
+            iris::log::warn("iris::graph: a scene ROOT node was moved — every static subtree under it has been demoted, "
+                            "because a static node cannot follow a moving parent (SCENEGRAPH_SPEC §6 rule 2).");
     }
 }
 
@@ -450,8 +451,8 @@ bool setStatic(DocNode &n, bool value)
     }
     if (value) {
         if (!eligibleStaticParent(n.parent)) {
-            qWarning("iris::graph::setStatic(true) refused: a static node's parent must be static or a scene root "
-                     "(SCENEGRAPH_SPEC §6 rule 2).");
+            iris::log::warn("iris::graph::setStatic(true) refused: a static node's parent must be static or a scene root "
+                            "(SCENEGRAPH_SPEC §6 rule 2).");
             return false;
         }
         if (n.owner && !n.owner->isStaticEligible()) return false;
@@ -465,8 +466,8 @@ bool promoteNode(DocNode &n, bool *switched)
     if (switched) *switched = false;
     if (n.graphStatic) return true;
     if (!eligibleStaticParent(n.parent)) {
-        qWarning("iris::graph::promoteNode refused: a static node's parent must be static or a scene root "
-                 "(SCENEGRAPH_SPEC §6 rule 2).");
+        iris::log::warn("iris::graph::promoteNode refused: a static node's parent must be static or a scene root "
+                        "(SCENEGRAPH_SPEC §6 rule 2).");
         return false;
     }
     if (n.owner && !n.owner->isStaticEligible()) return false;

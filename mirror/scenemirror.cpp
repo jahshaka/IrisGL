@@ -114,6 +114,8 @@ struct MirrorStage {
 
 }   // namespace
 #include <QtMath>
+#include "document/mapvalue.h"
+#include <cstdint>
 
 using namespace jahshaka::engine;
 
@@ -353,6 +355,13 @@ struct Hasher {
         bytes(s.utf16(), size_t(s.size()) * sizeof(char16_t));
         return *this;
     }
+    /// A document name (UTF-8): its length, then its bytes (a signature compared within one run only).
+    Hasher &operator<<(const std::string &s) {
+        const quint32 n = quint32(s.size());
+        bytes(&n, sizeof n);
+        bytes(s.data(), s.size());
+        return *this;
+    }
     Hasher &operator<<(const iris::Vec3 &v) { return *this << v.x() << v.y() << v.z(); }
     Hasher &operator<<(const iris::Quat &q) { return *this << q.x() << q.y() << q.z() << q.scalar(); }
 };
@@ -411,7 +420,7 @@ SceneMirror::SceneMirror(Scene *target) : mTarget(target)
     // socket resolver its pose source (CAMERAS_SPEC §5). Without one the
     // resolver still works — at the rig's bind pose — which is exactly what a
     // document-only host should get.
-    mSockets.setPoseSource([this](iris::MeshNode *node, QHash<QString, iris::Mat4> &out) {
+    mSockets.setPoseSource([this](iris::MeshNode *node, std::unordered_map<std::string, iris::Mat4> &out) {
         return boneWorldTransforms(node, out);
     });
     // THE VERIFICATION SWITCH (DIRTY_SET_MIRROR_SPEC §3.8 item 2). `full` runs
@@ -1589,7 +1598,7 @@ void SceneMirror::consumeDirty()
 void SceneMirror::syncPerFrameSet()
 {
     if (!mSource) return;
-    for (const iris::LightNodePtr &light : mSource->lights) {
+    for (const auto &[lightKey, light] : mSource->lights) {
         if (!light) continue;
         auto it = mEntries.find(light.get());
         if (it == mEntries.end() || !it->node) continue;   // not adopted yet
@@ -1598,7 +1607,7 @@ void SceneMirror::syncPerFrameSet()
             || !it->wireNode) continue;
         syncLightIcon(*it, light.get());
     }
-    for (const iris::CameraNodePtr &cam : mSource->cameras) {
+    for (const auto &[camKey, cam] : mSource->cameras) {
         if (!cam) continue;
         resolveFocusTracking(cam.get());
         auto it = mEntries.find(cam.get());
@@ -1694,7 +1703,7 @@ void SceneMirror::refreshLightAggregates()
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
     if (!mSource) return;
-    for (const iris::LightNodePtr &lp : mSource->lights) {
+    for (const auto &[lpKey, lp] : mSource->lights) {
         iris::LightNode *light = lp.get();
         if (!light) continue;
         // Exactly the walk's own test, in the walk's own order: a Sky Light
@@ -2106,7 +2115,7 @@ void SceneMirror::setCameraBodies(bool on)
 void SceneMirror::markDecalsDirty()
 {
     if (!mSource) return;
-    for (const iris::DecalNodePtr &d : mSource->decals)
+    for (const auto &[dKey, d] : mSource->decals)
         if (d) d->markChanged(iris::NodeChange::Flags);
 }
 
@@ -2177,8 +2186,8 @@ quint64 hashFloat(quint64 h, float v)
 void SceneMirror::resolveFocusTracking(iris::CameraNode *camera)
 {
     if (!camera || camera->focusMode != iris::CameraFocusMode::Track) return;
-    if (camera->focusTarget.isEmpty() || !mSource) return;
-    const iris::SceneNodePtr target = mSource->nodes.value(camera->focusTarget);
+    if (camera->focusTarget.empty() || !mSource) return;
+    const iris::SceneNodePtr target = iris::valueOr(mSource->nodes, camera->focusTarget);
     // A guid that no longer resolves (the target was deleted) leaves the last
     // distance standing: freezing focus is a far better failure than snapping
     // to a minimum nobody asked for.
@@ -4412,10 +4421,10 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
 
     // 1. Colour over life. Authored keys win; with none, the emitter's flat
     //    colour already covers it and no affector is added at all.
-    if (!ps->colourKeys.isEmpty()) {
+    if (!ps->colourKeys.empty()) {
         ParticleAffectorDesc a;
         a.kind = ParticleAffectorDesc::Kind::ColourKeys;
-        a.keyCount = unsigned(std::min(ps->colourKeys.size(), qsizetype(6)));
+        a.keyCount = unsigned(std::min(ps->colourKeys.size(), std::size_t(6)));
         for (unsigned i = 0; i < a.keyCount; ++i) {
             const iris::ParticleColourKey &k = ps->colourKeys[int(i)];
             a.colourKeyTimes[i] = k.time;
@@ -4426,7 +4435,7 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
 
     // 2. Scale over life: authored keys, else the legacy dissipate booleans.
     std::vector<std::pair<float, float>> scaleRamp;
-    if (!ps->scaleKeys.isEmpty()) {
+    if (!ps->scaleKeys.empty()) {
         for (const iris::ParticleScaleKey &k : ps->scaleKeys)
             scaleRamp.emplace_back(k.time, k.scale);
     } else if (ps->dissipate) {
@@ -4477,10 +4486,10 @@ std::vector<ParticleAffectorDesc> affectorsFor(const iris::ParticleSystemNode *p
                           (ps->colourFade2.isValid() && ps->colourFade2.alpha() +
                            ps->colourFade2.red() + ps->colourFade2.green() +
                            ps->colourFade2.blue() != 0);
-    if (!ps->colourRampImage.isEmpty()) {
+    if (!ps->colourRampImage.empty()) {
         ParticleAffectorDesc a;
         a.kind = ParticleAffectorDesc::Kind::ColourRamp;
-        a.colourRampPath = ps->colourRampImage.toStdString();
+        a.colourRampPath = ps->colourRampImage;
         out.push_back(a);
     } else if (haveFade) {
         // A colour cannot carry a NEGATIVE delta, and a fade-out is exactly
@@ -4643,7 +4652,7 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // (setParticleSystem's refusal is FINAL for the value while the file is missing - Engine.h: latched, no retry until
     // the signature changes. A MISSING RAMP MUST NOT TAKE THE WHOLE EMITTER DOWN: a ramp the engine refused is DROPPED
     // from every push while the document still names it - particleRefusal: the emitter stays drawn, its edits reach it)
-    if (ps->colourRampImage.toStdString() != e.particleRampRefused) e.particleRampRefused.clear();
+    if (ps->colourRampImage != e.particleRampRefused) e.particleRampRefused.clear();
     ParticleSystemDesc desc = toParticleDesc(ps, tex);
     if (!e.particleRampRefused.empty())
         for (ParticleAffectorDesc &a : desc.affectors)
@@ -5627,7 +5636,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // scale factor is recorded on the asset at import time and resolved onto
     // the node beside the path (LightNode::iesNormalisation).
     d.intensity = light->intensity;
-    if (!light->iesProfilePath.isEmpty() && light->iesNormalisation > 1e-6f)
+    if (!light->iesProfilePath.empty() && light->iesNormalisation > 1e-6f)
         d.intensity = light->intensity / light->iesNormalisation;
     d.range = light->distance;
     d.sourceRadius = light->sourceRadius;
@@ -5640,7 +5649,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
     // The asset binding travels as a resolved absolute path — the engine has no
     // database. The backend decides what each light type can actually honour
     // (profiles: spot and point lights, shadowed or not; never directional or area).
-    d.iesProfilePath = light->iesProfilePath.toStdString();
+    d.iesProfilePath = light->iesProfilePath;
     // Area lights never cast shadows (Ogre-Next limitation; the engine enforces
     // it too — this keeps the mirror's shadow-filter bookkeeping honest).
     // (every other light casts: no document setting lets a light through a wall - PHOTON-7 10-4 R9)
@@ -5739,7 +5748,7 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
     const quint64 sig = hs.h;   // three concatenated QStrings per decal per frame, before
     const bool rebind = !e.hasDecal || e.decalSignature != sig;
 
-    const TextureId diffuse = decalTextureFor(decal->resolvedTexturePath, DecalMap::Diffuse);
+    const TextureId diffuse = decalTextureFor(QString::fromStdString(decal->resolvedTexturePath), DecalMap::Diffuse);
     if (!diffuse) {
         // No image (yet), unreadable, or the atlas is full: the node exists and
         // draws its wire box, but projects nothing. Never leave a STALE decal
@@ -5755,8 +5764,8 @@ void SceneMirror::syncDecal(Entry &e, iris::DecalNode *decal)
 
     DecalDesc d = toDecalDesc(decal);
     d.diffuse = diffuse;
-    d.normal = decalTextureFor(decal->resolvedNormalPath, DecalMap::Normal);
-    d.emissive = decalTextureFor(decal->resolvedEmissivePath, DecalMap::Emissive);
+    d.normal = decalTextureFor(QString::fromStdString(decal->resolvedNormalPath), DecalMap::Normal);
+    d.emissive = decalTextureFor(QString::fromStdString(decal->resolvedEmissivePath), DecalMap::Emissive);
     // ON CHANGE ONLY, like every other push in this walk (DIRTY_SET_MIRROR_SPEC
     // §4). setDecal rebinds three atlas slices and rewrites the projector's
     // parameters, and it ran EVERY frame for every decal in the scene — the
@@ -6522,7 +6531,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     sig.bytes(e.rigId.data(), e.rigId.size());
     QList<iris::AnimationPtr> clips;
     if (host) {
-        QList<iris::AnimationPtr> candidates = host->getAnimations();
+        std::vector<iris::AnimationPtr> candidates = host->getAnimations();
         // The ACTIVE animation is not always IN that list. The Avatar page
         // rebuilds each clip through buildClipAnimation (root motion is a
         // preview policy, so the played clip is a stripped copy of the authored
@@ -6531,7 +6540,7 @@ void SceneMirror::attachClipsFor(Entry &e)
         // translation at all — the character would sit at bind pose while the
         // transport ran.
         const iris::AnimationPtr active = host->getAnimation();
-        if (!!active && !candidates.contains(active)) candidates.append(active);
+        if (!!active && std::find(candidates.begin(), candidates.end(), active) == candidates.end()) candidates.push_back(active);
         for (const auto &anim : candidates) {
             if (!anim || !anim->hasSkeletalAnimation()) continue;
             clips.append(anim);
@@ -6667,7 +6676,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     }
 }
 
-bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const
+bool SceneMirror::entryBoneWorldTransforms(const Entry &e, std::unordered_map<std::string, iris::Mat4> &out) const
 {
     if (!mTarget) return false;
     if (!e.gpuSkinned || !e.rigSkeleton || !e.docNode) return false;
@@ -6717,7 +6726,7 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // rigged node per frame, and every bone paid an indirect call on top.
     for (size_t i = 0; i < n; ++i) resolveBoneDerived(int(i), e.boneParents, poses);
     for (int i = 0; i < bones.size(); ++i)
-        out.insert(QString::fromStdString(bones[i]->name), meshWorld * mDerivedScratch[size_t(i)]);
+        out.insert_or_assign(bones[i]->name, meshWorld * mDerivedScratch[size_t(i)]);   // the bone's own UTF-8 name: no UTF-16 key per bone
     return true;
 }
 
@@ -6745,7 +6754,7 @@ const iris::Mat4 &SceneMirror::resolveBoneDerived(int i, const std::vector<int> 
     return mDerivedScratch[size_t(i)];
 }
 
-bool SceneMirror::boneWorldTransforms(QHash<QString, iris::Mat4> &out) const
+bool SceneMirror::boneWorldTransforms(std::unordered_map<std::string, iris::Mat4> &out) const
 {
     out.clear();
     if (!mTarget) return false;
@@ -6755,7 +6764,7 @@ bool SceneMirror::boneWorldTransforms(QHash<QString, iris::Mat4> &out) const
     return any;
 }
 
-bool SceneMirror::boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris::Mat4> &out) const
+bool SceneMirror::boneWorldTransforms(iris::SceneNode *node, std::unordered_map<std::string, iris::Mat4> &out) const
 {
     out.clear();
     if (!mTarget || !node) return false;
@@ -6828,14 +6837,14 @@ int SceneMirror::reconcileSockets()
 {
     mSocketDangling = 0;
     int riding = 0;
-    const QHash<QString, QList<iris::SceneNodePtr>> &attachments = mSource->socketAttachments;
+    const auto &attachments = mSource->socketAttachments;
     mRidersSeen.clear();
     QSet<const iris::SceneNode *> &seen = mRidersSeen;
 
-    for (auto it = attachments.constBegin(); it != attachments.constEnd(); ++it) {
-        const QList<iris::SceneNodePtr> &attached = it.value();
-        if (attached.isEmpty()) continue;
-        const iris::SceneNodePtr ownerNode = mSource->nodes.value(it.key());
+    for (auto it = attachments.cbegin(); it != attachments.cend(); ++it) {
+        const std::vector<iris::SceneNodePtr> &attached = it->second;
+        if (attached.empty()) continue;
+        const iris::SceneNodePtr ownerNode = iris::valueOr(mSource->nodes, it->first);
         iris::MeshNode *owner = (!!ownerNode &&
                                  ownerNode->getSceneNodeType() == iris::SceneNodeType::Mesh)
                                     ? static_cast<iris::MeshNode *>(ownerNode.get())
@@ -6973,7 +6982,7 @@ int SceneMirror::reconcileSockets()
             const jahshaka::engine::NodeId actualOwner =
                 mTarget->published().boneAttachmentOf(riderId, &actualBone);   // the last frame's tag (U3 stage 3)
             const bool armed = actualOwner == ownerId &&
-                               actualBone == socket->boneName.toStdString();
+                               actualBone == socket->boneName;
             RiderState &state = riderState(rider);
             if (!armed) {
                 // The rider keeps its place in the DOCUMENT hierarchy — the
@@ -6993,7 +7002,7 @@ int SceneMirror::reconcileSockets()
                     st->offsetKey = 0;
                     ++mSocketDangling;
                 };
-                if (!postOk(armRefused, &jahshaka::engine::Scene::attachToBone, riderId, ownerId, socket->boneName.toStdString(),
+                if (!postOk(armRefused, &jahshaka::engine::Scene::attachToBone, riderId, ownerId, socket->boneName,
                                            toVec3(socket->position), toQuat(socket->rotation),
                                            toVec3(socket->scale))) {
                     iris::graph::setSocketRider(rider->docNode(), false);
@@ -7012,7 +7021,7 @@ int SceneMirror::reconcileSockets()
                     continue;
                 }
                 state.owner = ownerId;
-                state.bone = socket->boneName;
+                state.bone = QString::fromStdString(socket->boneName);
                 state.offsetKey = key;
                 // Out of the fallback: the world transform the fallback wrote
                 // into this node's local is not a socket offset, and the tag
@@ -7031,7 +7040,7 @@ int SceneMirror::reconcileSockets()
                                                  toQuat(socket->rotation), toVec3(socket->scale));
                 state.offsetKey = key;
                 state.owner = ownerId;
-                state.bone = socket->boneName;
+                state.bone = QString::fromStdString(socket->boneName);
             }
             // What the rider's local is, as of this sync — the reference the
             // release compares against (see RiderState::lastLocal*).
@@ -8431,7 +8440,7 @@ void SceneMirror::applyCloudLayer()
     const bool imageSky = mSource->skyType == iris::SkyType::EQUIRECTANGULAR ||
                           mSource->skyType == iris::SkyType::CUBEMAP;
     // The weather map's pixels follow its FILE, uploaded once per change.
-    const QString weatherPath = (doc.enabled && !imageSky && !doc.weatherMapGuid.isEmpty() &&
+    const QString weatherPath = (doc.enabled && !imageSky && !doc.weatherMapGuid.empty() &&
                                  mSource->cloudWeatherMap)
                                     ? mSource->cloudWeatherMap->source : QString();
     if (weatherPath != mCloudWeatherPath) {
@@ -8974,7 +8983,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
     // socketed, and dropped the moment it is not (so a camera the user takes off
     // a head goes straight back to the pushed pose).
     jahshaka::engine::NodeId ride = 0;
-    if (!camera->socketOwnerGuid.isEmpty()) {
+    if (!camera->socketOwnerGuid.empty()) {
         const auto it = mEntries.constFind(camera.get());
         if (it != mEntries.constEnd()) ride = it->node;
     }

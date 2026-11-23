@@ -16,9 +16,7 @@ For more information see the LICENSE file
 #include "core/value.h"
 #include <functional>
 #include "document/srgbcolor.h"
-#include <QList>
-#include <QStringList>
-#include <QVector>
+#include <vector>
 #include "irisglfwd.h"
 #include "document/assets/texture2d.h"
 #include "document/input/possession.h"
@@ -29,9 +27,11 @@ For more information see the LICENSE file
 #include "document/scenegraph/simulationclock.h"
 
 // temp
-#include <QHash>
-#include <QMap>
-#include <QString>
+#include <unordered_map>
+#include <map>
+#include <string>
+#include <cstdint>
+#include <algorithm>
 
 namespace iris
 {
@@ -88,7 +88,7 @@ enum class RayTracingMode : int
 const char *rayTracingModeName(RayTracingMode mode);
 /// Case-insensitive; false (and `out` untouched) when `name` names no mode —
 /// the verb REFUSES rather than guessing, and the reader keeps its default.
-bool rayTracingModeFromName(const QString &name, RayTracingMode &out);
+bool rayTracingModeFromName(const std::string &name, RayTracingMode &out);
 
 // ---- THE VR WEARER'S LOCOMOTION (VR-WORLD-1, owner request 2026-09-18) ------
 //
@@ -125,9 +125,9 @@ enum class VrTurnMode : int
 };
 
 const char *vrFlyModeName(VrFlyMode mode);
-bool vrFlyModeFromName(const QString &name, VrFlyMode &out);
+bool vrFlyModeFromName(const std::string &name, VrFlyMode &out);
 const char *vrTurnModeName(VrTurnMode mode);
-bool vrTurnModeFromName(const QString &name, VrTurnMode &out);
+bool vrTurnModeFromName(const std::string &name, VrTurnMode &out);
 
 /// THE DEFAULTS, IN ONE PLACE — used by the Scene constructor and by anything
 /// that has to answer before a scene exists (services/vrworld.h resolves a
@@ -284,7 +284,7 @@ struct CloudLayer
 	/// An optional WEATHER MAP — an image asset guid whose red channel scales
 	/// the coverage over one tile of the layer (white = clouds allowed,
 	/// black = clear). Empty = none.
-	QString weatherMapGuid;
+	std::string weatherMapGuid;
 
 	bool operator==(const CloudLayer &o) const {
 		return enabled == o.enabled && coverage == o.coverage && density == o.density &&
@@ -393,7 +393,7 @@ struct SunContact
 	static SunContact fromJson(const Value &o);
 	/// The stable spellings ("auto", "full", "half") — the file, the verb.
 	static const char *resolutionName(SunContactResolution r);
-	static bool resolutionFromName(const QString &name, SunContactResolution &out);
+	static bool resolutionFromName(const std::string &name, SunContactResolution &out);
 };
 
 class Scene
@@ -420,20 +420,20 @@ public:
         return environment;
     }
 
-    QHash<QString, LightNodePtr> lights;
+    std::unordered_map<std::string, LightNodePtr> lights;
     /// Every DecalNode in the scene, keyed by guid — the picker and the
     /// engine-side budget check walk this rather than the whole tree.
-    QHash<QString, DecalNodePtr> decals;
-	QHash<QString, MeshNodePtr> meshes;
+    std::unordered_map<std::string, DecalNodePtr> decals;
+	std::unordered_map<std::string, MeshNodePtr> meshes;
     /// Picking's broad phase: one slot per entry of `meshes`, kept with it (addNode / removeNode). Declared after it,
     /// so it is torn down first, while the nodes whose slots it resets are still alive (graph::PickTable).
     graph::PickTable pickTable;
-	QHash<QString, ParticleSystemNodePtr> particleSystems;
+	std::unordered_map<std::string, ParticleSystemNodePtr> particleSystems;
     /// Every scene-graph CameraNode, keyed by guid (CAMERAS_SPEC §3). NOT the
     /// editor camera: `camera` above is the viewport's virtual explorer and is
     /// never a child of the root, so it is never in here.
-    QHash<QString, CameraNodePtr> cameras;
-	QHash<QString, SceneNodePtr> nodes;
+    std::unordered_map<std::string, CameraNodePtr> cameras;
+	std::unordered_map<std::string, SceneNodePtr> nodes;
 
     /// Socket attachments (CAMERAS_SPEC §5), keyed by the SOCKET OWNER's guid:
     /// owner guid -> every node currently riding one of that owner's sockets.
@@ -443,12 +443,12 @@ public:
     /// this is the grouping that makes that free. Maintained by addNode /
     /// removeNode / attachToSocket / detachFromSocket; never serialized (the
     /// attachment lives on the RIDER, which is what the file carries).
-    QHash<QString, QList<SceneNodePtr>> socketAttachments;
+    std::unordered_map<std::string, std::vector<SceneNodePtr>> socketAttachments;
 
     /// The camera PLAY renders through (CAMERAS_SPEC D6). Empty = the free
     /// viewer, which is what every scene written before cameras existed means.
     /// Serialized with the scene; resolved through `cameras` above.
-    QString activeCameraGuid;
+    std::string activeCameraGuid;
 
     /// Play state (see setPlaying). Runtime only — never written to the file.
     bool playing = false;
@@ -514,7 +514,7 @@ public:
     /// starts at the camera. This mapping leaves the subjects where they were and
     /// still fades the far ground away.
     static float fogDensityFromLinear(float start, float end) {
-        return 2.0f / qMax(start + end, 0.001f);
+        return 2.0f / std::max(start + end, 0.001f);
     }
 
     // global illumination (world panel; rendered by the engine viewport only).
@@ -532,7 +532,7 @@ public:
     /// tier's own table. A zero or negative halfSize/resolution in any entry means
     /// the whole request is ignored — a half-specified cascade is not a request
     /// the renderer can honour halfway.
-    QVector<iris::Vec3> giCascadeSet;
+    std::vector<iris::Vec3> giCascadeSet;
     /// THE PER-CASCADE INSTANCE BUDGET (PHOTON_SPEC §7 E2 (1)). How many
     /// objects ONE cascade may voxelise: the renderer keeps the ones that fill
     /// most of that cascade's own voxels, largest first, nearest first among
@@ -644,7 +644,7 @@ public:
     /// bump. A serial rather than a bool because two refreshes in one frame must
     /// still be one re-solve, and because a bool would need a clearer — which is
     /// the mirror's job, not the caller's.
-    quint64 giRefreshSerial = 0;
+    std::uint64_t giRefreshSerial = 0;
     /// A MATERIAL THE USER HAS NOT COMMITTED IS ON THE SCREEN (MATERIAL-PREVIEW-1).
     ///
     /// The editor's hover preview borrows a mesh's material slot while a
@@ -677,7 +677,7 @@ public:
     /// world.refreshShadows(). The mirror compares it against the value it last
     /// acted on and asks the renderer to re-render every cached map once per
     /// bump.
-    quint64 shadowRefreshSerial = 0;
+    std::uint64_t shadowRefreshSerial = 0;
     // anti-aliasing: MSAA sample count for the scene's viewport — 1 (off), 2, 4
     // or 8 (rendered by the engine viewport only; the driver may clamp).
     int antiAliasing;
@@ -939,7 +939,7 @@ public:
     // no empty segment) — src/services/scenefolders.h owns that policy and is
     // the only thing that should write this list. Serialized in the project's
     // EDITOR section, beside editor.camera, never in the node format.
-    QStringList folders;
+    std::vector<std::string> folders;
 
     float gravity;
 
@@ -1003,7 +1003,7 @@ public:
 	// re-homed with the light and would need a "which one wins" rule the
 	// moment two lights carried it.
 	//
-	QString sunLightGuid;
+	std::string sunLightGuid;
 
 	// ---- THE SUN DISC (SKY_LIGHT_SPEC.md §3, owner picks 2 and 4) -------
 	// The bright disc drawn in the sky where the sun light points. ONE
@@ -1140,15 +1140,15 @@ public:
 
 	/// Why sunLight() answered as it did: "pinned", "priority" or "none".
 	/// The World panel prints it; `world.sun()` returns it.
-	QString sunReason() const;
+	std::string sunReason() const;
 
 	/// Every DIRECTIONAL light in the scene, ordered by forwardShadingPriority
 	/// then nodeId — so the first entry is the sun whenever nothing is pinned.
-	QVector<LightNodePtr> directionalLights() const;
+	std::vector<LightNodePtr> directionalLights() const;
 
 	/// Every directional light that is NOT the sun, in the same order. These
 	/// light the scene and cast no shadow (one directional slot exists).
-	QVector<LightNodePtr> secondaryDirectionals() const;
+	std::vector<LightNodePtr> secondaryDirectionals() const;
 
 	/// The priority a directional light joining THIS scene should take: the
 	/// lowest number no directional is using. The first directional gets 0.
@@ -1170,17 +1170,17 @@ public:
 	LightNodePtr skyLight() const;
 
 	/// Why skyLight() answered as it did: "first", "none" or "allHidden".
-	QString skyLightReason() const;
+	std::string skyLightReason() const;
 
 	/// Every LightType::Sky light in the scene, ordered by nodeId (creation
 	/// order — deterministic across reloads, like directionalLights()).
-	QVector<LightNodePtr> skyLights() const;
+	std::vector<LightNodePtr> skyLights() const;
 
-    QString skyGuid;
+    std::string skyGuid;
     /// THE WORLD'S AMBIENT MUSIC: a Music asset's guid (empty = none) and its
     /// volume, 1..100. Data only — the editor's AmbienceService
     /// (src/services/ambienceservice.h) plays it; the document owns no player.
-    QString ambientMusicGuid;
+    std::string ambientMusicGuid;
     float ambientMusicVolume = 50.0f;
 
 	/// THE SKY, AS THE SERIALIZER AND THE PANELS SEE IT: one block per sky
@@ -1190,11 +1190,11 @@ public:
 	/// (The six `skyData<Type>` members that stood beside it are GONE — they
 	/// were filled by the constructor, copied into this map on the next line
 	/// and never read again by anything, in either repo.)
-	QMap<QString, Value> skyData;
+	std::map<std::string, Value> skyData;
 
 	void setWorldGravity(float gravity);
 
-    QString skyBoxTextures[6];
+    std::string skyBoxTextures[6];
 
     /*
      * customizations that can be passed in and applied to a scene. ideally these
@@ -1247,7 +1247,7 @@ public:
     /// and consumed by SceneMirror::sync(); see NodeDirtySet.
     NodeDirtySet *dirtySet() { return &mDirtySet; }
 
-	QStringList skyTypeToStr = {
+	std::vector<std::string> skyTypeToStr = {
 		"SingleColor",
 		"Cubemap",
 		"Equirectangular",
@@ -1258,11 +1258,11 @@ public:
 	};
 
     void setSkyTexture(Texture2DPtr tex);
-    void setSkyTextureSource(QString src) {
-        skyTexture->source = src;
+    void setSkyTextureSource(std::string src) {
+        skyTexture->source = QString::fromStdString(src);
     }
 
-    QString getSkyTextureSource();
+    std::string getSkyTextureSource();
     void clearSkyTexture();
     void setSkyColor(SrgbColor color);
 
@@ -1320,7 +1320,7 @@ public:
     /// is the document's own bounds (scenepicking.h); the triangle test is ours.
     void rayCast(const iris::Vec3& segStart,
                  const iris::Vec3& segEnd,
-                 QList<PickingResult>& hitList,
+                 std::vector<PickingResult>& hitList,
 			     uint64_t pickingMask = 0,
 				 bool allowUnpickable = false);
 
@@ -1360,7 +1360,7 @@ public:
     /// A guid that names no camera in this scene is REFUSED — returns false and
     /// leaves the previous choice alone, because silently rendering through the
     /// wrong camera is exactly the failure a caller cannot see.
-    bool setActiveCamera(const QString &guid);
+    bool setActiveCamera(const std::string &guid);
 
     /// THE FIRST CAMERA ADDED TAKES THE SHOT — and only the first
     /// (PLAYER-SPAWN-1 rule 2, owner 2026-09-17).
@@ -1412,7 +1412,7 @@ public:
     /// Never null when `hostCamera` is not: a scene whose active camera has been
     /// deleted falls back to the host's rather than to nothing.
     CameraNodePtr renderCamera(const CameraNodePtr &hostCamera) const;
-    QString getActiveCameraGuid() const { return activeCameraGuid; }
+    std::string getActiveCameraGuid() const { return activeCameraGuid; }
 
     // ---- sockets (CAMERAS_SPEC §5, D9; see scenegraph/socket.h) ----------
     //
@@ -1426,8 +1426,8 @@ public:
     /// the owner does not exist, is not a mesh, has no such socket, or sits
     /// inside `node`'s own subtree (which would be a feedback loop). The
     /// node's transform is not touched here — the next resolve() does that.
-    bool attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
-                        const QString &socketName, QString *error = nullptr);
+    bool attachToSocket(const SceneNodePtr &node, const std::string &ownerGuid,
+                        const std::string &socketName, std::string *error = nullptr);
     /// Stops driving `node`. It keeps the pose it was last resolved to.
     /// False when it was not attached.
     bool detachFromSocket(const SceneNodePtr &node);

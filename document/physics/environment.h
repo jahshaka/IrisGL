@@ -21,7 +21,6 @@
 
 #include "btBulletDynamicsCommon.h"
 
-#include "document/physics/physicshelper.h"
 
 class btTypedConstraint;
 class btCollisionShape;
@@ -204,7 +203,7 @@ public:
 	// So a sleeping pile's frame makes ZERO writes, and the document it leaves
 	// is bit-identical to the one the write-everything loop left
 	// (document.physics_writeback).
-	void writeBack(const QHash<QString, iris::SceneNodePtr> &nodes);
+	void writeBack(const std::unordered_map<std::string, iris::SceneNodePtr> &nodes);
 	/// Nodes the last writeBack wrote (a suite and monitor read).
 	int lastWriteBackWrites() const { return lastWrites; }
 	/// Sleeping bodies the last writeBack RE-CHECKED (step 2: under the write

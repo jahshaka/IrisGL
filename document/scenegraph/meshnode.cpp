@@ -23,9 +23,10 @@ For more information see the LICENSE file
 
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/scenenode.h"
-#include "document/animation/animableproperty.h"
 
 #include "document/assets/skeleton.h"
+#include <algorithm>
+#include "core/text.h"
 
 namespace iris
 {
@@ -74,7 +75,7 @@ PropertyRows MeshNode::getProperties()
     auto pathProp = std::make_unique<FileProperty>();
     pathProp->displayName = "Mesh Path";
     pathProp->name = "meshPath";
-    pathProp->value = meshPath.toStdString();
+    pathProp->value = meshPath;
     pathProp->readOnly = true;      // matches the setPropertyValue refusal below
     props.add(std::move(pathProp));
 
@@ -103,7 +104,7 @@ PropertyRows MeshNode::getProperties()
 
 Value MeshNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "meshPath")        return Value(meshPath.toStdString());
+    if (valueName == "meshPath")        return Value(meshPath);
     if (valueName == "meshIndex")       return Value(meshIndex);
     if (valueName == "faceCullingMode") return Value(static_cast<int>(faceCullingMode));
     if (valueName == "defaultFloor")    return Value(defaultFloor);
@@ -217,7 +218,7 @@ float MeshNode::getMeshRadius()
     float scaleY = world.column(1).toVector3D().length();
     float scaleZ = world.column(2).toVector3D().length();
 
-    return qMax(qMax(scaleX, scaleY), scaleZ);
+    return std::max(std::max(scaleX, scaleY), scaleZ);
 }
 
 BoundingSphere MeshNode::getTransformedBoundingSphere()
@@ -261,43 +262,42 @@ SceneNodePtr MeshNode::createDuplicate()
     return node;
 }
 
-bool MeshNode::hasBone(const QString &boneName) const
+bool MeshNode::hasBone(const std::string &boneName) const
 {
-    if (!skeleton || boneName.isEmpty()) return false;
-    return skeleton->boneMap.count(boneName.toStdString()) != 0;
+    if (!skeleton || boneName.empty()) return false;
+    return skeleton->boneMap.count(boneName) != 0;
 }
 
-const Socket *MeshNode::findSocket(const QString &socketName) const
+const Socket *MeshNode::findSocket(const std::string &socketName) const
 {
     for (const Socket &socket : sockets)
         if (socket.name == socketName) return &socket;
     return nullptr;
 }
 
-bool MeshNode::addSocket(const Socket &socket, QString *error)
+bool MeshNode::addSocket(const Socket &socket, std::string *error)
 {
-    const auto refuse = [error](const QString &message) {
+    const auto refuse = [error](const std::string &message) {
         if (error) *error = message;
         return false;
     };
-    if (socket.name.isEmpty()) return refuse(QStringLiteral("a socket needs a name"));
+    if (socket.name.empty()) return refuse("a socket needs a name");
     if (findSocket(socket.name))
-        return refuse(QStringLiteral("this node already has a socket named '%1'").arg(socket.name));
+        return refuse(iris::text::cat("this node already has a socket named '", socket.name, "'"));
     if (!skeleton || skeleton->bones.empty())
-        return refuse(QStringLiteral("'%1' has no rig — sockets attach to BONES, so only a "
-                                     "skinned mesh can carry one").arg(name));
+        return refuse(iris::text::cat("'", name, "' has no rig — sockets attach to BONES, so only a skinned mesh can carry one"));
     if (!hasBone(socket.boneName))
-        return refuse(QStringLiteral("'%1' has no bone named '%2'").arg(name, socket.boneName));
+        return refuse(iris::text::cat("'", name, "' has no bone named '", socket.boneName, "'"));
 
-    sockets.append(socket);
+    sockets.push_back(socket);
     return true;
 }
 
-bool MeshNode::removeSocket(const QString &socketName)
+bool MeshNode::removeSocket(const std::string &socketName)
 {
     for (int i = 0; i < sockets.size(); ++i) {
         if (sockets[i].name == socketName) {
-            sockets.removeAt(i);
+            sockets.erase(sockets.begin() + i);
             return true;
         }
     }

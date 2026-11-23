@@ -21,7 +21,6 @@ For more information see the LICENSE file
 
 #include "core/value.h"
 
-#include <QPointF>
 
 #include <string_view>
 
@@ -212,7 +211,7 @@ public:
     bool dofEnabled;
     CameraFocusMode focusMode;
     float focusDistance;      // metres, used when focusMode == Manual
-    QString focusTarget;      // node guid, used when focusMode == Track
+    std::string focusTarget;      // node guid, used when focusMode == Track
     float fStop;
 
     // ---- CAMERA_LENS_SPEC §3 P2: the focus block -------------------------
@@ -392,16 +391,6 @@ public:
         return std::shared_ptr<CameraNode>(new CameraNode());
     }
 
-    /**
-     * Calculate picking ray given the screen position.
-     * Assumes the ray's origin is the camera's position.
-     * @param viewPortWidth
-     * @param viewPortHeight
-     * @param pos point in screen space
-     * @return
-     */
-    iris::Vec3 calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos);
-
     virtual PropertyRows getProperties() override;
     virtual Value getPropertyValue(std::string_view valueName) override;
     virtual bool setPropertyValue(std::string_view valueName, const Value &value) override;
@@ -414,7 +403,7 @@ protected:
     /// the original (CLIPBOARD_SPEC §3.2, the recorded gap). A target outside
     /// the copied subtree keeps its guid, which is what "this camera watches
     /// that character" means.
-    void remapOwnNodeReferences(const QHash<QString, QString> &guidMap) override;
+    void remapOwnNodeReferences(const std::unordered_map<std::string, std::string> &guidMap) override;
 public:
 
 private:

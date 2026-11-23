@@ -15,6 +15,7 @@ For more information see the LICENSE file
 
 #include "document/properties/property.h"
 #include "document/scenegraph/particlesystemnode.h"
+#include "core/text.h"
 
 namespace iris
 {
@@ -258,7 +259,7 @@ void ParticleSystemNode::applyPreset(ParticlePreset p)
 // Serialized and scripted by NAME, never by ordinal: an enum reshuffle must not
 // silently repaint every saved scene.
 
-QString ParticleSystemNode::presetName(ParticlePreset p)
+std::string ParticleSystemNode::presetName(ParticlePreset p)
 {
     switch (p) {
     case ParticlePreset::Fire:       return "fire";
@@ -273,9 +274,9 @@ QString ParticleSystemNode::presetName(ParticlePreset p)
     return "custom";
 }
 
-ParticlePreset ParticleSystemNode::presetFromName(const QString &name)
+ParticlePreset ParticleSystemNode::presetFromName(const std::string &name)
 {
-    const QString n = name.trimmed().toLower();
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
     if (n == "fire")       return ParticlePreset::Fire;
     if (n == "embers")     return ParticlePreset::Embers;
     if (n == "smoke")      return ParticlePreset::Smoke;
@@ -286,12 +287,12 @@ ParticlePreset ParticleSystemNode::presetFromName(const QString &name)
     return ParticlePreset::Custom;
 }
 
-QStringList ParticleSystemNode::presetNames()
+std::vector<std::string> ParticleSystemNode::presetNames()
 {
     return { "custom", "fire", "embers", "smoke", "rain", "snow", "steadyFlow", "sparks" };
 }
 
-QString ParticleSystemNode::shapeName(ParticleEmitterShape s)
+std::string ParticleSystemNode::shapeName(ParticleEmitterShape s)
 {
     switch (s) {
     case ParticleEmitterShape::Box:             return "box";
@@ -304,9 +305,9 @@ QString ParticleSystemNode::shapeName(ParticleEmitterShape s)
     return "point";
 }
 
-ParticleEmitterShape ParticleSystemNode::shapeFromName(const QString &name)
+ParticleEmitterShape ParticleSystemNode::shapeFromName(const std::string &name)
 {
-    const QString n = name.trimmed().toLower();
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
     if (n == "box")             return ParticleEmitterShape::Box;
     if (n == "cylinder")        return ParticleEmitterShape::Cylinder;
     if (n == "ellipsoid")       return ParticleEmitterShape::Ellipsoid;
@@ -315,7 +316,7 @@ ParticleEmitterShape ParticleSystemNode::shapeFromName(const QString &name)
     return ParticleEmitterShape::Point;
 }
 
-QString ParticleSystemNode::orientationName(ParticleOrientation o)
+std::string ParticleSystemNode::orientationName(ParticleOrientation o)
 {
     switch (o) {
     case ParticleOrientation::StretchedCommon:      return "stretchedCommon";
@@ -327,9 +328,9 @@ QString ParticleSystemNode::orientationName(ParticleOrientation o)
     return "billboard";
 }
 
-ParticleOrientation ParticleSystemNode::orientationFromName(const QString &name)
+ParticleOrientation ParticleSystemNode::orientationFromName(const std::string &name)
 {
-    const QString n = name.trimmed().toLower();
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
     if (n == "stretchedcommon")       return ParticleOrientation::StretchedCommon;
     if (n == "stretchedvelocity")     return ParticleOrientation::StretchedVelocity;
     if (n == "perpendicularcommon")   return ParticleOrientation::PerpendicularCommon;
@@ -418,10 +419,10 @@ PropertyRows ParticleSystemNode::getProperties()
     // Enum-ish rows travel as their NAME, never as an ordinal (see the tables
     // above). FileProperty is the QString-valued Property here — the same one
     // the texture row has always used.
-    auto addString = [&props](const char *display, const char *name, const QString &value,
+    auto addString = [&props](const char *display, const char *name, const std::string &value,
                               bool readOnly = false) {
         auto p = std::make_unique<FileProperty>();
-        p->displayName = display; p->name = name; p->value = value.toStdString();
+        p->displayName = display; p->name = name; p->value = value;
         p->readOnly = readOnly;
         props.add(std::move(p));
     };
@@ -433,7 +434,7 @@ PropertyRows ParticleSystemNode::getProperties()
     // manager (guid -> file), which the document layer has no access to. The
     // texture's source path is exposed for inspection only; setPropertyValue
     // refuses it.
-    addString("Texture", "texture", !!texture ? texture->getSource() : QString(), true);
+    addString("Texture", "texture", !!texture ? texture->getSource().toStdString() : std::string(), true);
 
     return props;
 }
@@ -463,9 +464,9 @@ Value ParticleSystemNode::getPropertyValue(std::string_view valueName)
     if (valueName == "burstRepeatDelay")   return F(burstRepeatDelay);
     if (valueName == "startDelay")         return F(startDelay);
     if (valueName == "maxParticles")       return Value(maxParticles);
-    if (valueName == "shape")              return Value(shapeName(shape).toStdString());
-    if (valueName == "orientation")        return Value(orientationName(orientation).toStdString());
-    if (valueName == "preset")             return Value(presetName(preset).toStdString());
+    if (valueName == "shape")              return Value(shapeName(shape));
+    if (valueName == "orientation")        return Value(orientationName(orientation));
+    if (valueName == "preset")             return Value(presetName(preset));
     if (valueName == "texture")            return Value(!!texture ? texture->getSource().toStdString() : std::string());
     // The vector and colour rows (their Vec3 / Color rows in getProperties()).
     if (valueName == "extents")            return vec3ToValue(extents);
@@ -479,7 +480,7 @@ Value ParticleSystemNode::getPropertyValue(std::string_view valueName)
     if (valueName == "colourFadeSwitch")   return F(colourFadeSwitch);
     if (valueName == "scaleRate")          return F(scaleRate);
     if (valueName == "scaleRateMultiply")  return Value(scaleRateMultiply);
-    if (valueName == "colourRamp")         return Value(colourRampGuid.toStdString());
+    if (valueName == "colourRamp")         return Value(colourRampGuid);
 
     return SceneNode::getPropertyValue(valueName);
 }
@@ -497,7 +498,7 @@ bool ParticleSystemNode::setPropertyValue(std::string_view valueName, const Valu
     // A Null is THE invalid colour ("no fade"), an Object its colour (colourOfRowValue).
     const auto C = [&](SrgbColor &field) { return colourOfRowValue(value, field) && markedParams(); };
     const bool isText = value.kind() == Kind::String;
-    const QString text = isText ? QString::fromStdString(value.asString()) : QString();
+    const std::string text = isText ? value.asString() : std::string();
     if (valueName == "particlesPerSecond") return F(particlesPerSecond);
     if (valueName == "particleScale")      return F(particleScale);
     if (valueName == "gravityComplement")  return F(gravityComplement);

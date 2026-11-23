@@ -198,8 +198,8 @@ public:
      * honour a profile, point lights honour it only while they cast no shadows,
      * and directional/area lights never do.
      */
-    QString iesProfileGuid;
-    QString iesProfilePath;
+    std::string iesProfileGuid;
+    std::string iesProfilePath;
     float   iesNormalisation;
 
     /**

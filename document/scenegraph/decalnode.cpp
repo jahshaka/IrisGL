@@ -5,6 +5,8 @@
 #include "document/animation/animation.h"
 #include "document/animation/propertyanim.h"
 #include "document/properties/property.h"
+#include "core/math/scalar.h"
+#include <algorithm>
 
 namespace iris
 {
@@ -16,7 +18,7 @@ PropertyRows DecalNode::getProperties()
     auto texProp = std::make_unique<TextureProperty>();
     texProp->displayName = "Decal Image";
     texProp->name = "decalTexture";
-    texProp->value = textureGuid.toStdString();
+    texProp->value = textureGuid;
     props.add(std::move(texProp));
 
     auto prop = std::make_unique<FloatProperty>();
@@ -68,9 +70,9 @@ PropertyRows DecalNode::getProperties()
 
 Value DecalNode::getPropertyValue(std::string_view valueName)
 {
-    if (valueName == "decalTexture")       return Value(textureGuid.toStdString());
-    if (valueName == "decalNormal")        return Value(normalGuid.toStdString());
-    if (valueName == "decalEmissive")      return Value(emissiveGuid.toStdString());
+    if (valueName == "decalTexture")       return Value(textureGuid);
+    if (valueName == "decalNormal")        return Value(normalGuid);
+    if (valueName == "decalEmissive")      return Value(emissiveGuid);
     if (valueName == "width")              return Value(double(width));
     if (valueName == "height")             return Value(double(height));
     if (valueName == "depth")              return Value(double(depth));
@@ -91,9 +93,9 @@ bool DecalNode::setPropertyValue(std::string_view valueName, const Value &value)
     // Changing an image guid invalidates the resolved path: the host (reader /
     // edit service / property panel) re-resolves it through the CAS. Clearing
     // it here means the mirror can never bind a stale file for a new guid.
-    if (valueName == "decalTexture")  { if (!isText) return false; textureGuid = QString::fromStdString(value.asString());  resolvedTexturePath.clear();  return markedParams(); }
-    if (valueName == "decalNormal")   { if (!isText) return false; normalGuid = QString::fromStdString(value.asString());   resolvedNormalPath.clear();   return markedParams(); }
-    if (valueName == "decalEmissive") { if (!isText) return false; emissiveGuid = QString::fromStdString(value.asString()); resolvedEmissivePath.clear(); return markedParams(); }
+    if (valueName == "decalTexture")  { if (!isText) return false; textureGuid = value.asString();  resolvedTexturePath.clear();  return markedParams(); }
+    if (valueName == "decalNormal")   { if (!isText) return false; normalGuid = value.asString();   resolvedNormalPath.clear();   return markedParams(); }
+    if (valueName == "decalEmissive") { if (!isText) return false; emissiveGuid = value.asString(); resolvedEmissivePath.clear(); return markedParams(); }
     // Non-positive extents would collapse the projector box (and a NEGATIVE
     // one flips the accept half-space in the shader — DECALS_SPEC §4).
     if (valueName == "width")   { if (!isNum) return false; width  = std::max(0.001f, f); return markedParams(); }

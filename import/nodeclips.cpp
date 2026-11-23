@@ -70,7 +70,7 @@ void addRotTrack(Animation &anim, const QuaternionKeyFrame &keys)
 PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
 {
     PlayedNodeChannels out;
-    if (!fragment || fragment->getAnimations().isEmpty()) return out;
+    if (!fragment || fragment->getAnimations().empty()) return out;
 
     // The rigs' bones (a channel naming one belongs to the engine's skeleton) and the
     // fragment's nodes by name, first in depth order.
@@ -124,8 +124,8 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
         fragment->deleteAnimation(clip);
         ++out.clipsRemoved;
     }
-    if (!fragment->getAnimation() && !fragment->getAnimations().isEmpty())
-        fragment->setAnimation(fragment->getAnimations().first());
+    if (!fragment->getAnimation() && !fragment->getAnimations().empty())
+        fragment->setAnimation(fragment->getAnimations().front());
     out.nodes = given.size();
     return out;
 }

@@ -515,12 +515,12 @@ public:
     /// bone overlay and `avatar.bones` draw, and it is resolved as of the last
     /// rendered frame — call it after sync() and after a render, never before.
     /// False when nothing skinned is mirrored.
-    bool boneWorldTransforms(QHash<QString, iris::Mat4> &out) const;
+    bool boneWorldTransforms(std::unordered_map<std::string, iris::Mat4> &out) const;
     /// The same, for ONE node — which is what sockets need, because bone names
     /// are only unique within a rig and the whole-scene overload above silently
     /// lets a second character of the same rig overwrite the first's bones.
     /// False when the node is not a mirrored skinned mesh.
-    bool boneWorldTransforms(iris::SceneNode *node, QHash<QString, iris::Mat4> &out) const;
+    bool boneWorldTransforms(iris::SceneNode *node, std::unordered_map<std::string, iris::Mat4> &out) const;
     /// Drives every socket-attached node of the source scene from the pose the
     /// last rendered frame produced (CAMERAS_SPEC §5). Called at the top of
     /// sync(); public so a headless suite can step it explicitly. Returns how
@@ -1317,7 +1317,7 @@ private:
     /// One entry's bones in world space, APPENDED to `out` (it is not cleared —
     /// the whole-scene overload accumulates every rig into one map). False when
     /// the entry is not a posed skinned mesh.
-    bool entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const;
+    bool entryBoneWorldTransforms(const Entry &e, std::unordered_map<std::string, iris::Mat4> &out) const;
     /// Translates and attaches a node's clips. Idempotent: does nothing unless
     /// the rig or the clip set changed.
     void attachClipsFor(Entry &e);

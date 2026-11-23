@@ -26,6 +26,7 @@
 #include "core/geometry/trimesh.h"
 #include "core/log.h"
 #include "core/threadbudget.h"
+#include "document/mapvalue.h"
 
 namespace iris
 {
@@ -53,8 +54,8 @@ void Environment::addBodyToWorld(btRigidBody *body, const iris::SceneNodePtr &no
 {
     world->addRigidBody(body);
 
-	hashBodies.insert(node->getGUID(), body);
-	nodeTransforms.insert(node->getGUID(),
+	hashBodies.insert(QString::fromStdString(node->getGUID()), body);
+	nodeTransforms.insert(QString::fromStdString(node->getGUID()),
 	                      SavedLocal{ node->getLocalPos(), node->getLocalScale(), node->getLocalRot() });
 	indexBody(body, node);
 }
@@ -248,7 +249,7 @@ void Environment::stepSimulation(float delta)
 void Environment::addAvatarToWorld(const iris::SceneNodePtr &node)
 {
 	if (!node || !node->hasAvatarComponent()) return;
-	const QString guid = node->getGUID();
+	const QString guid = QString::fromStdString(node->getGUID());
 	for (const auto &weak : avatars) {
 		auto existing = weak.lock();
 		if (existing && existing->getGUID() == guid) return;
@@ -303,7 +304,7 @@ void Environment::updateAvatarMovement(float delta)
 		// pointer, and only its absence from the registry says it is gone.
 		auto scene = node ? node->getScene() : iris::ScenePtr();
 		const bool gone = !node || !node->hasAvatarComponent() || !scene
-		                  || !scene->nodes.contains(node->getGUID());
+		                  || !scene->nodes.count(node->getGUID());
 		if (gone) avatars.removeAt(i);
 	}
 
@@ -350,7 +351,7 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 			const bool skip = child->isPhysicsBody || child->hasAvatarComponent();
 			if (!skip && child->getSceneNodeType() == iris::SceneNodeType::Mesh
 			    && child->isCollisionEnabled()
-			    && !collisionContentNodes.contains(child->getGUID())) {
+			    && !collisionContentNodes.contains(QString::fromStdString(child->getGUID()))) {
 				auto meshNode = std::static_pointer_cast<iris::MeshNode>(child);
 				auto mesh = meshNode->getMesh();
 				if (mesh && mesh->getTriMesh() && !mesh->getTriMesh()->triangles.empty()) {
@@ -386,8 +387,8 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 					// other body's do.
 					collisionShapes.push_back(shape);
 					meshInterfaces.append(tri);
-					collisionObjects.insert(child->getGUID(), obj);
-					collisionContentNodes.insert(child->getGUID());
+					collisionObjects.insert(QString::fromStdString(child->getGUID()), obj);
+					collisionContentNodes.insert(QString::fromStdString(child->getGUID()));
 				}
 			}
 			// The skip must cover the SUBTREE, not just the node: an avatar's
@@ -417,7 +418,7 @@ void Environment::restoreNodeTransformations(iris::SceneNodePtr rootNode)
 bool Environment::syncBodyToNode(const iris::SceneNodePtr &node)
 {
 	if (!node) return false;
-	btRigidBody *body = hashBodies.value(node->getGUID(), nullptr);
+	btRigidBody *body = hashBodies.value(QString::fromStdString(node->getGUID()), nullptr);
 	if (!body) return false;
 
 	const iris::Vec3 pos = node->getGlobalPosition();
@@ -449,7 +450,7 @@ void Environment::indexBody(btRigidBody *body, const iris::SceneNodePtr &node)
 {
 	if (!body || !node) return;
 	BodyRecord rec;
-	rec.guid = node->getGUID();
+	rec.guid = QString::fromStdString(node->getGUID());
 	// NESTED: a body under another body's node is moved by THAT body's write
 	// too, which the epoch test cannot see (it is our own write); a node whose
 	// writes are not scene movement (a camera) is moved without the epoch
@@ -457,7 +458,7 @@ void Environment::indexBody(btRigidBody *body, const iris::SceneNodePtr &node)
 	rec.nested = !node->_countsAsMovement();
 	for (iris::SceneNodePtr p = node->getParent(); p; p = p->getParent()) {
 		++rec.depth;
-		if (p->isPhysicsBody && hashBodies.contains(p->getGUID())) rec.nested = true;
+		if (p->isPhysicsBody && hashBodies.contains(QString::fromStdString(p->getGUID()))) rec.nested = true;
 	}
 	bodyRecords.insert(body, rec);
 	if (rec.nested) {
@@ -471,7 +472,7 @@ void Environment::indexBody(btRigidBody *body, const iris::SceneNodePtr &node)
 	std::function<void(const iris::SceneNodePtr &)> markBelow = [&](const iris::SceneNodePtr &n) {
 		for (const iris::SceneNodePtr &c : n->children()) {
 			if (c->isPhysicsBody) {
-				btRigidBody *cb = hashBodies.value(c->getGUID(), nullptr);
+				btRigidBody *cb = hashBodies.value(QString::fromStdString(c->getGUID()), nullptr);
 				auto it = cb ? bodyRecords.find(cb) : bodyRecords.end();
 				if (it != bodyRecords.end() && !it->nested) {
 					it->nested = true;
@@ -523,7 +524,7 @@ void Environment::noteActiveBodies()
 	}
 }
 
-void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
+void Environment::writeBack(const std::unordered_map<std::string, iris::SceneNodePtr> &nodes)
 {
 	lastWrites = 0;
 	// Writes this world's pose into the body's node, and remembers what the
@@ -531,7 +532,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	// switch) is skipped, NULL-CHECKED (deep-audit F3); a node the editor's
 	// hand holds (disablePhysicsTransform, PLAY-SELECT-1) is left to the hand.
 	auto write = [&](btRigidBody *body, BodyRecord &rec) {
-		const iris::SceneNodePtr node = nodes.value(rec.guid);
+		const iris::SceneNodePtr node = iris::valueOr(nodes, rec.guid.toStdString());
 		if (!node || node->disablePhysicsTransform) { rec.pinned = false; return; }
 		// Since the physics is detached from the engine rendering, this is VERY
 		// important to retain object scale: ONE write of the simulated pose, not
@@ -549,7 +550,7 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 	// write left there (or was never written).
 	auto check = [&](btRigidBody *body, BodyRecord &rec) {
 		if (rec.pinned) {
-			const iris::SceneNodePtr node = nodes.value(rec.guid);
+			const iris::SceneNodePtr node = iris::valueOr(nodes, rec.guid.toStdString());
 			if (!node) return;
 			if (graph::poseWitness(node->docNode()) == rec.witness) return;
 		}
@@ -590,9 +591,9 @@ void Environment::writeBack(const QHash<QString, iris::SceneNodePtr> &nodes)
 		while (!stack.empty()) {
 			iris::SceneNode *owner = stack.back();
 			stack.pop_back();
-			if (owner->isPhysicsBody && !seen.contains(owner->getGUID())) {
-				seen.insert(owner->getGUID());
-				if (btRigidBody *body = hashBodies.value(owner->getGUID(), nullptr)) {
+			if (owner->isPhysicsBody && !seen.contains(QString::fromStdString(owner->getGUID()))) {
+				seen.insert(QString::fromStdString(owner->getGUID()));
+				if (btRigidBody *body = hashBodies.value(QString::fromStdString(owner->getGUID()), nullptr)) {
 					auto it = bodyRecords.find(body);
 					if (it != bodyRecords.end()) recheckBody(body, *it);
 				}
@@ -628,7 +629,7 @@ void Environment::restoreNodeTransformationsRecursive(const iris::SceneNodePtr &
 		// node's transform every frame, and nothing else would ever put it back
 		// (AVATAR_LOCOMOTION_SPEC §2 step 5).
 		const bool restorable = child->isPhysicsBody || child->hasAvatarComponent();
-		const auto saved = nodeTransforms.constFind(child->getGUID());
+		const auto saved = nodeTransforms.constFind(QString::fromStdString(child->getGUID()));
 		if (restorable && saved != nodeTransforms.constEnd()) {
 			child->setLocalPos(saved->pos);
 			child->setLocalRot(saved->rot);
@@ -913,7 +914,7 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 {
 	// Adds this constraint to two rigid bodies, the first is the currently selected node/body
 	// The second is selected from a menu ... TODO - do an interactive pick for selecting the second node
-	auto bodyA = hashBodies.value(node->getGUID());
+	auto bodyA = hashBodies.value(QString::fromStdString(node->getGUID()));
 	auto bodyB = hashBodies.value(to);
 
 	// Constraints must be defined in LOCAL SPACE...
@@ -932,7 +933,7 @@ void Environment::createConstraintBetweenNodes(iris::SceneNodePtr node, const QS
 	btTypedConstraint *constraint = Q_NULLPTR;
 
 	iris::ConstraintProperty constraintProperty;
-	constraintProperty.constraintFrom = node->getGUID();
+	constraintProperty.constraintFrom = QString::fromStdString(node->getGUID());
 	constraintProperty.constraintTo = to;
 
 	if (type == iris::PhysicsConstraintType::Ball) {

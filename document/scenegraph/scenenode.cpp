@@ -33,8 +33,11 @@ For more information see the LICENSE file
 #include "document/scenegraph/scene.h"
 #include "document/scenegraph/meshnode.h"
 
-#include <QDebug>
 #include "core/guid.h"
+#include "core/log.h"
+#include "core/text.h"
+#include <cstdint>
+#include <cassert>
 
 
 namespace iris
@@ -47,7 +50,7 @@ SceneNode::SceneNode()
 {
     sceneNodeType = SceneNodeType::Empty;
     nodeId = generateNodeId();
-    setName((QString("SceneNode%1").arg(nodeId)).toStdString());
+    setName(iris::text::cat("SceneNode", nodeId));
 
     visible = true;
     duplicable = true;
@@ -65,7 +68,7 @@ SceneNode::SceneNode()
     // THE OWNER TABLE the write journal resolves this node's id through (nodegraph.h).
     graph::registerNode(this);
 
-	setGUID(QString::fromStdString(iris::newGuid()));
+	setGUID(iris::newGuid());
 }
 
 void SceneNode::noteDocumentWrite()
@@ -81,7 +84,7 @@ void SceneNode::notifyChangedSubtree(NodeChange what)
     // second cascade over the same branch costs one test. (A reader that hides
     // a hundred nodes one by one inside one subtree would otherwise walk that
     // subtree a hundred times.)
-    const quint16 sub = nodeSubtreeBit(what);
+    const std::uint16_t sub = nodeSubtreeBit(what);
     if (mDirtyMask & sub) return;
     notifyChanged(what);
     mDirtyMask |= sub;
@@ -129,12 +132,12 @@ void SceneNode::setName(std::string name)
     notifyChanged(NodeChange::Name);
 }
 
-qint64 SceneNode::getNodeId() const
+std::int64_t SceneNode::getNodeId() const
 {
     return nodeId;
 }
 
-void SceneNode::setNodeId(qint64 id)
+void SceneNode::setNodeId(std::int64_t id)
 {
     graph::reassignNodeId(this, id);
 }
@@ -151,11 +154,11 @@ bool SceneNode::hasParent() const
     return mDoc.parent != nullptr;
 }
 
-QList<SceneNodePtr> SceneNode::children() const
+std::vector<SceneNodePtr> SceneNode::children() const
 {
-    QList<SceneNodePtr> out;
+    std::vector<SceneNodePtr> out;
     out.reserve(int(mDoc.children.size()));
-    for (const graph::DocNode *c : mDoc.children) out.append(c->owner->weak_from_this().lock());
+    for (const graph::DocNode *c : mDoc.children) out.push_back(c->owner->weak_from_this().lock());
     return out;
 }
 
@@ -238,12 +241,12 @@ const char *mobilityName(Mobility m)
     return "auto";
 }
 
-bool mobilityFromName(const QString &name, Mobility &out)
+bool mobilityFromName(const std::string &name, Mobility &out)
 {
-    const QString wanted = name.trimmed().toLower();
-    if (wanted == QLatin1String("auto"))    { out = Mobility::Auto;    return true; }
-    if (wanted == QLatin1String("static"))  { out = Mobility::Static;  return true; }
-    if (wanted == QLatin1String("movable")) { out = Mobility::Movable; return true; }
+    const std::string wanted = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (wanted == "auto")    { out = Mobility::Auto;    return true; }
+    if (wanted == "static")  { out = Mobility::Static;  return true; }
+    if (wanted == "movable") { out = Mobility::Movable; return true; }
     return false;
 }
 
@@ -270,7 +273,7 @@ namespace {
 /// made the distinction load-bearing. Split in two here because mobility
 /// reports WHY: real property channels are `animation`, a skeletal clip is
 /// `skeleton`.
-bool drivesTransform(const AnimationPtr &a) { return !!a && !a->properties.isEmpty(); }
+bool drivesTransform(const AnimationPtr &a) { return !!a && !a->properties.empty(); }
 /// A SKELETAL CLIP DRIVES THE NODES IT NAMES, not the node that carries it
 /// (BISTRO-IMPORT-1). An imported file's clips ride its fragment ROOT and their
 /// channels are matched to scene nodes by name; the root itself moves only if a
@@ -460,10 +463,9 @@ void SceneNode::setMobility(Mobility m)
 void SceneNode::_applyStaticHint(bool value)
 {
     if (value && !isStaticEligible()) {
-        qWarning("iris::SceneNode: static graph class refused for '%s': this node kind moves "
-                 "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
-                 "bodies, socket riders, avatars and animated nodes are never graph-static).",
-                 name.c_str());
+        iris::log::warn(iris::text::cat("iris::SceneNode: static graph class refused for '", name, "': this node kind moves "
+                                        "(SCENEGRAPH_SPEC §6 — lights, particles, decals, cameras, viewers, physics "
+                                        "bodies, socket riders, avatars and animated nodes are never graph-static)."));
         return;
     }
     // The GRAPH state is part of the test, not just the field: a node that
@@ -553,7 +555,7 @@ bool SceneNode::_applyStaticDefaultsStep(bool parentMovable)
 
 void SceneNode::addAnimation(AnimationPtr anim)
 {
-    animations.append(anim);
+    animations.push_back(anim);
     // AN ANIMATION IS A MOBILITY DRIVER (resolveMobility rule 1) and takes the
     // node out of the static half (isStaticEligible), so attaching or dropping
     // one changes what the renderer is told about it. Flags, and over the
@@ -561,7 +563,7 @@ void SceneNode::addAnimation(AnimationPtr anim)
     notifyChangedSubtree(NodeChange::Flags);
 }
 
-QList<AnimationPtr> SceneNode::getAnimations()
+std::vector<AnimationPtr> SceneNode::getAnimations()
 {
     return animations;
 }
@@ -585,13 +587,14 @@ bool SceneNode::hasActiveAnimation()
 
 void SceneNode::deleteAnimation(int index)
 {
-    animations.removeAt(index);
+    if (index >= 0 && index < int(animations.size())) animations.erase(animations.begin() + index);
     notifyChangedSubtree(NodeChange::Flags);
 }
 
 void SceneNode::deleteAnimation(AnimationPtr anim)
 {
-    animations.removeOne(anim);
+    const auto at = std::find(animations.begin(), animations.end(), anim);
+    if (at != animations.end()) animations.erase(at);
     notifyChangedSubtree(NodeChange::Flags);
 }
 
@@ -735,7 +738,7 @@ bool SceneNode::setPropertyValue(std::string_view valueName, const Value &value)
     if (valueName == "scale")    { if (!vec3FromValue(value, v)) return false; setLocalScale(v); return true; }
     if (valueName == "name") {
         if (value.kind() != Kind::String) return false;
-        setName(QString::fromStdString(value.asString()).toStdString());
+        setName(value.asString());
         return true;
     }
     const bool isBool = value.kind() == Kind::Bool;
@@ -753,7 +756,7 @@ bool SceneNode::setPropertyValue(std::string_view valueName, const Value &value)
     // wraps 4294967295 to -1; an Int past 32 bits keeps its low 32.
     if (valueName == "lightMask") {
         if (value.kind() != Kind::Int) return false;
-        setLightMask(static_cast<quint32>(value.asInt() & 0xFFFFFFFFll));
+        setLightMask(static_cast<std::uint32_t>(value.asInt() & 0xFFFFFFFFll));
         return true;
     }
     if (valueName == "mobility") {
@@ -804,7 +807,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
     // engine the new parent (the frame record).
     graph::attachDoc(mDoc, node->mDoc, position);
 
-    mChildRefs.append(node);      // the lifetime anchor; never the structure
+    mChildRefs.push_back(node);      // the lifetime anchor; never the structure
 
     if (auto sc = getScene()) {
         if (!node->hasScene()) node->setScene(sc);
@@ -865,7 +868,7 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool keepSceneMemb
     // keepSceneMembership: insertChild's same-scene move — the node is about
     // to be re-attached under a parent in the SAME scene, so registries stay.
     if (!keepSceneMembership) node->removeFromScene();
-    mChildRefs.removeOne(node);
+    if (const auto at = std::find(mChildRefs.begin(), mChildRefs.end(), node); at != mChildRefs.end()) mChildRefs.erase(at);
     // A SAME-SCENE REPARENT keeps its membership (and its collector): the
     // subtree is marked by the insertChild that follows. A real removal has
     // already been recorded as an EVICTION by removeFromScene above, and the
@@ -941,7 +944,7 @@ void SceneNode::update(float dt)
 void SceneNode::setScene(ScenePtr scene)
 {
     // should not already be a part of scene
-    Q_ASSERT(!hasScene());
+    assert(!hasScene());
 
     this->scene = std::weak_ptr(scene);
     // THE CHANGE COLLECTOR travels with scene membership, and only with it: a
@@ -977,9 +980,9 @@ void SceneNode::removeFromScene()
     }
 }
 
-qint64 SceneNode::generateNodeId()
+std::int64_t SceneNode::generateNodeId()
 {
-    return qint64(jahshaka::engine::reserveNodeId());
+    return std::int64_t(jahshaka::engine::reserveNodeId());
 }
 
 void SceneNode::setGlobalPos(iris::Vec3 pos)
@@ -1010,19 +1013,19 @@ void SceneNode::setGlobalTransform(iris::Mat4 transform)
 
 SceneNodePtr SceneNode::duplicate()
 {
-    QHash<QString, QString> guidMap;
+    std::unordered_map<std::string, std::string> guidMap;
     auto node = duplicateInto(guidMap);
     if (!node) return node;
     node->remapNodeReferences(guidMap);
     return node;
 }
 
-void SceneNode::remapNodeReferences(const QHash<QString, QString> &guidMap)
+void SceneNode::remapNodeReferences(const std::unordered_map<std::string, std::string> &guidMap)
 {
-    const auto through = [&](QString &field) {
-        if (field.isEmpty()) return;
-        const auto it = guidMap.constFind(field);
-        if (it != guidMap.constEnd()) field = it.value();
+    const auto through = [&](std::string &field) {
+        if (field.empty()) return;
+        const auto it = guidMap.find(field);
+        if (it != guidMap.cend()) field = it->second;
     };
 
     // A SOCKET RIDER: copying a character with a camera on its head must give
@@ -1037,8 +1040,12 @@ void SceneNode::remapNodeReferences(const QHash<QString, QString> &guidMap)
     // as the socket owner — an endpoint outside the copy is deliberately left
     // alone, because a constraint to a fixed anchor is a real authoring shape.
     for (auto &constraint : physicsProperty.constraints) {
-        through(constraint.constraintFrom);
-        through(constraint.constraintTo);
+        // (the constraint's guids are QString until physics converts, 5b: across the edge here)
+        std::string from = constraint.constraintFrom.toStdString(), to = constraint.constraintTo.toStdString();
+        through(from);
+        through(to);
+        constraint.constraintFrom = QString::fromStdString(from);
+        constraint.constraintTo = QString::fromStdString(to);
     }
 
     // Per-type references (a camera's focus target). Virtual rather than a
@@ -1051,7 +1058,7 @@ void SceneNode::remapNodeReferences(const QHash<QString, QString> &guidMap)
     for (int i = 0; i < n; ++i) if (SceneNode *c = childAt(i)) c->remapNodeReferences(guidMap);
 }
 
-SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
+SceneNodePtr SceneNode::duplicateInto(std::unordered_map<std::string, std::string> &guidMap)
 {
     if (!duplicable) return SceneNodePtr();
 
@@ -1109,7 +1116,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		auto copy = AvatarLocomotionPtr(new AvatarLocomotion());
 		copy->markRolesFromFile(this->avatarLocomotion->roles(),
 		                        this->avatarLocomotion->usesDefaultAsset());
-		QString err;
+		QString err;   // locomotion is 5b's
 		copy->setAssetPreservingDefaultFlag(this->avatarLocomotion->asset(), &err);
 		node->setLocomotionComponent(copy);
 	}
@@ -1135,9 +1142,9 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 		if (anim == this->animation) node->setAnimation(copy);
 	}
 
-    const QString guid = QString::fromStdString(iris::newGuid());
+    const std::string guid = iris::newGuid();
     node->setGUID(guid);
-    guidMap.insert(this->getGUID(), guid);
+    guidMap.insert_or_assign(this->getGUID(), guid);
 
     // The attachment travels with the copy. Whether it points at the ORIGINAL
     // owner or at the copy's own is decided by remapNodeReferences once the whole

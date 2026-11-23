@@ -9,6 +9,7 @@
   - LICENSE   sha256 6ffedbc0f7878612d2b23589f1ff2ab15633e1df7963a5d9fc750ec5500c7e7a
   Never `xxhsum` and never the `cli/` folder (GPL); nothing else of the archive.
 - Fetched 2026-11-23 from a neutral scratch directory (no project data sent); nothing of the archive was run.
-- Used by ONE translation unit: irisgl/import/meshbake.cpp, with `XXH_INLINE_ALL` (every xxHash function static
-  inline in that unit: no exported symbol, so no clash with another copy of xxHash anywhere in the process).
+- Used by ONE product unit plus its row: irisgl/import/meshbake.cpp (the checksum) and tests/meshbake/test_mesh_bake.cpp
+  (bake.round_trip's cost line), each with `XXH_INLINE_ALL` (every xxHash function static inline in its unit: no
+  exported symbol, so no clash with another copy of xxHash anywhere in the process).
 - A vendored tree is never edited (CODING_RULES § 2): a change is a new release vendored the same way.

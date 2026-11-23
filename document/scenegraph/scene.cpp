@@ -28,8 +28,11 @@ For more information see the LICENSE file
 #include "core/math/intersectionhelper.h"
 #include <cmath>
 #include <algorithm>
-#include <QSet>
+#include <unordered_set>
 #include "core/guid.h"
+#include "core/text.h"
+#include "core/math/scalar.h"
+#include "document/mapvalue.h"
 
 
 namespace iris
@@ -50,12 +53,12 @@ const char *rayTracingModeName(RayTracingMode mode)
     return "auto";
 }
 
-bool rayTracingModeFromName(const QString &name, RayTracingMode &out)
+bool rayTracingModeFromName(const std::string &name, RayTracingMode &out)
 {
-    const QString n = name.trimmed().toLower();
-    if (n == QLatin1String("auto")) { out = RayTracingMode::Auto; return true; }
-    if (n == QLatin1String("off"))  { out = RayTracingMode::Off;  return true; }
-    if (n == QLatin1String("on"))   { out = RayTracingMode::On;   return true; }
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (n == "auto") { out = RayTracingMode::Auto; return true; }
+    if (n == "off")  { out = RayTracingMode::Off;  return true; }
+    if (n == "on")   { out = RayTracingMode::On;   return true; }
     return false;
 }
 
@@ -72,12 +75,12 @@ const char *vrFlyModeName(VrFlyMode mode)
     return "aim";
 }
 
-bool vrFlyModeFromName(const QString &name, VrFlyMode &out)
+bool vrFlyModeFromName(const std::string &name, VrFlyMode &out)
 {
-    const QString n = name.trimmed().toLower();
-    if (n == QLatin1String("aim"))   { out = VrFlyMode::Aim;   return true; }
-    if (n == QLatin1String("gaze"))  { out = VrFlyMode::Gaze;  return true; }
-    if (n == QLatin1String("level")) { out = VrFlyMode::Level; return true; }
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (n == "aim")   { out = VrFlyMode::Aim;   return true; }
+    if (n == "gaze")  { out = VrFlyMode::Gaze;  return true; }
+    if (n == "level") { out = VrFlyMode::Level; return true; }
     return false;
 }
 
@@ -90,11 +93,11 @@ const char *vrTurnModeName(VrTurnMode mode)
     return "snap";
 }
 
-bool vrTurnModeFromName(const QString &name, VrTurnMode &out)
+bool vrTurnModeFromName(const std::string &name, VrTurnMode &out)
 {
-    const QString n = name.trimmed().toLower();
-    if (n == QLatin1String("snap"))   { out = VrTurnMode::Snap;   return true; }
-    if (n == QLatin1String("smooth")) { out = VrTurnMode::Smooth; return true; }
+    const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+    if (n == "snap")   { out = VrTurnMode::Snap;   return true; }
+    if (n == "smooth") { out = VrTurnMode::Smooth; return true; }
     return false;
 }
 
@@ -138,12 +141,12 @@ SkyRealistic SkyRealistic::defaults()
 
 CloudLayer CloudLayer::clamped(CloudLayer c)
 {
-    c.coverage  = qBound(0.0f,   c.coverage,  1.0f);
-    c.density   = qBound(0.0f,   c.density,   4.0f);
-    c.speed     = qBound(0.0f,   c.speed,     100.0f);
+    c.coverage  = iris::bound(0.0f, c.coverage, 1.0f);
+    c.density   = iris::bound(0.0f, c.density, 4.0f);
+    c.speed     = iris::bound(0.0f, c.speed, 100.0f);
     c.direction = std::fmod(std::fmod(c.direction, 360.0f) + 360.0f, 360.0f);
-    c.altitude  = qBound(500.0f, c.altitude,  8000.0f);
-    c.shadow    = qBound(0.0f,   c.shadow,    1.0f);
+    c.altitude  = iris::bound(500.0f, c.altitude, 8000.0f);
+    c.shadow    = iris::bound(0.0f, c.shadow, 1.0f);
     return c;
 }
 
@@ -156,7 +159,7 @@ Value CloudLayer::toJson() const
                     {"direction", Value(double(direction))},
                     {"altitude",  Value(double(altitude))},
                     {"shadow",    Value(double(shadow))}};
-    if (!weatherMapGuid.isEmpty()) o.emplace_back("weatherMap", Value(weatherMapGuid.toStdString()));
+    if (!weatherMapGuid.empty()) o.emplace_back("weatherMap", Value(weatherMapGuid));
     return Value(std::move(o));
 }
 
@@ -174,7 +177,7 @@ CloudLayer CloudLayer::fromJson(const Value &o)
     c.direction = float(numberOr(o, "direction", d.direction));
     c.altitude  = float(numberOr(o, "altitude", d.altitude));
     c.shadow    = float(numberOr(o, "shadow", d.shadow));
-    c.weatherMapGuid = QString::fromStdString(stringOr(o, "weatherMap", d.weatherMapGuid.toStdString()));
+    c.weatherMapGuid = stringOr(o, "weatherMap", d.weatherMapGuid);
     return clamped(c);
 }
 
@@ -187,10 +190,10 @@ HeightFog HeightFog::clamped(HeightFog h)
     if (!std::isfinite(h.heightFalloff)) h.heightFalloff = d.heightFalloff;
     if (!std::isfinite(h.baseHeight)) h.baseHeight = d.baseHeight;
     if (!std::isfinite(h.startDistance)) h.startDistance = d.startDistance;
-    h.density       = qBound(0.0f,      h.density,       10.0f);
-    h.heightFalloff = qBound(0.001f,    h.heightFalloff, 2.0f);
-    h.baseHeight    = qBound(-10000.0f, h.baseHeight,    10000.0f);
-    h.startDistance = qBound(0.0f,      h.startDistance, 100000.0f);
+    h.density       = iris::bound(0.0f, h.density, 10.0f);
+    h.heightFalloff = iris::bound(0.001f, h.heightFalloff, 2.0f);
+    h.baseHeight    = iris::bound(-10000.0f, h.baseHeight, 10000.0f);
+    h.startDistance = iris::bound(0.0f, h.startDistance, 100000.0f);
     return h;
 }
 
@@ -220,7 +223,7 @@ SunContact SunContact::clamped(SunContact c)
 {
 	// A NaN takes the default; the band is the renderer's (scene.h).
 	if (!std::isfinite(c.range)) c.range = SunContact().range;
-	c.range = qBound(kSunContactMinRange, c.range, kSunContactMaxRange);
+	c.range = iris::bound(kSunContactMinRange, c.range, kSunContactMaxRange);
 	const int r = int(c.resolution);
 	if (r < 0 || r > 2) c.resolution = SunContactResolution::Auto;
 	return c;
@@ -236,12 +239,12 @@ const char *SunContact::resolutionName(SunContactResolution r)
 	return "auto";
 }
 
-bool SunContact::resolutionFromName(const QString &name, SunContactResolution &out)
+bool SunContact::resolutionFromName(const std::string &name, SunContactResolution &out)
 {
-	const QString n = name.trimmed().toLower();
-	if (n == QLatin1String("auto")) { out = SunContactResolution::Auto; return true; }
-	if (n == QLatin1String("full")) { out = SunContactResolution::Full; return true; }
-	if (n == QLatin1String("half")) { out = SunContactResolution::Half; return true; }
+	const std::string n = iris::text::asciiLower(std::string(iris::text::trim(name)));
+	if (n == "auto") { out = SunContactResolution::Auto; return true; }
+	if (n == "full") { out = SunContactResolution::Full; return true; }
+	if (n == "half") { out = SunContactResolution::Half; return true; }
 	return false;
 }
 
@@ -260,7 +263,7 @@ SunContact SunContact::fromJson(const Value &o)
 	c.enabled = boolOr(o, "enabled", d.enabled);
 	c.range = float(numberOr(o, "range", d.range));
 	SunContactResolution r = d.resolution;
-	if (resolutionFromName(QString::fromStdString(stringOr(o, "resolution")), r)) c.resolution = r;
+	if (resolutionFromName(stringOr(o, "resolution"), r)) c.resolution = r;
 	return clamped(c);
 }
 
@@ -269,11 +272,11 @@ SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
     // The model's own bands, in the DOCUMENT: a value a dial cannot express
     // must not survive a visit to the panel, and must not reach the renderer
     // from a verb either.
-    r.sunHaze       = qBound(0.0f, r.sunHaze,       100.0f);
-    r.aerialScale   = qBound(0.0f, r.aerialScale,   1.0f);
-    r.skyBrightness = qBound(0.0f, r.skyBrightness, 10.0f);
-    r.groundAlbedo  = qBound(0.0f, r.groundAlbedo,  1.0f);
-    r.rayleighScale = qBound(0.0f, r.rayleighScale, 10.0f);
+    r.sunHaze       = iris::bound(0.0f, r.sunHaze, 100.0f);
+    r.aerialScale   = iris::bound(0.0f, r.aerialScale, 1.0f);
+    r.skyBrightness = iris::bound(0.0f, r.skyBrightness, 10.0f);
+    r.groundAlbedo  = iris::bound(0.0f, r.groundAlbedo, 1.0f);
+    r.rayleighScale = iris::bound(0.0f, r.rayleighScale, 10.0f);
     return r;
 }
 
@@ -304,7 +307,7 @@ SkyRealistic Scene::skyRealisticFromJson(const Value &o)
 void Scene::setSkyRealistic(const SkyRealistic &r)
 {
     skyRealistic = clampSkyRealistic(r);
-    skyData.insert(QStringLiteral("Realistic"), skyRealisticJson(skyRealistic));
+    skyData.insert_or_assign("Realistic", skyRealisticJson(skyRealistic));
 }
 
 bool Scene::skyRealisticInSync() const
@@ -312,9 +315,9 @@ bool Scene::skyRealisticInSync() const
     // Through the JSON both ways, so the comparison is of the two things that
     // actually exist rather than of six floats somebody remembered to list.
     const Value mine = skyRealisticJson(skyRealistic);
-    const auto it = skyData.constFind(QStringLiteral("Realistic"));
-    if (it == skyData.constEnd()) return false;
-    return skyRealisticJson(skyRealisticFromJson(*it)) == mine;
+    const auto it = skyData.find("Realistic");
+    if (it == skyData.cend()) return false;
+    return skyRealisticJson(skyRealisticFromJson(it->second)) == mine;
 }
 
 Scene::Scene()
@@ -493,14 +496,14 @@ Scene::Scene()
 
     // AUTOMATIC sun: the lowest forwardShadingPriority directional
     // (SUN_AND_LIGHT_DEFAULTS Q1). The sky follows it; nothing steers it.
-    sunLightGuid = QString();
+    sunLightGuid = std::string();
 
 	gradientTop = SrgbColor(255, 0, 0);
 	gradientMid = SrgbColor(0, 255, 0);
 	gradientBot = SrgbColor(0, 0, 255);
 	gradientOffset = .5f;
 
-	skyGuid = QString::fromStdString(iris::newGuid());
+	skyGuid = iris::newGuid();
 
 	// The colours in the colour's Value shape (valueshapes.h colourToValue: the file codec's four numbers).
 	const Value singleColourBlock(Value::Object{{"skyColor", colourToValue(skyColor)}});
@@ -510,13 +513,13 @@ Scene::Scene()
 	                                        {"gradientBot", colourToValue(SrgbColor(64, 128, 255))},
 	                                        {"gradientOffset", Value(double(.73f))}});
 
-	skyData.insert("SingleColor", singleColourBlock);
+	skyData.insert_or_assign("SingleColor", singleColourBlock);
 	// THROUGH THE ONE PATH, like every other write of these dials: the typed
 	// fields and the JSON block cannot start out disagreeing either.
 	setSkyRealistic(skyRealistic);
-	skyData.insert("Gradient", gradientBlock);
-	skyData.insert("Equirectangular", Value(Value::Object{}));
-	skyData.insert("Cubemap", Value(Value::Object{}));
+	skyData.insert_or_assign("Gradient", gradientBlock);
+	skyData.insert_or_assign("Equirectangular", Value(Value::Object{}));
+	skyData.insert_or_assign("Cubemap", Value(Value::Object{}));
 
     // end sky init
 
@@ -542,9 +545,9 @@ void Scene::setWorldGravity(float gravity)
 	environment->setWorldGravity(this->gravity = gravity);
 }
 
-QString Scene::getSkyTextureSource()
+std::string Scene::getSkyTextureSource()
 {
-    return skyTexture->getSource();
+    return skyTexture->getSource().toStdString();   // Texture2D is 5b's
 }
 
 void Scene::clearSkyTexture()
@@ -572,13 +575,13 @@ void Scene::setSkyColor(SrgbColor color)
 // both read 0 resolve the same way on every reload (R6 in the spec — the tie
 // case is the one the test has to assert, not the happy case).
 
-QVector<LightNodePtr> Scene::directionalLights() const
+std::vector<LightNodePtr> Scene::directionalLights() const
 {
-    QVector<LightNodePtr> out;
-    for (const auto &light : lights) {
+    std::vector<LightNodePtr> out;
+    for (const auto &[lightKey, light] : lights) {
         if (!light) continue;
         if (light->lightType != LightType::Directional) continue;
-        out.append(light);
+        out.push_back(light);
     }
     std::sort(out.begin(), out.end(), [](const LightNodePtr &a, const LightNodePtr &b) {
         if (a->forwardShadingPriority != b->forwardShadingPriority)
@@ -594,8 +597,8 @@ LightNodePtr Scene::sunLight() const
     //    DIRECTIONAL light. A pin left behind by a deleted light resolves to
     //    the automatic answer instead of to nothing (the panel then reads
     //    "chosen automatically" again, which is the truth).
-    if (!sunLightGuid.isEmpty()) {
-        auto node = nodes.value(sunLightGuid);
+    if (!sunLightGuid.empty()) {
+        auto node = iris::valueOr(nodes, sunLightGuid);
         if (node) {
             auto light = std::dynamic_pointer_cast<LightNode>(node);
             if (light && light->lightType == LightType::Directional) return light;
@@ -604,29 +607,29 @@ LightNodePtr Scene::sunLight() const
     // 2. Lowest priority, ties by creation order. 3. None — a legal, shipped
     //    state (Mirror Room, Showroom 2), never a warning.
     const auto dirs = directionalLights();
-    return dirs.isEmpty() ? LightNodePtr() : dirs.first();
+    return dirs.empty() ? LightNodePtr() : dirs.front();
 }
 
-QString Scene::sunReason() const
+std::string Scene::sunReason() const
 {
-    if (!sunLightGuid.isEmpty()) {
-        auto node = nodes.value(sunLightGuid);
+    if (!sunLightGuid.empty()) {
+        auto node = iris::valueOr(nodes, sunLightGuid);
         if (node) {
             auto light = std::dynamic_pointer_cast<LightNode>(node);
             if (light && light->lightType == LightType::Directional)
-                return QStringLiteral("pinned");
+                return "pinned";
         }
     }
-    return directionalLights().isEmpty() ? QStringLiteral("none")
-                                         : QStringLiteral("priority");
+    return directionalLights().empty() ? "none"
+                                         : "priority";
 }
 
-QVector<LightNodePtr> Scene::secondaryDirectionals() const
+std::vector<LightNodePtr> Scene::secondaryDirectionals() const
 {
     const auto sun = sunLight();
-    QVector<LightNodePtr> out;
+    std::vector<LightNodePtr> out;
     for (const auto &light : directionalLights())
-        if (light != sun) out.append(light);
+        if (light != sun) out.push_back(light);
     return out;
 }
 
@@ -634,12 +637,12 @@ int Scene::nextForwardShadingPriority() const
 {
     // The lowest number nobody is using: the first directional gets 0, a
     // second slots into 1, and deleting the sun frees 0 again for the next one.
-    QSet<int> used;
-    for (const auto &light : lights)
+    std::unordered_set<int> used;
+    for (const auto &[lightKey, light] : lights)
         if (light && light->lightType == LightType::Directional)
             used.insert(light->forwardShadingPriority);
     int p = 0;
-    while (used.contains(p)) ++p;
+    while ((used.count(p) != 0)) ++p;
     return p;
 }
 
@@ -659,13 +662,13 @@ int Scene::nextForwardShadingPriority() const
 // for its shadow; a second Sky Light is never useful, so the answer to two of
 // them is the scene issue, not a picker.
 
-QVector<LightNodePtr> Scene::skyLights() const
+std::vector<LightNodePtr> Scene::skyLights() const
 {
-    QVector<LightNodePtr> out;
-    for (const auto &light : lights) {
+    std::vector<LightNodePtr> out;
+    for (const auto &[lightKey, light] : lights) {
         if (!light) continue;
         if (light->lightType != LightType::Sky) continue;
-        out.append(light);
+        out.push_back(light);
     }
     // `lights` is a QHash by guid — hash order is not an order. Sort, as
     // directionalLights() does, so every reload resolves the same way.
@@ -682,13 +685,13 @@ LightNodePtr Scene::skyLight() const
     return LightNodePtr();
 }
 
-QString Scene::skyLightReason() const
+std::string Scene::skyLightReason() const
 {
     const auto all = skyLights();
-    if (all.isEmpty()) return QStringLiteral("none");
+    if (all.empty()) return "none";
     for (const auto &light : all)
-        if (light->isVisibleInScene()) return QStringLiteral("first");
-    return QStringLiteral("allHidden");
+        if (light->isVisibleInScene()) return "first";
+    return "allHidden";
 }
 
 void Scene::updateSceneAnimation(float time)
@@ -761,7 +764,7 @@ void Scene::refresh()
 
 void Scene::rayCast(const iris::Vec3& segStart,
                     const iris::Vec3& segEnd,
-                    QList<PickingResult>& hitList,
+                    std::vector<PickingResult>& hitList,
 					uint64_t pickingMask,
 					bool allowUnpickable)
 {
@@ -771,7 +774,7 @@ void Scene::rayCast(const iris::Vec3& segStart,
         pick.hitNode = p.node;
         pick.hitPoint = p.hitPoint;
         pick.triangleIndex = p.triangleIndex;
-        hitList.append(pick);
+        hitList.push_back(pick);
     }
 }
 
@@ -784,36 +787,36 @@ void Scene::addNode(SceneNodePtr node)
 
     if (node->sceneNodeType == SceneNodeType::Light) {
         auto light = std::static_pointer_cast<iris::LightNode>(node);
-        lights.insert(light->getGUID(), light);
+        lights.insert_or_assign(light->getGUID(), light);
     }
 
     if (node->sceneNodeType == SceneNodeType::Decal) {
         auto decal = std::static_pointer_cast<iris::DecalNode>(node);
-        decals.insert(decal->getGUID(), decal);
+        decals.insert_or_assign(decal->getGUID(), decal);
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
 		//qDebug() <<"Mesh GUID: " << node->getGUID();
         auto mesh = std::static_pointer_cast<iris::MeshNode>(node);
-		if (meshes.contains(node->getGUID()))
-			mesh->setGUID(QString::fromStdString(iris::newGuid()));
-		meshes.insert(node->getGUID(), mesh);
+		if ((meshes.count(node->getGUID()) != 0))
+			mesh->setGUID(iris::newGuid());
+		meshes.insert_or_assign(node->getGUID(), mesh);
 		pickTable.add(mesh.get());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
         auto particleSystem = std::static_pointer_cast<iris::ParticleSystemNode>(node);
-        particleSystems.insert(node->getGUID(), particleSystem);
+        particleSystems.insert_or_assign(node->getGUID(), particleSystem);
     }
 
     // CAMERAS_SPEC §3: scene-graph cameras. Reachable only now that the
     // CameraNode constructor sets its own type — before that a camera added to
     // a scene arrived here as an Empty and was never registered.
     if (node->sceneNodeType == SceneNodeType::Camera) {
-        cameras.insert(node->getGUID(), std::static_pointer_cast<iris::CameraNode>(node));
+        cameras.insert_or_assign(node->getGUID(), std::static_pointer_cast<iris::CameraNode>(node));
     }
 
-	nodes.insert(node->getGUID(), node);
+	nodes.insert_or_assign(node->getGUID(), node);
 
     // CAMERAS_SPEC §5: a node read from a file already carries its attachment,
     // so registration happens HERE and not only in attachToSocket — otherwise a
@@ -824,8 +827,8 @@ void Scene::addNode(SceneNodePtr node)
 void Scene::registerSocketAttachment(const SceneNodePtr &node)
 {
     if (!node || !node->isSocketAttached()) return;
-    QList<SceneNodePtr> &list = socketAttachments[node->socketOwnerGuid];
-    if (!list.contains(node)) list.append(node);
+    std::vector<SceneNodePtr> &list = socketAttachments[node->socketOwnerGuid];
+    if (std::find(list.begin(), list.end(), node) == list.end()) list.push_back(node);
 }
 
 void Scene::unregisterSocketAttachment(const SceneNodePtr &node)
@@ -836,42 +839,39 @@ void Scene::unregisterSocketAttachment(const SceneNodePtr &node)
     // been cleared by the caller — so sweep every bucket rather than trusting
     // it. Buckets are tiny; there is one per rig that carries attachments.
     for (auto it = socketAttachments.begin(); it != socketAttachments.end(); ) {
-        it.value().removeAll(node);
-        if (it.value().isEmpty()) it = socketAttachments.erase(it);
+        it->second.erase(std::remove(it->second.begin(), it->second.end(), node), it->second.end());
+        if (it->second.empty()) it = socketAttachments.erase(it);
         else ++it;
     }
 }
 
-bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
-                           const QString &socketName, QString *error)
+bool Scene::attachToSocket(const SceneNodePtr &node, const std::string &ownerGuid,
+                           const std::string &socketName, std::string *error)
 {
-    const auto refuse = [error](const QString &message) {
+    const auto refuse = [error](const std::string &message) {
         if (error) *error = message;
         return false;
     };
-    if (!node) return refuse(QStringLiteral("no node"));
+    if (!node) return refuse("no node");
     if (node->getGUID() == ownerGuid)
-        return refuse(QStringLiteral("a node cannot ride its own socket"));
+        return refuse("a node cannot ride its own socket");
 
-    const SceneNodePtr owner = nodes.value(ownerGuid);
+    const SceneNodePtr owner = iris::valueOr(nodes, ownerGuid);
     if (!owner)
-        return refuse(QStringLiteral("no node with id '%1'").arg(ownerGuid));
+        return refuse(iris::text::cat("no node with id '", ownerGuid, "'"));
     if (owner->getSceneNodeType() != SceneNodeType::Mesh)
-        return refuse(QStringLiteral("'%1' is not a mesh, so it carries no sockets")
-                          .arg(owner->getName()));
+        return refuse(iris::text::cat("'", owner->getName(), "' is not a mesh, so it carries no sockets"));
     auto meshOwner = std::static_pointer_cast<iris::MeshNode>(owner);
     if (!meshOwner->findSocket(socketName))
-        return refuse(QStringLiteral("'%1' has no socket named '%2'")
-                          .arg(owner->getName(), socketName));
+        return refuse(iris::text::cat("'", owner->getName(), "' has no socket named '", socketName, "'"));
 
     // A cycle would be a transform feedback loop: the owner's pose is read to
     // place the attached node, and the owner's own world transform is part of
     // that pose. Refuse an owner that lives INSIDE the attached node's subtree.
     for (SceneNodePtr walk = owner; !!walk; walk = walk->getParent()) {
         if (walk == node)
-            return refuse(QStringLiteral("'%1' is inside '%2' — attaching it would make the "
-                                         "socket drive its own owner")
-                              .arg(owner->getName(), node->getName()));
+            return refuse(iris::text::cat("'", owner->getName(), "' is inside '", node->getName(),
+                                          "' — attaching it would make the socket drive its own owner"));
     }
 
     unregisterSocketAttachment(node);
@@ -894,7 +894,7 @@ bool Scene::detachFromSocket(const SceneNodePtr &node)
 {
     if (!node || !node->isSocketAttached()) return false;
     unregisterSocketAttachment(node);
-    node->setSocketAttachment(QString(), QString());
+    node->setSocketAttachment(std::string(), std::string());
     return true;
 }
 
@@ -917,18 +917,18 @@ namespace {
 /// tolerated it, and this is what "no behaviour change" means here); the
 /// empty-key eviction does not survive, because it was a bug.
 template <typename Hash, typename Ptr>
-void removeRegistered(Hash &hash, const QString &guid, const Ptr &node)
+void removeRegistered(Hash &hash, const std::string &guid, const Ptr &node)
 {
-    if (hash.remove(guid) > 0) return;
-    const QString stale = hash.key(node);
-    if (!stale.isEmpty()) hash.remove(stale);
+    if (hash.erase(guid) > 0) return;
+    for (auto it = hash.begin(); it != hash.end(); ++it)   // QHash::key(value): the reverse lookup, by hand
+        if (it->second == node) { hash.erase(it); return; }
 }
 
 }  // namespace
 
 void Scene::removeNode(SceneNodePtr node)
 {
-    const QString guid = node->getGUID();
+    const std::string guid = node->getGUID();
 
     if (node->sceneNodeType == SceneNodeType::Light) {
         removeRegistered(lights, guid, std::static_pointer_cast<iris::LightNode>(node));
@@ -948,7 +948,7 @@ void Scene::removeNode(SceneNodePtr node)
     }
 
     if (node->sceneNodeType == SceneNodeType::Camera) {
-        cameras.remove(guid);
+        cameras.erase(guid);
         // Deleting the ACTIVE camera falls back to the free viewer rather than
         // leaving a guid that resolves to nothing. Undo re-adds the node with
         // the same guid, so re-pointing play at it is one setActiveCamera —
@@ -957,7 +957,7 @@ void Scene::removeNode(SceneNodePtr node)
         if (activeCameraGuid == guid) activeCameraGuid.clear();
     }
 
-	nodes.remove(guid);
+	nodes.erase(guid);
     // The node stops riding anything. Whatever was riding IT keeps its bucket:
     // the owner simply stops resolving (SocketResolver counts it as stale
     // and moves nothing), so an UNDO of the delete — which re-adds the same
@@ -975,13 +975,13 @@ void Scene::setCamera(CameraNodePtr cameraNode)
     camera = cameraNode;
 }
 
-bool Scene::setActiveCamera(const QString &guid)
+bool Scene::setActiveCamera(const std::string &guid)
 {
-    if (guid.isEmpty()) {          // back to the free viewer
+    if (guid.empty()) {          // back to the free viewer
         activeCameraGuid.clear();
         return true;
     }
-    if (!cameras.contains(guid)) return false;
+    if (!(cameras.count(guid) != 0)) return false;
     activeCameraGuid = guid;
     return true;
 }
@@ -991,17 +991,17 @@ bool Scene::armCameraIfNoneActive(const CameraNodePtr &camera)
     // The three refusals, each one a decision (see the header):
     // nothing to arm, something already armed, or a camera that is not ours.
     if (!camera) return false;
-    if (!activeCameraGuid.isEmpty()) return false;
-    const QString guid = camera->getGUID();
-    if (!cameras.contains(guid)) return false;
+    if (!activeCameraGuid.empty()) return false;
+    const std::string guid = camera->getGUID();
+    if (!(cameras.count(guid) != 0)) return false;
     activeCameraGuid = guid;
     return true;
 }
 
 CameraNodePtr Scene::getActiveCamera() const
 {
-    if (activeCameraGuid.isEmpty()) return CameraNodePtr();
-    return cameras.value(activeCameraGuid);
+    if (activeCameraGuid.empty()) return CameraNodePtr();
+    return iris::valueOr(cameras, activeCameraGuid);
 }
 
 CameraNodePtr Scene::renderCamera(const CameraNodePtr &hostCamera) const
@@ -1115,7 +1115,7 @@ void Scene::cleanup()
     // THE CHANGE COLLECTOR dies with this object, so nothing may still name
     // it: a node the undo stack or a command still holds would otherwise carry
     // a dangling NodeDirtySet* and mark into freed memory on its next write.
-    for (const auto &n : nodes) if (n) n->_setDirtySet(nullptr);
+    for (const auto &[nKey, n] : nodes) if (n) n->_setDirtySet(nullptr);
     if (rootNode) rootNode->_setDirtySet(nullptr);
     mDirtySet.clear();
 

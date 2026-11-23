@@ -61,7 +61,7 @@ MeshNode *findSocketOwner(const SceneNodePtr &node, const QString &socketName)
     if (!node) return nullptr;
     if (node->getSceneNodeType() == SceneNodeType::Mesh) {
         auto *mesh = static_cast<MeshNode *>(node.get());
-        if (mesh->hasSkeleton() && mesh->findSocket(socketName)) return mesh;
+        if (mesh->hasSkeleton() && mesh->findSocket(socketName.toStdString())) return mesh;
     }
     const int kids = node->childCount();
     for (int i = 0; i < kids; ++i) {
@@ -110,7 +110,7 @@ bool AvatarPossession::possess(const SceneNodePtr &node)
     unpossess();
 
     mPossessed = std::weak_ptr(node);
-    mPossessedGuid = node->getGUID();
+    mPossessedGuid = QString::fromStdString(node->getGUID());
     captureOffsetReference(node);
 
     // Start the arm behind the character rather than wherever the previous
@@ -190,7 +190,7 @@ void AvatarPossession::captureOffsetReference(const SceneNodePtr &node)
     // exactly the pose we want (the character's proportions, not its gait).
     if (MeshNode *owner = findSocketOwner(node, QStringLiteral("shoulder"))) {
         Mat4 socketWorld;
-        if (socketWorldTransform(owner, QStringLiteral("shoulder"), BonePoseSource(), socketWorld)) {
+        if (socketWorldTransform(owner, (QStringLiteral("shoulder")).toStdString(), BonePoseSource(), socketWorld)) {
             const Vec4 t = socketWorld.column(3);
             const Vec3 origin = node->getGlobalPosition();
             const float dy = t.y() - origin.y();

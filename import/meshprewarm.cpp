@@ -77,4 +77,11 @@ void MeshPrewarm::clear()
     mBaked.clear();
 }
 
+void MeshPrewarm::forget(const QString &path)
+{
+    QMutexLocker locked(&mLock);
+    mTried.remove(path);
+    mBaked.remove(path);
+}
+
 }   // namespace iris

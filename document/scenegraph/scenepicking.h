@@ -43,7 +43,8 @@ For more information see the LICENSE file
 // node's local space, reporting the triangle index (Ogre has no triangle path).
 // -----------------------------------------------------------------------------
 
-#include <QList>
+#include <cstdint>
+#include <vector>
 
 #include "core/math/vec.h"
 #include "irisglfwd.h"
@@ -70,7 +71,7 @@ namespace picking
 /// `pickingMask` is the document's ALL-test (`(node->pickingGroups & mask) ==
 /// mask`), applied to the candidates with `pickable` and the effective
 /// visibility. `allowUnpickable` ignores the per-node `pickable` flag.
-QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
+std::vector<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
                               uint64_t pickingMask = 0, bool allowUnpickable = false);
 
 

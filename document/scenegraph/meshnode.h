@@ -35,7 +35,7 @@ class MeshNode : public SceneNode
 public:
     MeshPtr mesh;
 
-    QString meshPath;
+    std::string meshPath;
 
     /**
      * This holds the index of the mesh
@@ -87,7 +87,7 @@ public:
     SkeletonPtr getSkeleton() const { return skeleton; }
     bool hasSkeleton() const { return !!skeleton; }
     /// Whether this node's rig has a bone by this name.
-    bool hasBone(const QString &boneName) const;
+    bool hasBone(const std::string &boneName) const;
 
     // ---- sockets (CAMERAS_SPEC §5, D9; see scenegraph/socket.h) -----------
     //
@@ -98,23 +98,23 @@ public:
 
     /// This node's sockets, in the order they were added (the order the file
     /// writes and `node.sockets` reports).
-    const QList<Socket> &getSockets() const { return sockets; }
+    const std::vector<Socket> &getSockets() const { return sockets; }
     /// The socket with this name, or null. The pointer is into `sockets` and is
     /// invalidated by any add/remove — read it, do not keep it.
-    const Socket *findSocket(const QString &name) const;
+    const Socket *findSocket(const std::string &name) const;
     /// Adds a socket. Refused (false, with `error` set when given) for an empty
     /// name, a name this node already uses, or a bone this node's rig does not
     /// have — including "this node has no rig at all", which is the refusal a
     /// caller most often means to hit.
-    bool addSocket(const Socket &socket, QString *error = nullptr);
+    bool addSocket(const Socket &socket, std::string *error = nullptr);
     /// Removes the socket by name. False when there was none.
     /// NOTE: this does NOT detach whatever was riding it — that is the scene's
     /// job (Scene::detachFromSocket), because a node knows nothing about who
     /// points at it. An attachment left pointing at a removed socket simply
     /// stops moving (the fail-soft rule in socket.h).
-    bool removeSocket(const QString &name);
+    bool removeSocket(const std::string &name);
     /// Replaces the whole list (the reader, and duplication).
-    void setSockets(const QList<Socket> &list)
+    void setSockets(const std::vector<Socket> &list)
     {
         sockets = list;
         notifyChanged(NodeChange::Params);
@@ -189,7 +189,7 @@ private:
     /// Clones the mesh's rig template into this node's `skeleton` (or clears it).
     void adoptSkeletonFromMesh();
 
-    QList<Socket> sockets;
+    std::vector<Socket> sockets;
 };
 
 }

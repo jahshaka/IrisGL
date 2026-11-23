@@ -14,14 +14,14 @@ For more information see the LICENSE file
 #include "document/scenegraph/cameranode.h"
 #include "document/scenegraph/looks.h"
 
-#include <QPoint>
-#include <QtMath>
 
 #include <algorithm>
 #include <cmath>
 
 #include "core/math/mathhelper.h"
 #include "document/properties/property.h"
+#include "core/math/scalar.h"
+#include <cstdint>
 
 namespace
 {
@@ -461,7 +461,7 @@ Value CameraNode::getPropertyValue(std::string_view valueName)
     if (valueName == "dofEnabled")      return Value(dofEnabled);
     if (valueName == "focusMode")       return Value(static_cast<int>(focusMode));
     if (valueName == "focusDistance")   return F(focusDistance);
-    if (valueName == "focusTarget")     return Value(focusTarget.toStdString());
+    if (valueName == "focusTarget")     return Value(focusTarget);
     if (valueName == "fStop")           return F(fStop);
     if (valueName == "outputHeight")    return Value(outputHeight);
     if (valueName == "bodyVisible")     return Value(bodyVisible);
@@ -557,7 +557,7 @@ bool CameraNode::setPropertyValue(std::string_view valueName, const Value &value
     if (valueName == "focusDistance") { if (!isNum) return false; focusDistance = std::max(0.0f, f); return markedParams(); }
     if (valueName == "focusTarget") {
         if (value.kind() != Kind::String) return false;
-        focusTarget = QString::fromStdString(value.asString());
+        focusTarget = value.asString();
         return markedParams();
     }
     if (valueName == "fStop")         { if (!isNum) return false; fStop = std::max(0.0f, f);         return markedParams(); }
@@ -686,7 +686,7 @@ void CameraNode::updateCameraMatrices()
 
 void CameraNode::setFieldOfViewRadians(float fov)
 {
-    const float deg = qRadiansToDegrees(fov);
+    const float deg = iris::radiansToDegrees(fov);   // Qt's float overload: the same constant
     if (angle == deg) return;
     angle = deg;
     notifyChanged(NodeChange::Params);
@@ -887,23 +887,11 @@ void CameraNode::update(float dt)
     updateCameraMatrices();
 }
 
-iris::Vec3 CameraNode::calculatePickingDirection(int viewPortWidth, int viewPortHeight, QPointF pos)
+void CameraNode::remapOwnNodeReferences(const std::unordered_map<std::string, std::string> &guidMap)
 {
-    float x = ((2.0f * pos.x()) / viewPortWidth) - 1.0f;
-    float y = 1.0f - ((2.0f * pos.y()) / viewPortHeight);
-
-    iris::Vec4 ray = projMatrix.inverted() * iris::Vec4(x, y, -1.0f, 1.0f);
-    ray.setZ(-1.0f);
-    ray.setW(0.0f);
-    ray = viewMatrix.inverted() * ray;
-    return ray.toVector3D().normalized();
-}
-
-void CameraNode::remapOwnNodeReferences(const QHash<QString, QString> &guidMap)
-{
-    if (focusTarget.isEmpty()) return;
-    const auto it = guidMap.constFind(focusTarget);
-    if (it != guidMap.constEnd()) focusTarget = it.value();
+    if (focusTarget.empty()) return;
+    const auto it = guidMap.find(focusTarget);
+    if (it != guidMap.cend()) focusTarget = it->second;
 }
 
 SceneNodePtr CameraNode::createDuplicate()

@@ -22,11 +22,10 @@ For more information see the LICENSE file
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"
 
-#include <QHash>
-#include <QList>
-#include <QString>
-#include <QtGlobal>
+#include <unordered_map>
+#include <vector>
 #include <string>
+#include <cstdint>
 
 namespace iris
 {
@@ -78,7 +77,7 @@ enum class NodeChange {
 /// How many NodeChange kinds there are (the width of a node's dirty mask).
 const unsigned kNodeChangeCount = unsigned(NodeChange::Params) + 1u;
 /// The one bit for a kind.
-inline quint16 nodeChangeBit(NodeChange what) { return quint16(1u << unsigned(what)); }
+inline std::uint16_t nodeChangeBit(NodeChange what) { return std::uint16_t(1u << unsigned(what)); }
 /// ...and the SECOND bit, "this kind was already cascaded over my subtree".
 ///
 /// It has to be separate from the first (found by mirror.dirty_equals_full,
@@ -87,9 +86,9 @@ inline quint16 nodeChangeBit(NodeChange what) { return quint16(1u << unsigned(wh
 /// pruned on the plain bit alone saw it already set and marked no descendant at
 /// all — every child of a re-classified group kept the parent's old mobility
 /// until something else happened to write it.
-inline quint16 nodeSubtreeBit(NodeChange what)
+inline std::uint16_t nodeSubtreeBit(NodeChange what)
 {
-    return quint16(1u << (unsigned(what) + 8u));
+    return std::uint16_t(1u << (unsigned(what) + 8u));
 }
 
 /// MOBILITY — "does this thing move?", the one classification a user sets and
@@ -112,7 +111,7 @@ inline quint16 nodeSubtreeBit(NodeChange what)
 /// Nothing here is the GRAPH's class: a light is never graph-static (its
 /// object memory manager has no static twin) and is still perfectly `static`
 /// mobility — it just does not move.
-enum class Mobility : quint8 {
+enum class Mobility : std::uint8_t {
     Auto = 0,      ///< no user opinion; the resolution rule decides
     Static = 1,    ///< the user says it never moves
     Movable = 2    ///< the user says it moves
@@ -121,7 +120,7 @@ enum class Mobility : quint8 {
 /// WHY a node resolved the way it did — the reason the verb, the panel row and
 /// the render-loop monitor report. First match wins, in this order:
 /// the six drivers, then `Parent`, then `User`, then `Play`, then `Default`.
-enum class MobilityReason : quint8 {
+enum class MobilityReason : std::uint8_t {
     Default = 0,   ///< nothing drives it and nobody said otherwise -> static
     User,          ///< the user's explicit Static/Movable
     Physics,       ///< a physics body: Bullet writes its transform every step
@@ -138,7 +137,7 @@ enum class MobilityReason : quint8 {
 /// Enum values travel as NAMES on this surface, never as ordinals.
 const char *mobilityName(Mobility m);
 /// False when `name` is not one of auto/static/movable (case-insensitive).
-bool mobilityFromName(const QString &name, Mobility &out);
+bool mobilityFromName(const std::string &name, Mobility &out);
 const char *mobilityReasonName(MobilityReason r);
 
 // -----------------------------------------------------------------------------
@@ -169,7 +168,7 @@ const char *mobilityReasonName(MobilityReason r);
 class SceneNode : public std::enable_shared_from_this<SceneNode>
 {
 protected:
-    QList<AnimationPtr> animations;
+    std::vector<AnimationPtr> animations;
     AnimationPtr animation;
 
 
@@ -181,7 +180,7 @@ protected:
 
     /// LIFETIME ANCHOR ONLY — see the class note. Never iterate it; use
     /// children().
-    QList<SceneNodePtr> mChildRefs;
+    std::vector<SceneNodePtr> mChildRefs;
 
 
     /// SCENE_STATIC, the document's side of it — the GRAPH class only, which
@@ -215,7 +214,7 @@ protected:
     // scene's list — that pair IS the dedupe, so however many times a frame
     // writes this node it is appended once.
     NodeDirtySet *mDirtySet = nullptr;
-    quint16 mDirtyMask = 0;
+    std::uint16_t mDirtyMask = 0;
     bool mQueued = false;
     /// Where this node sits on the scene's list while `mQueued` — what lets a
     /// node that leaves the document before the list is consumed cancel its
@@ -230,7 +229,7 @@ public:
     /// `long`, which is 32 bits on Windows LLP64 (deep audit 2026-09, area 5).
     /// SceneMirror keys its entry map on it, so a wrap is a silent aliasing of
     /// two different nodes onto one engine entry.
-    qint64 nodeId;
+    std::int64_t nodeId;
 
     /// The scene this node belongs to, weakly (a scene owns its nodes through
     /// its registries; a node must never keep its scene alive).
@@ -259,8 +258,8 @@ public:
     // The owner is named by GUID and not by pointer on purpose: it survives the
     // file, it survives a re-import that rebuilds the node objects, and a
     // stale one is inert rather than a crash.
-    QString socketOwnerGuid;
-    QString socketName;
+    std::string socketOwnerGuid;
+    std::string socketName;
 
     // ---- OUTLINER FOLDERS (SCENEGRAPH_SPEC.md §6b) -------------------------
     //
@@ -274,24 +273,24 @@ public:
     // Written by src/services/scenefolders.h (which owns path normalisation and
     // is the only thing that should touch it) and persisted in the project's
     // EDITOR section — never in the node's own serialized block.
-    QString folderPath;
+    std::string folderPath;
 
-    QString getFolderPath() const { return folderPath; }
+    std::string getFolderPath() const { return folderPath; }
     /// Raw setter — no normalisation, no scene-side folder registration. The
     /// reader, duplication and scenefolders:: use it; UI and verbs go through
     /// scenefolders::setNodeFolder, which normalises and keeps the scene's
     /// explicit folder list correct.
-    void _setFolderPath(const QString &path)
+    void _setFolderPath(const std::string &path)
     {
         folderPath = path;
         notifyChanged(NodeChange::Flags);
     }
 
-    bool isSocketAttached() const { return !socketOwnerGuid.isEmpty() && !socketName.isEmpty(); }
+    bool isSocketAttached() const { return !socketOwnerGuid.empty() && !socketName.empty(); }
     /// The RAW setter — no validation, no registry. The reader and duplication
     /// use it; everything else goes through Scene::attachToSocket, which
     /// validates the owner and keeps the scene's attachment registry correct.
-    void setSocketAttachment(const QString &ownerGuid, const QString &socket)
+    void setSocketAttachment(const std::string &ownerGuid, const std::string &socket)
     {
         socketOwnerGuid = ownerGuid;
         socketName = socket;
@@ -379,10 +378,10 @@ public:
     // leaves it empty and behaves exactly as it always has.
     struct AvatarLink
     {
-        QString asset;     ///< the Avatar asset's guid
-        QString version;   ///< the definition oid this instance last resolved
-        QString name;      ///< the definition's name at that version
-        bool isLinked() const { return !asset.isEmpty(); }
+        std::string asset;     ///< the Avatar asset's guid
+        std::string version;   ///< the definition oid this instance last resolved
+        std::string name;      ///< the definition's name at that version
+        bool isLinked() const { return !asset.empty(); }
     };
     AvatarLink avatarLink;
 
@@ -434,7 +433,7 @@ public:
     // so): it filters DIRECT light only. A masked-off object still casts a
     // shadow from that light (the shadow map is one texture for all receivers)
     // and still receives its GI bounce.
-    quint32 lightMask = 0xFFFFFFFFu;
+    std::uint32_t lightMask = 0xFFFFFFFFu;
 
     // PROBE-GRID EXCLUSION (REFLECTIONS_ADOPTION_SPEC.md P1a.2; renamed by
     // D4-PHOTON-TIERS): "this object must not decide WHERE the reflection-probe
@@ -445,7 +444,7 @@ public:
     // it under a 2-unit scene spreads the grid over empty air.
     bool probeGridExcluded = false;
 
-	mutable QString guid;
+	mutable std::string guid;
 
     friend class Renderer;
     friend class Scene;
@@ -480,7 +479,7 @@ public:
 
     /// Which NodeChange kinds have been raised since the mirror last consumed
     /// this node. Read by SceneMirror; there is no other consumer.
-    quint16 dirtyMask() const { return mDirtyMask; }
+    std::uint16_t dirtyMask() const { return mDirtyMask; }
     /// True when this node is on its scene's dirty list.
     bool isQueuedDirty() const { return mQueued; }
     /// THE CONSUMER'S END of the funnel: hands over the mask and re-arms the
@@ -493,10 +492,10 @@ public:
     /// (Inside the consumption the list has been swapped away and the cancel's
     /// node check finds nothing to clear.) THE INVARIANT: a node in the live
     /// list is queued — SceneMirror counts any that is not (unqueuedDirtySlots).
-    quint16 _takeDirtyMask()
+    std::uint16_t _takeDirtyMask()
     {
         if (mQueued && mDirtySet) mDirtySet->cancel(mDirtySlot, this);
-        const quint16 m = mDirtyMask;
+        const std::uint16_t m = mDirtyMask;
         mDirtyMask = 0;
         mQueued = false;
         return m;
@@ -558,17 +557,17 @@ public:
     void setName(std::string name);
     const std::string &getName() const;
 
-    qint64 getNodeId() const;
+    std::int64_t getNodeId() const;
     /// Takes a SESSION id (an undo's replay, src/io/scenereader.cpp): the owner table the write journal resolves
     /// through follows the id (graph::reassignNodeId) — a raw write of `nodeId` would leave the writes to this node
     /// resolved to the node that held it before (ENGINE-UPGRADE-U3 decision 33).
-    void setNodeId(qint64 id);
+    void setNodeId(std::int64_t id);
 
-	void setGUID(const QString &id) const {
+	void setGUID(const std::string &id) const {
 		guid = id;
 	}
 
-	const QString getGUID() const {
+	const std::string getGUID() const {
 		return guid;
 	}
 
@@ -619,7 +618,7 @@ public:
     /// fine inside a walk that runs every frame or over the whole document —
     /// use childCount()/childAt() there, which read the store's child list and
     /// allocate nothing.
-    QList<SceneNodePtr> children() const;
+    std::vector<SceneNodePtr> children() const;
     /// The child count without materialising the list.
     int childCount() const { return int(mDoc.children.size()); }
     /// The i'th child, borrowed (null only out of range). The store holds
@@ -638,7 +637,7 @@ public:
     int siblingIndex() const { return graph::indexInParent(mDoc); }
 
     void addAnimation(AnimationPtr anim);
-    QList<AnimationPtr> getAnimations();
+    std::vector<AnimationPtr> getAnimations();
     void setAnimation(AnimationPtr anim);
     AnimationPtr getAnimation();
     bool hasActiveAnimation();
@@ -674,7 +673,7 @@ private:
    /// give the COPY's camera the COPY's head, not the original's (the guids are
    /// regenerated, so a straight field copy would have every duplicate riding
    /// the first character forever).
-   SceneNodePtr duplicateInto(QHash<QString, QString> &guidMap);
+   SceneNodePtr duplicateInto(std::unordered_map<std::string, std::string> &guidMap);
 public:
    /// Re-points every NODE-GUID reference this subtree carries through
    /// `guidMap`: socket owners, physics constraint endpoints, and whatever a
@@ -686,12 +685,12 @@ public:
    /// duplicate() calls it here, and the clipboard's paste calls it after
    /// rebuilding a fragment with fresh guids (CLIPBOARD_SPEC §3.2 — before
    /// this, only duplicate() remapped anything, and only socket owners).
-   void remapNodeReferences(const QHash<QString, QString> &guidMap);
+   void remapNodeReferences(const std::unordered_map<std::string, std::string> &guidMap);
 
 protected:
    /// A subclass's own node-guid fields. The base walks the subtree and calls
    /// this on each node; an override remaps its own fields and nothing else.
-   virtual void remapOwnNodeReferences(const QHash<QString, QString> &guidMap) { Q_UNUSED(guidMap); }
+   virtual void remapOwnNodeReferences(const std::unordered_map<std::string, std::string> &guidMap) { (void)guidMap; }
 public:
 
     /// The node's OWN flag — what the outliner eye and `visible` in a saved
@@ -754,12 +753,12 @@ public:
     /// object on no channels is lit by nothing but ambient/GI, which is a
     /// perfectly good thing to ask for. The mirror pushes it: the light side as
     /// part of the LightDesc, the object side onto the node's Item.
-    void setLightMask(quint32 mask) {
+    void setLightMask(std::uint32_t mask) {
         lightMask = mask;
         notifyChanged(NodeChange::Flags);
     }
 
-    quint32 getLightMask() const {
+    std::uint32_t getLightMask() const {
         return lightMask;
     }
 
@@ -1083,7 +1082,7 @@ protected:
         // funnel. Before the per-frame dedupe: that reader is on its own
         // schedule, not the mirror's.
         if (what != NodeChange::Transform) noteDocumentWrite();
-        const quint16 bit = nodeChangeBit(what);
+        const std::uint16_t bit = nodeChangeBit(what);
         if (mDirtyMask & bit) return;
         mDirtyMask |= bit;
         if (!mQueued) {
@@ -1099,7 +1098,7 @@ private:
     void setScene(ScenePtr scene);
     void removeFromScene();
 
-    static qint64 generateNodeId();
+    static std::int64_t generateNodeId();
 };
 
 }

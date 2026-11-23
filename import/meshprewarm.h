@@ -71,6 +71,8 @@ public:
     /// Paths whose bake was read.
     QStringList paths() const;
     void clear();
+    /// Forgets that `path` was tried, so the next parse reads its bake again (a refused bake re-baked: N3).
+    void forget(const QString &path);
 
 private:
     Q_DISABLE_COPY(MeshPrewarm)

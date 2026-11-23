@@ -311,7 +311,10 @@ namespace
 // version. The document's names and containers are std (UTF-8 std::string names, std::map / std::vector members: this
 // file's crossings write each name as the QString they wrote before, so the stream's name bytes are unchanged); three
 // index guards compare UNSIGNED (an index of 2^31 or more passed `int(x) >= count`). Every bake re-bakes.
-constexpr int kFormatVersion = 37;
+// v38 (2026-11-23, NOQT-DOCUMENT-1 stage 5, "5a"): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED - MeshNode::meshPath is
+// a std::string now, so its two writers here (buildFragment's) and four in import/scenebuilder.cpp take
+// `filePath.toStdString()`; meshPath is never serialized. Every library re-bakes once (forward-only).
+constexpr int kFormatVersion = 38;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -3012,7 +3015,7 @@ SceneNodePtr buildFragmentNode(
         MeshPtr mesh = model.meshes[n.meshIndex];
         meshNode->setMesh(mesh);
         meshNode->name = n.name.toStdString();
-        meshNode->meshPath = filePath;
+        meshNode->meshPath = filePath.toStdString();
         meshNode->meshIndex = n.meshIndex;
         if (n.materialIndex >= 0 && n.materialIndex < model.materials.size()) {
             MeshMaterialData data = model.materials[n.materialIndex];
@@ -3084,7 +3087,7 @@ SceneNodePtr MeshBake::buildFragment(
         MeshPtr mesh = model.meshes.first();
         attachAnimations(node);
         node->setMesh(mesh);
-        node->meshPath = filePath;
+        node->meshPath = filePath.toStdString();
         node->meshIndex = 0;
         if (model.root.materialIndex >= 0 && model.root.materialIndex < model.materials.size()) {
             MeshMaterialData data = model.materials[model.root.materialIndex];

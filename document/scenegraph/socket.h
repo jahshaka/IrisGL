@@ -47,9 +47,9 @@ For more information see the LICENSE file
 // node simply stays where it is. A hard failure here would mean a re-imported
 // character breaks every scene that used it.
 
-#include <QHash>
-#include <QList>
-#include <QString>
+#include <unordered_map>
+#include <vector>
+#include <string>
 #include <functional>
 
 #include "core/math/mat4.h"
@@ -67,8 +67,8 @@ namespace iris
 /// edit. `offsetMatrix()` is the derived form.
 struct Socket
 {
-    QString name;          ///< unique within its owner; never empty
-    QString boneName;      ///< a bone of the owner's skeleton
+    std::string name;          ///< unique within its owner; never empty
+    std::string boneName;      ///< a bone of the owner's skeleton
     Vec3    position;      ///< offset from the bone, in BONE space
     Quat    rotation;
     Vec3    scale = Vec3(1, 1, 1);
@@ -96,7 +96,7 @@ struct Socket
 /// The QHash is an OUT parameter and is expected to be reused between calls:
 /// this runs per frame, and a fresh container per skinned node per frame is
 /// exactly the allocation churn the resolver exists to avoid.
-using BonePoseSource = std::function<bool(MeshNode *, QHash<QString, Mat4> &)>;
+using BonePoseSource = std::function<bool(MeshNode *, std::unordered_map<std::string, Mat4> &)>;
 
 /// The rig's BIND pose in world space — FK-free, because a v1 skeleton already
 /// carries each bone's mesh-space bind matrix. Equal by construction to what
@@ -104,12 +104,12 @@ using BonePoseSource = std::function<bool(MeshNode *, QHash<QString, Mat4> &)>;
 /// the engine's bind locals from exactly these matrices).
 ///
 /// False when the node is not a skinned mesh.
-bool bindPoseWorldTransforms(MeshNode *node, QHash<QString, Mat4> &out);
+bool bindPoseWorldTransforms(MeshNode *node, std::unordered_map<std::string, Mat4> &out);
 
 /// The world transform of one socket: `boneWorld * socket.offset`.
 /// False when the owner has no socket of that name, or the socket names a bone
 /// the pose does not have.
-bool socketWorldTransform(MeshNode *owner, const QString &socketName,
+bool socketWorldTransform(MeshNode *owner, const std::string &socketName,
                           const BonePoseSource &source, Mat4 &out);
 
 /// Drives every socket-attached node of a scene, once per frame.
@@ -142,7 +142,7 @@ public:
 
 private:
     BonePoseSource mSource;
-    QHash<QString, Mat4> mBones;    ///< scratch, reused every frame
+    std::unordered_map<std::string, Mat4> mBones;    ///< scratch, reused every frame
     int mDangling = 0;
 };
 

@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #define PARTICLESYSTEMNODE_H
 
 #include "core/math/vec.h"
-#include <QVector>
+#include <vector>
 
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
@@ -87,7 +87,7 @@ public:
     /// was loaded from — what a saved scene persists, never derived back from
     /// the texture's path. Empty for an image nobody named (the shipped default
     /// with no project open), which a save cannot keep.
-    QString textureGuid;
+    std::string textureGuid;
 
     bool dissipate = true, dissipateInv = false;
     bool randomRotation = true;
@@ -120,10 +120,10 @@ public:
 
     /// Colour over life, up to 6 keys. Empty = no ramp (particles keep the
     /// emission colour). This is the single lever that turns quads into fire.
-    QVector<ParticleColourKey> colourKeys;
+    std::vector<ParticleColourKey> colourKeys;
     /// Scale over life, up to 6 keys, as multipliers of `particleScale`. Empty
     /// = constant size, unless `dissipate`/`dissipateInv` synthesise a ramp.
-    QVector<ParticleScaleKey> scaleKeys;
+    std::vector<ParticleScaleKey> scaleKeys;
 
     // ---- ADDENDUM A-4: the four affectors the renderer had and we did not --
     //
@@ -142,8 +142,8 @@ public:
     /// RESOLVED PATH, not a guid: the renderer's affector loads it by name
     /// through the resource system, so the document resolves it like every
     /// other bound asset and the engine registers its folder.
-    QString colourRampImage;
-    QString colourRampGuid;   ///< the library asset behind colourRampImage
+    std::string colourRampImage;
+    std::string colourRampGuid;   ///< the library asset behind colourRampImage
 
     /// Size RATE over life: units per second, or a per-second FACTOR when
     /// `scaleRateMultiply`. 0 (additive) / 1 (multiplicative) are neutral and
@@ -211,7 +211,7 @@ public:
     /// Binds the billboard image and the asset it is (TEX-REF-1). A null `tex`
     /// with a guid is a reference the store could not resolve: kept, so the
     /// next save writes it back.
-    void setTexture(std::shared_ptr<iris::Texture2D> tex, const QString &guid)
+    void setTexture(std::shared_ptr<iris::Texture2D> tex, const std::string &guid)
     {
         if (texture == tex && textureGuid == guid) return;
         texture = tex;
@@ -222,19 +222,19 @@ public:
     /// The three LIST-valued colour/size sources have no reflected key, so
     /// they had no setter either — the verb and the panel assigned the fields
     /// and the mirror never heard (audit D2). Every writer goes through these.
-    void setColourKeys(const QVector<ParticleColourKey> &keys)
+    void setColourKeys(const std::vector<ParticleColourKey> &keys)
     {
         colourKeys = keys;
         notifyChanged(NodeChange::Params);
     }
-    void setScaleKeys(const QVector<ParticleScaleKey> &keys)
+    void setScaleKeys(const std::vector<ParticleScaleKey> &keys)
     {
         scaleKeys = keys;
         notifyChanged(NodeChange::Params);
     }
     /// The colour RAMP image (a resolved path) and the asset behind it; both
     /// empty = no ramp.
-    void setColourRamp(const QString &guid, const QString &path)
+    void setColourRamp(const std::string &guid, const std::string &path)
     {
         if (colourRampGuid == guid && colourRampImage == path) return;
         colourRampGuid = guid;
@@ -260,13 +260,13 @@ public:
     /// constructor and applyPreset both start from.
     void resetAuthoringDefaults();
 
-    static QString presetName(ParticlePreset p);
-    static ParticlePreset presetFromName(const QString &name);
-    static QStringList presetNames();
-    static QString shapeName(ParticleEmitterShape s);
-    static ParticleEmitterShape shapeFromName(const QString &name);
-    static QString orientationName(ParticleOrientation o);
-    static ParticleOrientation orientationFromName(const QString &name);
+    static std::string presetName(ParticlePreset p);
+    static ParticlePreset presetFromName(const std::string &name);
+    static std::vector<std::string> presetNames();
+    static std::string shapeName(ParticleEmitterShape s);
+    static ParticleEmitterShape shapeFromName(const std::string &name);
+    static std::string orientationName(ParticleOrientation o);
+    static ParticleOrientation orientationFromName(const std::string &name);
 
     /// Pure transform refresh — this node has not simulated anything since the
     /// ParticleFX2 adoption. Kept because SceneNode::update is what walks

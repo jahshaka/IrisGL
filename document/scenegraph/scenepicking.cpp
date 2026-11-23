@@ -99,10 +99,10 @@ void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
 
 }  // namespace
 
-QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
+std::vector<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
                               uint64_t pickingMask, bool allowUnpickable)
 {
-    QList<MeshPick> out;
+    std::vector<MeshPick> out;
     if (!scene || !scene->getRootNode()) return out;
 
     std::vector<MeshNode *> candidates;
@@ -127,7 +127,7 @@ QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &se
             p.hitPoint = world * r.hitPoint;
             p.distanceSqrd = (p.hitPoint - segStart).lengthSquared();
             p.triangleIndex = r.triangleIndex;
-            out.append(p);
+            out.push_back(p);
         }
     }
     return out;

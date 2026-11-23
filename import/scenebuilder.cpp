@@ -446,7 +446,7 @@ std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
 
             meshNode->setMesh(meshObj);
             meshNode->name = std::string(mesh->mName.C_Str());
-            meshNode->meshPath = filePath;
+            meshNode->meshPath = filePath.toStdString();
             meshNode->meshIndex = node->mMeshes[0];
 
             // mesh->mMaterialIndex is always at least 0
@@ -476,7 +476,7 @@ std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
 
             auto meshNode = iris::MeshNode::create();
             meshNode->name = std::string(mesh->mName.C_Str());
-            meshNode->meshPath = filePath;
+            meshNode->meshPath = filePath.toStdString();
             meshNode->meshIndex = node->mMeshes[i];
 
             meshNode->setMesh(meshObj);
@@ -597,7 +597,7 @@ loadAsSceneFragment(QString filePath,
         if (xf.skeleton) meshObj->setSkeleton(extractSkeleton(mesh, scene));
 
         node->setMesh(meshObj);
-        node->meshPath = filePath;
+        node->meshPath = filePath.toStdString();
         node->meshIndex = 0;
 
         auto m = scene->mMaterials[mesh->mMaterialIndex];
@@ -681,7 +681,7 @@ loadAsSceneFragment(
 		if (xf.skeleton) meshObj->setSkeleton(extractSkeleton(mesh, scene));
 
 		node->setMesh(meshObj);
-		node->meshPath = filePath;
+		node->meshPath = filePath.toStdString();
 		node->meshIndex = 0;
 
 		auto m = scene->mMaterials[mesh->mMaterialIndex];
