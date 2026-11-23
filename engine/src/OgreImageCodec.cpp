@@ -3,6 +3,7 @@
 #include "jahshaka/engine/ImageCodec.h"
 #include "jahshaka/engine/Pictures.h"
 
+#include <OgreCodec.h>
 #include <OgreDataStream.h>
 #include <OgreException.h>
 #include <OgreImage2.h>
@@ -44,6 +45,15 @@ bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &
         why = "an empty picture (" + std::to_string(image.width) + " x " + std::to_string(image.height) + ") has no PNG";
         return false;
     }
+    // NO CODEC is told apart by WHICH CALL threw, never by a sentence: Codec::getCodec throws ERR_ITEM_NOT_FOUND only when no
+    // codec is registered for the extension (OgreMain/src/OgreCodec.cpp, Codec::getCodec); a throw of the encode after it
+    // is the encode's own failure (an allocation, FreeImage's)
+    try {
+        Ogre::Codec::getCodec("png");
+    } catch (const Ogre::Exception &e) {
+        why = "no PNG codec on this engine: " + e.getDescription();
+        return false;
+    }
     // Ogre's door takes a mutable pointer: the rows are copied (top-left origin, RGBA8: the codec flips them for its own
     // bottom-up bitmap and orders the channels itself)
     std::vector<std::uint8_t> rows(image.rgba.begin(), image.rgba.end());
@@ -56,22 +66,31 @@ bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &
         if (!out.empty()) out.resize(png->read(out.data(), out.size()));
     } catch (const Ogre::Exception &e) {
         out.clear();
-        why = "no PNG codec on this engine: " + e.getDescription();
+        why = "the PNG encode failed: " + e.getDescription();
         return false;
     } catch (const std::exception &e) {
         out.clear();
-        why = std::string("no PNG codec on this engine: ") + e.what();
+        why = std::string("the PNG encode failed: ") + e.what();
         return false;
     }
     // OGRE's DEFECT (DOCS/OGRE_UPSTREAM_ISSUES.md): FreeImageCodec2::encode ignores FreeImage_SaveToMemory's answer, so a
-    // failed save is an EMPTY stream, never an exception - the bytes are checked for the PNG signature
-    static const std::uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
-    if (out.size() < 8 || !std::equal(kSignature, kSignature + 8, out.begin())) {
-        why = "the codec wrote no PNG (" + std::to_string(out.size()) + " bytes without the PNG signature)";
+    // failed save is an EMPTY or TRUNCATED stream (libpng writes the signature and IHDR before the rows), never an exception
+    if (!pngComplete(out)) {
+        why = "the codec wrote no complete PNG (" + std::to_string(out.size()) + " bytes without the PNG signature first and "
+              "the IEND chunk last)";
         out.clear();
         return false;
     }
     return true;
+}
+
+bool pngComplete(const std::vector<std::uint8_t> &png)
+{
+    static const std::uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    // IEND: length 0, the type, its CRC-32 (fixed: the chunk has no data)
+    static const std::uint8_t kEnd[12] = {0, 0, 0, 0, 'I', 'E', 'N', 'D', 0xAE, 0x42, 0x60, 0x82};
+    return png.size() >= 8 + 12 && std::equal(kSignature, kSignature + 8, png.begin()) &&
+           std::equal(kEnd, kEnd + 12, png.end() - 12);
 }
 
 }}  // namespace jahshaka::engine

@@ -17,8 +17,13 @@ struct Image;
 /// are averaged as they are (display-encoded, no linearisation: a preview, never a measurement). maxEdge 0 is taken as 1.
 Image boxDownscale(const Image &in, unsigned maxEdge);
 
-/// The image as PNG bytes (8 bits a channel, RGBA: its alpha kept) into `out`; false with `why` when no PNG codec answers,
-/// the codec wrote no PNG (no signature), or the image is empty (a zero width or height) - nothing is thrown.
+/// The image as PNG bytes (8 bits a channel, RGBA, its alpha kept - an all-opaque image may be written as RGB, colour type 2:
+/// its alpha is 255 by the PNG's own rule) into `out`; false with `why` when the engine has no PNG codec, the encode threw,
+/// the codec wrote no complete PNG (pngComplete), or the image is empty (a zero width or height) - nothing is thrown.
 bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &why);
+
+/// True when `png` is framed as a whole PNG: the 8-byte signature first AND the 12-byte IEND chunk last (a failed save can
+/// leave the signature and IHDR alone in the stream: Ogre's FreeImage codec ignores the save's answer).
+bool pngComplete(const std::vector<std::uint8_t> &png);
 
 }}  // namespace jahshaka::engine

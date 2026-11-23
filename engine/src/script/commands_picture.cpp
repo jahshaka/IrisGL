@@ -10,6 +10,7 @@
 // picture is, under the SAME cap, with the same reductions (engine.radiance.*) in radiance units instead of codes.
 #include "script/commands.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -164,12 +165,18 @@ void registerPictureCommands(Host &host, const Commands &k)
            "place; needs the engine (its image codec)."},
           [k](Call &c) -> Value {
               if (!k.engine(c)) return Value();
-              const Image small = boxDownscale(*c.object<Image>(c[0]), unsigned(c[1].asInt()));
+              const Image &held = *c.object<Image>(c[0]);
+              const unsigned maxEdge = unsigned(c[1].asInt());
+              // a picture that already fits is encoded in place (boxDownscale's copy of it would be the same bytes)
+              const bool fits = std::max(held.width, held.height) <= maxEdge;
+              Image small;
+              if (!fits) small = boxDownscale(held, maxEdge);
+              const Image &shown = fits ? held : small;
               std::vector<std::uint8_t> png;
               std::string why;
-              if (!encodePng(small, png, why)) return c.fail(why);
-              return Value(Value::Object{{"png", Value::bytes(std::move(png))}, {"width", Value(small.width)},
-                                         {"height", Value(small.height)}});
+              if (!encodePng(shown, png, why)) return c.fail(why);
+              return Value(Value::Object{{"png", Value::bytes(std::move(png))}, {"width", Value(shown.width)},
+                                         {"height", Value(shown.height)}});
           });
     r.add({"engine.picture.release", {Access::Changes, {pic}, Kind::Bool},
            "Releases the picture: its handle is stale from here on, its bytes leave the live pictures' cap."},
