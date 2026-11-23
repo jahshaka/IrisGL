@@ -18,11 +18,13 @@
 // binding of EXACTLY N names (records_bind.inc, generated up to 128), so a field added to T BREAKS THE BUILD until its
 // table names it; Table::inOrder (the CPU case) then checks each entry's byte offset against the binding's field, in
 // declaration order (a swapped, missing or misnamed entry fails by name). A record with a base class, a union, a
-// private or a bit-field member cannot be bound (Types.h has none: the stage-2 preflight).
+// private or a bit-field member cannot be bound (the engine's records had none at the stage-2 preflight).
 //
-// The tables live in fields_<subject>.cpp (each including `jahshaka/engine/Types.h` path-qualified, one line);
-// a subject's header declares its records with JAH_RECORD_COUNT and its enums with JAH_ENUM_NAMES. The commands that
-// take or answer a record use Table::param / toValue / fromValue.
+// KEYED BY FAMILY (SCRIPT-IN-ENGINE-1 stage 2: two families share a subject header - LightDesc and DecalDesc are both
+// Lights.h's): a family's records are declared in records_<family>.h - JAH_RECORD_COUNT beside each table's declaration,
+// JAH_ENUM_NAMES for its enums, the subject headers it needs included path-qualified ("jahshaka/engine/Lights.h") - and
+// their tables live in fields_<family>.cpp. The commands that take or answer a record use Table::param / toValue /
+// fromValue; an engine id a record carries (a TextureId, a NodeId) is a typed handle: Field::handle.
 #include "jahshaka/engine/Script.h"
 #include "jahshaka/engine/Math.h"
 
@@ -162,8 +164,9 @@ template <class T> Param paramOf(std::string name)
     }
 }
 
-/// A C++ value as a script value.
-template <class T> Value toValue(const T &v)
+/// A C++ value as a script value. `call`: the call that answers it - a record's HANDLE member (Field::handle) is minted
+/// through it (null: no handle member may carry an id; a field's default is read so, an id 0 answers null).
+template <class T> Value toValue(const T &v, Call *call = nullptr)
 {
     if constexpr (std::is_same<T, bool>::value) {
         return Value(v);
@@ -185,16 +188,16 @@ template <class T> Value toValue(const T &v)
         detail::flatOut(v, a);
         return Value(std::move(a));
     } else if constexpr (detail::IsOptional<T>::value || detail::IsShared<T>::value) {
-        return v ? toValue(*v) : Value();
+        return v ? toValue(*v, call) : Value();
     } else if constexpr (detail::IsVector<T>::value || std::is_array<T>::value) {
         Value::Array a;
         for (const auto &e : v) {
             if constexpr (detail::flatWidth<typename std::decay<decltype(e)>::type>() != 0) detail::flatOut(e, a);
-            else a.push_back(toValue(e));
+            else a.push_back(toValue(e, call));
         }
         return Value(std::move(a));
     } else {
-        return Record<T>::table().toValue(v);
+        return Record<T>::table().toValue(v, call);
     }
 }
 
@@ -252,7 +255,7 @@ template <class T> bool fromValue(const Value &v, T &out, const std::string &whe
 template <class R> struct Field {
     Param param;
     std::size_t offset = 0;
-    std::function<Value(const R &)> get;
+    std::function<Value(const R &, Call *call)> get;   ///< `call`: the answering call (toValue)
     std::function<bool(const Value &, R &, const std::string &where, std::string &why)> set;
 
     Field range(double lo, double hi) const { return with(param.range(lo, hi)); }
@@ -261,6 +264,42 @@ template <class R> struct Field {
     Field upTo(unsigned elements) const { return with(param.upTo(elements)); }
     Field in(std::string unit) const { return with(param.in(std::move(unit))); }
     Field allowNonFinite() const { return with(param.allowNonFinite()); }
+    /// A HANDLE MEMBER (SCRIPT-IN-ENGINE-1 E0): the member is the engine's id of `kind` (an integral id, or a vector of
+    /// them) and the script carries it as that kind's TYPED HANDLE - checked at the call by the registry's walk of
+    /// object members (the kind's own existence read, asked of the command's first target, its scene), its id taken
+    /// by Call::idOf. A scalar member's default is NONE: null, or a literal 0 (the registry conforms both to null), is
+    /// id 0. ANSWERED (toValue through its call), an id is minted as a handle of `kind` - 0 answers null. Declared after
+    /// the other domain methods (it drops the id's numeric range: a handle is no id).
+    Field handle(std::string kind) const
+    {
+        Field f = *this;
+        f.param.handle = kind;
+        f.param.min.reset();
+        f.param.max.reset();
+        f.param.fallback = f.param.kind == Kind::Array ? Value(Value::Array{}) : Value();
+        const auto get = f.get;
+        const auto set = f.set;
+        f.get = [get, kind](const R &r, Call *call) {
+            const auto one = [&kind, call](const Value &id) -> Value {
+                if (id.asInt() == 0) return Value();
+                if (!call) throw std::logic_error("the " + kind + " handle member is answered only through its call");
+                return call->name(kind, static_cast<unsigned long long>(id.asInt()));
+            };
+            const Value ids = get(r, call);
+            if (ids.kind() != Kind::Array) return one(ids);
+            Value::Array a;
+            for (const Value &id : ids.asArray()) a.push_back(one(id));
+            return Value(std::move(a));
+        };
+        f.set = [set](const Value &v, R &r, const std::string &where, std::string &why) {
+            const auto idOf = [](const Value &h) { return h.isNull() ? Value(0) : Value(std::int64_t(Call::idOf(h))); };
+            if (v.kind() != Kind::Array) return set(idOf(v), r, where, why);
+            Value::Array a;
+            for (const Value &h : v.asArray()) a.push_back(idOf(h));
+            return set(Value(std::move(a)), r, where, why);
+        };
+        return f;
+    }
 
 private:
     Field with(Param p) const
@@ -280,7 +319,7 @@ template <class R, class M> Field<R> field(std::string name, M R::*member)
     f.param = paramOf<M>(std::move(name));
     f.param.fallback = toValue(probe.*member);   // an absent member takes the record's default
     f.offset = std::size_t(reinterpret_cast<const char *>(&(probe.*member)) - reinterpret_cast<const char *>(&probe));
-    f.get = [member](const R &r) { return toValue(r.*member); };
+    f.get = [member](const R &r, Call *call) { return toValue(r.*member, call); };
     f.set = [member](const Value &v, R &r, const std::string &where, std::string &why) {
         return fromValue(v, r.*member, where, why);
     };
@@ -301,11 +340,12 @@ public:
         for (const Field<R> &f : mFields) members.push_back(f.param);
         return object(std::move(name), std::move(members), Value(Value::Object{}));
     }
-    Value toValue(const R &r) const
+    /// The record as a script value; `call`: the answering call (a handle member is minted through it).
+    Value toValue(const R &r, Call *call = nullptr) const
     {
         Value::Object o;
         o.reserve(mFields.size());
-        for (const Field<R> &f : mFields) o.emplace_back(f.param.name, f.get(r));
+        for (const Field<R> &f : mFields) o.emplace_back(f.param.name, f.get(r, call));
         return Value(std::move(o));
     }
     /// `v` conformed to param(): each member present (the registry filled the defaults) set; one absent keeps `out`'s.

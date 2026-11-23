@@ -136,12 +136,36 @@ set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_view.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_picture.cpp
-    # 2c's split: one file a family, empty until its builder fills it
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_material.cpp
+    # stage 2's families (E0, the batch's base: every file listed ONCE here, each its builder's own after it)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_light.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_effects.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_atom.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_status.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_status.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/commands_gi_read.cpp
+    # each family's records (records_<family>.h) and their field tables (fields_<family>.cpp): records.h says how
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_scene.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_scene.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_node.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_node.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_light.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_light.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_material.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_material.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_effects.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_effects.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_view.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_view.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_gi.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_gi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_gi_read.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_gi_read.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_engine.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_engine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_atom.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_atom.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/records_status.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/fields_status.cpp)
 set(JAHSHAKA_ENGINE_SCRIPT_SOURCES "${JAHSHAKA_ENGINE_SCRIPT_SOURCES}" PARENT_SCOPE)
 
 # --- The hardware ray-query tier (PHOTON_SPEC §7 R1) -------------------------

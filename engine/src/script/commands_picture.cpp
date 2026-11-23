@@ -49,6 +49,23 @@ Value Commands::holdPicture(Call &c, Image img) const
     return Value(Value::Object{{"picture", handle}, {"width", Value(w)}, {"height", Value(h)}});
 }
 
+/// THE RADIANCE PICTURE (E0): held as a picture is, under the same cap, its float bytes counted.
+Value Commands::holdRadiance(Call &c, ImageF img) const
+{
+    const std::size_t bytes = img.rgba.size() * sizeof(float);
+    if (!roomForPicture(c, bytes)) return Value();
+    const unsigned w = img.width, h = img.height;
+    st->pictureBytes += bytes;
+    std::weak_ptr<EngineState> owner = st;
+    std::shared_ptr<ImageF> held(new ImageF(std::move(img)), [owner, bytes](ImageF *p) {
+        if (auto s = owner.lock()) s->pictureBytes -= bytes;
+        delete p;
+    });
+    const Value handle = c.hold(kRadiance, std::move(held), true);
+    if (handle.isNull()) return Value();
+    return Value(Value::Object{{"radiance", handle}, {"width", Value(w)}, {"height", Value(h)}});
+}
+
 void registerPictureCommands(Host &host, const Commands &k)
 {
     Registry &r = host.registry();

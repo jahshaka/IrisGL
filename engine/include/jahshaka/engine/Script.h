@@ -116,7 +116,8 @@ struct Param {
     bool target = false;
     /// A HANDLE (Kind::Int; or Kind::Array of them, handles()): the kind of object it must name ("scene", "node",
     /// "mesh"); empty = a plain number. The registry checks the handle's owner and kind at the call - each element's
-    /// of an array (Registry, THE HANDLES).
+    /// of an array (Registry, THE HANDLES). A handle whose default is NULL (an optional one: a record's id member,
+    /// records.h Field::handle) is NONE when null or a literal 0 (both conform to null, nothing checked).
     std::string handle;
     /// THE DECLARED DOMAIN (the lead's S2): checked by the host at the call and printed by signatureText - so the strict
     /// host enforces it and the generated documentation shows it, and a command's body never re-checks it.
@@ -175,8 +176,8 @@ struct ValueBounds {
 
 /// WHAT CALLING A COMMAND MAY DO (SCRIPT-IN-ENGINE-1 2a; MCP-ON-HOST-1's read-only surface): `Reads` changes nothing
 /// the engine holds (a read, a reduction, an assertion); `Changes` changes the engine's state (an object made or
-/// released, a value set, a frame drawn); `Files` reads or writes a file; `Test` is a test door (registered only behind
-/// --test-doors). A command takes the HIGHEST any of its arguments reaches - Test > Files > Changes > Reads: a path
+/// released, a value set, a frame drawn); `Files` reads or writes a file; `Test` is a test door (refused at the call
+/// unless the host's test doors are open - --test-doors: Registry::openTestDoors). A command takes the HIGHEST any of its arguments reaches - Test > Files > Changes > Reads: a path
 /// anywhere is Files. `Unset` is no tag: Registry::add refuses it.
 enum class Access { Unset, Reads, Changes, Files, Test };
 const char *accessName(Access);
@@ -325,6 +326,11 @@ public:
     /// command: false with `why` FAILS the call by name. No check = the kind's ids are taken as they come.
     using HandleCheck = std::function<bool(const Call &call, std::uint32_t id, std::string &why)>;
     void checkKind(const std::string &kind, HandleCheck check);
+    /// THE TEST DOORS (Access::Test): a command tagged `test` is REFUSED AT THE CALL - FAILS by name, before its
+    /// arguments are read - while the doors are closed (the default); the engine's registration opens them for a host
+    /// started with --test-doors (registerEngineCommands' testDoors). Listed either way (the documentation shows them).
+    void openTestDoors(bool open) { mTestDoors = open; }
+    bool testDoorsOpen() const { return mTestDoors; }
 
 private:
     struct Entry { CommandInfo info; CommandFn fn; };
@@ -347,6 +353,7 @@ private:
     std::vector<HandleCheck> mChecks;  // index - 1
     std::vector<Held> mHeld;           // slot - 1
     std::vector<std::function<void()>> mAtEnd;
+    bool mTestDoors = false;
 };
 
 template <class T> Value Call::hold(const std::string &kind, std::shared_ptr<T> object, bool scoped)
@@ -421,7 +428,8 @@ public:
         /// past them, or one that cannot be carried, FAILS the run by name. Absent (jahengine): the value is dropped.
         std::optional<ValueBounds> completionBounds;
         /// A HOST FOR AN OUTSIDE CLIENT (the MCP server's): what is ENGINE-WIDE - beyond the scenes and views this host
-        /// made - is refused by name: engine.arm (an arm changes what the owner's own scenes draw).
+        /// made - is refused by name: engine.arm (an arm changes what the owner's own scenes draw) and every engine-wide
+        /// setting (the engine's commands ask one helper, Commands::engineWide).
         bool outsideClient = false;
     };
     Host();   // the default options
@@ -516,11 +524,14 @@ namespace script {
 /// ENGINE-WIDE - it changes what the owner's own scenes draw - so a host for an OUTSIDE client refuses it (the MCP's).
 /// WHAT IS HANDED IN OUTLIVES THE HOST (the owner's duty, as the host's own before its engine): the host holds the
 /// handed-in Scene* and View* - its end removes what it made in such a scene, and a route declared on such a view is
-/// judged at every frame - so an owner that destroys one before the host ends leaves the host touching freed memory.
-/// Not guarded: the engine has no public read of a scene's or a view's liveness by which the host could skip a dead
-/// one (it comes with 2e's header commit, beside the per-engine liveness read Engine::isAlive cannot give). A null `engine` (it did not start) still registers them: each FAILS with "the engine
-/// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) open (jahengine --test-doors);
-/// without it engine.arm FAILS on one.
+/// judged at every frame. GUARDED (SCRIPT-IN-ENGINE-1 E0): the host knows its engine by its SERIAL (Engine::isLive -
+/// never the pointer alone) and asks the engine whether it still holds a scene or view before reading one
+/// (Engine::scenePresence / viewPresence): a call on one its owner destroyed FAILS by name, a declaration on it is a
+/// failed law, and the host's end skips it (what the host made there went with it). The guard stands in lockstep; while a
+/// render thread owns the engine the reads are unanswered and the owner's duty is the contract. A null `engine` (it did not start) still registers them: each FAILS with "the engine
+/// did not start: <bootError>". `testDoors`: the engine's TEST arms (ArmInfo::test) and every command tagged `test`
+/// open (jahengine --test-doors; Registry::openTestDoors); without it engine.arm FAILS on a test arm and a test door
+/// FAILS at the call.
 void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);
 
 }}}  // namespace jahshaka::engine::script

@@ -630,6 +630,13 @@ bool conform(const Registry &reg, const Param &p, Value &in, const Where &where,
         out = *p.fallback;   // a default was checked ONCE, at registration (settleDefaults: an object's filled there)
         return true;
     }
+    // AN OPTIONAL HANDLE (its default null: a record's id member, records.h Field::handle) takes a literal 0 as NONE -
+    // the engine's own "no id" - conformed to null: nothing is checked, nothing named
+    if (!p.handle.empty() && p.kind == Kind::Int && p.fallback && p.fallback->isNull() &&
+        (in.kind() == Kind::Int || in.kind() == Kind::Number) && in.asNumber() == 0.0) {
+        out = Value();
+        return true;
+    }
     return conformKind(reg, p.kind, p, in, where, out, why);
 }
 
@@ -796,6 +803,11 @@ Result Registry::callAt(std::size_t index, Value::Array args)
     const Entry *entry = &mEntries[index];
     const std::string &name = entry->info.name;
     const std::vector<Param> &params = entry->info.signature.params;
+    if (entry->info.signature.access == Access::Test && !mTestDoors) {   // THE TEST DOORS (Script.h, openTestDoors)
+        r.status = Status::Failed;
+        r.message = name + ": a test door: this host was not started with --test-doors";
+        return r;
+    }
     if (args.size() > params.size()) {
         r.status = Status::Failed;
         r.message = name + ": " + std::to_string(args.size()) + " arguments given, it takes " +

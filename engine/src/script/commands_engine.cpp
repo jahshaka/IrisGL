@@ -7,10 +7,11 @@
 // length checked by the host.
 //
 // THE ENGINE'S COMMANDS (SCRIPT-IN-ENGINE-1): the engine registers its `engine.*` commands into the process's script
-// host (jahshaka/engine/Script.h, registerEngineCommands), ONE FILE PER FAMILY - commands_scene.cpp (scene, mesh,
-// material), commands_node.cpp, commands_view.cpp, commands_gi.cpp, commands_picture.cpp, and this file (the frames and
-// the arms; the registration of every family) - over the state and helpers of commands.h. A new family is a new file and
-// one line in registerEngineCommands below. Every command calls the PUBLIC engine
+// host (jahshaka/engine/Script.h, registerEngineCommands), ONE FILE PER FAMILY - commands_scene.cpp (scene, mesh),
+// commands_node.cpp, commands_material.cpp, commands_light.cpp, commands_effects.cpp, commands_view.cpp,
+// commands_picture.cpp, commands_gi.cpp, commands_gi_read.cpp, commands_atom.cpp, commands_status.cpp, and this file
+// (the frames and the arms; the registration of every family: makeEngineCommands) - over the state and helpers of
+// commands.h; a family's records in records_<family>.h, their tables in fields_<family>.cpp. Every command calls the PUBLIC engine
 // API on the calling thread, which is the engine's (the host calls commands inline; Engine.h's thread affinity).
 // EVERY OBJECT IS A TYPED HANDLE (Script.h, THE HANDLES): scenes, views and pictures held by the host; nodes, meshes
 // and materials naming the engine's own ids, their existence asked of the engine at every call. A picture is the request shape of PICTURE-REQUEST-1 (view, eyes, content, when); its reductions are
@@ -37,7 +38,10 @@
 // WHAT ITS OWN HOST MADE (Commands::mine: the made record is the authority; the owner's nodes, meshes and materials are
 // read-only to it, and the scene's own settings too: Commands::settable); a handed-in VIEW is the script's to drive,
 // never to destroy. Every command that changes a node, mesh, material or a scene's settings asks them. THE HOST DIES BEFORE ITS ENGINE (registerEngineCommands'
-// contract): a host that ends after its engine is a named fault (stderr; it aborts a debug build) and calls nothing.
+// contract): a host that ends after its engine is a named fault (stderr; it aborts a debug build) and calls nothing -
+// the engine known by its SERIAL (Engine::isLive), never by its address; and a scene or view its owner handed in and
+// destroyed first is never read (Engine::scenePresence / viewPresence: a call on it FAILS by name, the end skips it).
+// A node, mesh, material, texture or decal image made in a handed-in scene is recorded and removed alike.
 #include "script/commands.h"
 
 #include "jahshaka/engine/EngineInspect.h"
@@ -55,11 +59,12 @@
 namespace jahshaka { namespace engine { namespace script {
 
 namespace {
-/// False, the end's fault said once, when the host's engine is gone (the deleters then call nothing).
+/// False, the end's fault said once, when the host's engine is gone (the deleters then call nothing) - asked of the
+/// engine's SERIAL (Engine::isLive), never of the pointer: a dead engine, or another made at its address, is gone.
 bool engineLive(EngineState &st)
 {
     if (!st.engine || st.engineGone) return false;
-    if (Engine::isAlive()) return true;
+    if (Engine::isLive(st.engineSerial)) return true;
     st.engineGone = true;
     std::fprintf(stderr, "FAULT: a script host ended after its engine (registerEngineCommands: the host dies first) - "
                          "nothing it made is destroyed by it\n");
@@ -117,12 +122,75 @@ bool ownedBy(const EngineState &st, const Scene *s)
 }
 }  // namespace
 
+Engine *Commands::engine(Call &c) const
+{
+    if (!st->engine) {
+        c.fail("the engine did not start: " + st->bootError);
+        return nullptr;
+    }
+    if (!Engine::isLive(st->engineSerial)) {
+        c.fail("the engine this host served is gone (the host outlived it: registerEngineCommands' contract)");
+        return nullptr;
+    }
+    return st->engine;
+}
+
+namespace {
+/// WHAT IS HANDED IN OUTLIVES THE HOST (Script.h), GUARDED: a scene or view the engine no longer holds is never read.
+/// Unanswered (a render thread owns the engine: not this host's shape) is taken as held - the owner's duty stands there.
+bool held(Scene::Presence p) { return p != Scene::Presence::Absent; }
+}  // namespace
+
+Scene *Commands::scene(Call &c, const Value &h) const
+{
+    Engine *e = engine(c);
+    Scene *s = e ? c.object<Scene>(h) : nullptr;
+    if (s && !held(e->scenePresence(s))) {
+        c.fail("the scene this handle names was destroyed by the host's owner, which handed it in (what is handed in "
+               "outlives the host)");
+        return nullptr;
+    }
+    return s;
+}
+
+View *Commands::view(Call &c, const Value &h) const
+{
+    Engine *e = engine(c);
+    View *v = e ? c.object<View>(h) : nullptr;
+    if (v && !held(e->viewPresence(v))) {
+        c.fail("the view this handle names was destroyed by the host's owner, which handed it in (what is handed in "
+               "outlives the host)");
+        return nullptr;
+    }
+    return v;
+}
+
+bool Commands::submitScene(Call &c, Scene *s, const std::function<void(FrameInputScene &)> &fill) const
+{
+    Engine *e = engine(c);
+    if (!e || !s || !settable(c, s)) return false;
+    FrameInput in = FrameInput::withCause(FrameCause::Scripted);
+    FrameInputScene part;
+    part.scene = s;
+    fill(part);
+    in.scenes.push_back(std::move(part));
+    e->submitFrame(std::move(in));
+    return true;
+}
+
+bool Commands::engineWide(Call &c) const
+{
+    if (!st->host->options().outsideClient) return true;
+    c.fail("engine-wide: this host serves an outside client");
+    return false;
+}
+
 bool Commands::mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const
 {
     if (ownedBy(*st, s)) return true;
     const auto it = st->made.find(s);
     if (it != st->made.end() && it->second.count(madeKey(kind, id))) return true;
-    static const char *const kWord[] = {"node", "mesh", "material"};
+    static const char *const kWord[] = {"node", "mesh", "material", "texture", "decal image"};
     c.fail(std::string(kWord[int(kind)]) + " " + std::to_string(id) + " is not this host's to " + verb + ": the scene '" +
            s->name() + "' was handed in by the host's owner, and this host did not make it");
     return false;
@@ -151,6 +219,16 @@ bool Commands::frame(Call &c) const
     std::string broken;
     for (size_t i = 0; i < st->declared.size();) {
         DeclaredRoutes &d = st->declared[i];
+        // a handed-in view or scene its owner destroyed is never read (Script.h, WHAT IS HANDED IN): the declaration
+        // cannot be judged - a failed law of the verdict, by name
+        if (!held(st->engine->viewPresence(d.view)) || !held(st->engine->scenePresence(d.scene))) {
+            const std::string line = "a declared view or its scene was destroyed by the host's owner before the "
+                                     "declaration was judged (frame " + std::to_string(d.frames) + ")";
+            st->host->law(false, line);
+            if (broken.empty()) broken = line;
+            st->declared.erase(st->declared.begin() + long(i));
+            continue;
+        }
         RouteWords ran, pub;
         if (const inspect::ViewEcho *ve = inspect::view(d.view)) {
             const inspect::ViewRoutes vr = ve->routes();
@@ -187,8 +265,7 @@ void registerFrameCommands(Host &host, const Commands &k)
            "Sets the engine's measuring arm {name, value} (Engine::arms). A TEST arm opens only in a host started with "
            "--test-doors. An arm is engine-wide: a host for an outside client refuses it."},
           [k](Call &c) -> Value {
-              if (k.st->host->options().outsideClient)
-                  return c.fail("arms are engine-wide: this host serves an outside client");
+              if (!k.engineWide(c)) return Value();
               Engine *e = k.engine(c);
               if (!e) return Value();
               const std::string name = c[0]["name"].asString();
@@ -220,28 +297,37 @@ void registerFrameCommands(Host &host, const Commands &k)
           });
 }
 
-void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors)
+Commands makeEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors)
 {
     auto st = std::make_shared<EngineState>();
     st->host = &host;
     st->engine = engine;
+    st->engineSerial = engine ? engine->serial() : 0;
     st->bootError = std::move(bootError);
     st->testDoors = testDoors;
     st->pictureBytesCap = host.options().pictureBytesCap;
+    // THE TEST DOORS (Access::Test): refused at the call, by name, unless the host was started with --test-doors
+    host.registry().openTestDoors(testDoors);
     // THE HOST's END (THE OWNERSHIP LAW above): what the commands made in a scene they do not own, removed - every node
-    // first (a node draws a mesh and a material), then the meshes, then the materials; the views and scenes they made
-    // follow, released by the registry (the last held first)
+    // first (a node draws a mesh and a material), then the meshes, then the materials, then the textures and the decal
+    // images the materials sampled (Scene::destroyTexture: a decal image's atlas slice is released there, refcounted -
+    // a run that loaded one and ended leaves the atlas as it found it); the views and scenes they made follow, released
+    // by the registry (the last held first). A scene its owner handed in and destroyed before the host's end took what
+    // the host made in it along: it is never read (Engine::scenePresence; Script.h, WHAT IS HANDED IN).
     host.registry().atEnd([st] {
         if (!engineLive(*st)) return;
-        for (const MadeKind kind : {MadeKind::Node, MadeKind::Mesh, MadeKind::Material})
-            for (const auto &[scene, keys] : st->made)
+        for (const MadeKind kind : {MadeKind::Node, MadeKind::Mesh, MadeKind::Material, MadeKind::Texture, MadeKind::DecalTexture})
+            for (const auto &[scene, keys] : st->made) {
+                if (!held(st->engine->scenePresence(scene))) continue;
                 for (auto it = keys.rbegin(); it != keys.rend(); ++it) {   // (the highest id first)
                     if (MadeKind(*it >> 32) != kind) continue;
                     const std::uint32_t id = std::uint32_t(*it);
                     if (kind == MadeKind::Node) scene->removeNode(NodeId(id));
                     else if (kind == MadeKind::Mesh) scene->destroyMesh(MeshId(id));
-                    else scene->destroyMaterial(MaterialId(id));
+                    else if (kind == MadeKind::Material) scene->destroyMaterial(MaterialId(id));
+                    else scene->destroyTexture(TextureId(id));
                 }
+            }
         st->made.clear();
     });
     const Commands k(st);
@@ -250,9 +336,12 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     host.registry().bindKind<Scene>(kScene);
     host.registry().bindKind<View>(kView);
     host.registry().bindKind<Image>(kPicture);
+    host.registry().bindKind<ImageF>(kRadiance);
     host.registry().nameKind(kNode);
     host.registry().nameKind(kMesh);
     host.registry().nameKind(kMaterial);
+    host.registry().nameKind(kTexture);
+    host.registry().nameKind(kDecalTexture);
     registerSceneCommands(host, k);
     registerViewCommands(host, k);
     registerNodeCommands(host, k);
@@ -264,17 +353,24 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     registerEffectsCommands(host, k);
     registerAtomCommands(host, k);
     registerStatusCommands(host, k);
-    // THE EXISTENCE OF THE ENGINE's OWN IDS (THE HANDLES, Script.h; the lead's S1): a node, mesh or material handle names
-    // the engine's id, and the ENGINE is asked (Scene::nodePresence...) whether its scene - the command's first target -
-    // holds it now: a dead or foreign id FAILS by name before the command runs (Scene::setNodeTransform would ignore
-    // it). In the render thread's mode the read is unanswered and the call FAILS saying so (the editor client's door, P3).
-    const auto presence = [](const char *kind, Scene::Presence (*ask)(const Scene &, std::uint32_t)) {
-        return [kind, ask](const Call &c, std::uint32_t id, std::string &why) {
+    registerGiReadCommands(host, k);
+    // THE EXISTENCE OF THE ENGINE's OWN IDS (THE HANDLES, Script.h; the lead's S1): a node, mesh, material, texture or
+    // decal-image handle names the engine's id, and the ENGINE is asked (Scene::nodePresence...; ONE READ PER KIND: a
+    // decal image is never a texture) whether its scene - the command's first target - holds it now: a dead or foreign
+    // id FAILS by name before the command runs (Scene::setNodeTransform would ignore it). In the render thread's mode
+    // the read is unanswered and the call FAILS saying so (the editor client's door, P3). A scene the engine no longer
+    // holds (handed in, then destroyed by its owner) is never asked.
+    const auto presence = [st](const char *kind, Scene::Presence (*ask)(const Scene &, std::uint32_t)) {
+        return [st, kind, ask](const Call &c, std::uint32_t id, std::string &why) {
             const Scene *s = c.info().signature.params.empty() || c.info().signature.params[0].handle != kScene
                                  ? nullptr : c.object<Scene>(c[0]);
             if (!s) {
                 why = std::string("a ") + kind + " is named with its scene: this command's first target names no engine "
                       "scene";
+                return false;
+            }
+            if (!st->engine || !Engine::isLive(st->engineSerial) || !held(st->engine->scenePresence(s))) {
+                why = std::string("the ") + kind + "'s scene is gone (its engine ended, or its owner destroyed it)";
                 return false;
             }
             const Scene::Presence p = ask(*s, id);
@@ -292,6 +388,18 @@ void registerEngineCommands(Host &host, Engine *engine, std::string bootError, b
     host.registry().checkKind(kMaterial, presence(kMaterial, [](const Scene &s, std::uint32_t id) {
                                   return s.materialPresence(id);
                               }));
+    host.registry().checkKind(kTexture, presence(kTexture, [](const Scene &s, std::uint32_t id) {
+                                  return s.texturePresence(id);
+                              }));
+    host.registry().checkKind(kDecalTexture, presence(kDecalTexture, [](const Scene &s, std::uint32_t id) {
+                                  return s.decalTexturePresence(id);
+                              }));
+    return k;
+}
+
+void registerEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors)
+{
+    makeEngineCommands(host, engine, std::move(bootError), testDoors);
 }
 
 }}}  // namespace jahshaka::engine::script
