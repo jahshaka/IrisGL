@@ -58,16 +58,16 @@ namespace
 /// several levels down (that is what avatar.spawn produces).
 MeshNode *findSocketOwner(const SceneNodePtr &node, const QString &socketName)
 {
-    if (node.isNull()) return nullptr;
+    if (!node) return nullptr;
     if (node->getSceneNodeType() == SceneNodeType::Mesh) {
-        auto *mesh = static_cast<MeshNode *>(node.data());
+        auto *mesh = static_cast<MeshNode *>(node.get());
         if (mesh->hasSkeleton() && mesh->findSocket(socketName)) return mesh;
     }
     const int kids = node->childCount();
     for (int i = 0; i < kids; ++i) {
         SceneNode *raw = node->childAt(i);
         if (!raw) continue;
-        if (auto *hit = findSocketOwner(raw->sharedFromThis(), socketName)) return hit;
+        if (auto *hit = findSocketOwner(raw->weak_from_this().lock(), socketName)) return hit;
     }
     return nullptr;
 }
@@ -83,7 +83,7 @@ AvatarPossession::~AvatarPossession() = default;
 
 SceneNodePtr AvatarPossession::possessed() const
 {
-    auto node = mPossessed.toStrongRef();
+    auto node = mPossessed.lock();
     // A possessed avatar whose component was removed (undo of avatar.spawn) is
     // no longer an avatar, and pretending otherwise would route input into a
     // null component every frame.
@@ -93,15 +93,15 @@ SceneNodePtr AvatarPossession::possessed() const
 
 QString AvatarPossession::possessedGuid() const
 {
-    return possessed().isNull() ? QString() : mPossessedGuid;
+    return !possessed() ? QString() : mPossessedGuid;
 }
 
 bool AvatarPossession::possess(const SceneNodePtr &node)
 {
-    if (node.isNull() || !node->hasAvatarComponent()) return false;
+    if (!node || !node->hasAvatarComponent()) return false;
 
     const SceneNodePtr current = possessed();
-    if (current && current.data() == node.data()) return true;   // already driving it
+    if (current && current.get() == node.get()) return true;   // already driving it
 
     // Unreal's rule (§8.4): Possess() on a controller that is already
     // controlling unpossesses first. It is also the only way to guarantee the
@@ -109,7 +109,7 @@ bool AvatarPossession::possess(const SceneNodePtr &node)
     // a held W at the moment of a switch would otherwise walk it forever.
     unpossess();
 
-    mPossessed = node.toWeakRef();
+    mPossessed = std::weak_ptr(node);
     mPossessedGuid = node->getGUID();
     captureOffsetReference(node);
 
@@ -127,9 +127,9 @@ bool AvatarPossession::possess(const SceneNodePtr &node)
 bool AvatarPossession::unpossess()
 {
     const SceneNodePtr node = possessed();
-    mPossessed.clear();
+    mPossessed.reset();
     mPossessedGuid.clear();
-    if (node.isNull()) return false;
+    if (!node) return false;
     // THE §8.4 REQUIREMENT, and gate P5: the released avatar keeps stepping
     // (its state machine must idle, not freeze) but with ZERO input.
     if (auto *movement = node->avatar()) movement->clearInput();
@@ -210,7 +210,7 @@ void AvatarPossession::captureOffsetReference(const SceneNodePtr &node)
 void AvatarPossession::updateFollowCamera()
 {
     const SceneNodePtr node = possessed();
-    if (node.isNull()) return;
+    if (!node) return;
 
     const Quat rot = Quat::fromEulerAngles(mPitch, mYaw, 0.0f);
     const Vec3 forward = rot.rotatedVector(Vec3(0, 0, -1));
@@ -227,7 +227,7 @@ void AvatarPossession::updateFollowCamera()
 
     if (!mScene) return;
     const CameraNodePtr cam = mScene->camera;
-    if (cam.isNull()) return;
+    if (!cam) return;
     // R5: PlayBack::update calls setController(mouseController) every frame and
     // the mouse controller writes the camera in update(dt) — which runs BEFORE
     // Scene::advance, i.e. before this. Writing here means the arm wins without
@@ -248,7 +248,7 @@ void AvatarPossession::routeInput(float dt)
 {
     Q_UNUSED(dt);
     const SceneNodePtr node = possessed();
-    if (node.isNull()) return;
+    if (!node) return;
     auto *movement = node->avatar();
     if (!movement) return;
 
@@ -284,22 +284,22 @@ void AvatarPossession::routeInput(float dt)
 // hands that camera in.
 void AvatarPossession::applyToViewCamera(const CameraNodePtr &cam)
 {
-    if (cam.isNull()) return;
+    if (!cam) return;
     if (!isPossessing()) {
         // Possession ended (stop, or an explicit unpossess mid-play): give the
         // host's camera back exactly where the arm found it. Idempotent — the
         // flag is what stops a second call restoring a stale pose over a pose
         // the user has since moved.
-        if (mHasSavedViewCamera && cam.data() == mSavedViewCamera.data()) {
+        if (mHasSavedViewCamera && cam.get() == mSavedViewCamera.get()) {
             cam->setLocalPos(mSavedViewCameraPos);
             cam->setLocalRot(mSavedViewCameraRot);
             cam->update(0);
         }
         mHasSavedViewCamera = false;
-        mSavedViewCamera.clear();
+        mSavedViewCamera.reset();
         return;
     }
-    if (!mHasSavedViewCamera || mSavedViewCamera.data() != cam.data()) {
+    if (!mHasSavedViewCamera || mSavedViewCamera.get() != cam.get()) {
         mSavedViewCamera = cam;
         mSavedViewCameraPos = cam->getLocalPos();
         mSavedViewCameraRot = cam->getLocalRot();
@@ -314,7 +314,7 @@ void AvatarPossession::applyToViewCamera(const CameraNodePtr &cam)
 
 SceneNodePtr AvatarPossession::firstAvatar(const SceneNodePtr &root)
 {
-    if (root.isNull()) return SceneNodePtr();
+    if (!root) return SceneNodePtr();
     // DEPTH-FIRST, children in order — byte for byte the walk Environment
     // registers avatars with (environment.cpp's registerAvatars), which is what
     // makes "the first avatar" ONE order and not two. The ROOT itself is never
@@ -323,7 +323,7 @@ SceneNodePtr AvatarPossession::firstAvatar(const SceneNodePtr &root)
     for (int i = 0; i < kids; ++i) {
         SceneNode *raw = root->childAt(i);
         if (!raw) continue;
-        const SceneNodePtr child = raw->sharedFromThis();
+        const SceneNodePtr child = raw->weak_from_this().lock();
         if (child->hasAvatarComponent()) return child;
         if (auto hit = firstAvatar(child)) return hit;
     }
@@ -344,7 +344,7 @@ void AvatarPossession::onPlayStarted()
     }
 
     const SceneNodePtr avatar = firstAvatar(mScene->getRootNode());
-    if (avatar.isNull()) {
+    if (!avatar) {
         // §8.5: "A scene with third-person and no avatar falls back to explorer
         // AND SAYS SO IN THE LOG. Silently doing nothing is the failure mode
         // that costs an hour of debugging." The serialized setting is NOT
@@ -383,7 +383,7 @@ void AvatarPossession::onPlayStopped()
             cam->update(0);
         }
         mHasSavedViewCamera = false;
-        mSavedViewCamera.clear();
+        mSavedViewCamera.reset();
     }
 }
 

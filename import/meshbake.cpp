@@ -290,7 +290,10 @@ namespace
 // document (import/scenebuilder.{h,cpp}, now on the hashed list) and this file's and meshbake.h's calls and include moved
 // with it; source.bake_key_versioned's law (a hashed file changes only with a format bump). Every byte of a blob but
 // this version and the fingerprint is equal to v32's (41 fixtures, spikes/noqt-document/s1-builder/). Every bake re-bakes.
-constexpr int kFormatVersion = 33;
+// v34 (2026-11-23, NOQT-DOCUMENT-1 stage 2): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — the document's pointers
+// are std::shared_ptr (this file's and scenebuilder.cpp's pointer lines; three comments re-pointed from the split
+// Types.h to Mesh.h): pointer spellings and comments only, no write path edited. Every bake re-bakes.
+constexpr int kFormatVersion = 34;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -405,14 +408,14 @@ MeshMaterialData readMaterial(QDataStream &s)
 
 void writeSkeleton(QDataStream &s, const SkeletonPtr &skel)
 {
-    if (skel.isNull()) { s << qint32(-1); return; }
+    if (!skel) { s << qint32(-1); return; }
     s << qint32(skel->bones.size());
     QHash<Bone *, int> index;
-    for (int i = 0; i < skel->bones.size(); ++i) index.insert(skel->bones[i].data(), i);
+    for (int i = 0; i < skel->bones.size(); ++i) index.insert(skel->bones[i].get(), i);
     for (const BonePtr &bone : skel->bones) {
         s << bone->name;
         writeMatrix(s, bone->inverseMeshSpacePoseMatrix);
-        s << qint32(bone->parentBone.isNull() ? -1 : index.value(bone->parent().data(), -1));
+        s << qint32(bone->parentBone.expired() ? -1 : index.value(bone->parent().get(), -1));
     }
 }
 
@@ -443,7 +446,7 @@ SkeletonPtr readSkeleton(QDataStream &s, bool *okOut)
     // The bind local of every bone — the identical loop extractSkeleton
     // runs after linking (ANIMATION_ENGINE_MIGRATION_SPEC §1.5 F1).
     for (const auto &bone : skel->bones) {
-        const iris::Mat4 bindLocal = !bone->parentBone.isNull()
+        const iris::Mat4 bindLocal = !bone->parentBone.expired()
             ? bone->parent()->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
@@ -677,7 +680,7 @@ MeshPtr readMesh(QDataStream &s, bool *okOut)
 
     auto skel = readSkeleton(s, okOut);
     if (!*okOut) return MeshPtr();
-    if (!skel.isNull()) mesh->setSkeleton(skel);
+    if (!!skel) mesh->setSkeleton(skel);
 
     // ATOM stage 1's trailing block (format v7).
     qint32 levels = 0;
@@ -1359,7 +1362,7 @@ const float *attribData(const MeshPtr &mesh, VertexAttribUsage usage, int *compo
 //      plane, its depth range along the axis, both grown by a margin (the
 //      surfels are samples of a surface, not its corners), and the LOD LEVEL
 //      whose error is below the card's own texel — ATOM-2's rule
-//      (`lodLevelForWorldError`, jahshaka/engine/Types.h) with the card texel
+//      (`lodLevelForWorldError`, jahshaka/engine/Mesh.h) with the card texel
 //      in the cell's place.
 //
 //   4. THE 6-FACE BOX FALLBACK, and it is a MEASUREMENT, not a guess. Lumen
@@ -1426,7 +1429,7 @@ int dominantAxis(const Vec3 &n, float *dotOut)
     return best;
 }
 
-/// THE ONE LOD RULE (jahshaka/engine/Types.h `lodLevelForWorldError`), restated
+/// THE ONE LOD RULE (jahshaka/engine/Mesh.h `lodLevelForWorldError`), restated
 /// here because the bake is document-side and links no engine: the coarsest
 /// level whose BOUND is STRICTLY below what the consumer can afford. The card's
 /// consumer affords its own texel.
@@ -1641,19 +1644,19 @@ float measureList(QVector<MeshCard> *list, const std::vector<Surfel> &surfels,
 
 void build(const MeshPtr &mesh, int maxCards)
 {
-    if (mesh.isNull()) return;
+    if (!mesh) return;
     mesh->cards.clear();
     mesh->cardCoverage = 0.0f;
     if (maxCards <= 0) return;                            // "no cards" is a legal request
     maxCards = std::min(maxCards, kMaxCardsCeiling);
-    if (!mesh->getSkeleton().isNull()) return;            // a card on a bind pose is a lie
+    if (!!mesh->getSkeleton()) return;            // a card on a bind pose is a lie
     if (mesh->primitiveMode != PrimitiveMode::Triangles) return;
 
     int posComps = 3; size_t nv = 0;
     const float *positions = attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
     if (!positions || posComps < 3 || nv < 3) return;
     const IndexBufferPtr ib = mesh->getIndexBuffer();
-    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return;
+    if (!ib || !ib->data || ib->dataSize <= 0) return;
     std::vector<unsigned> indices(reinterpret_cast<const unsigned *>(ib->data),
                                   reinterpret_cast<const unsigned *>(ib->data) +
                                       size_t(ib->dataSize) / sizeof(unsigned));
@@ -2013,7 +2016,7 @@ void build(const MeshPtr &mesh, int maxCards)
 
 void MeshBake::buildLevelTable(const MeshPtr &mesh)
 {
-    if (mesh.isNull()) return;
+    if (!mesh) return;
     mesh->lodIndices.clear();
     mesh->lodErrors.clear();
     mesh->lodBounds.clear();
@@ -2069,12 +2072,12 @@ namespace
 /// (skinned, not triangles, malformed).
 bool dagInput(const MeshPtr &mesh, atomdag::MeshView *view, std::vector<unsigned> *base)
 {
-    if (mesh.isNull() || !mesh->getSkeleton().isNull() || mesh->primitiveMode != PrimitiveMode::Triangles) return false;
+    if (!mesh || !!mesh->getSkeleton() || mesh->primitiveMode != PrimitiveMode::Triangles) return false;
     int posComps = 3; size_t nv = 0;
     const float *positions = attribData(mesh, VertexAttribUsage::Position, &posComps, &nv);
     if (!positions || posComps < 3 || nv < 3) return false;
     const IndexBufferPtr ib = mesh->getIndexBuffer();
-    if (ib.isNull() || !ib->data || ib->dataSize <= 0) return false;
+    if (!ib || !ib->data || ib->dataSize <= 0) return false;
     base->assign(reinterpret_cast<const unsigned *>(ib->data),
                  reinterpret_cast<const unsigned *>(ib->data) + size_t(ib->dataSize) / sizeof(unsigned));
     if (base->size() < 3 || base->size() % 3 != 0) return false;
@@ -2098,7 +2101,7 @@ bool dagInput(const MeshPtr &mesh, atomdag::MeshView *view, std::vector<unsigned
 /// the node bounds read the document's box, the engine takes its own from the uploaded positions).
 void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
 {
-    if (mesh.isNull() || a.count() == 0) return;
+    if (!mesh || a.count() == 0) return;
     for (const VertexBufferPtr &vb : mesh->getVertexBuffers()) {
         if (!vb || !vb->data || vb->dataSize <= 0) continue;
         const QList<VertexAttribute> attribs = vb->vertexLayout.getAttribs();
@@ -2134,7 +2137,7 @@ void applyAppended(const MeshPtr &mesh, const atomdag::Appended &a)
 void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, const ClusterDagOptions &options)
 {
     if (stats) *stats = ClusterDagStats();
-    if (mesh.isNull()) return;
+    if (!mesh) return;
     mesh->clusterDag = MeshClusterDag();
     atomdag::MeshView view;
     std::vector<unsigned> base;
@@ -2341,7 +2344,7 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, const QStringLi
     for (size_t i = 0; i < meshes; ++i) order[i] = i;
     const auto trianglesOf = [&](size_t i) {
         const IndexBufferPtr ib = model.meshes.at(int(i))->getIndexBuffer();
-        return ib.isNull() || !ib->data ? size_t(0) : size_t(ib->dataSize) / 12u;
+        return !ib || !ib->data ? size_t(0) : size_t(ib->dataSize) / 12u;
     };
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return trianglesOf(a) > trianglesOf(b); });
     bakepool::forRange(bakepool::Range(meshes, 1), bakepool::width(),
@@ -2682,7 +2685,7 @@ MeshBake::Model MeshBake::deserialize(const QByteArray &blob, const QString &exp
     bool ok = true;
     for (qint32 i = 0; i < meshCount; ++i) {
         MeshPtr mesh = readMesh(s, &ok);
-        if (!ok || mesh.isNull() || s.status() != QDataStream::Ok) return Model();
+        if (!ok || !mesh || s.status() != QDataStream::Ok) return Model();
         model.meshes.append(mesh);
     }
 

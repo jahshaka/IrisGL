@@ -504,7 +504,7 @@ void SceneMirror::setSource(iris::ScenePtr scene)
     mGiVolBuilt = false;
     mHighlighted.clear();
     mHighlightSet.clear();
-    mHighlightRequestedPrimary.clear();
+    mHighlightRequestedPrimary.reset();
     for (HighlightShell &s : mHighlightShells) if (s.node) postCall(&jahshaka::engine::Scene::removeNode, s.node);
     mHighlightShells.clear();
     if (mHighlightMaterial) { postCall(&jahshaka::engine::Scene::destroyMaterial, mHighlightMaterial); mHighlightMaterial = 0; }
@@ -592,7 +592,7 @@ void SceneMirror::evacuateEngineObjects()
     mHighlightShells.clear();
     mHighlighted.clear();
     mHighlightSet.clear();
-    mHighlightRequestedPrimary.clear();
+    mHighlightRequestedPrimary.reset();
     // THE GROUND PLANE GOES TOO: its material PIN would otherwise hold a
     // datablock alive, on an Item, in a scene nobody renders, until the page
     // switches back. The next sync rebuilds it if the host still wants it.
@@ -668,9 +668,9 @@ std::function<void(const std::string &)> SceneMirror::entryRefusal(iris::SceneNo
 {
     const auto it = mEntries.constFind(node);
     const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
-    return [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()), id, what, retry,
+    return [this, key = node, alive = std::weak_ptr<iris::SceneNode>(node->weak_from_this().lock()), id, what, retry,
             reset = std::move(reset)](const std::string &why) {
-        if (alive.isNull()) return;
+        if (alive.expired()) return;
         const auto e = mEntries.find(key);
         if (e == mEntries.end() || e->node != id) return;   // released or re-adopted since: nothing of ours to hand back
         qWarning("SceneMirror: the engine refused the %s of '%s' (%s)%s", what, qUtf8Printable(key->getName()),
@@ -950,7 +950,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
     // mode. Every other frame the document hands over the list of what it
     // changed and the mirror handles that instead — which is why a still frame
     // now costs the bounded passes and nothing else.
-    iris::SceneNode *root = mSource->getRootNode().data();
+    iris::SceneNode *root = mSource->getRootNode().get();
     iris::NodeDirtySet *marks = mSource->dirtySet();
     // An eviction list that overflowed (a scene nobody was mirroring built and
     // dropped thousands of nodes) is the one answer that cannot be reconciled
@@ -1291,7 +1291,7 @@ SceneMirror::VisitResult SceneMirror::visitDirty(iris::SceneNode *node)
     // its own — so a mark on it (addChild fires Structure on the parent as
     // well as on the child) must not adopt it. Its own `visible` flag still
     // reaches its children: setVisible cascades the whole subtree.
-    if (mSource && node == mSource->getRootNode().data()) return {};
+    if (mSource && node == mSource->getRootNode().get()) return {};
     const quint8 ps = parentStateOf(node);   // ONE memo probe for both answers (U4 stage 5)
     return visitNode(node, (ps & kParentShown) != 0, (ps & kParentMovable) != 0);
 }
@@ -1382,7 +1382,7 @@ void SceneMirror::runStaticSettle()
         if (++mSettleRotation == 0u) mSettleRotation = 1u;   // this rotation's id (Entry::settleVisited)
         // The document root has no document parent: applyStaticDefaults
         // starts it with parentMovable = false.
-        mSettleWalk.push_back({ root.toWeakRef(), nullptr, false });
+        mSettleWalk.push_back({ std::weak_ptr(root), nullptr, false });
     }
     if (stepStaticSettle()) {
         // A rotation that deferred nothing is a whole re-derivation; one that
@@ -1466,7 +1466,7 @@ bool SceneMirror::stepStaticSettle()
     while (!mSettleWalk.empty() && visits < kStaticSettleNodesPerSync) {
         const SettleEntry e = mSettleWalk.back();
         mSettleWalk.pop_back();
-        const iris::SceneNodePtr n = e.node.toStrongRef();
+        const iris::SceneNodePtr n = e.node.lock();
         if (!n) continue;                               // died since it was queued
         // Left the parent it was found under (removed, reparented) since it was
         // queued: not part of the tree this walk is classifying any more. (The
@@ -1478,7 +1478,7 @@ bool SceneMirror::stepStaticSettle()
         // ITS OWN QUIET WINDOW. Written within kStaticSettleFrames syncs: left
         // as it is, with its subtree (rule 2 — nothing under a dynamic node can
         // be static), for the next rotation, which starts once it is quiet.
-        const auto ent = mEntries.find(n.data());
+        const auto ent = mEntries.find(n.get());
         if (ent != mEntries.end()) ent->settleVisited = mSettleRotation;   // passed by this rotation (noteSettleWrite)
         if (ent != mEntries.end() && ent->lastWriteSync != 0
             && mSyncStamp - ent->lastWriteSync < kStaticSettleFrames) {
@@ -1487,10 +1487,10 @@ bool SceneMirror::stepStaticSettle()
             continue;
         }
         const bool movable = n->_applyStaticDefaultsStep(e.parentMovable);
-        noteGraphClass(n.data());   // the settle's own promotion: the engine hears it this sync
+        noteGraphClass(n.get());   // the settle's own promotion: the engine hears it this sync
         for (int i = n->childCount(); i-- > 0;) {
             if (iris::SceneNode *c = n->childAt(i))
-                mSettleWalk.push_back({ c->sharedFromThis().toWeakRef(), n.data(), movable });
+                mSettleWalk.push_back({ std::weak_ptr(c->weak_from_this().lock()), n.get(), movable });
         }
     }
     mSettleVisits = visits;
@@ -1591,19 +1591,19 @@ void SceneMirror::syncPerFrameSet()
     if (!mSource) return;
     for (const iris::LightNodePtr &light : mSource->lights) {
         if (!light) continue;
-        auto it = mEntries.find(light.data());
+        auto it = mEntries.find(light.get());
         if (it == mEntries.end() || !it->node) continue;   // not adopted yet
-        syncLightWires(*it, light.data());
+        syncLightWires(*it, light.get());
         if (light->lightType == iris::LightType::Sky
             || !it->wireNode) continue;
-        syncLightIcon(*it, light.data());
+        syncLightIcon(*it, light.get());
     }
     for (const iris::CameraNodePtr &cam : mSource->cameras) {
         if (!cam) continue;
-        resolveFocusTracking(cam.data());
-        auto it = mEntries.find(cam.data());
+        resolveFocusTracking(cam.get());
+        auto it = mEntries.find(cam.get());
         if (it == mEntries.end() || !it->node) continue;
-        syncCameraWires(*it, cam.data());
+        syncCameraWires(*it, cam.get());
     }
 }
 
@@ -1667,7 +1667,7 @@ quint64 SceneMirror::verifyAgainstFullWalk()
 {
     if (!mSource || !mSource->getRootNode()) return 0;
     const quint64 before = mVisitPushes;
-    iris::SceneNode *root = mSource->getRootNode().data();
+    iris::SceneNode *root = mSource->getRootNode().get();
     const int n = root->childCount();
     const bool rootShown = root->isVisible();
     mVerifying = true;
@@ -1689,13 +1689,13 @@ quint64 SceneMirror::verifyAgainstFullWalk()
 /// registry, which holds exactly the lights the walk would have reached.
 void SceneMirror::refreshLightAggregates()
 {
-    mSyncSun = mSource ? mSource->sunLight().data() : nullptr;
+    mSyncSun = mSource ? mSource->sunLight().get() : nullptr;
     mAnyShadowCaster = false;
     mShadowFilter = ShadowFilter::Hard;
     mMaxShadowResolution = 0;
     if (!mSource) return;
     for (const iris::LightNodePtr &lp : mSource->lights) {
-        iris::LightNode *light = lp.data();
+        iris::LightNode *light = lp.get();
         if (!light) continue;
         // Exactly the walk's own test, in the walk's own order: a Sky Light
         // returns before the fold (it is the ambient, not a light), an Area
@@ -1790,24 +1790,24 @@ void SceneMirror::setHighlightedNodes(const QList<iris::SceneNodePtr> &nodes,
     // engine-side latches were already change-guarded; this is the same
     // discipline one level up.
     bool selectionMoved = nodes.size() != mHighlighted.size()
-                          || primary.data() != mHighlightRequestedPrimary.data();
+                          || primary.get() != mHighlightRequestedPrimary.get();
     if (!selectionMoved)
         for (int i = 0; i < nodes.size(); ++i)
-            if (nodes[i].data() != mHighlighted[i].data()) { selectionMoved = true; break; }
+            if (nodes[i].get() != mHighlighted[i].get()) { selectionMoved = true; break; }
     if (!selectionMoved) return;
     mHighlightRequestedPrimary = primary;
     for (const auto &n : mHighlighted) if (n) n->markChanged(iris::NodeChange::Flags);
     for (const auto &n : nodes)        if (n) n->markChanged(iris::NodeChange::Flags);
     mHighlighted.clear();
     mHighlightSet.clear();
-    for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.data()); }
+    for (const auto &n : nodes) if (n) { mHighlighted.append(n); mHighlightSet.insert(n.get()); }
     // The primary only counts when it is actually IN the list: the viewport
     // filters the World root out of the highlight, and
     // a primary that was filtered away must not colour somebody else's shell.
-    mHighlightPrimary.clear();
+    mHighlightPrimary.reset();
     if (primary)
         for (const auto &n : mHighlighted)
-            if (n.data() == primary.data()) { mHighlightPrimary = primary; break; }
+            if (n.get() == primary.get()) { mHighlightPrimary = primary; break; }
 }
 
 bool SceneMirror::isHighlighted(const iris::SceneNode *node) const
@@ -1838,7 +1838,7 @@ void SceneMirror::collectHighlightMeshes(iris::SceneNode *node, bool primary,
         // lookup by document mesh, which since the character rig can answer with
         // a sibling character's copy of the same asset (mMeshes is keyed by
         // (mesh, rig id)).
-        if (meshNode->mesh.data()) {
+        if (meshNode->mesh.get()) {
             const auto ent = mEntries.constFind(node);
             if (ent != mEntries.constEnd() && ent->mesh)
                 out.push_back(HighlightTarget{ meshNode, ent->mesh, primary });
@@ -1863,7 +1863,7 @@ void SceneMirror::syncHighlight()
     // making the lone selection change colour would move every pixel
     // app.selection_outline measures. One member = one colour, exactly as
     // before.
-    const bool distinguishPrimary = mHighlighted.size() > 1 && !mHighlightPrimary.isNull();
+    const bool distinguishPrimary = mHighlighted.size() > 1 && !!mHighlightPrimary;
     // N ROOTS: the same subtree walk, once per member of the set. Duplicates
     // cannot appear — a member whose ancestor is also selected contributes
     // meshes the ancestor already contributed — so they are dropped here rather
@@ -1876,8 +1876,8 @@ void SceneMirror::syncHighlight()
         if (!highlighted || !highlighted->isVisibleInScene()) continue;
         const size_t before = targets.size();
         const bool primary =
-            distinguishPrimary && highlighted.data() == mHighlightPrimary.data();
-        collectHighlightMeshes(highlighted.data(), primary, targets);
+            distinguishPrimary && highlighted.get() == mHighlightPrimary.get();
+        collectHighlightMeshes(highlighted.get(), primary, targets);
         for (size_t i = targets.size(); i > before; --i) {
             const size_t idx = i - 1;
             bool dup = false;
@@ -2515,7 +2515,7 @@ void SceneMirror::syncGroundPlane()
         mGroundPlaneMaterial = 0;      // nothing is attached yet
     }
     if (!mGroundPlaneMaterial) {
-        iris::Material *doc = mGroundPlaneDoc.data();
+        iris::Material *doc = mGroundPlaneDoc.get();
         const MaterialId mat = materialFor(doc);
         const auto planeRefused = [this](const std::string &why) {
             qWarning("SceneMirror: the engine refused the ground plane (%s)", why.c_str());
@@ -2771,7 +2771,7 @@ jahshaka::engine::MeshId SceneMirror::vrProxyModelMesh(int hand)
     // ONE baked mesh (the vendoring merged the parts; the seed baked it).
     const iris::MeshPtr baked = iris::ShippedMeshes::mesh(path);
     MeshData data;
-    if (!baked || !toMeshData(baked.data(), data) || data.positions.empty()
+    if (!baked || !toMeshData(baked.get(), data) || data.positions.empty()
         || data.indices.empty()) {
         qWarning("SceneMirror: the VR controller model '%s' has no geometry - the wand stands in",
                  qUtf8Printable(path));
@@ -3553,9 +3553,9 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // node's removal) — forgets the entry and its subtree's, and marks them: the mirror's own retry adopts them
         // afresh at the next sync, once the old node is gone.
         postChecked([id = e.node, parentId](jahshaka::engine::Scene &s) { return s.createDocumentNode(id, parentId) != 0; },
-                    [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()),
+                    [this, key = node, alive = std::weak_ptr<iris::SceneNode>(node->weak_from_this().lock()),
                      id = e.node](const std::string &why) {
-                        if (alive.isNull()) return;
+                        if (alive.expired()) return;
                         const auto it = mEntries.constFind(key);
                         if (it == mEntries.cend() || it->node != id) return;
                         qWarning("SceneMirror: the engine refused node %llu (%s); re-adopted at the next sync",
@@ -3685,10 +3685,10 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
         // three pointers that almost never change.
-        iris::Mesh *mesh = meshNode->mesh.data();
-        iris::Material *material = meshNode->material.data();
+        iris::Mesh *mesh = meshNode->mesh.get();
+        iris::Material *material = meshNode->material.get();
         // The pose authority for this node (null for unskinned meshes).
-        if (e.skeleton.data() != meshNode->skeleton.data()) e.skeleton = meshNode->skeleton;
+        if (e.skeleton.get() != meshNode->skeleton.get()) e.skeleton = meshNode->skeleton;
         // A MESH swap has to re-attach too. `e.meshPtr` was written here and
         // never read anywhere (deep audit 2026-09, area 5): setMesh() on a live
         // node changed the document and nothing else, which is why the mesh
@@ -3739,7 +3739,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
         // nothing of it is created now (its material neither). A rigged node is
         // never deferred (its engine mesh is keyed by the rig, and characters
         // are few).
-        if (mesh && !e.hasMesh && e.skeleton.isNull() && attachBudgetSpent() &&
+        if (mesh && !e.hasMesh && !e.skeleton && attachBudgetSpent() &&
             !mMeshes.contains(qMakePair(mesh, QString()))) {
             node->markChanged(iris::NodeChange::Content);
             ++mAttachesOwedThisSync;
@@ -3764,7 +3764,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             e.boneCount = 0;
             MeshId m = 0;
             if (e.meshPtr != mesh) e.rigRefused = false;   // a new mesh is a new question
-            if (mat && !e.skeleton.isNull() && !e.rigRefused) {
+            if (mat && !!e.skeleton && !e.rigRefused) {
                 // GPU skinning: a SEPARATE entry point, because the engine has to
                 // know the mesh is skinned before the renderable exists —
                 // attaching first and rigging later yields a silently unskinned
@@ -3781,7 +3781,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                 const iris::SceneNode *host = nullptr;
                 quint32 epoch = 0;
                 if (const CharacterRig *cr = characterRigFor(node)) {
-                    const auto map = cr->remaps.constFind(e.skeleton.data());
+                    const auto map = cr->remaps.constFind(e.skeleton.get());
                     if (map != cr->remaps.constEnd()) {
                         rigSkeleton = cr->rig;
                         blendToRig = map.value();
@@ -3795,9 +3795,9 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
                     std::vector<unsigned short> blend(blendToRig.cbegin(), blendToRig.cend());
                     // THE RIG'S ANSWER COMES BACK AS A COMPLETION (U3 stage 3): a refusal re-attaches unskinned at
                     // the next sync — what the walk did on the spot when the call was direct.
-                    const auto refused = [this, key = node, alive = QWeakPointer<iris::SceneNode>(node->sharedFromThis()),
+                    const auto refused = [this, key = node, alive = std::weak_ptr<iris::SceneNode>(node->weak_from_this().lock()),
                                           id = e.node](const std::string &why) {
-                        if (alive.isNull()) return;
+                        if (alive.expired()) return;
                         const auto it = mEntries.find(key);
                         if (it == mEntries.end() || it->node != id) return;
                         qWarning("SceneMirror: the engine would not rig a skinned mesh (%s); it renders unskinned",
@@ -4154,7 +4154,7 @@ void SceneMirror::visit(iris::SceneNode *node, bool parentShown, bool parentMova
 SceneMirror::RiderState &SceneMirror::riderState(iris::SceneNode *rider)
 {
     RiderState &st = mBoneRiders[rider];
-    if (st.alive.isNull()) st.alive = rider->sharedFromThis();
+    if (st.alive.expired()) st.alive = rider->weak_from_this().lock();
     return st;
 }
 
@@ -4164,7 +4164,7 @@ void SceneMirror::takePublishedRiderTags()
     const jahshaka::engine::PublishedFrame &pub = mTarget->published();
     if (pub.riderTags.empty()) return;
     for (auto it = mBoneRiders.begin(); it != mBoneRiders.end(); ++it) {
-        if (it->alive.isNull()) continue;   // deleted by the document: the walk below drops it
+        if (it->alive.expired()) continue;   // deleted by the document: the walk below drops it
         iris::SceneNode *rider = const_cast<iris::SceneNode *>(it.key());
         const auto e = mEntries.constFind(rider);
         if (e == mEntries.cend() || !e->node) continue;
@@ -5581,7 +5581,7 @@ Colour SceneMirror::atmosphereTintFor(const iris::LightNode *light,
     if (!resolved) {
         const auto scene = const_cast<iris::LightNode *>(light)->getScene();
         const auto own = scene ? scene->sunLight() : iris::LightNodePtr();
-        resolved = own.data();
+        resolved = own.get();
     }
     if (resolved != light) return white;
     const iris::Vec3 travel = const_cast<iris::LightNode *>(light)->getLightDir();
@@ -5672,7 +5672,7 @@ LightDesc SceneMirror::toLightDesc(iris::LightNode *light, iris::LightNode *sun,
         if (!sunKnown) {
             const auto scene = light->getScene();
             const auto own = scene ? scene->sunLight() : iris::LightNodePtr();
-            resolved = own.data();
+            resolved = own.get();
         }
         d.primaryDirectional = !resolved || resolved == light;
         // ...AND A SUN THAT CANNOT MOVE A PIXEL CASTS NOTHING (round-2 review
@@ -6039,7 +6039,7 @@ struct StructureHash {
 bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc &out)
 {
     out = SkeletonDesc();
-    if (skeleton.isNull() || skeleton->bones.isEmpty()) return false;
+    if (!skeleton || skeleton->bones.isEmpty()) return false;
 
     const QList<iris::BonePtr> &bones = skeleton->bones;
     out.bones.resize(size_t(bones.size()));
@@ -6056,7 +6056,7 @@ bool SceneMirror::toSkeletonDesc(const iris::SkeletonPtr &skeleton, SkeletonDesc
         // pivot-preserving FBX. (Before that fix every bone of such a rig was
         // parentless and this loop would have produced a flat rig.)
         bd.parent = -1;
-        if (!b->parentBone.isNull()) {
+        if (!b->parentBone.expired()) {
             const auto it = skeleton->boneMap.constFind(b->parent()->name);
             if (it != skeleton->boneMap.constEnd() && it.value() != i) bd.parent = it.value();
         }
@@ -6129,14 +6129,14 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
     mergeOrder.reserve(pieces.size());
     for (int i = 0; i < pieces.size(); ++i) mergeOrder.append(i);
     std::stable_sort(mergeOrder.begin(), mergeOrder.end(), [&](int a, int b) {
-        const int na = pieces[a].isNull() ? 0 : pieces[a]->bones.size();
-        const int nb = pieces[b].isNull() ? 0 : pieces[b]->bones.size();
+        const int na = !pieces[a] ? 0 : pieces[a]->bones.size();
+        const int nb = !pieces[b] ? 0 : pieces[b]->bones.size();
         return na > nb;
     });
 
     for (int p : mergeOrder) {
         const iris::SkeletonPtr &sk = pieces[p];
-        if (sk.isNull() || sk->bones.isEmpty()) {
+        if (!sk || sk->bones.isEmpty()) {
             if (excludedOut) excludedOut->append(p);
             continue;
         }
@@ -6144,7 +6144,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
         // anything is merged, so a disagreeing piece leaves no trace.
         bool agrees = true;
         for (const iris::BonePtr &b : sk->bones) {
-            if (b.isNull()) { agrees = false; break; }
+            if (!b) { agrees = false; break; }
             const auto it = recs.constFind(b->name);
             if (it != recs.constEnd() && !bindAgrees(it->meshSpace, b->meshSpacePoseMatrix)) {
                 agrees = false;
@@ -6167,7 +6167,7 @@ bool SceneMirror::buildUnionSkeleton(const QVector<iris::SkeletonPtr> &pieces,
             // The piece's own chain: every bone above this one THAT THIS PIECE
             // carries. Different pieces carry different subsets, so the union of
             // the chains is what the character's real ancestry is.
-            for (iris::Bone *up = b->parent().data(); up; up = up->parent().data()) {
+            for (iris::Bone *up = b->parent().get(); up; up = up->parent().get()) {
                 if (up->name == b->name) break;       // defensive: a self-parent
                 r.ancestors.insert(up->name);
             }
@@ -6248,10 +6248,10 @@ bool SceneMirror::rigRemap(const iris::SkeletonPtr &piece, const iris::SkeletonP
                            QVector<unsigned short> &out)
 {
     out.clear();
-    if (piece.isNull() || rig.isNull()) return false;
+    if (!piece || !rig) return false;
     out.reserve(piece->bones.size());
     for (const iris::BonePtr &b : piece->bones) {
-        if (b.isNull()) return false;
+        if (!b) return false;
         const auto it = rig->boneMap.constFind(b->name);
         if (it == rig->boneMap.constEnd()) { out.clear(); return false; }
         out.append((unsigned short)it.value());
@@ -6387,9 +6387,9 @@ namespace {
 /// evaluator starts its walk there, so clip translation must too.
 iris::SceneNode *clipHostOf(iris::SceneNode *node)
 {
-    for (iris::SceneNode *n = node; n; n = n->getParent().data()) {
+    for (iris::SceneNode *n = node; n; n = n->getParent().get()) {
         for (const auto &anim : n->getAnimations())
-            if (!anim.isNull() && anim->hasSkeletalAnimation()) return n;
+            if (!!anim && anim->hasSkeletalAnimation()) return n;
     }
     return nullptr;
 }
@@ -6402,7 +6402,7 @@ iris::SceneNode *clipHostOf(iris::SceneNode *node)
 /// how the authored transport keeps the whole rest of the scene.
 const iris::AvatarLocomotion *locomotionHostOf(iris::SceneNode *node)
 {
-    for (iris::SceneNode *n = node; n; n = n->getParent().data())
+    for (iris::SceneNode *n = node; n; n = n->getParent().get())
         if (n->hasLocomotionComponent()) return n->locomotion();
     return nullptr;
 }
@@ -6421,9 +6421,9 @@ const iris::SceneNode *SceneMirror::characterHostOf(iris::SceneNode *node) const
     // side by side are not one character, and unioning their rigs would merge
     // two strangers' skeletons into one 130-bone rig that neither of them is.
     const iris::SceneNodePtr parent = node->getParent();
-    if (parent.isNull()) return nullptr;
-    if (!mSource.isNull() && parent.data() == mSource->getRootNode().data()) return nullptr;
-    return parent.data();
+    if (!parent) return nullptr;
+    if (!!mSource && parent.get() == mSource->getRootNode().get()) return nullptr;
+    return parent.get();
 }
 
 const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *piece)
@@ -6448,8 +6448,8 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
         iris::SceneNode *n = stack[i];
         if (n->getSceneNodeType() == iris::SceneNodeType::Mesh) {
             auto *mn = static_cast<iris::MeshNode *>(n);
-            if (!mn->skeleton.isNull()) {
-                skels.append(mn->skeleton); hashPtr(mn->skeleton.data());
+            if (!!mn->skeleton) {
+                skels.append(mn->skeleton); hashPtr(mn->skeleton.get());
                 pieceNodes.append(n);
             }
         }
@@ -6462,7 +6462,7 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
     }
 
     CharacterRig &rec = mCharacterRigs[host];
-    if (rec.signature == sig && !rec.rig.isNull()) return &rec;
+    if (rec.signature == sig && !!rec.rig) return &rec;
 
     iris::SkeletonPtr rig;
     QVector<int> excluded;
@@ -6499,7 +6499,7 @@ const SceneMirror::CharacterRig *SceneMirror::characterRigFor(iris::SceneNode *p
     for (int i = 0; i < skels.size(); ++i) {
         if (excluded.contains(i)) continue;
         QVector<unsigned short> map;
-        if (rigRemap(skels[i], rig, map)) fresh.remaps.insert(skels[i].data(), map);
+        if (rigRemap(skels[i], rig, map)) fresh.remaps.insert(skels[i].get(), map);
     }
     rec = fresh;
     return &rec;
@@ -6510,7 +6510,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     // THE RIG SKELETON, not the piece's own: bone TRACK indices are resolved
     // against the rig the engine holds, which for a piece of a multi-piece
     // character is the character union (AVATAR_RIG_PERF_SPEC §3.1).
-    if (!e.gpuSkinned || !e.docNode || e.rigSkeleton.isNull()) return;
+    if (!e.gpuSkinned || !e.docNode || !e.rigSkeleton) return;
     if (e.shareMaster) return;                  // a follower carries no clips
     iris::SceneNode *host = clipHostOf(e.docNode);
 
@@ -6536,15 +6536,15 @@ void SceneMirror::attachClipsFor(Entry &e)
         // translation at all — the character would sit at bind pose while the
         // transport ran.
         const iris::AnimationPtr active = host->getAnimation();
-        if (!active.isNull() && !candidates.contains(active)) candidates.append(active);
+        if (!!active && !candidates.contains(active)) candidates.append(active);
         for (const auto &anim : candidates) {
-            if (anim.isNull() || !anim->hasSkeletalAnimation()) continue;
+            if (!anim || !anim->hasSkeletalAnimation()) continue;
             clips.append(anim);
             // The POINTER is part of the signature on purpose: the Avatar
             // page's root-motion toggle rebuilds every clip's Animation object
             // with the same name and length, and without this the mirror would
             // keep playing the pre-toggle translation.
-            sig << anim->getName() << anim->getLength() << quintptr(anim.data());
+            sig << anim->getName() << anim->getLength() << quintptr(anim.get());
         }
     }
     const quint64 signature = sig.h;
@@ -6584,7 +6584,7 @@ void SceneMirror::attachClipsFor(Entry &e)
     e.engineClipsFresh = false;
     for (int i = 0; i < clips.size(); ++i) {
         QString err;
-        if (!iris::ClipExtractor::extract(host->sharedFromThis(), e.docNode->sharedFromThis(),
+        if (!iris::ClipExtractor::extract(host->weak_from_this().lock(), e.docNode->weak_from_this().lock(),
                                           e.rigSkeleton, clips[i]->getSkeletalAnimation(),
                                           clips[i]->getName(), clips[i]->getLength(),
                                           nullptr, extracted[i], &err)) {
@@ -6605,7 +6605,7 @@ void SceneMirror::attachClipsFor(Entry &e)
         }
         ClipDesc desc;
         if (!toClipDesc(extracted[i], e.rigId, desc)) continue;
-        pushed.append({ clips[i].data(), QString::fromStdString(desc.id) });
+        pushed.append({ clips[i].get(), QString::fromStdString(desc.id) });
         descs.push_back(std::move(desc));
     }
     if (descs.empty()) {
@@ -6675,7 +6675,7 @@ void SceneMirror::attachClipsFor(Entry &e)
 bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::Mat4> &out) const
 {
     if (!mTarget) return false;
-    if (!e.gpuSkinned || e.rigSkeleton.isNull() || !e.docNode) return false;
+    if (!e.gpuSkinned || !e.rigSkeleton || !e.docNode) return false;
     const QList<iris::BonePtr> &bones = e.rigSkeleton->bones;
     if (bones.isEmpty() || size_t(bones.size()) != e.boneCount) return false;
     // The three scratch buffers are MEMBERS, not locals: this used to run once
@@ -6706,15 +6706,15 @@ bool SceneMirror::entryBoneWorldTransforms(const Entry &e, QHash<QString, iris::
     // hash per bone per frame for a relationship that is fixed by the rig. The
     // cache is keyed on the skeleton pointer and the bone count, so a
     // re-imported rig rebuilds it.
-    if (e.boneParentsOwner != e.rigSkeleton.data() || e.boneParents.size() != n) {
+    if (e.boneParentsOwner != e.rigSkeleton.get() || e.boneParents.size() != n) {
         e.boneParents.assign(n, -1);
         for (size_t i = 0; i < n; ++i) {
-            if (bones[int(i)]->parentBone.isNull()) continue;
+            if (bones[int(i)]->parentBone.expired()) continue;
             const auto pit = e.rigSkeleton->boneMap.constFind(bones[int(i)]->parent()->name);
             if (pit != e.rigSkeleton->boneMap.constEnd() && size_t(pit.value()) != i)
                 e.boneParents[i] = pit.value();
         }
-        e.boneParentsOwner = e.rigSkeleton.data();
+        e.boneParentsOwner = e.rigSkeleton.get();
     }
     // ...and the FK itself is a member function, not a recursive
     // std::function: the closure captured six references, which is past
@@ -6787,7 +6787,7 @@ int SceneMirror::resolveSockets()
     // engine rig (a headless run, a character the walk has not rigged yet):
     // those riders are still moved by writing their world transform.
     if (!mSource) return 0;
-    if (!mTarget) return mSockets.resolve(mSource.data());
+    if (!mTarget) return mSockets.resolve(mSource.get());
     return reconcileSockets();
 }
 
@@ -6841,9 +6841,9 @@ int SceneMirror::reconcileSockets()
         const QList<iris::SceneNodePtr> &attached = it.value();
         if (attached.isEmpty()) continue;
         const iris::SceneNodePtr ownerNode = mSource->nodes.value(it.key());
-        iris::MeshNode *owner = (!ownerNode.isNull() &&
+        iris::MeshNode *owner = (!!ownerNode &&
                                  ownerNode->getSceneNodeType() == iris::SceneNodeType::Mesh)
-                                    ? static_cast<iris::MeshNode *>(ownerNode.data())
+                                    ? static_cast<iris::MeshNode *>(ownerNode.get())
                                     : nullptr;
         // Is there a LIVE ENGINE RIG to hang a tag on? Without one (a headless
         // run, a character the walk has not rigged yet) the riders take the
@@ -6853,7 +6853,7 @@ int SceneMirror::reconcileSockets()
                             ownerEntry->node;
 
         for (const iris::SceneNodePtr &riderPtr : attached) {
-            iris::SceneNode *rider = riderPtr.data();
+            iris::SceneNode *rider = riderPtr.get();
             if (!rider) { ++mSocketDangling; continue; }
             const iris::Socket *socket = owner ? owner->findSocket(rider->socketName) : nullptr;
             if (!socket) { ++mSocketDangling; releaseRider(rider); continue; }
@@ -6985,9 +6985,9 @@ int SceneMirror::reconcileSockets()
                 // socket API's promise — by construction (the store owns it);
                 // the flag, set BEFORE the tag, makes its world the engine's.
                 iris::graph::setSocketRider(rider->docNode(), true);
-                const auto armRefused = [this, key = rider, alive = QWeakPointer<iris::SceneNode>(rider->sharedFromThis()),
+                const auto armRefused = [this, key = rider, alive = std::weak_ptr<iris::SceneNode>(rider->weak_from_this().lock()),
                                          ownerId](const std::string &why) {
-                    if (alive.isNull()) return;
+                    if (alive.expired()) return;
                     const auto st = mBoneRiders.find(key);
                     if (st == mBoneRiders.end() || st->owner != ownerId) return;
                     qWarning("SceneMirror: the engine refused a socket arm (%s)", why.c_str());
@@ -7137,8 +7137,8 @@ void SceneMirror::releaseRider(iris::SceneNode *rider)
         // Off the bone: the engine re-homes the node under whatever parent it
         // can name and re-expresses the pose it last rendered with.
         jahshaka::engine::NodeId parentId = 0;
-        if (!parent.isNull()) {
-            const auto pe = mEntries.constFind(parent.data());
+        if (!!parent) {
+            const auto pe = mEntries.constFind(parent.get());
             if (pe != mEntries.constEnd()) parentId = pe->node;
         }
         postCall(&jahshaka::engine::Scene::detachFromBone, entry->node, parentId);
@@ -7393,8 +7393,8 @@ void SceneMirror::syncClips()
         if (mClipPushScratch.isEmpty()) {
             iris::SceneNode *host = clipHostOf(e.docNode);
             iris::AnimationPtr active = host ? host->getAnimation() : iris::AnimationPtr();
-            if (!active.isNull() && active->hasSkeletalAnimation()) {
-                const auto mappedId = e.clipMap.constFind(active.data());
+            if (!!active && active->hasSkeletalAnimation()) {
+                const auto mappedId = e.clipMap.constFind(active.get());
                 if (mappedId != e.clipMap.constEnd()) {
                     const auto mapped = e.clipIdMap.constFind(mappedId.value());
                     if (mapped != e.clipIdMap.constEnd()) {
@@ -7823,8 +7823,8 @@ void SceneMirror::buildEnvironment(FrameInput &in, FrameInputScene &scene, Frame
         // authored; a World sky with lighting off is an UNLIT BACKDROP - drawn, photographing nothing. A dome wins
         // (it is the light; the backdrop says only that the drawn sky emits nothing).
         EnvironmentDesc env;
-        const QSharedPointer<iris::Texture2D> cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
-                                                         ? skyLight->skyCubeTexture : QSharedPointer<iris::Texture2D>();
+        const std::shared_ptr<iris::Texture2D> cube = skyLight && skyLight->skySource == iris::SkyLightSource::Cubemap
+                                                         ? skyLight->skyCubeTexture : std::shared_ptr<iris::Texture2D>();
         const QImage *faces = cube ? cube->cubeFaces() : nullptr;
         if (cube != mDomeSource) {
             releaseDome();
@@ -8153,7 +8153,7 @@ SceneMirror::SkySource SceneMirror::skySourceOf(const iris::Scene &scene)
     } else if (scene.skyType == iris::SkyType::CUBEMAP && scene.skyTexture &&
                scene.skyTexture->isCubeMap()) {
         src.kind = SkySource::Kind::Cubemap;
-        src.cubeTexture = scene.skyTexture.data();
+        src.cubeTexture = scene.skyTexture.get();
     } else if (scene.skyType == iris::SkyType::GRADIENT) {
         src.kind = SkySource::Kind::Gradient;
         src.gradientTop = scene.gradientTop;
@@ -8369,7 +8369,7 @@ void SceneMirror::buildSky(FrameInputScene &scene, std::optional<Colour> &backgr
                 // ATMOSPHERE): a sun that looks white in the sky while lighting
                 // the room orange would be the defect this toggle exists to
                 // avoid, so the disc reads the identical tint.
-                const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+                const Colour tint = atmosphereTintFor(sunLight.get(), sunLight.get());
                 sun.colour = Colour(c.r * k * tint.r, c.g * k * tint.g, c.b * k * tint.b, 1.0f);
                 // A DISC THAT CANNOT MOVE A PIXEL IS NOT DRAWN (round-2 review
                 // item 4; made ABSOLUTE by lane SKY-SMALL). The test is on the
@@ -8478,7 +8478,7 @@ void SceneMirror::applyCloudLayer()
             cl.hasSun = true;
             cl.sunDir[0] = toSun.x(); cl.sunDir[1] = toSun.y(); cl.sunDir[2] = toSun.z();
             const iris::LinearColor c = iris::linearOf(sunLight->color);
-            const Colour tint = atmosphereTintFor(sunLight.data(), sunLight.data());
+            const Colour tint = atmosphereTintFor(sunLight.get(), sunLight.get());
             // THE PLATE'S UNITS (CloudLayerDesc::sunIrradiance): the engine
             // lights with power intensity x pi and HlmsPbs divides the diffuse
             // by pi (OgreScene's light push), so the irradiance is intensity x
@@ -8709,12 +8709,12 @@ bool SceneMirror::noteDrivingCamera(const View *view, const iris::CameraNodePtr 
         if (entry.first != view) continue;
         // QWeakPointer has no data() — lock and compare, which also makes a
         // camera that DIED since the last frame read as a change (it is one).
-        const bool changed = entry.second.toStrongRef().data() != camera.data();
-        entry.second = camera.toWeakRef();
+        const bool changed = entry.second.lock().get() != camera.get();
+        entry.second = std::weak_ptr(camera);
         return changed;
     }
     if (int(mDrivingCameras.size()) >= kMaxTracked) mDrivingCameras.erase(mDrivingCameras.begin());
-    mDrivingCameras.emplace_back(view, camera.toWeakRef());
+    mDrivingCameras.emplace_back(view, std::weak_ptr(camera));
     // The FIRST camera a view is ever given is not a cut: there is no previous
     // shot to cut from, and re-seeding the exposure history on the first frame
     // would change the opening frames of every view that ever existed.
@@ -8724,7 +8724,7 @@ bool SceneMirror::noteDrivingCamera(const View *view, const iris::CameraNodePtr 
 iris::CameraNodePtr SceneMirror::drivingCameraFor(const View *view) const
 {
     for (const auto &entry : mDrivingCameras)
-        if (entry.first == view) return entry.second.toStrongRef();
+        if (entry.first == view) return entry.second.lock();
     return iris::CameraNodePtr();
 }
 
@@ -8866,7 +8866,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
     // so if the active-camera seam swaps in an AUTHORED camera the hold must
     // not follow: an authored lens is a deliberate choice and stays exactly as
     // authored, at every aspect (owner rule, 2026-09-07).
-    const iris::CameraNode *hostCamera = camera.data();
+    const iris::CameraNode *hostCamera = camera.get();
 
     // THE ACTIVE-CAMERA SEAM (CAMERAS_SPEC D6, phase 1). This function is the
     // ONLY way a View's camera moves (Engine.h), so the whole of "play renders
@@ -8917,8 +8917,8 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
     // per view, and buildEnvironment reads the same record next frame.
     const bool cut = noteDrivingCamera(view, camera);
 
-    if (mViewCamera != camera.data()) {
-        mViewCamera = camera.data();
+    if (mViewCamera != camera.get()) {
+        mViewCamera = camera.get();
         // ...and hide its helpers NOW rather than at the next sync. Hosts call
         // sync() and buildCamera() in either order (the editor syncs first, the
         // gizmo suite applies first), and a viewport that renders one frame
@@ -8964,7 +8964,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
     // document node — a camera the user authored keeps its lens whoever renders
     // it — so it is applied HERE and not inside toCameraDesc, which applyPip
     // also uses and which must never hold an authored camera's inset.
-    desc.framingAspect = (camera.data() == hostCamera) ? framingAspect : 0.0f;
+    desc.framingAspect = (camera.get() == hostCamera) ? framingAspect : 0.0f;
     part.camera = desc;
 
     // A CAMERA ON A SOCKET RIDES ITS NODE (AVATAR_RIG_PERF_SPEC §4.6, P2b).
@@ -8979,7 +8979,7 @@ void SceneMirror::buildCamera(FrameInputView &part, iris::CameraNodePtr camera, 
     // a head goes straight back to the pushed pose).
     jahshaka::engine::NodeId ride = 0;
     if (!camera->socketOwnerGuid.isEmpty()) {
-        const auto it = mEntries.constFind(camera.data());
+        const auto it = mEntries.constFind(camera.get());
         if (it != mEntries.constEnd()) ride = it->node;
     }
     part.cameraNode = ride;   // the engine compares with the view's

@@ -24,7 +24,7 @@ bool bindPoseWorldTransforms(MeshNode *node, QHash<QString, Mat4> &out)
     out.clear();
     if (!node) return false;
     const SkeletonPtr skeleton = node->getSkeleton();
-    if (skeleton.isNull() || skeleton->bones.isEmpty()) return false;
+    if (!skeleton || skeleton->bones.isEmpty()) return false;
 
     // meshSpacePoseMatrix IS the bind pose, already composed down the chain —
     // no FK needed, and no disagreement possible with the engine's bind pose,
@@ -32,7 +32,7 @@ bool bindPoseWorldTransforms(MeshNode *node, QHash<QString, Mat4> &out)
     // matrices (parentInverse * child) precisely so that FK reproduces them.
     const Mat4 world = node->getGlobalTransform();
     for (const BonePtr &bone : skeleton->bones) {
-        if (bone.isNull()) continue;
+        if (!bone) continue;
         out.insert(bone->name, world * bone->meshSpacePoseMatrix);
     }
     return !out.isEmpty();
@@ -79,15 +79,15 @@ int SocketResolver::resolve(Scene *scene)
         if (attached.isEmpty()) continue;
 
         const SceneNodePtr ownerNode = scene->nodes.value(it.key());
-        MeshNode *owner = (!ownerNode.isNull() &&
+        MeshNode *owner = (!!ownerNode &&
                            ownerNode->getSceneNodeType() == SceneNodeType::Mesh)
-                              ? static_cast<MeshNode *>(ownerNode.data())
+                              ? static_cast<MeshNode *>(ownerNode.get())
                               : nullptr;
         const bool posed = owner && poseFor(owner, mSource, mBones);
         if (!posed) { mDangling += int(attached.size()); continue; }
 
         for (const SceneNodePtr &node : attached) {
-            if (node.isNull()) { ++mDangling; continue; }
+            if (!node) { ++mDangling; continue; }
             const Socket *socket = owner->findSocket(node->socketName);
             if (!socket) { ++mDangling; continue; }
             const auto bone = mBones.constFind(socket->boneName);

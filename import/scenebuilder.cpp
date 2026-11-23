@@ -259,7 +259,7 @@ SkeletonPtr extractSkeleton(const aiMesh *mesh, const aiScene *scene)
         auto bone = skel->getBone(QString(node->mName.C_Str()));
         // A bone may appear twice in a node tree only if the file is malformed;
         // don't re-parent one that already has a parent.
-        if (!!bone && !!ancestor && bone->parentBone.isNull() && bone != ancestor)
+        if (!!bone && !!ancestor && bone->parentBone.expired() && bone != ancestor)
             ancestor->addChild(bone);
         const BonePtr &nextAncestor = !!bone ? bone : ancestor;
         for (unsigned i = 0; i < node->mNumChildren; i++)
@@ -284,7 +284,7 @@ SkeletonPtr extractSkeleton(const aiMesh *mesh, const aiScene *scene)
     // FK over these reproduces meshSpacePoseMatrix, whose inverse is assimp's
     // offset matrix. One quantity, three consumers, computed once here.
     for (const auto &bone : skel->bones) {
-        const iris::Mat4 bindLocal = !bone->parentBone.isNull()
+        const iris::Mat4 bindLocal = !bone->parentBone.expired()
             ? bone->parent()->inverseMeshSpacePoseMatrix * bone->meshSpacePoseMatrix
             : bone->meshSpacePoseMatrix;
         decomposeTRS(bindLocal, bone->bindingPos, bone->bindingRot, bone->bindingScale);
@@ -420,7 +420,7 @@ static QMap<QString, SkeletalAnimationPtr> filteredClips(const aiScene *scene,
     return kept;
 }
 
-QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
+std::shared_ptr<iris::SceneNode> _buildScene(const aiScene* scene,
 											aiNode* node,
 											SceneNodePtr rootBone,
 											QString filePath,
@@ -428,7 +428,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
 											const QString& extractDir = QString(),
 											const ImportTransform &xf = ImportTransform())
 {
-    QSharedPointer<iris::SceneNode> sceneNode;
+    std::shared_ptr<iris::SceneNode> sceneNode;
 
     // if this node only has one child then make sceneNode a meshnode and add mesh to it
     if (node->mNumMeshes == 1) {
@@ -466,7 +466,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
     }
     else {
         //otherwise, add meshes as child nodes
-        sceneNode = QSharedPointer<iris::SceneNode>(new iris::SceneNode());
+        sceneNode = std::shared_ptr<iris::SceneNode>(new iris::SceneNode());
         sceneNode->name = QString(node->mName.C_Str());
 
         for (unsigned i = 0; i < node->mNumMeshes; i++) {
@@ -518,7 +518,7 @@ QSharedPointer<iris::SceneNode> _buildScene(const aiScene* scene,
     return sceneNode;
 }
 
-QSharedPointer<iris::SceneNode>
+std::shared_ptr<iris::SceneNode>
 loadAsSceneFragment(QString filePath,
                               std::function<MaterialPtr(MeshPtr mesh, MeshMaterialData& data)> createMaterialFunc,
                               SceneSource *scene_, IModelReadProgress* progressReader,
@@ -549,9 +549,9 @@ loadAsSceneFragment(QString filePath,
     if (scene == nullptr) {
         qWarning("loadAsSceneFragment: assimp failed to load %s: %s",
                  qUtf8Printable(filePath), scene_->importer().GetErrorString());
-        return QSharedPointer<iris::MeshNode>(nullptr);
+        return std::shared_ptr<iris::MeshNode>(nullptr);
     }
-    if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
+    if (scene->mNumMeshes == 0) return std::shared_ptr<iris::MeshNode>(nullptr);
     // AVATAR_MODULE_SPEC "ITEM ZERO" (fix A): the single-mesh shortcut below
     // builds ONE MeshNode and no child SceneNodes at all. A clip's channels are
     // matched to SCENE NODES by name — that was true of the document evaluator
@@ -633,7 +633,7 @@ loadAsSceneFragment(QString filePath,
     return node;
 }
 
-QSharedPointer<iris::SceneNode>
+std::shared_ptr<iris::SceneNode>
 loadAsSceneFragment(
 	const QString &filePath,
 	const aiScene* scene_,
@@ -643,8 +643,8 @@ loadAsSceneFragment(
 	const aiScene *scene = scene_;
 
 	if (scene == nullptr)
-		return QSharedPointer<iris::MeshNode>(nullptr);
-	if (scene->mNumMeshes == 0) return QSharedPointer<iris::MeshNode>(nullptr);
+		return std::shared_ptr<iris::MeshNode>(nullptr);
+	if (scene->mNumMeshes == 0) return std::shared_ptr<iris::MeshNode>(nullptr);
 	// Same ITEM ZERO fix as the path-based overload above, for the same reason:
 	// the single-mesh shortcut builds ONE MeshNode and no child SceneNodes, and
 	// pose evaluation is name-matched over the scene-node hierarchy — so a

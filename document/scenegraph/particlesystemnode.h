@@ -211,7 +211,7 @@ public:
     /// Binds the billboard image and the asset it is (TEX-REF-1). A null `tex`
     /// with a guid is a reference the store could not resolve: kept, so the
     /// next save writes it back.
-    void setTexture(QSharedPointer<iris::Texture2D> tex, const QString &guid)
+    void setTexture(std::shared_ptr<iris::Texture2D> tex, const QString &guid)
     {
         if (texture == tex && textureGuid == guid) return;
         texture = tex;
@@ -285,8 +285,5 @@ public:
 };
 
 }
-
-Q_DECLARE_METATYPE(iris::ParticleSystemNode)
-Q_DECLARE_METATYPE(iris::ParticleSystemNodePtr)
 
 #endif // PARTICLESYSTEMNODE_H

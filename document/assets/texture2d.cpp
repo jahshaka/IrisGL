@@ -68,10 +68,10 @@ Texture2DPtr Texture2D::create(QImage image)
 {
     auto tex = new Texture2D();
     tex->image = image;
-    return QSharedPointer<Texture2D>(tex);
+    return std::shared_ptr<Texture2D>(tex);
 }
 
-QSharedPointer<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
+std::shared_ptr<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
                                                    QString posY, QString negY,
                                                    QString negX, QString posX,
                                                    QImage *info)
@@ -100,7 +100,7 @@ QSharedPointer<Texture2D> Texture2D::createCubeMap(QString negZ, QString posZ,
     tex->cubeMap = true;
     tex->image = faces[0];
     for (int i = 0; i < 6; ++i) tex->cubeFaceImages[i] = faces[i];
-    return QSharedPointer<Texture2D>(tex);
+    return std::shared_ptr<Texture2D>(tex);
 }
 
 // A LIVE texture (MATERIAL_GAPS_SPEC A-1). `source` carries the reference
@@ -125,7 +125,7 @@ Texture2DPtr Texture2D::createLive(const QString &guid, const QString &name,
     // texture that has only ever held its birth pixels still gets its first
     // upload rather than being mistaken for one already in sync.
     tex->generation      = 1;
-    return QSharedPointer<Texture2D>(tex);
+    return std::shared_ptr<Texture2D>(tex);
 }
 
 bool Texture2D::writeLive(const QImage &rgba)

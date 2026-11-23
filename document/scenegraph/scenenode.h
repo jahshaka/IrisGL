@@ -43,7 +43,7 @@ class PhysicsProperty;
 class Property;
 class Animation;
 class PropertyAnim;
-typedef QSharedPointer<Animation> AnimationPtr;
+typedef std::shared_ptr<Animation> AnimationPtr;
 
 /// What a mutation changed. Every setter on SceneNode and its subclasses
 /// reports it through notifyChanged(), and the node's SCENE collects it
@@ -161,7 +161,7 @@ const char *mobilityReasonName(MobilityReason r);
 // exactly two functions (insertChild / removeChild) touch it. Structure comes
 // from the store, always.
 // -----------------------------------------------------------------------------
-class SceneNode : public QEnableSharedFromThis<SceneNode>
+class SceneNode : public std::enable_shared_from_this<SceneNode>
 {
 protected:
     QList<AnimationPtr> animations;
@@ -331,9 +331,9 @@ public:
     // time the user toggled pages while playing.
     AvatarMovementPtr avatarMovement;
 
-    bool hasAvatarComponent() const { return !avatarMovement.isNull(); }
+    bool hasAvatarComponent() const { return !!avatarMovement; }
     /// The component, or null. Borrowed — the node owns it.
-    AvatarMovement *avatar() const { return avatarMovement.data(); }
+    AvatarMovement *avatar() const { return avatarMovement.get(); }
     /// Installs (or replaces) the component. Passing a null pointer removes it.
     void setAvatarComponent(const AvatarMovementPtr &component);
 
@@ -354,9 +354,9 @@ public:
     // document is the only place they can live.
     AvatarLocomotionPtr avatarLocomotion;
 
-    bool hasLocomotionComponent() const { return !avatarLocomotion.isNull(); }
+    bool hasLocomotionComponent() const { return !!avatarLocomotion; }
     /// The state machine, or null. Borrowed — the node owns it.
-    AvatarLocomotion *locomotion() const { return avatarLocomotion.data(); }
+    AvatarLocomotion *locomotion() const { return avatarLocomotion.get(); }
     void setLocomotionComponent(const AvatarLocomotionPtr &component);
 
     // ---- THE AVATAR LINK (AVATAR_ASSET_SPEC §5.4) -------------------------
@@ -604,7 +604,7 @@ public:
 	}
 
 	bool hasParent() const;
-	bool hasScene()  const { return !scene.isNull(); }
+	bool hasScene()  const { return !scene.expired(); }
 
     /// The children, in order, from the store. Built on demand: this is a QList
     /// by value, not a reference to a member.
@@ -1099,5 +1099,4 @@ private:
 
 }
 
-Q_DECLARE_METATYPE(iris::SceneNodePtr)
 #endif // SCENENODE_H

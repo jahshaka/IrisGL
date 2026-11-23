@@ -88,7 +88,7 @@ void collectCandidates(Scene *scene, const Vec3 &segStart, const Vec3 &segEnd,
         if (!n) continue;
         if (st == graph::PickTable::Stale) {
             MeshNode *mn = static_cast<MeshNode *>(n);
-            Mesh *mesh = mn->mesh.data();   // the member, not getMesh(): no shared-pointer copy
+            Mesh *mesh = mn->mesh.get();   // the member, not getMesh(): no shared-pointer copy
             if (!mesh || !mesh->getTriMesh()) { table.markNoGeometry(i); continue; }   // nothing to test
             if (!table.refresh(i, mesh->aabb.getMin(), mesh->aabb.getMax())) continue;
         }
@@ -123,7 +123,7 @@ QList<MeshPick> raycastMeshes(Scene *scene, const Vec3 &segStart, const Vec3 &se
         if (!mesh->getTriMesh()->getSegmentIntersections(a, b, results)) continue;
         for (const TriangleIntersectionResult &r : results) {
             MeshPick p;
-            p.node = meshNode->sharedFromThis();
+            p.node = meshNode->weak_from_this().lock();
             p.hitPoint = world * r.hitPoint;
             p.distanceSqrd = (p.hitPoint - segStart).lengthSquared();
             p.triangleIndex = r.triangleIndex;

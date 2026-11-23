@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef TEXTURE2D_H
 #define TEXTURE2D_H
 
-#include <QSharedPointer>
+#include <memory>
 #include <QImage>
 
 #include "document/assets/texture.h"

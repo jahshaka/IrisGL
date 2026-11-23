@@ -50,7 +50,7 @@ inline iris::Mat4 composeRest(const ClipExtractor::RestLocal &r)
 QVector<SceneNode *> pathToRoot(SceneNode *node, SceneNode *root)
 {
     QVector<SceneNode *> path;
-    for (SceneNode *n = node; n; n = n->getParent().data()) {
+    for (SceneNode *n = node; n; n = n->getParent().get()) {
         path.append(n);
         if (n == root) return path;
     }
@@ -62,9 +62,9 @@ QVector<SceneNode *> pathToRoot(SceneNode *node, SceneNode *root)
 ClipExtractor::RestPose ClipExtractor::captureRest(const SceneNodePtr &root)
 {
     RestPose out;
-    if (root.isNull()) return out;
+    if (!root) return out;
     QVector<SceneNode *> stack;
-    stack.append(root.data());
+    stack.append(root.get());
     while (!stack.isEmpty()) {
         SceneNode *n = stack.takeLast();
         RestLocal r;
@@ -92,10 +92,10 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     out.name = clipName;
     out.length = length > 0.0f ? length : 0.0f;
 
-    if (root.isNull()) return fail("clip extraction: no subtree root");
-    if (meshNode.isNull()) return fail("clip extraction: no mesh node");
-    if (rig.isNull() || rig->bones.isEmpty()) return fail("clip extraction: the rig has no bones");
-    if (clip.isNull()) return fail("clip extraction: no clip");
+    if (!root) return fail("clip extraction: no subtree root");
+    if (!meshNode) return fail("clip extraction: no mesh node");
+    if (!rig || rig->bones.isEmpty()) return fail("clip extraction: the rig has no bones");
+    if (!clip) return fail("clip extraction: no clip");
 
     // ---- the subtree, by name -------------------------------------------
     // The document evaluator joins clip channels to scene nodes BY NAME and
@@ -105,7 +105,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     QHash<QString, SceneNode *> byName;
     {
         QVector<SceneNode *> order;
-        order.append(root.data());
+        order.append(root.get());
         for (int i = 0; i < order.size(); ++i) {
             SceneNode *n = order[i];
             byName.insert(n->name, n);
@@ -133,7 +133,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
     // ---- per-node local transform at a time ------------------------------
     const auto localAt = [&](SceneNode *n, float t) -> iris::Mat4 {
         const auto it = clip->boneAnimations.constFind(n->name);
-        if (it != clip->boneAnimations.constEnd() && !it.value().isNull()) {
+        if (it != clip->boneAnimations.constEnd() && !!it.value()) {
             // SceneNode::updateAnimation writes all THREE components whenever a
             // channel exists, normalising the quaternion. Not "position if
             // there are position keys" — so a channel with an empty scale track
@@ -155,8 +155,8 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         return m;
     };
 
-    SceneNode *rootNode = root.data();
-    const QVector<SceneNode *> meshPath = pathToRoot(meshNode.data(), rootNode);
+    SceneNode *rootNode = root.get();
+    const QVector<SceneNode *> meshPath = pathToRoot(meshNode.get(), rootNode);
     if (meshPath.isEmpty()) return fail("clip extraction: the mesh node is not in the subtree");
 
     const QList<BonePtr> &bones = rig->bones;
@@ -173,13 +173,13 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         // node, which is the frame SceneMirror::toSkeletonDesc authors root
         // bind locals in (`bindLocal = meshSpacePoseMatrix`, i.e. mesh space).
         int parentIndex = -1;
-        if (!bone->parentBone.isNull()) {
+        if (!bone->parentBone.expired()) {
             const auto pit = rig->boneMap.constFind(bone->parent()->name);
             if (pit != rig->boneMap.constEnd() && pit.value() != i) parentIndex = pit.value();
         }
         SceneNode *frameNode = nullptr;
         if (parentIndex >= 0) frameNode = byName.value(bones[parentIndex]->name, nullptr);
-        if (!frameNode) frameNode = meshNode.data();
+        if (!frameNode) frameNode = meshNode.get();
         const QVector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
         if (framePath.isEmpty()) continue;
 
@@ -210,7 +210,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         const auto collect = [&](const QVector<SceneNode *> &path, int startIndex) {
             for (int k = startIndex; k >= 0; --k) {
                 const auto it = clip->boneAnimations.constFind(path[k]->name);
-                if (it == clip->boneAnimations.constEnd() || it.value().isNull()) continue;
+                if (it == clip->boneAnimations.constEnd() || !it.value()) continue;
                 const auto &ba = it.value();
                 for (const auto *key : ba->posKeys->keys)   { timeSet.insert(quantiseTime(key->time)); ++sourceKeys; }
                 for (const auto *key : ba->rotKeys->keys)   { timeSet.insert(quantiseTime(key->time)); ++sourceKeys; }
@@ -264,7 +264,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
         SceneNode *boneNode = byName.value(bone->name, nullptr);
         if (!boneNode) continue;
         int parentIndex = -1;
-        if (!bone->parentBone.isNull()) {
+        if (!bone->parentBone.expired()) {
             const auto pit = rig->boneMap.constFind(bone->parent()->name);
             if (pit != rig->boneMap.constEnd() && pit.value() != i) parentIndex = pit.value();
         }
@@ -274,7 +274,7 @@ bool ClipExtractor::extract(const SceneNodePtr &root, const SceneNodePtr &meshNo
 
         SceneNode *frameNode = parentIndex >= 0
             ? byName.value(bones[parentIndex]->name, nullptr) : nullptr;
-        if (!frameNode) frameNode = meshNode.data();
+        if (!frameNode) frameNode = meshNode.get();
         const QVector<SceneNode *> bonePath = pathToRoot(boneNode, rootNode);
         const QVector<SceneNode *> framePath = pathToRoot(frameNode, rootNode);
         if (bonePath.isEmpty() || framePath.isEmpty()) continue;

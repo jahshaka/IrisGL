@@ -40,7 +40,7 @@ public:
 
     bool hasKeyFrame(QString name);
 
-    static QSharedPointer<KeyFrameSet> create();
+    static std::shared_ptr<KeyFrameSet> create();
 };
 
 }

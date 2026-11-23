@@ -78,8 +78,8 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
     QHash<QString, SceneNodePtr> byName;
     std::function<void(const SceneNodePtr &)> walk = [&](const SceneNodePtr &n) {
         if (n->getSceneNodeType() == SceneNodeType::Mesh) {
-            const auto mesh = n.staticCast<MeshNode>();
-            if (!mesh->skeleton.isNull())
+            const auto mesh = std::static_pointer_cast<MeshNode>(n);
+            if (!!mesh->skeleton)
                 for (const auto &bone : mesh->skeleton->bones)
                     if (bone) bones.insert(bone->name);
         }
@@ -91,7 +91,7 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
     const AnimationPtr active = fragment->getAnimation();
     QSet<SceneNode *> given;
     for (const AnimationPtr &clip : fragment->getAnimations()) {
-        if (!clip || clip->skeletalAnimation.isNull()) continue;
+        if (!clip || !clip->skeletalAnimation) continue;
         bool keysARig = false;
         const auto &channels = clip->skeletalAnimation->boneAnimations;
         for (auto it = channels.constBegin(); it != channels.constEnd(); ++it) {
@@ -101,7 +101,7 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
             const int pivot = it.key().indexOf(QLatin1String("_$AssimpFbx$_"));
             const QString base = pivot >= 0 ? it.key().left(pivot) : it.key();
             if (bones.contains(base)) { keysARig = true; continue; }
-            const BoneAnimation *channel = it.value().data();
+            const BoneAnimation *channel = it.value().get();
             const SceneNodePtr node = byName.value(it.key());
             if (!channel || !node || node == fragment || !channel->moves()) continue;
             auto anim = Animation::create(clip->getName());
@@ -112,13 +112,13 @@ PlayedNodeChannels playNodeChannels(const SceneNodePtr &fragment)
             anim->calculateAnimationLength();
             node->addAnimation(anim);
             if (clip == active || !node->getAnimation()) node->setAnimation(anim);
-            given.insert(node.data());
+            given.insert(node.get());
         }
         if (!keysARig) clip->setSkeletalAnimation(SkeletalAnimationPtr());   // marked for removal
     }
     // The clips that keyed no rig leave the root: their channels play on their nodes.
     for (const AnimationPtr &clip : fragment->getAnimations()) {
-        if (!clip || !clip->skeletalAnimation.isNull() || !clip->properties.isEmpty()) continue;
+        if (!clip || !!clip->skeletalAnimation || !clip->properties.isEmpty()) continue;
         if (fragment->getAnimation() == clip) fragment->setAnimation(AnimationPtr());
         fragment->deleteAnimation(clip);
         ++out.clipsRemoved;

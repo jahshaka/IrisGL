@@ -16,7 +16,7 @@ For more information see the LICENSE file
 // (step 14): these are pure document/asset data - the engine mirror converts
 // them into engine buffers, and importers fill them. No GL anywhere.
 
-#include <QSharedPointer>
+#include <memory>
 #include <cstring>
 #include "document/assets/vertexlayout.h"
 
@@ -24,9 +24,9 @@ namespace iris
 {
 
 class VertexBuffer;
-typedef QSharedPointer<VertexBuffer> VertexBufferPtr;
+typedef std::shared_ptr<VertexBuffer> VertexBufferPtr;
 class IndexBuffer;
-typedef QSharedPointer<IndexBuffer> IndexBufferPtr;
+typedef std::shared_ptr<IndexBuffer> IndexBufferPtr;
 
 class VertexBuffer
 {

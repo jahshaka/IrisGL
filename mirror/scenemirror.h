@@ -1741,7 +1741,7 @@ private:
         /// document deleted is a freed pointer here until the walk drops its entry — the published tags are applied at
         /// the TOP of sync (takePublishedRiderTags), before that walk, so they check this first (ENGINE-UPGRADE-U3
         /// stage 3: a frame's tags reached a deleted rider, sockets.tags under ASan's eye).
-        QWeakPointer<iris::SceneNode> alive;
+        std::weak_ptr<iris::SceneNode> alive;
         jahshaka::engine::NodeId owner = 0;
         QString bone;
         quint64 offsetKey = 0;
@@ -1872,7 +1872,7 @@ private:
     /// WEAK on the camera: the entry outlives the call that wrote it and is
     /// dereferenced a frame later, so a deleted camera must read as "gone" and
     /// not as a dangling pointer.
-    std::vector<std::pair<const jahshaka::engine::View *, QWeakPointer<iris::CameraNode>>>
+    std::vector<std::pair<const jahshaka::engine::View *, std::weak_ptr<iris::CameraNode>>>
         mDrivingCameras;
     /// THE WORLD'S post description as buildEnvironment last built it, BEFORE
     /// the driving camera was layered over it. The picture-in-picture inset is
@@ -1969,7 +1969,7 @@ private:
     /// the engine's environment names them (the engine copies them into its dome cube). HELD, never a bare address (the
     /// 10-3 read's W3): a dome cleared and a new one bound in one sync could reuse the freed address and keep the old
     /// faces - a held texture cannot be freed, so the pointer is its identity exactly.
-    QSharedPointer<iris::Texture2D> mDomeSource;
+    std::shared_ptr<iris::Texture2D> mDomeSource;
     jahshaka::engine::TextureId mDomeFaceTextures[6] = { 0, 0, 0, 0, 0, 0 };
     void releaseDome();
     /// THE CLOUD LAYER'S WEATHER MAP (CLOUDS-2D-1), uploaded from its decoded
@@ -2230,7 +2230,7 @@ private:
     /// walking. A node moved INTO the tree is written (Structure) and owes its
     /// own rotation. Empty = no rotation in progress.
     struct SettleEntry {
-        QWeakPointer<iris::SceneNode> node;
+        std::weak_ptr<iris::SceneNode> node;
         iris::SceneNode *parent = nullptr;
         bool parentMovable = false;
     };

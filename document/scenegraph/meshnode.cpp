@@ -136,8 +136,8 @@ bool MeshNode::setPropertyValue(QString valueName, const QVariant &value)
 // reference the document should store.)
 void MeshNode::setMesh(MeshPtr mesh)
 {
-    const bool hadMesh = !this->mesh.isNull();
-    const bool hadSkeleton = !skeleton.isNull();
+    const bool hadMesh = !!this->mesh;
+    const bool hadSkeleton = !!skeleton;
     this->mesh = mesh;
     adoptSkeletonFromMesh();
     // CONTENT (DIRTY_SET_MIRROR_SPEC §3.1). Nothing reported a mesh or
@@ -162,7 +162,7 @@ void MeshNode::setMesh(MeshPtr mesh)
     // rotation applies the whole rule and leaves the node dynamic: a skinned or
     // meshless node is never eligible to be promoted back. One walk, no loop.
     const bool presenceFlipped =
-        hadMesh != !this->mesh.isNull() || hadSkeleton != !skeleton.isNull();
+        hadMesh != !!this->mesh || hadSkeleton != !!skeleton;
     if (presenceFlipped && getScene()) {
         if (!isStaticEligible()) {
             if (isStaticInGraph()) _applyStaticHint(false);
@@ -259,7 +259,7 @@ SceneNodePtr MeshNode::createDuplicate()
 
 bool MeshNode::hasBone(const QString &boneName) const
 {
-    if (skeleton.isNull() || boneName.isEmpty()) return false;
+    if (!skeleton || boneName.isEmpty()) return false;
     return skeleton->boneMap.contains(boneName);
 }
 
@@ -279,7 +279,7 @@ bool MeshNode::addSocket(const Socket &socket, QString *error)
     if (socket.name.isEmpty()) return refuse(QStringLiteral("a socket needs a name"));
     if (findSocket(socket.name))
         return refuse(QStringLiteral("this node already has a socket named '%1'").arg(socket.name));
-    if (skeleton.isNull() || skeleton->bones.isEmpty())
+    if (!skeleton || skeleton->bones.isEmpty())
         return refuse(QStringLiteral("'%1' has no rig — sockets attach to BONES, so only a "
                                      "skinned mesh can carry one").arg(name));
     if (!hasBone(socket.boneName))

@@ -16,7 +16,7 @@ In Assimp, Meshes' root transform starts at arbitrary bones in the hierarchy.
 Thus, the inverseMeshSpacePoseMatrix (and the meshSpacePoseMatrix) isnt relative to the root of the skeleton, but the
 bone in the hierarchy that represents the mesh's root.
 */
-class Bone : public QEnableSharedFromThis<Bone>
+class Bone : public std::enable_shared_from_this<Bone>
 {
     Bone(){}
 public:
@@ -43,12 +43,12 @@ public:
     // reference cycle that never freed (one clone per skinned MeshNode —
     // platform audit B8.1). The parent always outlives the child through
     // childBones, so a weak back-link loses nothing; read it through parent().
-    QWeakPointer<Bone> parentBone;
-    BonePtr parent() const { return parentBone.toStrongRef(); }
+    std::weak_ptr<Bone> parentBone;
+    BonePtr parent() const { return parentBone.lock(); }
 
     void addChild(BonePtr bone)
     {
-        bone->parentBone = this->sharedFromThis();
+        bone->parentBone = this->weak_from_this().lock();
         childBones.append(bone);
     }
 
@@ -83,7 +83,7 @@ public:
     BonePtr getRootBone()
     {
         for(auto bone : bones)
-            if(bone->parentBone.isNull())
+            if(bone->parentBone.expired())
                 return bone;
         return BonePtr();  // no parentless bone (empty/cyclic skeleton)
     }
@@ -92,7 +92,7 @@ public:
     {
         QList<BonePtr> roots;
         for(auto bone : bones)
-            if(bone->parentBone.isNull())
+            if(bone->parentBone.expired())
                 roots.append(bone);
 
         return roots;

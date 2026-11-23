@@ -383,7 +383,7 @@ public:
     void update(float dt) override;
 
     static CameraNodePtr create() {
-        return QSharedPointer<CameraNode>(new CameraNode());
+        return std::shared_ptr<CameraNode>(new CameraNode());
     }
 
     /**

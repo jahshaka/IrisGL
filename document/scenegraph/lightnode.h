@@ -210,10 +210,10 @@ public:
      */
     SkyLightSource skySource = SkyLightSource::Sky;
     QJsonObject skyCubeFaces;
-    QSharedPointer<Texture2D> skyCubeTexture;
+    std::shared_ptr<Texture2D> skyCubeTexture;
 
     //editor-specific
-    QSharedPointer<Texture2D> icon;
+    std::shared_ptr<Texture2D> icon;
     float iconSize;
 
     static LightNodePtr create()

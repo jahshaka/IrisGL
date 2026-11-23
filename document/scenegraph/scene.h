@@ -394,12 +394,12 @@ struct SunContact
 	static bool resolutionFromName(const QString &name, SunContactResolution &out);
 };
 
-class Scene: public QEnableSharedFromThis<Scene>
+class Scene
 {
-    QSharedPointer<Environment> environment;
+    std::shared_ptr<Environment> environment;
     /// The one possession slot (§8.4). Owned like `environment` — created in
     /// the constructor, destroyed with the scene, never serialized.
-    QSharedPointer<AvatarPossession> possession;
+    std::shared_ptr<AvatarPossession> possession;
 
     /// WHAT CHANGED SINCE THE LAST FRAME (SPECS/DIRTY_SET_MIRROR_SPEC.md).
     /// Every node in this scene points at it (SceneNode::_setDirtySet, wired
@@ -414,7 +414,7 @@ public:
     CameraNodePtr camera;
     SceneNodePtr rootNode;
 
-    QSharedPointer<Environment> getPhysicsEnvironment() {
+    std::shared_ptr<Environment> getPhysicsEnvironment() {
         return environment;
     }
 
@@ -1453,8 +1453,8 @@ public:
     /// The one possession slot and the spring-arm follow camera that rides with
     /// it. Never null: the scene owns one for its whole life, the way it owns
     /// its Environment. Nothing in it is serialized.
-    AvatarPossession *getPossession() { return possession.data(); }
-    const AvatarPossession *getPossession() const { return possession.data(); }
+    AvatarPossession *getPossession() { return possession.get(); }
+    const AvatarPossession *getPossession() const { return possession.get(); }
 
     ScenePlayMode getPlayMode() const { return playMode; }
     /// Changing the mode WHILE PLAYING re-arms possession immediately (the same

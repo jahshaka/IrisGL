@@ -49,7 +49,7 @@ public:
     /// Empty = a clip no stored asset backs (it cannot be persisted).
     QString assetGuid;
 
-    QMap<QString, QSharedPointer<BoneAnimation>> boneAnimations;
+    QMap<QString, std::shared_ptr<BoneAnimation>> boneAnimations;
 
     /// The clip's DECLARED length in seconds — the file's own duration
     /// (assimp's mDuration / mTicksPerSecond), 0 when it declares none.

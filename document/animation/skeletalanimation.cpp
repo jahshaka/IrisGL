@@ -5,13 +5,13 @@ namespace iris {
 
 void SkeletalAnimation::addBoneAnimation(QString boneName, iris::BoneAnimation *boneAnim)
 {
-    boneAnimations.insert(boneName, QSharedPointer<BoneAnimation>(boneAnim));
+    boneAnimations.insert(boneName, std::shared_ptr<BoneAnimation>(boneAnim));
 }
 
 SkeletalAnimationPtr SkeletalAnimation::referencedAs(const SkeletalAnimationPtr &anim,
                                                     const QString &guid)
 {
-    if (anim.isNull()) return anim;
+    if (!anim) return anim;
     if (anim->assetGuid.isEmpty() || anim->assetGuid == guid) {
         anim->assetGuid = guid;
         return anim;
@@ -49,13 +49,13 @@ bool BoneAnimation::moves() const
 bool SkeletalAnimation::movesNode(const QString &nodeName) const
 {
     const auto it = boneAnimations.constFind(nodeName);
-    return it != boneAnimations.constEnd() && !it.value().isNull() && it.value()->moves();
+    return it != boneAnimations.constEnd() && !!it.value() && it.value()->moves();
 }
 
 bool SkeletalAnimation::movesAnything() const
 {
     for (auto it = boneAnimations.constBegin(); it != boneAnimations.constEnd(); ++it)
-        if (!it.value().isNull() && it.value()->moves()) return true;
+        if (!!it.value() && it.value()->moves()) return true;
     return false;
 }
 

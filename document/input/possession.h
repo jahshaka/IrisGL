@@ -129,7 +129,7 @@ public:
     /// The possessed node's guid, or an empty string. Cheaper than possessed()
     /// for the verbs, and it survives the node dying.
     QString possessedGuid() const;
-    bool isPossessing() const { return !possessed().isNull(); }
+    bool isPossessing() const { return !!possessed(); }
 
     // ---- the follow camera ------------------------------------------------
 

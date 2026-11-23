@@ -86,7 +86,7 @@ public:
     /// and duplicates of one rig animate independently.
     /// Null when the mesh has no skeleton.
     SkeletonPtr getSkeleton() const { return skeleton; }
-    bool hasSkeleton() const { return !skeleton.isNull(); }
+    bool hasSkeleton() const { return !!skeleton; }
     /// Whether this node's rig has a bone by this name.
     bool hasBone(const QString &boneName) const;
 
@@ -151,7 +151,7 @@ public:
     /// the classification when either presence flips.
     bool isStaticEligible() const override
     {
-        return !mesh.isNull() && !skeleton && SceneNode::isStaticEligible();
+        return !!mesh && !skeleton && SceneNode::isStaticEligible();
     }
 
     /// MOBILITY rule 1 for a mesh: a rig WITH A CLIP moves
@@ -171,7 +171,7 @@ public:
         // import arrives in: the file's clips on the fragment root) deforms when any
         // of that clip's channels moves (BISTRO-IMPORT-1 — the root no longer makes
         // its subtree movable merely by carrying a clip).
-        if (!skeleton.isNull() && ((!mesh.isNull() && mesh->hasSkeletalAnimations()) ||
+        if (!!skeleton && ((!!mesh && mesh->hasSkeletalAnimations()) ||
                                    hasMovingClipOver())) {
             if (why) *why = MobilityReason::Skeleton;
             return true;

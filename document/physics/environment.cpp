@@ -153,7 +153,7 @@ void Environment::initializePhysicsWorldFromScene(const iris::SceneNodePtr rootN
 		for (int i = 0; i < kids; ++i) {
 			iris::SceneNode *raw = node->childAt(i);
 			if (!raw) continue;
-			auto child = raw->sharedFromThis();
+			auto child = raw->weak_from_this().lock();
 			if (child->hasAvatarComponent()) addAvatarToWorld(child);
 			registerAvatars(child);
 		}
@@ -249,10 +249,10 @@ void Environment::addAvatarToWorld(const iris::SceneNodePtr &node)
 	if (!node || !node->hasAvatarComponent()) return;
 	const QString guid = node->getGUID();
 	for (const auto &weak : avatars) {
-		auto existing = weak.toStrongRef();
+		auto existing = weak.lock();
 		if (existing && existing->getGUID() == guid) return;
 	}
-	avatars.append(node.toWeakRef());
+	avatars.append(std::weak_ptr(node));
 	// PRE-PLAY TRANSFORM, so Stop puts the character back where the user left
 	// it. An avatar is NOT a physics body, so it never appeared in this hash
 	// and `restoreNodeTransformations` would have left it wherever it walked to
@@ -275,7 +275,7 @@ void Environment::addAvatarToWorld(const iris::SceneNodePtr &node)
 void Environment::removeAvatarFromWorld(const QString &guid)
 {
 	for (int i = avatars.size() - 1; i >= 0; --i) {
-		auto node = avatars[i].toStrongRef();
+		auto node = avatars[i].lock();
 		if (!node || node->getGUID() == guid) avatars.removeAt(i);
 	}
 }
@@ -293,7 +293,7 @@ void Environment::updateAvatarMovement(float delta)
 	// and it must stop stepping it BEFORE the step loop so the loop can run
 	// forward.
 	for (int i = avatars.size() - 1; i >= 0; --i) {
-		auto node = avatars[i].toStrongRef();
+		auto node = avatars[i].lock();
 		// The SCENE'S REGISTRY is the truth for "still in the document", not the
 		// shared pointer: `Scene::removeNode` drops the guid from `nodes` but
 		// does NOT clear the node's own scene back-pointer, and the undo stack
@@ -312,7 +312,7 @@ void Environment::updateAvatarMovement(float delta)
 	// happened to order first (§4.4 defect 1). Registration order is document
 	// order, which is what makes a two-avatar run reproducible.
 	for (int i = 0; i < avatars.size(); ++i) {
-		auto node = avatars[i].toStrongRef();
+		auto node = avatars[i].lock();
 		if (!node) continue;
 		AvatarMovement *movement = node->avatar();
 		movement->step(world, node, delta, world ? float(world->getGravity().y()) : -10.0f);
@@ -341,7 +341,7 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 		for (int i = 0; i < kids; ++i) {
 			iris::SceneNode *raw = node->childAt(i);
 			if (!raw) continue;
-			auto child = raw->sharedFromThis();
+			auto child = raw->weak_from_this().lock();
 			// A node that is ALREADY a physics body has a collider; giving it a
 			// second one would make the character collide with the box twice.
 			// An avatar's own subtree is skipped too — a character must not be
@@ -350,7 +350,7 @@ void Environment::buildCollisionContent(const iris::SceneNodePtr &rootNode)
 			if (!skip && child->getSceneNodeType() == iris::SceneNodeType::Mesh
 			    && child->isCollisionEnabled()
 			    && !collisionContentNodes.contains(child->getGUID())) {
-				auto meshNode = child.staticCast<iris::MeshNode>();
+				auto meshNode = std::static_pointer_cast<iris::MeshNode>(child);
 				auto mesh = meshNode->getMesh();
 				if (mesh && mesh->getTriMesh() && !mesh->getTriMesh()->triangles.isEmpty()) {
 					btTriangleMesh *tri = iris::PhysicsHelper::btTriangleMeshShapeFromMesh(mesh);

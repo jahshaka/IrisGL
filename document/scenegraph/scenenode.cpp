@@ -104,7 +104,7 @@ SceneNode::~SceneNode()
 
 SceneNodePtr SceneNode::create()
 {
-    return QSharedPointer<SceneNode>(new SceneNode());
+    return std::shared_ptr<SceneNode>(new SceneNode());
 }
 
 void SceneNode::setAvatarComponent(const AvatarMovementPtr &component)
@@ -144,7 +144,7 @@ void SceneNode::setNodeId(qint64 id)
 
 SceneNodePtr SceneNode::getParent() const
 {
-    return mDoc.parent ? mDoc.parent->owner->sharedFromThis() : SceneNodePtr();
+    return mDoc.parent ? mDoc.parent->owner->weak_from_this().lock() : SceneNodePtr();
 }
 
 bool SceneNode::hasParent() const
@@ -156,7 +156,7 @@ QList<SceneNodePtr> SceneNode::children() const
 {
     QList<SceneNodePtr> out;
     out.reserve(int(mDoc.children.size()));
-    for (const graph::DocNode *c : mDoc.children) out.append(c->owner->sharedFromThis());
+    for (const graph::DocNode *c : mDoc.children) out.append(c->owner->weak_from_this().lock());
     return out;
 }
 
@@ -271,7 +271,7 @@ namespace {
 /// made the distinction load-bearing. Split in two here because mobility
 /// reports WHY: real property channels are `animation`, a skeletal clip is
 /// `skeleton`.
-bool drivesTransform(const AnimationPtr &a) { return !a.isNull() && !a->properties.isEmpty(); }
+bool drivesTransform(const AnimationPtr &a) { return !!a && !a->properties.isEmpty(); }
 /// A SKELETAL CLIP DRIVES THE NODES IT NAMES, not the node that carries it
 /// (BISTRO-IMPORT-1). An imported file's clips ride its fragment ROOT and their
 /// channels are matched to scene nodes by name; the root itself moves only if a
@@ -280,11 +280,11 @@ bool drivesTransform(const AnimationPtr &a) { return !a.isNull() && !a->properti
 /// moved one camera.)
 bool clipKeysNode(const AnimationPtr &a, const QString &name)
 {
-    return !a.isNull() && !a->skeletalAnimation.isNull() && a->skeletalAnimation->movesNode(name);
+    return !!a && !!a->skeletalAnimation && a->skeletalAnimation->movesNode(name);
 }
 bool clipMovesAnything(const AnimationPtr &a)
 {
-    return !a.isNull() && !a->skeletalAnimation.isNull() && a->skeletalAnimation->movesAnything();
+    return !!a && !!a->skeletalAnimation && a->skeletalAnimation->movesAnything();
 }
 } // namespace
 
@@ -841,7 +841,7 @@ void SceneNode::insertChild(int position, SceneNodePtr node, bool keepTransform)
 
 void SceneNode::removeFromParent()
 {
-    auto self = sharedFromThis();
+    auto self = weak_from_this().lock();
     if (auto p = getParent()) p->removeChild(self);
 }
 
@@ -872,7 +872,7 @@ void SceneNode::removeChildInternal(const SceneNodePtr &node, bool keepSceneMemb
 bool SceneNode::isRootNode()
 {
     auto sc = getScene();
-    return sc && sc->getRootNode().data() == this;
+    return sc && sc->getRootNode().get() == this;
 }
 
 void SceneNode::updateAnimation(float time)
@@ -938,13 +938,13 @@ void SceneNode::setScene(ScenePtr scene)
     // should not already be a part of scene
     Q_ASSERT(!hasScene());
 
-    this->scene = scene.toWeakRef();
+    this->scene = std::weak_ptr(scene);
     // THE CHANGE COLLECTOR travels with scene membership, and only with it: a
     // node outside a scene records nothing (there is no mirror that could ever
     // be asked about it), and joining one is a Structure event that marks the
     // whole subtree below.
     _setDirtySet(scene->dirtySet());
-    scene->addNode(this->sharedFromThis());
+    scene->addNode(this->weak_from_this().lock());
 
     // add children — RAW (childAt), not children(): that builds a QList of
     // shared pointers per node joining a scene (SCENEGRAPH-BASELINE-2), and
@@ -957,14 +957,14 @@ void SceneNode::setScene(ScenePtr scene)
 void SceneNode::removeFromScene()
 {
     auto sc = getScene();
-    this->scene.clear();
+    this->scene.reset();
     // OUT OF THE DOCUMENT: the mirror still holds an entry keyed by this
     // pointer and has to release it. The pointer is RECORDED, never followed —
     // releaseEntry reads the entry alone — and it is processed before the next
     // frame's dirty list so an address a same-frame insert recycles is freed
     // before it is adopted again (DIRTY_SET_MIRROR_SPEC §3.4).
     _leaveDirtySet();
-    if (sc) sc->removeNode(this->sharedFromThis());
+    if (sc) sc->removeNode(this->weak_from_this().lock());
 
     // ...and the children
     for (const auto &child : children()) {
@@ -1124,7 +1124,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
 	// cloned (own property keys, the SAME skeletal clip and its reference),
 	// and the copy plays the clip the original plays.
 	for (const auto &anim : this->animations) {
-		if (anim.isNull()) continue;
+		if (!anim) continue;
 		auto copy = anim->clone();
 		node->addAnimation(copy);
 		if (anim == this->animation) node->setAnimation(copy);
@@ -1145,7 +1145,7 @@ SceneNodePtr SceneNode::duplicateInto(QHash<QString, QString> &guidMap)
         }
     }
 
-    return node.staticCast<SceneNode>();
+    return std::static_pointer_cast<SceneNode>(node);
 }
 
 }

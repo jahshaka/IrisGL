@@ -16,7 +16,7 @@ For more information see the LICENSE file
  * The legacy GL renderer's classes were deleted at step 14.
  */
 
-#include <QSharedPointer>
+#include <memory>
 #include "core/logger.h"
 
 namespace iris
@@ -72,11 +72,11 @@ class AvatarMovement;
 /// CONSUMES the movement's five-parameter contract rather than living inside it.
 class AvatarLocomotion;
 
-typedef QSharedPointer<iris::Animation> AnimationPtr;
-typedef QSharedPointer<Scene> ScenePtr;
-typedef QSharedPointer<SceneNode> SceneNodePtr;
-typedef QSharedPointer<AvatarMovement> AvatarMovementPtr;
-typedef QSharedPointer<AvatarLocomotion> AvatarLocomotionPtr;
+typedef std::shared_ptr<iris::Animation> AnimationPtr;
+typedef std::shared_ptr<Scene> ScenePtr;
+typedef std::shared_ptr<SceneNode> SceneNodePtr;
+typedef std::shared_ptr<AvatarMovement> AvatarMovementPtr;
+typedef std::shared_ptr<AvatarLocomotion> AvatarLocomotionPtr;
 
 /// The scene graph's NON-owning links. The tree has exactly one ownership
 /// direction — a parent owns its children — so the back-references (child to
@@ -84,25 +84,25 @@ typedef QSharedPointer<AvatarLocomotion> AvatarLocomotionPtr;
 /// audit of 2026-09 (area 3) measured what that costs: every parent/child pair
 /// was a reference cycle, so no scene, no subtree and no node ever died and
 /// every world the app had opened stayed resident for the life of the process.
-typedef QWeakPointer<Scene> SceneWPtr;
-typedef QWeakPointer<SceneNode> SceneNodeWPtr;
-typedef QSharedPointer<Mesh> MeshPtr;
-typedef QSharedPointer<Material> MaterialPtr;
-typedef QSharedPointer<LightNode> LightNodePtr;
-typedef QSharedPointer<DecalNode> DecalNodePtr;
-typedef QSharedPointer<CameraNode> CameraNodePtr;
-typedef QSharedPointer<MeshNode> MeshNodePtr;
-typedef QSharedPointer<Texture2D> Texture2DPtr;
-typedef QSharedPointer<Texture> TexturePtr;
-typedef QSharedPointer<KeyFrameSet> KeyFrameSetPtr;
-typedef QSharedPointer<FloatKeyFrame> FloatKeyFramePtr;
-typedef QSharedPointer<PbrMaterial> PbrMaterialPtr;
-typedef QSharedPointer<ParticleSystemNode> ParticleSystemNodePtr;
-typedef QSharedPointer<Bone> BonePtr;
-typedef QSharedPointer<Skeleton> SkeletonPtr;
-typedef QSharedPointer<SkeletalAnimation> SkeletalAnimationPtr;
-typedef QSharedPointer<VertexBuffer> VertexBufferPtr;
-typedef QSharedPointer<IndexBuffer> IndexBufferPtr;
+typedef std::weak_ptr<Scene> SceneWPtr;
+typedef std::weak_ptr<SceneNode> SceneNodeWPtr;
+typedef std::shared_ptr<Mesh> MeshPtr;
+typedef std::shared_ptr<Material> MaterialPtr;
+typedef std::shared_ptr<LightNode> LightNodePtr;
+typedef std::shared_ptr<DecalNode> DecalNodePtr;
+typedef std::shared_ptr<CameraNode> CameraNodePtr;
+typedef std::shared_ptr<MeshNode> MeshNodePtr;
+typedef std::shared_ptr<Texture2D> Texture2DPtr;
+typedef std::shared_ptr<Texture> TexturePtr;
+typedef std::shared_ptr<KeyFrameSet> KeyFrameSetPtr;
+typedef std::shared_ptr<FloatKeyFrame> FloatKeyFramePtr;
+typedef std::shared_ptr<PbrMaterial> PbrMaterialPtr;
+typedef std::shared_ptr<ParticleSystemNode> ParticleSystemNodePtr;
+typedef std::shared_ptr<Bone> BonePtr;
+typedef std::shared_ptr<Skeleton> SkeletonPtr;
+typedef std::shared_ptr<SkeletalAnimation> SkeletalAnimationPtr;
+typedef std::shared_ptr<VertexBuffer> VertexBufferPtr;
+typedef std::shared_ptr<IndexBuffer> IndexBufferPtr;
 
 }
 

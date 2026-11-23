@@ -289,7 +289,7 @@ public:
     static QVector<DagDriftRow> dagDrift(const MeshPtr &mesh);
     /// THE DRIFT PER CLUSTER (a diagnostic, never stored — `atom2.one_step_drift_bound`; PHOTON-7 stage 6: the ray
     /// origin's guard). Atom's cut draws a cluster when its PRODUCING group's stored error is under what the view affords,
-    /// and every ray job lifts its origin off a drawn point by kLevelDriftOverBound x that error (jahshaka/engine/Types.h)
+    /// and every ray job lifts its origin off a drawn point by kLevelDriftOverBound x that error (jahshaka/engine/Mesh.h)
     /// - so the law holds per CLUSTER, not per uniform cut: per cluster a simplification produced (refined >= 0), the
     /// largest distance of its facets from level 0's surface (the ten fixed points of each facet level 0 does not have
     /// - the direction the lift clears: a drawn point inside level 0 by that much), beside its producing group's stored

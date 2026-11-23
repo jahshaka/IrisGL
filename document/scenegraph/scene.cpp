@@ -532,12 +532,12 @@ Scene::Scene()
     meshes.reserve(100);
     particleSystems.reserve(100);
 
-    environment = QSharedPointer<Environment>(new Environment());
+    environment = std::shared_ptr<Environment>(new Environment());
 	gravity = environment->getWorldGravity();
     // The possession slot (AVATAR_LOCOMOTION_SPEC §8.4). Owned for the scene's
     // whole life like the Environment: `playMode` is what the file carries, and
     // WHICH avatar is being driven never is.
-    possession = QSharedPointer<AvatarPossession>(new AvatarPossession(this));
+    possession = std::shared_ptr<AvatarPossession>(new AvatarPossession(this));
 
 }
 
@@ -558,7 +558,7 @@ QString Scene::getSkyTextureSource()
 
 void Scene::clearSkyTexture()
 {
-    skyTexture.clear();
+    skyTexture.reset();
 }
 
 void Scene::setSkyColor(QColor color)
@@ -606,7 +606,7 @@ LightNodePtr Scene::sunLight() const
     if (!sunLightGuid.isEmpty()) {
         auto node = nodes.value(sunLightGuid);
         if (node) {
-            auto light = node.dynamicCast<LightNode>();
+            auto light = std::dynamic_pointer_cast<LightNode>(node);
             if (light && light->lightType == LightType::Directional) return light;
         }
     }
@@ -621,7 +621,7 @@ QString Scene::sunReason() const
     if (!sunLightGuid.isEmpty()) {
         auto node = nodes.value(sunLightGuid);
         if (node) {
-            auto light = node.dynamicCast<LightNode>();
+            auto light = std::dynamic_pointer_cast<LightNode>(node);
             if (light && light->lightType == LightType::Directional)
                 return QStringLiteral("pinned");
         }
@@ -792,26 +792,26 @@ void Scene::addNode(SceneNodePtr node)
     }
 
     if (node->sceneNodeType == SceneNodeType::Light) {
-        auto light = node.staticCast<iris::LightNode>();
+        auto light = std::static_pointer_cast<iris::LightNode>(node);
         lights.insert(light->getGUID(), light);
     }
 
     if (node->sceneNodeType == SceneNodeType::Decal) {
-        auto decal = node.staticCast<iris::DecalNode>();
+        auto decal = std::static_pointer_cast<iris::DecalNode>(node);
         decals.insert(decal->getGUID(), decal);
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
 		//qDebug() <<"Mesh GUID: " << node->getGUID();
-        auto mesh = node.staticCast<iris::MeshNode>();
+        auto mesh = std::static_pointer_cast<iris::MeshNode>(node);
 		if (meshes.contains(node->getGUID()))
 			mesh->setGUID(QString::fromStdString(iris::newGuid()));
 		meshes.insert(node->getGUID(), mesh);
-		pickTable.add(mesh.data());
+		pickTable.add(mesh.get());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
-        auto particleSystem = node.staticCast<iris::ParticleSystemNode>();
+        auto particleSystem = std::static_pointer_cast<iris::ParticleSystemNode>(node);
         particleSystems.insert(node->getGUID(), particleSystem);
     }
 
@@ -819,7 +819,7 @@ void Scene::addNode(SceneNodePtr node)
     // CameraNode constructor sets its own type — before that a camera added to
     // a scene arrived here as an Empty and was never registered.
     if (node->sceneNodeType == SceneNodeType::Camera) {
-        cameras.insert(node->getGUID(), node.staticCast<iris::CameraNode>());
+        cameras.insert(node->getGUID(), std::static_pointer_cast<iris::CameraNode>(node));
     }
 
 	nodes.insert(node->getGUID(), node);
@@ -832,14 +832,14 @@ void Scene::addNode(SceneNodePtr node)
 
 void Scene::registerSocketAttachment(const SceneNodePtr &node)
 {
-    if (node.isNull() || !node->isSocketAttached()) return;
+    if (!node || !node->isSocketAttached()) return;
     QList<SceneNodePtr> &list = socketAttachments[node->socketOwnerGuid];
     if (!list.contains(node)) list.append(node);
 }
 
 void Scene::unregisterSocketAttachment(const SceneNodePtr &node)
 {
-    if (node.isNull()) return;
+    if (!node) return;
     // The node's own guid is the wrong key here (the registry is keyed by
     // OWNER so a rig's pose is read once), and the owner field may ALREADY have
     // been cleared by the caller — so sweep every bucket rather than trusting
@@ -858,17 +858,17 @@ bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
         if (error) *error = message;
         return false;
     };
-    if (node.isNull()) return refuse(QStringLiteral("no node"));
+    if (!node) return refuse(QStringLiteral("no node"));
     if (node->getGUID() == ownerGuid)
         return refuse(QStringLiteral("a node cannot ride its own socket"));
 
     const SceneNodePtr owner = nodes.value(ownerGuid);
-    if (owner.isNull())
+    if (!owner)
         return refuse(QStringLiteral("no node with id '%1'").arg(ownerGuid));
     if (owner->getSceneNodeType() != SceneNodeType::Mesh)
         return refuse(QStringLiteral("'%1' is not a mesh, so it carries no sockets")
                           .arg(owner->getName()));
-    auto meshOwner = owner.staticCast<iris::MeshNode>();
+    auto meshOwner = std::static_pointer_cast<iris::MeshNode>(owner);
     if (!meshOwner->findSocket(socketName))
         return refuse(QStringLiteral("'%1' has no socket named '%2'")
                           .arg(owner->getName(), socketName));
@@ -876,7 +876,7 @@ bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
     // A cycle would be a transform feedback loop: the owner's pose is read to
     // place the attached node, and the owner's own world transform is part of
     // that pose. Refuse an owner that lives INSIDE the attached node's subtree.
-    for (SceneNodePtr walk = owner; !walk.isNull(); walk = walk->getParent()) {
+    for (SceneNodePtr walk = owner; !!walk; walk = walk->getParent()) {
         if (walk == node)
             return refuse(QStringLiteral("'%1' is inside '%2' — attaching it would make the "
                                          "socket drive its own owner")
@@ -901,7 +901,7 @@ bool Scene::attachToSocket(const SceneNodePtr &node, const QString &ownerGuid,
 
 bool Scene::detachFromSocket(const SceneNodePtr &node)
 {
-    if (node.isNull() || !node->isSocketAttached()) return false;
+    if (!node || !node->isSocketAttached()) return false;
     unregisterSocketAttachment(node);
     node->setSocketAttachment(QString(), QString());
     return true;
@@ -940,20 +940,20 @@ void Scene::removeNode(SceneNodePtr node)
     const QString guid = node->getGUID();
 
     if (node->sceneNodeType == SceneNodeType::Light) {
-        removeRegistered(lights, guid, node.staticCast<iris::LightNode>());
+        removeRegistered(lights, guid, std::static_pointer_cast<iris::LightNode>(node));
     }
 
     if (node->sceneNodeType == SceneNodeType::Decal) {
-        removeRegistered(decals, guid, node.staticCast<iris::DecalNode>());
+        removeRegistered(decals, guid, std::static_pointer_cast<iris::DecalNode>(node));
     }
 
     if (node->sceneNodeType == SceneNodeType::Mesh) {
-        removeRegistered(meshes, guid, node.staticCast<iris::MeshNode>());
-        pickTable.remove(node.data());
+        removeRegistered(meshes, guid, std::static_pointer_cast<iris::MeshNode>(node));
+        pickTable.remove(node.get());
     }
 
     if (node->sceneNodeType == SceneNodeType::ParticleSystem) {
-        removeRegistered(particleSystems, guid, node.staticCast<iris::ParticleSystemNode>());
+        removeRegistered(particleSystems, guid, std::static_pointer_cast<iris::ParticleSystemNode>(node));
     }
 
     if (node->sceneNodeType == SceneNodeType::Camera) {
@@ -1055,7 +1055,7 @@ void Scene::setPlaying(bool playing)
     // transforms back (PlayBack) and the classification with them, so the next
     // settle refresh rebuilds the room around the real world again. Cleared on
     // BOTH edges: a second play must not inherit the last one's promotions.
-    if (rootNode) clearSoftMobility(rootNode.data());
+    if (rootNode) clearSoftMobility(rootNode.get());
     if (!possession) return;
     if (playing) possession->onPlayStarted();
     else possession->onPlayStopped();
@@ -1128,10 +1128,10 @@ void Scene::cleanup()
     if (rootNode) rootNode->_setDirtySet(nullptr);
     mDirtySet.clear();
 
-    camera.clear();
-    rootNode.clear();
+    camera.reset();
+    rootNode.reset();
 
-    skyTexture.clear();
+    skyTexture.reset();
 
     lights.clear();
     decals.clear();

@@ -107,8 +107,8 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
     // rotation and scale are all SceneNode's, and they are read from
     // `sceneNode` now. Only the three geometry shapes need the real mesh, and
     // they degrade to an empty shape when it is not there.
-    const auto meshNode = sceneNode.dynamicCast<iris::MeshNode>();
-    const bool hasMeshGeometry = !meshNode.isNull() && !meshNode->getMesh().isNull()
+    const auto meshNode = std::dynamic_pointer_cast<iris::MeshNode>(sceneNode);
+    const bool hasMeshGeometry = !!meshNode && !!meshNode->getMesh()
                                  && meshNode->getMesh()->getTriMesh() != nullptr;
     auto rot = sceneNode->getGlobalRotation().toVector4D();
 
@@ -304,8 +304,8 @@ PhysicsBody PhysicsHelper::createPhysicsBody(const iris::SceneNodePtr sceneNode,
 				// node TYPE, and a node whose type says Mesh can still be a MeshNode
 				// with no mesh loaded — or, from a hand-authored file, not a MeshNode
 				// at all. A child that carries no geometry contributes nothing.
-				auto childMeshNode = node.dynamicCast<iris::MeshNode>();
-				if (childMeshNode.isNull() || childMeshNode->getMesh().isNull()
+				auto childMeshNode = std::dynamic_pointer_cast<iris::MeshNode>(node);
+				if (!childMeshNode || !childMeshNode->getMesh()
 				    || !childMeshNode->getMesh()->getTriMesh()) {
 					qWarning("PhysicsHelper: compound child '%s' carries no mesh geometry — skipped",
 					         qUtf8Printable(node->getName()));

@@ -598,7 +598,7 @@ void mergeLowerRadius(SceneNode *n, float axisX, float axisZ, float midY, BodyMe
         if (auto mesh = meshNode->getMesh()) {
             const Mat4 toWorld = n->getGlobalTransform();
             int floats = 0;
-            if (const float *pos = positionsOf(mesh.data(), floats)) {
+            if (const float *pos = positionsOf(mesh.get(), floats)) {
                 for (int i = 0; i + 2 < floats; i += 3) {
                     const Vec3 w = toWorld * Vec3(pos[i], pos[i + 1], pos[i + 2]);
                     if (w.y() > midY) continue;
@@ -635,7 +635,7 @@ void AvatarMovement::fitCapsuleToNode(const SceneNodePtr &node)
     AABB full;
     full.setNegativeInfinity();
     bool anyGeometry = false;
-    mergeExtent(node.data(), full, anyGeometry);
+    mergeExtent(node.get(), full, anyGeometry);
     if (!anyGeometry) return;   // nothing to measure — the defaults stand
 
     const float minY = full.getMin().y();
@@ -650,7 +650,7 @@ void AvatarMovement::fitCapsuleToNode(const SceneNodePtr &node)
     BodyMeasure m;
     m.minY = minY;
     m.maxY = maxY;
-    mergeLowerRadius(node.data(), origin.x(), origin.z(), minY + height * 0.5f, m);
+    mergeLowerRadius(node.get(), origin.x(), origin.z(), minY + height * 0.5f, m);
 
     AvatarMovementParams p = mParams;
     p.capsuleHeight = height;

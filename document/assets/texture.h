@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef TEXTURE_H
 #define TEXTURE_H
 
-#include <QSharedPointer>
+#include <memory>
 #include <QString>
 
 namespace iris

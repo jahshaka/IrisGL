@@ -579,17 +579,17 @@ void collectAvatarClips(const SceneNodePtr &node, QMap<QString, float> &out)
         [&](const SceneNode *n) -> const SceneNode * {
         if (!n) return nullptr;
         for (const auto &anim : const_cast<SceneNode *>(n)->getAnimations())
-            if (!anim.isNull() && anim->hasSkeletalAnimation()) return n;
+            if (!!anim && anim->hasSkeletalAnimation()) return n;
         const int kids = const_cast<SceneNode *>(n)->childCount();
         for (int i = 0; i < kids; ++i)
             if (const SceneNode *hit = findHost(const_cast<SceneNode *>(n)->childAt(i)))
                 return hit;
         return nullptr;
     };
-    const SceneNode *host = findHost(node.data());
+    const SceneNode *host = findHost(node.get());
     if (!host) return;
     for (const auto &anim : const_cast<SceneNode *>(host)->getAnimations()) {
-        if (anim.isNull() || !anim->hasSkeletalAnimation()) continue;
+        if (!anim || !anim->hasSkeletalAnimation()) continue;
         // FIRST WINS on a duplicate name, matching the engine's uniquifying
         // attach: two clips with one name is a content defect, not a crash.
         if (!out.contains(anim->getName())) out.insert(anim->getName(), anim->getLength());
