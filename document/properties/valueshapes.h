@@ -147,8 +147,13 @@ inline bool sameMembers(const Value &a, const Value &b)
 {
     if (a.kind() == Kind::Object && b.kind() == Kind::Object) {
         if (a.asObject().size() != b.asObject().size()) return false;
+        // BOTH WAYS (the reader's F17): one pass plus the size would call {x, x} and {x, y} equal.
         for (const Value::Member &m : a.asObject()) {
             const Value *other = b.find(m.first);
+            if (!other || !sameMembers(m.second, *other)) return false;
+        }
+        for (const Value::Member &m : b.asObject()) {
+            const Value *other = a.find(m.first);
             if (!other || !sameMembers(m.second, *other)) return false;
         }
         return true;
