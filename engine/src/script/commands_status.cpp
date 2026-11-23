@@ -84,8 +84,10 @@ void registerStatusCommands(Host &host, const Commands &k)
     r.add({"engine.monitor.popRecords", {Access::Changes, {}, Kind::Array},
            "Pops the frame monitor's finished records (MonitorRecord, oldest first; the queue is emptied - a record "
            "waits for its GPU samples, so pop across frames). A queue nobody pops loses its oldest (the monitor "
-           "status' framesDropped)."},
+           "status' framesDropped). ENGINE-WIDE (the engine's ONE queue: the owner reads it too): a host for an "
+           "outside client refuses it."},
           [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();   // (the engine's ONE queue: the owner's capture, Engine.h's fifth door)
               Engine *e = k.engine(c);
               if (!e) return Value();
               std::vector<MonitorRecord> records;
@@ -94,8 +96,10 @@ void registerStatusCommands(Host &host, const Commands &k)
           });
     r.add({"engine.monitor.popEvents", {Access::Changes, {}, Kind::Array},
            "Pops the monitor's discrete events (MonitorEvent, oldest first: GI rebuilds, atlas changes, compiles, "
-           "texture loads, VRAM flushes, device loss, the host's own); a full queue drops the NEW event (counted)."},
+           "texture loads, VRAM flushes, device loss, the host's own); a full queue drops the NEW event (counted). "
+           "ENGINE-WIDE: a host for an outside client refuses it."},
           [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
               Engine *e = k.engine(c);
               if (!e) return Value();
               std::vector<MonitorEvent> events;
