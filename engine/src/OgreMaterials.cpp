@@ -1537,9 +1537,12 @@ TextureId OgreScene::loadTexture(const std::string &path, bool srgb, TextureId i
     {
         auto hit = mTextureIndex.find(textureKey(path, false, DecalMap::Diffuse, srgb));
         if (hit != mTextureIndex.end()) {
-            if (!id) return hit->second;
-            // A HOST-RESERVED ID FOR A PATH THIS SCENE ALREADY HOLDS (U3 stage 3): the same GPU texture under a
-            // second id, refcounted like a texture two scenes share, so either id's destroy releases only its own.
+            // A PATH THIS SCENE ALREADY HOLDS: the same GPU texture under a SECOND id - the host's reserved one, or
+            // one reserved here (trackTexture) - refcounted like a texture two scenes share, so either id's destroy
+            // releases only its own. EVERY LOAD ANSWERS ITS OWN ID, in lockstep as in the host-posts mode (which always
+            // names one, above): handing a holder's id back to a second loader let the first holder's destroy free
+            // the second's texture (SCRIPT-IN-ENGINE-1 2c, the reverse alias: a script's host ended and unbound its
+            // owner's material).
             TextureRec &orig = mTextures[hit->second];
             if (!orig.shared) { orig.shared = true; detail::retainSharedTexture(orig.texture); }
             TextureRec alias = orig;

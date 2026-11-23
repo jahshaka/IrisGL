@@ -574,8 +574,8 @@ public:
 
     // ---- Textures (step 4b): image files on disk, shared across materials ----
     /// Loads an image file (png/jpg/tga/dds...). `srgb` for colour maps (albedo,
-    /// emissive); false for data maps (normal, roughness, metalness). The same path
-    /// loaded twice returns the same id. 0 on failure (lastError()).
+    /// emissive); false for data maps (normal, roughness, metalness). Every load answers its OWN id: the same
+    /// path loaded twice is two ids of ONE image, refcounted (a destroy releases its own). 0 on failure (lastError()).
     virtual TextureId   loadTexture(const std::string &path, bool srgb, TextureId id = 0) = 0; ///< `id` reserved by the host (U3 stage 3; 0 = the engine reserves)
     /// A texture from RGBA8 pixels in memory (top-left origin, width*height*4 bytes).
     ///

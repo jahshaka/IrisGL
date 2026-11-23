@@ -213,8 +213,8 @@ TextureId OgreScene::loadDecalTexture(const std::string &path, DecalMap kind, Te
     {
         auto hit = mTextureIndex.find(textureKey(path, true, kind, /*srgb=*/false));
         if (hit != mTextureIndex.end()) {
-            if (!id) return hit->second;
-            // A host-reserved id for a slice this scene already holds (U3 stage 3): one more reference to it.
+            // A slice this scene already holds: one more reference to it under its OWN id (the host's reserved one,
+            // or one reserved here: trackTexture) - every load answers its own id, as loadTexture's does.
             TextureRec alias = mTextures[hit->second];
             ++atlas.refs[alias.texture];
             return trackTexture(alias, id);
