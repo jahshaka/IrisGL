@@ -2,11 +2,14 @@
 // only (std::to_chars / std::from_chars for the numbers): NOQT-CORE-1 moves this file whole.
 #include "core/json.h"
 
+#include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace iris { namespace json {
 
@@ -89,9 +92,36 @@ std::string pathText(const JsonPath *p)
     return pathText(p->up) + (p->name ? "." + *p->name : "[" + std::to_string(p->index) + "]");
 }
 
+/// A UTF-8 name as UTF-16 code units: the order QJsonObject keeps its members in (writePretty sorts by it). A byte that is
+/// no valid sequence passes as itself (the write refuses it by name after the sort).
+std::u16string utf16Of(const std::string &s)
+{
+    std::u16string out;
+    for (std::size_t i = 0; i < s.size();) {
+        const std::size_t n = utf8Length(s, i);
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (n <= 1) {
+            out += char16_t(c);
+            i += n ? n : 1;
+            continue;
+        }
+        std::uint32_t cp = c & (0xFF >> (n + 1));
+        for (std::size_t k = 1; k < n; ++k) cp = cp << 6 | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            out += char16_t(0xD800 + (cp >> 10));
+            out += char16_t(0xDC00 + (cp & 0x3FF));
+        } else {
+            out += char16_t(cp);
+        }
+        i += n;
+    }
+    return out;
+}
+
 class JsonWriter {
 public:
-    JsonWriter(std::string &out, std::string &why) : mOut(out), mWhy(why) {}
+    JsonWriter(std::string &out, std::string &why, bool pretty) : mOut(out), mWhy(why), mPretty(pretty) {}
 
     bool value(const Value &v, const JsonPath *at, int depth)
     {
@@ -101,36 +131,48 @@ public:
         case Kind::Int:    return integer(v.asInt());
         case Kind::Number: return number(v.asNumber(), at);
         case Kind::String: return string(v.asString(), at, "");
-        case Kind::Bytes:  return bytes(v.asBytes(), at);
+        case Kind::Bytes:  return bytes(v.asBytes(), at, depth);
         case Kind::Array: {
             if (depth >= kMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
             mOut += '[';
             const Value::Array &a = v.asArray();
             for (std::size_t i = 0; i < a.size(); ++i) {
                 if (i) mOut += ',';
+                newline(depth + 1);
                 const JsonPath element{at, nullptr, i};
                 if (!value(a[i], &element, depth + 1)) return false;
             }
-            mOut += ']';
+            close(']', depth);
             return true;
         }
         case Kind::Object: {
             if (depth >= kMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
             mOut += '{';
             const Value::Object &o = v.asObject();
+            // the write's order: the members' own (compact), or sorted by name as Qt keeps them (pretty)
+            std::vector<std::size_t> order(o.size());
+            for (std::size_t i = 0; i < o.size(); ++i) order[i] = i;
+            if (mPretty) {
+                std::vector<std::u16string> keys;
+                keys.reserve(o.size());
+                for (const Value::Member &m : o) keys.push_back(utf16Of(m.first));
+                std::stable_sort(order.begin(), order.end(), [&keys](std::size_t a, std::size_t b) { return keys[a] < keys[b]; });
+            }
             std::unordered_set<std::string_view> seen;   // views of the value's own names (they hold still meanwhile)
-            for (std::size_t i = 0; i < o.size(); ++i) {
+            for (std::size_t k = 0; k < order.size(); ++k) {
+                const std::size_t i = order[k];
                 const std::string &name = o[i].first;
                 if (name == kBytesKey)
                     return fail(at, "has a member named \"$bytes\": it would read back as bytes");
                 if (!seen.insert(name).second) return fail(at, "names the member '" + name + "' twice");
-                if (i) mOut += ',';
+                if (k) mOut += ',';
+                newline(depth + 1);
                 if (!string(name, at, "a member name ")) return false;
-                mOut += ':';
+                mOut += mPretty ? ": " : ":";
                 const JsonPath member{at, &name, 0};
                 if (!value(o[i].second, &member, depth + 1)) return false;
             }
-            mOut += '}';
+            close('}', depth);
             return true;
         }
         }
@@ -138,6 +180,20 @@ public:
     }
 
 private:
+    /// Pretty only: a new line at `level`'s indent (four spaces a level).
+    void newline(int level)
+    {
+        if (!mPretty) return;
+        mOut += '\n';
+        mOut.append(std::size_t(level) * 4, ' ');
+    }
+    /// The closing bracket: pretty puts it on its own line at the container's indent, empty or not (Qt's form).
+    void close(char bracket, int level)
+    {
+        newline(level);
+        mOut += bracket;
+    }
+
     bool fail(const JsonPath *at, const std::string &reason)
     {
         mWhy = pathText(at) + " " + reason;
@@ -152,15 +208,33 @@ private:
         return true;
     }
 
-    /// The shortest text that reads back to the same bits, with a fraction or an exponent so it reads back a Number.
+    /// ONE NUMBER TEXT (option B, Qt's): an integral Number of magnitude <= 2^53 as an integer (-0.0 as "0"), any other as
+    /// its SHORTEST round-trip digits in the shorter of the fixed and the exponent form, a tie to fixed, the exponent of at
+    /// least two digits (QJsonDocument's rule). The fixed form is made from the shortest digits and zeros, never from a
+    /// double's exact decimal expansion (12345678901234567890 is "12345678901234567000", as Qt writes it).
     bool number(double d, const JsonPath *at)
     {
         if (nonFiniteBits(d)) return fail(at, "is not a finite number (JSON carries no NaN or infinity)");
-        char b[32];
-        const std::to_chars_result r = std::to_chars(b, b + sizeof b, d);
-        const std::string_view t(b, std::size_t(r.ptr - b));
-        mOut += t;
-        if (t.find_first_of(".e") == std::string_view::npos) mOut += ".0";
+        if (std::trunc(d) == d && std::fabs(d) <= 9007199254740992.0) return integer(static_cast<std::int64_t>(d));
+        char b[40];
+        const std::to_chars_result r = std::to_chars(b, b + sizeof b, d, std::chars_format::scientific);
+        const std::string sci(b, r.ptr);                  // "-d.ddde+XX": the shortest digits, the exponent >= 2 digits
+        const std::size_t e = sci.find('e');
+        const bool negative = sci[0] == '-';
+        std::string digits;
+        for (std::size_t i = negative ? 1 : 0; i < e; ++i)
+            if (sci[i] != '.') digits += sci[i];
+        const int exponent = std::stoi(sci.substr(e + 1));
+        std::string fixed = negative ? "-" : "";
+        const int n = int(digits.size());
+        if (exponent < 0) {
+            fixed += "0." + std::string(std::size_t(-exponent - 1), '0') + digits;
+        } else if (exponent + 1 >= n) {
+            fixed += digits + std::string(std::size_t(exponent + 1 - n), '0');
+        } else {
+            fixed += digits.substr(0, std::size_t(exponent + 1)) + "." + digits.substr(std::size_t(exponent + 1));
+        }
+        mOut += fixed.size() <= sci.size() ? fixed : sci;
         return true;
     }
 
@@ -200,10 +274,12 @@ private:
         return true;
     }
 
-    bool bytes(const Value::Bytes &b, const JsonPath *at)
+    bool bytes(const Value::Bytes &b, const JsonPath *at, int depth)
     {
         if (b.size() > kBytesCap) return fail(at, "is " + capText(b.size()));
-        mOut += "{\"$bytes\":\"";
+        mOut += '{';
+        newline(depth + 1);
+        mOut += mPretty ? "\"$bytes\": \"" : "\"$bytes\":\"";
         std::size_t i = 0;
         for (; i + 3 <= b.size(); i += 3) {
             const unsigned v = unsigned(b[i]) << 16 | unsigned(b[i + 1]) << 8 | b[i + 2];
@@ -220,12 +296,14 @@ private:
             mOut += two ? kBase64[v >> 6 & 63] : '=';
             mOut += '=';
         }
-        mOut += "\"}";
+        mOut += '"';
+        close('}', depth);
         return true;
     }
 
     std::string &mOut;
     std::string &mWhy;
+    const bool mPretty;
 };
 
 int base64Digit(char c)
@@ -553,8 +631,20 @@ private:
 bool write(const Value &value, std::string &out, std::string &why)
 {
     out.clear();
-    JsonWriter w(out, why);
+    JsonWriter w(out, why, false);
     if (w.value(value, nullptr, 0)) return true;
+    out.clear();
+    return false;
+}
+
+bool writePretty(const Value &value, std::string &out, std::string &why)
+{
+    out.clear();
+    JsonWriter w(out, why, true);
+    if (w.value(value, nullptr, 0)) {
+        out += '\n';
+        return true;
+    }
     out.clear();
     return false;
 }
