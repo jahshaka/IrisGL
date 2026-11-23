@@ -4,8 +4,9 @@
 // a capture size 0 or 64..1024, :8026-8027 - its power of two is engine.gi.set's own check; the update budget, the
 // instance cap and the card budget >= 0, 0 the documented "paused" / "none" / "the tier's": :4365, :5319); the cascade
 // table as the record holds it (a used entry's 0 is "the tier's": GiParams.h; engine.gi.set judges the used ones by the
-// GI's whole law); a pin frees a cascade or not (0 / 1); the sun contact's range kSunContactMinRange..kSunContactMaxRange
-// (GiGather.h, the band the engine clamps it to: OgreRayQuery.cpp:14399-14400).
+// GI's whole law); a pin frees a cascade or not (0 / 1); the sun contact's range 0.05..50 m - kSunContactMinRange ..
+// kSunContactMaxRange (GiGather.h, the band the engine clamps it to: OgreRayQuery.cpp:14399-14400) WRITTEN AS DOUBLES: the
+// registry compares in double, and the float constant 0.05f widens to 0.05000000074505806, which would refuse 0.05 itself.
 #include "script/records_gi.h"
 
 namespace jahshaka { namespace engine { namespace script {
@@ -51,7 +52,7 @@ const Table<GiPlacementPin> &Record<GiPlacementPin>::table()
 const Table<SunContactDesc> &Record<SunContactDesc>::table()
 {
     using S = SunContactDesc;
-    static const Table<S> t({field("enabled", &S::enabled), field("range", &S::range).range(kSunContactMinRange, kSunContactMaxRange).in("m"),
+    static const Table<S> t({field("enabled", &S::enabled), field("range", &S::range).range(0.05, 50).in("m"),
                              field("resolution", &S::resolution)});
     return t;
 }
