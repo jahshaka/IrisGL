@@ -8,6 +8,11 @@
 #include "script/records_gi_read.h"
 #include "jahshaka/engine/GiModes.h"
 
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <sstream>
+
 namespace jahshaka { namespace engine { namespace script {
 
 namespace {
@@ -190,16 +195,34 @@ void registerGiReadCommands(Host &host, const Commands &k)
             Kind::Object},
            "TRACES A BATCH OF RAYS against the scene's acceleration structure and waits (Scene::traceRays): rays, 12 numbers "
            "a ray - origin xyz, tMin, direction xyz, tMax, the instance mask (bit 0 casters, 1 movers, 2 the still world, 3 "
-           "every near copy, 4 the far copies), three unused - at most 65,536 rays; answers {hits}: 4 numbers a ray - the "
+           "every near copy, 4 the far copies: an UNSIGNED INTEGER 0..255 whose BITS the engine reads - the command copies "
+           "them into the ray's float as the engine's own row does, test_gi_rayquery.cpp pushRay; a fraction, a negative "
+           "or one past 255 FAILS by name), three unused - at most 65,536 rays; answers {hits}: 4 numbers a ray - the "
            "distance (< 0 a miss), the hit node's index in the scene's item order, the triangle, 1 or 0 (a ray cut at the "
            "loops' bound: its tMax, -1, -1, 1). Refused while the ray tier is off or the scene has no structure yet (draw a "
            "frame first)."},
           [k](Call &c) -> Value {
+              // THE MASK IS BITS (the train's card, P4): Scene::traceRays reads each ray's 9th float as the unsigned word
+              // its bits spell (test_gi_rayquery.cpp:111-121 memcpy's it); converted by value, 31 became 31.0f and every
+              // ray missed - so the element is an unsigned integer 0..255, judged before the engine is asked
+              const Value::Array &in = c[1]["rays"].asArray();
+              for (std::size_t i = 8; i < in.size(); i += 12) {
+                  const double m = in[i].asNumber();
+                  if (!(m >= 0.0 && m <= 255.0 && m == std::floor(m))) {
+                      std::ostringstream v;
+                      v << m;
+                      return c.fail("trace.rays[" + std::to_string(i) + "] (ray " + std::to_string(i / 12) +
+                                    "'s instance mask) must be an integer 0..255 (" + v.str() + " is not): its bits are the mask");
+                  }
+              }
               Scene *s = k.scene(c, c[0]);
               if (!s) return Value();
-              const Value::Array &in = c[1]["rays"].asArray();
               std::vector<float> rays(in.size()), hits;
-              for (std::size_t i = 0; i < in.size(); ++i) rays[i] = float(in[i].asNumber());
+              for (std::size_t i = 0; i < in.size(); ++i) {
+                  if (i % 12 != 8) { rays[i] = float(in[i].asNumber()); continue; }
+                  const std::uint32_t mask = std::uint32_t(in[i].asNumber());
+                  std::memcpy(&rays[i], &mask, sizeof mask);
+              }
               if (!s->traceRays(rays, hits))
                   return c.refuse("no ray was traced: the ray tier is off or unavailable, or the scene has no acceleration "
                                   "structure yet (draw a frame first)");

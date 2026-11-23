@@ -192,7 +192,9 @@ void registerSceneCommands(Host &host, const Commands &k)
     r.add({"engine.scene.setLodBias",
            {Access::Changes, {target(handle("scene", kScene)), arg("bias", Kind::Number).atLeast(0).asFloat()}, Kind::Null},
            "The scene's LOD dial (Scene::setLodBias): a multiplier on every view's pixel budget, 1 the reference, larger "
-           "coarser, 0 pins every mesh at level 0. Applies at once to the meshes that exist."},
+           "coarser, 0 pins every mesh at level 0. Applies at once to the meshes that exist. It acts on the meshes the "
+           "stock path draws (their LOD chain: measured 8192 / 512 / 32 triangles at 0 / 1 / 8); an Atom-drawn mesh's cut "
+           "is Atom's own pixel-error law - the bias does not reach it."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               if (!s || !k.settable(c, s)) return Value();
