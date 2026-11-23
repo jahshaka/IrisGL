@@ -401,13 +401,22 @@ bool Registry::judgeHandles(const Call &call, const Param &p, const Value &v, st
             }
         return true;
     }
+    // A NESTED MEMBER's FAILURE CARRIES ITS RECORD PATH (E0's audit, worth a look 1): "sky.faces[2]: ...", "list[1].tex: ..."
+    // - the conform check's own form - prefixed as the walk unwinds
     if (p.kind == Kind::Object && v.kind() == Kind::Object) {
         for (const Param &f : p.fields)
-            if (!judgeHandles(call, f, v[f.name], why)) return false;
+            if (!judgeHandles(call, f, v[f.name], why)) {
+                why = p.name + "." + why;
+                return false;
+            }
     } else if (p.kind == Kind::Array && p.element == Kind::Object && v.kind() == Kind::Array) {
-        for (const Value &x : v.asArray())
+        const Value::Array &a = v.asArray();
+        for (size_t i = 0; i < a.size(); ++i)
             for (const Param &f : p.fields)
-                if (!judgeHandles(call, f, x[f.name], why)) return false;
+                if (!judgeHandles(call, f, a[i][f.name], why)) {
+                    why = p.name + "[" + std::to_string(i) + "]." + why;
+                    return false;
+                }
     }
     return true;
 }
