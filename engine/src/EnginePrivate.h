@@ -5347,7 +5347,6 @@ public:
     GpuWalk gpuWalk() const override;
     TraceSun traceSun() const override;
     GiPlan giPlan() const override;
-    int giUpdateBudget() const override { return mPhoton.giParams().updateBudget; }
     bool rayNearLevels(std::vector<int> &levels) const override;
     bool rayNearAddresses(std::vector<unsigned long long> &addresses) const override;
     void setVrHandBoneNodes(unsigned hand, const NodeId *nodes, unsigned count) override;
@@ -5355,6 +5354,8 @@ public:
     Presence nodePresence(NodeId id) const override;
     Presence meshPresence(MeshId id) const override;
     Presence materialPresence(MaterialId id) const override;
+    Presence texturePresence(TextureId id) const override;
+    Presence decalTexturePresence(TextureId id) const override;
     bool nodeWorldPose(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeWorldPoseDrawn(NodeId id, Vec3 &position, Quat &rotation) const override;
     bool nodeBackdrop(NodeId id) const override;
@@ -8982,6 +8983,8 @@ public:
     }
 
     void destroyScene(Scene *scene) override;
+    Scene::Presence scenePresence(const Scene *scene) const override;
+    Scene::Presence viewPresence(const View *view) const override;
     /// Destroys whatever a frame asked for while it was running
     /// (mPendingSceneDestroy). Called ONLY from renderOneFrame's frame guard,
     /// after the in-frame flag has been cleared, and never throws — a

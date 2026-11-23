@@ -102,6 +102,10 @@ constexpr float kGiBrickFloor = 5.9604645e-08f / 0.01f;
 struct GiStatus {
     /// The mode currently in force (what the scene last accepted).
     GiMode mode = GiMode::Off;
+    /// GiParams::updateBudget AS THE SCENE TOOK IT, in every mode (SCRIPT-IN-ENGINE-1 E0): 0 = GI PAUSED - the one route
+    /// word the published record carried nowhere (the fields derived from the budget read 0 in other modes too:
+    /// probeUpdatesPerFrame, ifdProbesPerFrame). Its default is GiParams': a record no frame filled is not paused.
+    int    updateBudget = 1;
     /// Live parallax-corrected cubemap probes. In VctPccHybrid this is the
     /// clamped grid product (pccProbesX * pccProbesY * pccProbesZ); 0 in every
     /// other mode, and 0 in the hybrid when the probe arm failed to build.
