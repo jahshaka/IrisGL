@@ -77,10 +77,10 @@ void registerMaterialCommands(Host &host, const Commands &k)
           });
     r.add({"engine.material.createUnlit",
            {Access::Changes,
-            {scene, object("unlit", {numbers("colour", 4).range(0, 1).asFloat(), arg("depthTest", Kind::Bool, Value(true)),
+            {scene, object("unlit", {numbers("colour", 4).atLeast(0).asFloat(), arg("depthTest", Kind::Bool, Value(true)),
                                      arg("wireframe", Kind::Bool, Value(false))})},
             Kind::Int, kMaterial},
-           "A flat, unlit material: colour r, g, b, a (an alpha under 1 blends), depthTest (false: drawn on top of "
+           "A flat, unlit material: colour r, g, b, a (each >= 0: the engine takes HDR; an alpha under 1 blends), depthTest (false: drawn on top of "
            "everything), wireframe (the triangle edges only). Answers -> material id."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);

@@ -311,8 +311,11 @@ void registerFrameCommands(Host &host, const Commands &k)
     // (Commands::engineWide: a host for an outside client refuses it); a READ changes nothing the engine holds.
     r.add({"engine.shaders.wait", {Access::Reads, {}, Kind::Null},
            "Blocks until no shader build is pending, publishing as jobs land (Engine::waitForAsyncShaders): for a test or "
-           "a caller that must hand over a finished picture."},
+           "a caller that must hand over a finished picture. UNBOUNDED (the verb takes no bound: Engine.h, \"never on an "
+           "interactive path\") and it drives every scene's compiles: engine-wide - a host for an outside client refuses "
+           "it."},
           [k](Call &c) -> Value {
+              if (!k.engineWide(c)) return Value();
               Engine *e = k.engine(c);
               if (e) e->waitForAsyncShaders();
               return Value();

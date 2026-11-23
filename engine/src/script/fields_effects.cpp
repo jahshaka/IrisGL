@@ -4,7 +4,11 @@
 // fillInterpStages, OgreParticles.cpp:185-197; the planar budget 0..8, its resolution 64..2048 and maxDistance >=
 // 0.01: OgrePlanar.cpp:339-342 - the power of two is engine.planar.set's own check); a particle colour lies in the
 // range its GPU encoding carries, [-4, 120] (Particles.h ParticleAffectorDesc); a decal's box has extent; a cone's
-// half-angle, a scope, a metalness and a roughness are what they are (0..180 degrees, 0..1).
+// half-angle, a scope, a metalness and a roughness are what they are (0..180 degrees, 0..1). A decal box's extent
+// >= 0.001 m (OgreDecals.cpp:469-471); a particle's time to live >= 0.01 s (OgreParticles.cpp:618-619); the hole
+// (innerExtents) a FRACTION 0..0.999 of the outer extents, its z never read (:636-637). What the engine would REPAIR
+// silently - a minimum above its maximum swapped (:616-619), key times out of order bumped (:191) - engine.particles.set
+// refuses by name.
 #include "script/records_effects.h"
 
 namespace jahshaka { namespace engine { namespace script {
@@ -17,8 +21,8 @@ const Table<DecalDesc> &Record<DecalDesc>::table()
 {
     using D = DecalDesc;
     static const Table<D> t({field("diffuse", &D::diffuse).handle("decalTexture"), field("normal", &D::normal).handle("decalTexture"),
-                             field("emissive", &D::emissive).handle("decalTexture"), field("width", &D::width).above(0).in("m"),
-                             field("height", &D::height).above(0).in("m"), field("depth", &D::depth).above(0).in("m"),
+                             field("emissive", &D::emissive).handle("decalTexture"), field("width", &D::width).atLeast(0.001).in("m"),
+                             field("height", &D::height).atLeast(0.001).in("m"), field("depth", &D::depth).atLeast(0.001).in("m"),
                              field("metalness", &D::metalness).range(0, 1), field("roughness", &D::roughness).range(0, 1),
                              field("ignoreAlphaDiffuse", &D::ignoreAlphaDiffuse)});
     return t;
@@ -30,12 +34,12 @@ const Table<ParticleEmitterDesc> &Record<ParticleEmitterDesc>::table()
     static const Table<E> t({field("shape", &E::shape), field("position", &E::position).in("m"), field("direction", &E::direction),
                              field("angleDegrees", &E::angleDegrees).range(0, 180).in("degrees"),
                              field("rate", &E::rate).atLeast(0).in("/s"), field("velocityMin", &E::velocityMin).atLeast(0).in("m/s"),
-                             field("velocityMax", &E::velocityMax).atLeast(0).in("m/s"), field("ttlMin", &E::ttlMin).atLeast(0).in("s"),
-                             field("ttlMax", &E::ttlMax).atLeast(0).in("s"), field("sizeWidth", &E::sizeWidth).atLeast(0).in("m"),
+                             field("velocityMax", &E::velocityMax).atLeast(0).in("m/s"), field("ttlMin", &E::ttlMin).atLeast(0.01).in("s"),
+                             field("ttlMax", &E::ttlMax).atLeast(0.01).in("s"), field("sizeWidth", &E::sizeWidth).atLeast(0).in("m"),
                              field("sizeHeight", &E::sizeHeight).atLeast(0).in("m"),
                              field("colourStart", &E::colourStart).range(kColourLo, kColourHi),
                              field("colourEnd", &E::colourEnd).range(kColourLo, kColourHi), field("extents", &E::extents).atLeast(0).in("m"),
-                             field("innerExtents", &E::innerExtents).atLeast(0).in("m"), field("duration", &E::duration).atLeast(0).in("s"),
+                             field("innerExtents", &E::innerExtents).range(0, 0.999), field("duration", &E::duration).atLeast(0).in("s"),
                              field("repeatDelay", &E::repeatDelay).atLeast(0).in("s"), field("startTime", &E::startTime).atLeast(0).in("s")});
     return t;
 }

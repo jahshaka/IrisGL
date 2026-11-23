@@ -10,6 +10,7 @@
 #include "script/commands.h"
 #include "script/records_effects.h"
 
+#include <cstdio>
 #include <vector>
 
 namespace jahshaka { namespace engine { namespace script {
@@ -68,20 +69,45 @@ void registerEffectsCommands(Host &host, const Commands &k)
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               if (!s || !k.mine(c, s, MadeKind::Node, Call::idOf(c[1]), "change")) return Value();
-              if (!s->removeDecal(NodeId(Call::idOf(c[1])))) return c.refuse(k.st->engine->lastError());
+              // (the engine answers false, writing nothing, for a node with no decal: OgreDecals.cpp:501 - the reason is ours)
+              if (!s->removeDecal(NodeId(Call::idOf(c[1]))))
+                  return c.refuse("node " + std::to_string(Call::idOf(c[1])) + " carries no decal");
               return Value(true);
           });
 
     // ---- THE PARTICLE SYSTEM
     r.add({"engine.particles.set", {Access::Changes, {scene, node, Record<ParticleSystemDesc>::table().param("system")}, Kind::Bool},
            "The node's simulated particle system (Scene::setParticleSystem): its quota, texture, blend, orientation, "
-           "emitters (at least one) and affectors; a scalar change applies in place, a topology change rebuilds it. A "
+           "emitters (at least one; an emitter's innerExtents is the hole as a FRACTION 0..0.999 of its extents, x and y "
+           "read, z not; a minimum never above its maximum) and affectors (key times ascending); a scalar change applies in place, a topology change rebuilds it. A "
            "colour ramp's IMAGE is a path: engine.particles.setColourRamp sets it (a colourRampPath here FAILS); a ramp "
            "it set stays with its affector while that affector stays a colour ramp."},
           [k](Call &c) -> Value {
               ParticleSystemDesc d;
               if (!recordOf(c, c[2], "system", d)) return Value();
               if (d.emitters.empty()) return c.fail("system.emitters is empty: a particle system emits from at least one");
+              // WHAT THE ENGINE WOULD REPAIR SILENTLY, refused by name (OgreParticles.cpp:616-619 swaps a minimum above
+              // its maximum; fillInterpStages, :185-197, bumps a key time not after the one before)
+              const auto num = [](float x) { char b[32]; std::snprintf(b, sizeof b, "%g", double(x)); return std::string(b); };
+              for (size_t i = 0; i < d.emitters.size(); ++i) {
+                  const ParticleEmitterDesc &e = d.emitters[i];
+                  const std::string at = "system.emitters[" + std::to_string(i) + "].";
+                  if (e.velocityMin > e.velocityMax)
+                      return c.fail(at + "velocityMin " + num(e.velocityMin) + " is above velocityMax " + num(e.velocityMax));
+                  if (e.ttlMin > e.ttlMax)
+                      return c.fail(at + "ttlMin " + num(e.ttlMin) + " is above ttlMax " + num(e.ttlMax));
+              }
+              for (size_t i = 0; i < d.affectors.size(); ++i) {
+                  const ParticleAffectorDesc &a = d.affectors[i];
+                  const bool colours = a.kind == ParticleAffectorDesc::Kind::ColourKeys;
+                  if (!colours && a.kind != ParticleAffectorDesc::Kind::ScaleKeys) continue;
+                  const float *t = colours ? a.colourKeyTimes : a.scaleKeyTimes;
+                  for (unsigned j = 1; j < a.keyCount; ++j)
+                      if (!(t[j] > t[j - 1]))
+                          return c.fail("system.affectors[" + std::to_string(i) + "]." + (colours ? "colourKeyTimes[" : "scaleKeyTimes[") +
+                                        std::to_string(j) + "] " + num(t[j]) + " is not after key " + std::to_string(j - 1) +
+                                        "'s " + num(t[j - 1]) + " (the keys run in ascending time)");
+              }
               for (size_t i = 0; i < d.affectors.size(); ++i)
                   if (!d.affectors[i].colourRampPath.empty())
                       return c.fail("system.affectors[" + std::to_string(i) + "].colourRampPath is a path: "
@@ -136,7 +162,11 @@ void registerEffectsCommands(Host &host, const Commands &k)
               Scene *s = k.scene(c, c[0]);
               const std::uint32_t n = Call::idOf(c[1]);
               if (!s || !k.mine(c, s, MadeKind::Node, n, "change")) return Value();
-              if (!s->removeParticleSystem(NodeId(n))) return c.refuse(k.st->engine->lastError());
+              // every system on a node this host may change was set by this host (mine): no record, no system
+              if (!k.kept<ParticleSystemDesc>(s, KeptKind::ParticleSystem, n))
+                  return c.fail("node " + std::to_string(n) + " carries no particle system this host set");
+              if (!s->removeParticleSystem(NodeId(n)))
+                  return c.refuse("node " + std::to_string(n) + "'s particle system was not removed (" + k.st->engine->lastError() + ")");
               k.unkeep(s, KeptKind::ParticleSystem, n);
               return Value(true);
           });
