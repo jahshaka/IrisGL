@@ -15,6 +15,8 @@ add_library(IrisCore SHARED
     geometry/plane.h
     guid.cpp
     guid.h
+    json.cpp
+    json.h
     math/scalar.h
     signal.h
     text.cpp

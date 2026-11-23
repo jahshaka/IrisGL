@@ -2,7 +2,7 @@
 // THE SIGNATURE AS A SCHEMA (MCP-ON-HOST-1 stage 1; SPECS/MCP_ON_HOST_1_SPEC.md L5) - the JSON Schema (2020-12) of ONE
 // command's arguments by name, made from its signature's FIELDS alone: the adapter knows no command, so every command,
 // today's and tomorrow's, is described by the same few lines. The MCP library (JahshakaEngineMcp): the standard library,
-// Script.h and ScriptJson.h, nothing else of the engine.
+// Script.h and the core's JSON codec (core/json.h), nothing else of the engine.
 //
 // THE FORM: {"type":"object","description":<doc>,"properties":{<param>: <its schema>, ...},"required":[<params with no
 // default>],"additionalProperties":false} ("required" only when one is). A parameter's schema:

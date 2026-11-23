@@ -16,7 +16,7 @@
 // end is a cancel, then the session ends.
 
 #include "jahshaka/engine/Script.h"
-#include "jahshaka/engine/ScriptJson.h"
+#include "core/json.h"
 
 #include <cstddef>
 #include <deque>
@@ -34,7 +34,7 @@ constexpr const char *kRevision = "2026-07-28";
 /// and the reply is -32700 with no id; the session lives on). DERIVED from the codec's bytes cap, so the two cannot
 /// drift: the largest legitimate request carries ONE `{"$bytes": ...}` argument at its cap - its base64 text - and
 /// everything else around it (a run_script source, the other arguments, the envelope) is given twice that again.
-constexpr std::size_t kBytesBase64 = (script::kJsonBytesCap + 2) / 3 * 4;   // 1,398,104
+constexpr std::size_t kBytesBase64 = (iris::json::kBytesCap + 2) / 3 * 4;   // 1,398,104
 constexpr std::size_t kLineCap = 3 * kBytesBase64;                          // 4,194,312 (~4 MiB)
 
 /// THE MCP HOST's COMPLETION BOUNDS (run_script's answer; Host::Options::completionBounds), each with its reason:
@@ -59,7 +59,7 @@ constexpr std::size_t kEnvelopeBytes = std::size_t(64) << 10;
 constexpr int kEnvelopeLevels = 4;   // {"result": {"structuredContent": {"result": <value>}}}
 static_assert(kCompletionBounds.bytes * 6 + kConsoleCap * 6 + kEnvelopeBytes < kLineCap,
               "a run_script reply at its bounds must fit one line under the cap");
-static_assert(kCompletionBounds.depth + kEnvelopeLevels < script::kJsonMaxDepth,
+static_assert(kCompletionBounds.depth + kEnvelopeLevels < iris::json::kMaxDepth,
               "a completion value at its depth must nest under the codec's 64 inside its reply");
 
 /// One line from the client: its text, or `overlong` (its first kLineCap bytes were read and the rest discarded).

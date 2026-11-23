@@ -1,7 +1,7 @@
 #pragma once
-// THE SCRIPT VALUE IN JSON (MCP-ON-HOST-1 stage 1; SPECS/MCP_ON_HOST_1_SPEC.md) - script::Value <-> JSON text, the
-// standard library only: its one include of ours is Script.h for Value and Kind (NOQT-CORE-1 stage 3 MOVES this file and
-// json.cpp whole into the Qt-free core library, beside Value: a move, never a second codec).
+// iris::json - THE ONE JSON CODEC BELOW THE EDITOR (NOQT-CORE-1 stage 3; V2 plan 0.12): iris::Value <-> JSON text, the
+// standard library only. MOVED here whole from the script host (MCP-ON-HOST-1 stage 1, jahshaka/engine/ScriptJson.h,
+// deleted): one codec, never a second. Its one include of ours is core/value.h.
 //
 // THE LAWS (both ways):
 //   * UTF-8, strictly: an overlong form, a surrogate code point, a code point over U+10FFFF, a stray or missing
@@ -25,21 +25,22 @@
 // FIRST COMMAND THAT TAKES A FILE PATH must refuse a NUL in it by name (a C path stops at the first NUL: "a.png\0../x"
 // would name another file than the one checked).
 
-#include "jahshaka/engine/Script.h"
+#include "core/export.h"
+#include "core/value.h"
 
 #include <cstddef>
 #include <string>
 #include <string_view>
 
-namespace jahshaka { namespace engine { namespace script {
+namespace iris { namespace json {
 
 /// The most a Bytes value carries in JSON (decoded), and the deepest nesting of arrays and objects, either way.
-constexpr std::size_t kJsonBytesCap = std::size_t(1) << 20;
-constexpr int kJsonMaxDepth = 64;
+constexpr std::size_t kBytesCap = std::size_t(1) << 20;
+constexpr int kMaxDepth = 64;
 
 /// `value` as one line of compact JSON into `out`; false with `why` (naming the value's path) when it cannot be carried.
-bool toJson(const Value &value, std::string &out, std::string &why);
+IRIS_CORE_API bool write(const Value &value, std::string &out, std::string &why);
 /// The one JSON value of `text` into `out`; false with `why` ("line L, column C: ...") when the text is refused.
-bool parseJson(std::string_view text, Value &out, std::string &why);
+IRIS_CORE_API bool parse(std::string_view text, Value &out, std::string &why);
 
-}}}  // namespace jahshaka::engine::script
+}}  // namespace iris::json

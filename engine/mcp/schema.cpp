@@ -1,7 +1,7 @@
 // THE SIGNATURE AS A SCHEMA (MCP-ON-HOST-1 stage 1): mcp/include/mcp/schema.h says the form. From the signature's fields alone.
 #include "mcp/schema.h"
 
-#include "jahshaka/engine/ScriptJson.h"
+#include "core/json.h"
 
 #include <cmath>
 #include <cstdint>
@@ -17,7 +17,7 @@ using script::Value;
 namespace {
 
 /// The longest base64 text of a Bytes value the codec carries (4 characters per 3 bytes, padded).
-constexpr std::int64_t kBytesTextCap = std::int64_t((script::kJsonBytesCap + 2) / 3 * 4);
+constexpr std::int64_t kBytesTextCap = std::int64_t((iris::json::kBytesCap + 2) / 3 * 4);
 
 const char *typeName(Kind k)
 {

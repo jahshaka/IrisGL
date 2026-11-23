@@ -119,8 +119,6 @@ set(JAHSHAKA_ENGINE_SOURCES "${JAHSHAKA_ENGINE_SOURCES}" PARENT_SCOPE)
 set(JAHSHAKA_ENGINE_SCRIPT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/host.cpp
-    # the value in JSON (MCP-ON-HOST-1; include/jahshaka/engine/ScriptJson.h): std only, moved whole by NOQT-CORE-1
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/script/json.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/Language.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/LanguageTable.inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/script/RouteDeclaration.h
@@ -855,9 +853,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ogre_head_inpu
 # and writes the value into a generated header; `copy_if_different` inside the
 # script keeps an unchanged value from cascading a rebuild.
 file(GLOB JAHSHAKA_ENGINE_BUILD_ID_HEADERS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/include/jahshaka/engine/*.h)
-# Script.h, ScriptJson.h: the script host's public headers stay OUT of the id like its sources (above: a command edit never
-# re-keys the caches; source.script_build_id B1 holds both)
-list(FILTER JAHSHAKA_ENGINE_BUILD_ID_HEADERS EXCLUDE REGEX "/(EngineInspect|Stillness|ProcessExit|Script|ScriptJson)\\.h$")
+# Script.h: the script host's public header stays OUT of the id like its sources (above: a command edit never re-keys the
+# caches; source.script_build_id B1 holds it)
+list(FILTER JAHSHAKA_ENGINE_BUILD_ID_HEADERS EXCLUDE REGEX "/(EngineInspect|Stillness|ProcessExit|Script)\\.h$")
 list(SORT JAHSHAKA_ENGINE_BUILD_ID_HEADERS)
 # (the script host's sources are NOT inputs: JAHSHAKA_ENGINE_SCRIPT_SOURCES above says why; source.script_build_id)
 set(_build_id_inputs ${JAHSHAKA_ENGINE_SOURCES} ${JAHSHAKA_ENGINE_BUILD_ID_HEADERS})
@@ -1015,7 +1013,7 @@ target_link_libraries(jahengine PRIVATE JahshakaScript JahshakaEngineMcp)
 add_dependencies(jahengine JahshakaEngineMedia)
 
 # JahshakaEngineMcp (MCP-ON-HOST-1): THE MCP ADAPTER over the engine's script host - the standard library, Script.h and
-# ScriptJson.h, no Qt and no other engine header; it is linked into jahengine only (never Jahshaka, jahlab or IrisGL).
+# the core's JSON codec (core/json.h: NOQT-CORE-1 stage 3), no Qt and no other engine header; it is linked into jahengine only (never Jahshaka, jahlab or IrisGL).
 # Stage 1: the schema of a signature (mcp/schema.h); stage 2: the session - the protocol and its five tools
 # (mcp/session.h) and its stdio transport (mcp/stdio.h). ITS PUBLIC INCLUDE ROOT IS ITS OWN HEADERS ONLY (mcp/include: "mcp/<file>.h")
 # - never irisgl/engine, which would hand every user the engine's private src/ (the boundary law).

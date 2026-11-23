@@ -196,7 +196,7 @@ void Session::serve(const Incoming &in)
         return error(nullptr, kParseError, "Parse error: a line over " + std::to_string(kLineCap) + " bytes (the cap)");
     Value m;
     std::string why;
-    if (!script::parseJson(in.line, m, why)) return error(nullptr, kParseError, "Parse error: " + why);
+    if (!iris::json::parse(in.line, m, why)) return error(nullptr, kParseError, "Parse error: " + why);
     if (m.kind() != Kind::Object) return error(nullptr, kInvalidRequest, "Invalid Request: a message is one JSON object");
     const Value *id = m.find("id");
     const bool idOk = id && (id->kind() == Kind::Int || id->kind() == Kind::String);
@@ -267,10 +267,10 @@ void Session::request(const Value &id, const std::string &method, const Value &p
         return;
     }
     std::string text, why;
-    if (!script::toJson(structured, text, why)) {
+    if (!iris::json::write(structured, text, why)) {
         isError = true;
         structured = object({{"error", Value("the answer cannot be carried: " + why)}});
-        script::toJson(structured, text, why);
+        iris::json::write(structured, text, why);
     }
     Value::Object result{{"content", Value(Value::Array{object({{"type", Value("text")}, {"text", Value(text)}})})},
                          {"structuredContent", std::move(structured)}};
@@ -407,7 +407,7 @@ bool Session::keepGoing(double done, double total)
     for (Incoming &in : arrived) {
         Value m;
         std::string why;
-        if (!in.overlong && script::parseJson(in.line, m, why) && m.kind() == Kind::Object && !m.find("id") &&
+        if (!in.overlong && iris::json::parse(in.line, m, why) && m.kind() == Kind::Object && !m.find("id") &&
             m["method"] == Value("notifications/cancelled")) {
             cancelled(m["params"]["requestId"]);
             continue;
@@ -437,7 +437,7 @@ void Session::cancelled(const Value &requestId)
     for (auto it = mQueue.begin(); it != mQueue.end(); ++it) {   // a queued request: dropped unanswered
         Value m;
         std::string why;
-        if (it->overlong || !script::parseJson(it->line, m, why) || m.kind() != Kind::Object) continue;
+        if (it->overlong || !iris::json::parse(it->line, m, why) || m.kind() != Kind::Object) continue;
         const Value *id = m.find("id");
         if (id && *id == requestId && id->kind() == requestId.kind()) {
             mQueue.erase(it);
@@ -466,13 +466,13 @@ void Session::error(const Value *id, int code, const std::string &message, Value
 void Session::write(Value message)
 {
     std::string text, why;
-    if (script::toJson(message, text, why)) return mDoors.send(text);
+    if (iris::json::write(message, text, why)) return mDoors.send(text);
     // the message cannot be carried (invalid UTF-8 in a message of ours): an internal error, its id kept
     Value::Object m{{"jsonrpc", Value("2.0")}};
     if (const Value *id = message.find("id")) m.emplace_back("id", *id);
     m.emplace_back("error", object({{"code", Value(kInternalError)},
                                     {"message", Value("Internal error: the reply cannot be carried")}}));
-    if (script::toJson(Value(std::move(m)), text, why)) mDoors.send(text);
+    if (iris::json::write(Value(std::move(m)), text, why)) mDoors.send(text);
 }
 
 }}}  // namespace jahshaka::engine::mcp

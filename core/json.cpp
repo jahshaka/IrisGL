@@ -1,6 +1,6 @@
-// THE SCRIPT VALUE IN JSON (MCP-ON-HOST-1 stage 1): jahshaka/engine/ScriptJson.h says the laws. The standard library
+// iris::json (MOVED from the script host's json.cpp: NOQT-CORE-1 stage 3): core/json.h says the laws. The standard library
 // only (std::to_chars / std::from_chars for the numbers): NOQT-CORE-1 moves this file whole.
-#include "jahshaka/engine/ScriptJson.h"
+#include "core/json.h"
 
 #include <charconv>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
-namespace jahshaka { namespace engine { namespace script {
+namespace iris { namespace json {
 
 namespace {
 
@@ -74,7 +74,7 @@ void appendUtf8(std::string &out, std::uint32_t cp)
 
 std::string capText(std::size_t n)
 {
-    return std::to_string(n) + " bytes: over the 1 MiB (" + std::to_string(kJsonBytesCap) + ") a value carries as bytes";
+    return std::to_string(n) + " bytes: over the 1 MiB (" + std::to_string(kBytesCap) + ") a value carries as bytes";
 }
 
 /// WHERE A VALUE SITS, as a chain on the stack: made into text only when a write fails.
@@ -103,7 +103,7 @@ public:
         case Kind::String: return string(v.asString(), at, "");
         case Kind::Bytes:  return bytes(v.asBytes(), at);
         case Kind::Array: {
-            if (depth >= kJsonMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
+            if (depth >= kMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
             mOut += '[';
             const Value::Array &a = v.asArray();
             for (std::size_t i = 0; i < a.size(); ++i) {
@@ -115,7 +115,7 @@ public:
             return true;
         }
         case Kind::Object: {
-            if (depth >= kJsonMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
+            if (depth >= kMaxDepth) return fail(at, "is nested deeper than 64 arrays and objects");
             mOut += '{';
             const Value::Object &o = v.asObject();
             std::unordered_set<std::string_view> seen;   // views of the value's own names (they hold still meanwhile)
@@ -202,7 +202,7 @@ private:
 
     bool bytes(const Value::Bytes &b, const JsonPath *at)
     {
-        if (b.size() > kJsonBytesCap) return fail(at, "is " + capText(b.size()));
+        if (b.size() > kBytesCap) return fail(at, "is " + capText(b.size()));
         mOut += "{\"$bytes\":\"";
         std::size_t i = 0;
         for (; i + 3 <= b.size(); i += 3) {
@@ -238,7 +238,7 @@ int base64Digit(char c)
     return -1;
 }
 
-/// Strict base64 (padded, its unused bits zero) into `out`, at most kJsonBytesCap decoded; false with `why`.
+/// Strict base64 (padded, its unused bits zero) into `out`, at most kBytesCap decoded; false with `why`.
 bool base64Decode(const std::string &s, Value::Bytes &out, std::string &why)
 {
     const std::size_t n = s.size();
@@ -248,7 +248,7 @@ bool base64Decode(const std::string &s, Value::Bytes &out, std::string &why)
     }
     const std::size_t pad = n ? std::size_t(s[n - 1] == '=') + std::size_t(s[n - 2] == '=') : 0;
     const std::size_t size = n / 4 * 3 - pad;
-    if (size > kJsonBytesCap) {
+    if (size > kBytesCap) {
         why = "the $bytes value is " + capText(size);
         return false;
     }
@@ -350,7 +350,7 @@ private:
 
     bool array(Value &out, int depth)
     {
-        if (depth >= kJsonMaxDepth) return fail("nested deeper than 64 arrays and objects");
+        if (depth >= kMaxDepth) return fail("nested deeper than 64 arrays and objects");
         ++mI;
         space();
         Value::Array a;
@@ -379,7 +379,7 @@ private:
 
     bool object(Value &out, int depth)
     {
-        if (depth >= kJsonMaxDepth) return fail("nested deeper than 64 arrays and objects");
+        if (depth >= kMaxDepth) return fail("nested deeper than 64 arrays and objects");
         const std::size_t start = mI;
         ++mI;
         space();
@@ -550,7 +550,7 @@ private:
 
 }  // namespace
 
-bool toJson(const Value &value, std::string &out, std::string &why)
+bool write(const Value &value, std::string &out, std::string &why)
 {
     out.clear();
     JsonWriter w(out, why);
@@ -559,7 +559,7 @@ bool toJson(const Value &value, std::string &out, std::string &why)
     return false;
 }
 
-bool parseJson(std::string_view text, Value &out, std::string &why)
+bool parse(std::string_view text, Value &out, std::string &why)
 {
     JsonReader p(text, why);
     Value v;
@@ -568,4 +568,4 @@ bool parseJson(std::string_view text, Value &out, std::string &why)
     return true;
 }
 
-}}}  // namespace jahshaka::engine::script
+}}  // namespace iris::json
