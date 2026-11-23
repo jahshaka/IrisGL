@@ -327,7 +327,6 @@ set(SRCS
 )
 
 set (HEADERS
-    document/qt/colour.h
     core/viewport.h
     core/threadbudget.h
     import/meshprewarm.h
