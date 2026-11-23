@@ -993,7 +993,7 @@ int SceneMirror::sync(const FrameViews &frameViews)
         // assumed to have been seen.
         mMaterialRevision = iris::Material::globalRevision();
         // RAW children, no QList: SceneNode::children() builds a
-        // QList<QSharedPointer> — a heap allocation plus an atomic refcount per
+        // QList<std::shared_ptr> — a heap allocation plus an atomic refcount per
         // child — and this walk runs over the whole document.
         const int rootChildren = root->childCount();
         const bool rootShown = root->isVisible();
@@ -1823,7 +1823,7 @@ void SceneMirror::setHighlightWireframe(bool on)
     mHighlightWireframe = on;
 }
 
-/// RAW nodes, no QSharedPointer. This runs over the whole selected subtree
+/// RAW nodes, no std::shared_ptr. This runs over the whole selected subtree
 /// every frame; `sharedFromThis()` per child was one QSharedPointer
 /// construction (and two atomic refcount ops) per node per frame to hand back
 /// what `childAt` already returns raw — audit F9. `getMesh()` was the same
@@ -3682,7 +3682,7 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             }
         }
         // The members, not the by-value getters: `getMesh()`/`getMaterial()`/
-        // `getSkeleton()` each return a QSharedPointer BY VALUE, so reading
+        // `getSkeleton()` each return a std::shared_ptr BY VALUE, so reading
         // them costs an atomic increment and decrement per mesh per frame for
         // three pointers that almost never change.
         iris::Mesh *mesh = meshNode->mesh.get();
@@ -8707,7 +8707,7 @@ bool SceneMirror::noteDrivingCamera(const View *view, const iris::CameraNodePtr 
     constexpr int kMaxTracked = 8;
     for (auto &entry : mDrivingCameras) {
         if (entry.first != view) continue;
-        // QWeakPointer has no data() — lock and compare, which also makes a
+        // std::weak_ptr has no get() — lock and compare, which also makes a
         // camera that DIED since the last frame read as a change (it is one).
         const bool changed = entry.second.lock().get() != camera.get();
         entry.second = std::weak_ptr(camera);

@@ -217,7 +217,7 @@ void SceneNode::setVisible(bool flag)
 
 bool SceneNode::isVisibleInScene() const
 {
-    // Raw pointers up the store's chain — no QSharedPointer per level. A socket
+    // Raw pointers up the store's chain — no std::shared_ptr per level. A socket
     // rider's parent is its document parent (socketing is not a reparent).
     for (const SceneNode *n = this; n; n = (n->mDoc.parent ? n->mDoc.parent->owner : nullptr))
         if (!n->visible) return false;

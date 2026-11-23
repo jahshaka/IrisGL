@@ -1205,7 +1205,7 @@ private:
     jahshaka::engine::MeshId wireMeshFor(int kind);
     /// The per-sync document walk. Takes a RAW node and iterates children
     /// through iris::graph rather than through SceneNode::children(), which
-    /// materialises a QList<QSharedPointer> — one heap allocation and one
+    /// materialises a QList<std::shared_ptr> — one heap allocation and one
     /// atomic refcount per child — for every node of the scene, every frame.
     /// `parentShown` is the parent's EFFECTIVE visibility (it and every
     /// ancestor visible): the walk is parent-first, so the rule costs one AND

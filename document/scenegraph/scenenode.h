@@ -43,7 +43,6 @@ class PhysicsProperty;
 class Property;
 class Animation;
 class PropertyAnim;
-typedef std::shared_ptr<Animation> AnimationPtr;
 
 /// What a mutation changed. Every setter on SceneNode and its subclasses
 /// reports it through notifyChanged(), and the node's SCENE collects it
@@ -154,10 +153,10 @@ const char *mobilityReasonName(MobilityReason r);
 // rest pose, asset references and the properties/reflection surface.
 //
 // OWNERSHIP, and why one list survives. The store holds RAW pointers (DocNode::
-// parent / children), never a QSharedPointer: the undo stack's contract is
+// parent / children), never a std::shared_ptr: the undo stack's contract is
 // "the undo stack is what keeps deleted nodes alive" (audit §3.3). So
 // `mChildRefs` below is kept as a pure LIFETIME ANCHOR: it holds the
-// QSharedPointers, it is never read for order, parentage or iteration, and
+// std::shared_ptrs, it is never read for order, parentage or iteration, and
 // exactly two functions (insertChild / removeChild) touch it. Structure comes
 // from the store, always.
 // -----------------------------------------------------------------------------
