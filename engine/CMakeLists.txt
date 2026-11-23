@@ -991,7 +991,9 @@ set_target_properties(JahshakaEngine PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC 
 # std symbol (source.script_neutral N6 the proof). Still "inside the engine": its tree, its laws, outside the build ID.
 add_library(JahshakaScript STATIC ${JAHSHAKA_ENGINE_SCRIPT_SOURCES})
 target_include_directories(JahshakaScript PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(JahshakaScript PUBLIC JahshakaEngine PRIVATE qjs)
+# its value IS the core's (Script.h names iris::Value, core/value.h: NOQT-CORE-1 stage 3): IrisCore PUBLIC, so every client of
+# the host - JahshakaEngineMcp through it included - gets the core's one library and its include root
+target_link_libraries(JahshakaScript PUBLIC JahshakaEngine IrisCore PRIVATE qjs)
 set_target_properties(JahshakaScript PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON
                                                 POSITION_INDEPENDENT_CODE ON)
 

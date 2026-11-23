@@ -19,6 +19,8 @@ add_library(IrisCore SHARED
     signal.h
     text.cpp
     text.h
+    value.cpp
+    value.h
 )
 target_compile_features(IrisCore PUBLIC cxx_std_17)
 # Hidden by default: only what core/export.h's IRIS_CORE_API marks is exported (the iris:: API). Beside IrisGL in bin/.
