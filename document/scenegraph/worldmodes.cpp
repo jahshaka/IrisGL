@@ -17,7 +17,7 @@ For more information see the LICENSE file
 
 #include <algorithm>
 
-#include <QJsonValue>
+#include "document/properties/valueshapes.h"
 
 namespace worldmodes {
 
@@ -1084,9 +1084,9 @@ QVector<Row> buildRows()
 bool overrideValue(const iris::ScenePtr &scene, const QString &id, int &out)
 {
     if (!scene) return false;
-    const QJsonValue v = scene->worldOverrides.value(id);
-    if (v.isUndefined() || v.isNull()) return false;
-    out = v.toInt();
+    const iris::Value *v = scene->worldOverrides.find(id.toStdString());
+    if (!v || v->isNull()) return false;
+    out = iris::intOr(scene->worldOverrides, id.toStdString().c_str(), 0);
     return true;
 }
 
@@ -1500,7 +1500,7 @@ int tierIndex(PhotonTier t) { return qBound(0, int(t), 3); }
 
 bool pinned(const iris::ScenePtr &s, const char *id)
 {
-    return s && s->worldOverrides.contains(QLatin1String(id));
+    return s && s->worldOverrides.find(id) != nullptr;
 }
 
 }   // namespace
@@ -1829,7 +1829,7 @@ void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier)
         // alone: writing a tier's quality into a scene that renders no GI would
         // be churn in the document and in every diff of it, and re-enabling
         // applies the tier anyway.
-        scene->worldOverrides.remove(QStringLiteral("giMode"));
+        scene->worldOverrides.erase("giMode");
         scene->giMode = iris::GiMode::OFF;
         return;
     }
@@ -1845,7 +1845,7 @@ void setPhoton(const iris::ScenePtr &scene, bool enabled, PhotonTier tier)
     else if (scene->giMode == iris::GiMode::OFF) {
         // A pin of "off" is what an Advanced technique picker set to Off would
         // record; turning Photon on means the tier's technique, so the pin goes.
-        scene->worldOverrides.remove(QStringLiteral("giMode"));
+        scene->worldOverrides.erase("giMode");
         scene->giMode = iris::GiMode(qBound(1, row.technique, 2));
     }
 }
@@ -1876,7 +1876,7 @@ QStringList photonDeviations(const iris::ScenePtr &scene)
 void clearPhotonOverrides(const iris::ScenePtr &scene)
 {
     if (!scene) return;
-    for (const QString &id : photonRowIds()) scene->worldOverrides.remove(id);
+    for (const QString &id : photonRowIds()) scene->worldOverrides.erase(id.toStdString());
     setPhoton(scene, photonEnabled(scene), photonTier(scene));
 }
 
@@ -1958,7 +1958,7 @@ int resolved(const iris::ScenePtr &scene, const Row &r)
 QString source(const iris::ScenePtr &scene, const Row &r)
 {
     if (!scene) return QStringLiteral("custom");
-    if (scene->worldOverrides.contains(r.id)) return QStringLiteral("override");
+    if (scene->worldOverrides.find(r.id.toStdString())) return QStringLiteral("override");
     // A row NO TIER RESOLVES was never set by a mode, so saying "mode" would be
     // a claim about a dial that does not own it (EXPOSURE-1).
     if (r.tierSpace == TierSpace::None) return QStringLiteral("custom");
@@ -2020,13 +2020,13 @@ void setMode(const iris::ScenePtr &scene, Mode m)
     // honours a non-off giMode pin — the selector would read Epic while Photon reads Custom.
     // A World Mode pick drops that pin, so the row writes the mode's own technique; a Photon
     // edit after the pick makes the mode Custom again as before.
-    scene->worldOverrides.remove(QStringLiteral("giMode"));
+    scene->worldOverrides.erase("giMode");
     for (const Row &r : rows()) {
         // A Photon-tiered row is written by the `photon` row (which IS in this
         // loop and honours the same pins) — never twice, and never from the
         // world tier's columns, which are not this row's tier space at all.
         if (r.tierSpace != TierSpace::World) continue;
-        if (scene->worldOverrides.contains(r.id)) continue;   // pinned: survives the switch
+        if (scene->worldOverrides.find(r.id.toStdString())) continue;   // pinned: survives the switch
         writeField(scene, r, r.tier[int(m)]);
     }
 }
@@ -2043,7 +2043,9 @@ bool setRowValue(const iris::ScenePtr &scene, const QString &id, int value, bool
     // A row with no backing field can ONLY be remembered as a pin, so an
     // explicit set of one always records (it is a deliberate user choice —
     // unlike setMode's sweep, which never touches those rows).
-    if (recordOverride || !r->set) scene->worldOverrides.insert(id, value);
+    // (worldOverrides is always an Object - the scene's own, the reader's object, the reset - so set cannot refuse:
+    // a false would be a scene whose override map is not one.)
+    if ((recordOverride || !r->set) && !scene->worldOverrides.set(id.toStdString(), iris::Value(value))) return false;
     return true;
 }
 
@@ -2051,13 +2053,12 @@ void pinRowValue(const iris::ScenePtr &scene, const QString &id, int value)
 {
     if (!scene || !row(id)) return;
     if (id == photonRowId()) return;   // never pinned (WORLD-MODE-1, setRowValue)
-    scene->worldOverrides.insert(id, value);
+    (void)scene->worldOverrides.set(id.toStdString(), iris::Value(value));   // always an Object (setRowValue's note)
 }
 
 bool clearOverride(const iris::ScenePtr &scene, const QString &id)
 {
-    if (!scene || !scene->worldOverrides.contains(id)) return false;
-    scene->worldOverrides.remove(id);
+    if (!scene || !scene->worldOverrides.erase(id.toStdString())) return false;
     const Row *r = row(id);
     const Mode m = pickedMode(scene);
     // A Photon-tiered row falls back through the PHOTON tier, and it does so via
@@ -2084,7 +2085,11 @@ bool clearOverride(const iris::ScenePtr &scene, const QString &id)
 void clearOverrides(const iris::ScenePtr &scene)
 {
     if (!scene) return;
-    const QStringList ids = scene->worldOverrides.keys();
+    // In the order QJsonObject's keys() gave (sorted: the ids are ASCII), so the clears run as they always ran.
+    QStringList ids;
+    if (scene->worldOverrides.kind() == iris::Kind::Object)
+        for (const iris::Value::Member &m : scene->worldOverrides.asObject()) ids << QString::fromStdString(m.first);
+    ids.sort();
     for (const QString &id : ids) clearOverride(scene, id);
 }
 

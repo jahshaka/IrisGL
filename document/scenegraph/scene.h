@@ -29,8 +29,9 @@ For more information see the LICENSE file
 #include "document/scenegraph/simulationclock.h"
 
 // temp
-#include <QJsonArray>
-#include <QJsonObject>
+#include <QHash>
+#include <QMap>
+#include <QString>
 
 namespace iris
 {
@@ -297,8 +298,8 @@ struct CloudLayer
 	static CloudLayer clamped(CloudLayer c);
 	/// The file's form. `fromJson` gives an ABSENT key the constructor's value
 	/// (the reader-defaults law).
-	QJsonObject toJson() const;
-	static CloudLayer fromJson(const QJsonObject &o);
+	Value toJson() const;
+	static CloudLayer fromJson(const Value &o);
 };
 
 /// THE EXPONENTIAL HEIGHT FOG (SKY-DEFAULTS-1) — Unreal's Exponential Height
@@ -345,8 +346,8 @@ struct HeightFog
 	/// Every dial held inside its band (the verb, the reader and the panel).
 	static HeightFog clamped(HeightFog h);
 	/// The file's form; an ABSENT key takes the constructor's value.
-	QJsonObject toJson() const;
-	static HeightFog fromJson(const QJsonObject &o);
+	Value toJson() const;
+	static HeightFog fromJson(const Value &o);
 	/// Unreal's dial units -> per metre (x 0.1; the header above).
 	static constexpr float kUnrealDialToPerMetre = 0.1f;
 };
@@ -388,8 +389,8 @@ struct SunContact
 	/// The one clamp the verb, the reader and the undo table share.
 	static SunContact clamped(SunContact c);
 	/// The file's form; an ABSENT key takes the constructor's value.
-	QJsonObject toJson() const;
-	static SunContact fromJson(const QJsonObject &o);
+	Value toJson() const;
+	static SunContact fromJson(const Value &o);
 	/// The stable spellings ("auto", "full", "half") — the file, the verb.
 	static const char *resolutionName(SunContactResolution r);
 	static bool resolutionFromName(const QString &name, SunContactResolution &out);
@@ -925,7 +926,7 @@ public:
     int worldMode;
     // { rowId: value } — the rows the user pinned. Overrides survive mode
     // switches by design (owner requirement).
-    QJsonObject worldOverrides;
+    Value worldOverrides{Value::Object{}};   // brace-initialised: source.photon_never_pinned counts each whole-map assignment
 
     // ---- OUTLINER FOLDERS (SCENEGRAPH_SPEC.md §6b) --------------------------
     // Folders are EDITOR ORGANISATION, never nodes: no transform, no place in
@@ -977,8 +978,8 @@ public:
 	/// NEW scene has (the reader-defaults trap: an absent key must mean exactly
 	/// what a new scene means, never 0), so a document written before a dial
 	/// existed opens at the fitted default.
-	static QJsonObject skyRealisticJson(const SkyRealistic &r);
-	static SkyRealistic skyRealisticFromJson(const QJsonObject &o);
+	static Value skyRealisticJson(const SkyRealistic &r);
+	static SkyRealistic skyRealisticFromJson(const Value &o);
 
 	/// DO THE TWO HALVES AGREE? The document-level assertion that the hazard
 	/// above has not come back. False means somebody wrote one half directly.
@@ -1189,7 +1190,7 @@ public:
 	/// (The six `skyData<Type>` members that stood beside it are GONE — they
 	/// were filled by the constructor, copied into this map on the next line
 	/// and never read again by anything, in either repo.)
-	QMap<QString, QJsonObject> skyData;
+	QMap<QString, Value> skyData;
 
 	void setWorldGravity(float gravity);
 

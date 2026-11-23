@@ -412,7 +412,6 @@ set (HEADERS
     core/math/bezierhelper.h
     document/animation/animation.h
     import/materialhelper.h
-    document/qt/colorjson.h
     document/scenegraph/particlesystemnode.h
     document/materials/pbrmaterial.h
     document/animation/propertyanim.h

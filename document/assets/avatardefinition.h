@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #ifndef IRIS_AVATARDEFINITION_H
 #define IRIS_AVATARDEFINITION_H
 
-#include <QJsonObject>
+#include "core/value.h"
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -98,11 +98,11 @@ struct AvatarDefinition
     /// installed at spawn). Kept as raw JSON until the socket authoring UI
     /// exists, so a file written by a later build round-trips through this one
     /// instead of losing its sockets.
-    QJsonObject sockets;
+    Value sockets = Value(Value::Object{});
     bool hasSockets = false;
 
     /// SLOT: LOCOMOTION Stage 8 / morph targets. Raw, same reason.
-    QJsonObject blendshapes;
+    Value blendshapes = Value(Value::Object{});
     bool hasBlendshapes = false;
 
     /// The clip entry with this display name, or nullptr.
@@ -114,12 +114,12 @@ struct AvatarDefinition
 };
 
 /// Serialization. `toJson` always writes every key (nulls included).
-QJsonObject avatarDefinitionToJson(const AvatarDefinition &def);
+Value avatarDefinitionToJson(const AvatarDefinition &def);
 
 /// Parses AND validates: on refusal `out` is untouched and `*error` says what
 /// is wrong in the file's own vocabulary. A definition with no model is a
 /// refusal, not an empty avatar — nothing downstream can do anything with one.
-bool avatarDefinitionFromJson(const QJsonObject &obj, AvatarDefinition &out, QString *error);
+bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, QString *error);
 
 }   // namespace iris
 

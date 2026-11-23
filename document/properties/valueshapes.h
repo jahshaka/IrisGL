@@ -31,6 +31,8 @@ For more information see the LICENSE file
 #include "core/value.h"
 #include "document/srgbcolor.h"
 
+#include <string>
+
 namespace iris
 {
 
@@ -89,6 +91,52 @@ inline bool vec3FromValue(const Value &v, Vec3 &out)
     const Value::Array &a = v.asArray();
     out = Vec3(float(a[0].asNumber()), float(a[1].asNumber()), float(a[2].asNumber()));
     return true;
+}
+
+// ---- READING A JSON MEMBER AS QJsonValue's to<T>(default) DID (the document's codecs, NOQT-DOCUMENT-1 stage 4) -------
+// `obj[key]` is a Null when `obj` is not an Object or has no such member (Value::operator[]).
+
+/// QJsonValue::toDouble(d): the member's number (a Number or an Int: one JSON number type), else d.
+inline double numberOr(const Value &obj, const char *key, double d)
+{
+    const Value &v = obj[key];
+    return (v.kind() == Kind::Number || v.kind() == Kind::Int) ? v.asNumber() : d;
+}
+/// QJsonValue::toBool(d): the member's Bool, else d.
+inline bool boolOr(const Value &obj, const char *key, bool d)
+{
+    const Value &v = obj[key];
+    return v.kind() == Kind::Bool ? v.asBool() : d;
+}
+/// QJsonValue::toString(d): the member's String, else d.
+inline std::string stringOr(const Value &obj, const char *key, const std::string &d = std::string())
+{
+    const Value &v = obj[key];
+    return v.kind() == Kind::String ? v.asString() : d;
+}
+/// QJsonValue::toInt(d): the member's number when it is whole and an int holds it, else d.
+inline int intOr(const Value &obj, const char *key, int d)
+{
+    const Value &v = obj[key];
+    if (v.kind() == Kind::Int)
+        return (v.asInt() >= -2147483648ll && v.asInt() <= 2147483647ll) ? int(v.asInt()) : d;
+    if (v.kind() == Kind::Number) {
+        const double n = v.asNumber();
+        return (n >= -2147483648.0 && n <= 2147483647.0 && n == double(int(n))) ? int(n) : d;
+    }
+    return d;
+}
+/// QJsonValue::toObject(): the member when it is an Object, else an empty Object.
+inline Value objectOr(const Value &obj, const char *key)
+{
+    const Value &v = obj[key];
+    return v.kind() == Kind::Object ? v : Value(Value::Object{});
+}
+/// QJsonValue::toArray(): the member when it is an Array, else an empty Array.
+inline Value arrayOr(const Value &obj, const char *key)
+{
+    const Value &v = obj[key];
+    return v.kind() == Kind::Array ? v : Value(Value::Array{});
 }
 
 /// A Float-kind value's number into `out` (a Number, or an Int: one JSON number type - the spec's RULED E (1));

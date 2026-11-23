@@ -14,7 +14,7 @@ For more information see the LICENSE file
 
 #include "core/math/vec.h"
 #include "document/srgbcolor.h"
-#include <QJsonObject>
+#include "core/value.h"
 #include "irisglfwd.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/shadowmap.h"
@@ -209,7 +209,7 @@ public:
      * exactly as the IES profile's path above.
      */
     SkyLightSource skySource = SkyLightSource::Sky;
-    QJsonObject skyCubeFaces;
+    Value skyCubeFaces = Value(Value::Object{});
     std::shared_ptr<Texture2D> skyCubeTexture;
 
     //editor-specific

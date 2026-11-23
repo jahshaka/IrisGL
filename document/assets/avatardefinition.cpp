@@ -11,8 +11,12 @@ For more information see the LICENSE file
 
 #include "document/assets/avatardefinition.h"
 
-#include <QJsonArray>
+#include "document/properties/valueshapes.h"
+
 #include <QSet>
+
+#include <algorithm>
+#include <vector>
 
 namespace iris
 {
@@ -38,100 +42,77 @@ QStringList AvatarDefinition::dependencyGuids() const
     return out;
 }
 
-QJsonObject avatarDefinitionToJson(const AvatarDefinition &def)
+Value avatarDefinitionToJson(const AvatarDefinition &def)
 {
-    QJsonObject obj;
-    obj[QStringLiteral("format")] = QStringLiteral("jah-avatar");
-    obj[QStringLiteral("version")] = AvatarDefinition::kFormatVersion;
-    obj[QStringLiteral("name")] = def.name;
+    const auto S = [](const QString &q) { return Value(q.toStdString()); };
+    Value::Array boneNames;
+    for (const QString &b : def.rig.boneNames) boneNames.push_back(S(b));
+    // the SLOT, written as null when there is no unit scale
+    const Value unitScale = def.rig.hasUnitScale ? Value(def.rig.unitScale) : Value();
 
-    QJsonObject model;
-    model[QStringLiteral("asset")] = def.modelAsset;
-    obj[QStringLiteral("model")] = model;
+    Value::Array clips;
+    for (const auto &clip : def.clips)
+        clips.push_back(Value(Value::Object{{"asset", S(clip.asset)}, {"rawName", S(clip.rawName)},
+                                            {"name", S(clip.name)}, {"looping", Value(clip.looping)},
+                                            {"rootMotion", Value(clip.rootMotion)}}));
 
-    QJsonObject rig;
-    rig[QStringLiteral("rigId")] = def.rig.rigId;
-    rig[QStringLiteral("bones")] = def.rig.bones;
-    rig[QStringLiteral("boneNames")] = QJsonArray::fromStringList(def.rig.boneNames);
-    if (def.rig.hasUnitScale) rig[QStringLiteral("unitScale")] = def.rig.unitScale;
-    else rig[QStringLiteral("unitScale")] = QJsonValue();   // the SLOT, written as null
-    obj[QStringLiteral("rig")] = rig;
-
-    QJsonArray clips;
-    for (const auto &clip : def.clips) {
-        QJsonObject entry;
-        entry[QStringLiteral("asset")] = clip.asset;
-        entry[QStringLiteral("rawName")] = clip.rawName;
-        entry[QStringLiteral("name")] = clip.name;
-        entry[QStringLiteral("looping")] = clip.looping;
-        entry[QStringLiteral("rootMotion")] = clip.rootMotion;
-        clips.append(entry);
-    }
-    obj[QStringLiteral("clips")] = clips;
-
-    QJsonObject defaults;
-    defaults[QStringLiteral("activeClip")] = def.defaultClip;
-    obj[QStringLiteral("defaults")] = defaults;
-
+    Value locomotion;
     if (def.hasLocomotion) {
-        QJsonObject loco;
-        QJsonObject roles;
+        Value::Object roles;
         for (int i = 0; i < kClipRoleCount; ++i) {
             const auto role = ClipRole(i);
             if (def.locomotionRoles.has(role))
-                roles[QLatin1String(clipRoleName(role))] = def.locomotionRoles.get(role);
+                roles.emplace_back(clipRoleName(role), S(def.locomotionRoles.get(role)));
         }
-        loco[QStringLiteral("roles")] = roles;
-        loco[QStringLiteral("asset")] = locomotionAssetToJson(def.locomotion);
-        obj[QStringLiteral("locomotion")] = loco;
-    } else {
-        obj[QStringLiteral("locomotion")] = QJsonValue();
+        locomotion = Value(Value::Object{{"roles", Value(std::move(roles))},
+                                         {"asset", locomotionAssetToJson(def.locomotion)}});
     }
 
+    Value movement;
     if (def.hasMovement) {
         const auto &p = def.movement;
-        QJsonObject move;
-        move[QStringLiteral("walkSpeed")] = p.walkSpeed;
-        move[QStringLiteral("runSpeed")] = p.runSpeed;
-        move[QStringLiteral("maxAcceleration")] = p.maxAcceleration;
-        move[QStringLiteral("brakingDeceleration")] = p.brakingDeceleration;
-        move[QStringLiteral("groundFriction")] = p.groundFriction;
-        move[QStringLiteral("jumpVelocity")] = p.jumpVelocity;
-        move[QStringLiteral("jumpCount")] = p.jumpCount;
-        move[QStringLiteral("coyoteTime")] = p.coyoteTime;
-        move[QStringLiteral("jumpReArm")] = p.jumpReArm;
-        move[QStringLiteral("airControl")] = p.airControl;
-        move[QStringLiteral("gravityScale")] = p.gravityScale;
-        move[QStringLiteral("maxStepHeight")] = p.maxStepHeight;
-        move[QStringLiteral("walkableFloorAngle")] = p.walkableFloorAngle;
-        move[QStringLiteral("orientRotationToMovement")] = p.orientRotationToMovement;
-        move[QStringLiteral("rotationRate")] = p.rotationRate;
-        move[QStringLiteral("capsuleAuto")] = p.capsuleAuto;
-        move[QStringLiteral("capsuleRadius")] = p.capsuleRadius;
-        move[QStringLiteral("capsuleHeight")] = p.capsuleHeight;
-        obj[QStringLiteral("movement")] = move;
-    } else {
-        obj[QStringLiteral("movement")] = QJsonValue();
+        const auto F = [](float f) { return Value(double(f)); };
+        movement = Value(Value::Object{
+            {"walkSpeed", F(p.walkSpeed)}, {"runSpeed", F(p.runSpeed)},
+            {"maxAcceleration", F(p.maxAcceleration)}, {"brakingDeceleration", F(p.brakingDeceleration)},
+            {"groundFriction", F(p.groundFriction)}, {"jumpVelocity", F(p.jumpVelocity)},
+            {"jumpCount", Value(p.jumpCount)}, {"coyoteTime", F(p.coyoteTime)}, {"jumpReArm", F(p.jumpReArm)},
+            {"airControl", F(p.airControl)}, {"gravityScale", F(p.gravityScale)},
+            {"maxStepHeight", F(p.maxStepHeight)}, {"walkableFloorAngle", F(p.walkableFloorAngle)},
+            {"orientRotationToMovement", Value(p.orientRotationToMovement)}, {"rotationRate", F(p.rotationRate)},
+            {"capsuleAuto", Value(p.capsuleAuto)}, {"capsuleRadius", F(p.capsuleRadius)},
+            {"capsuleHeight", F(p.capsuleHeight)}});
     }
 
-    obj[QStringLiteral("sockets")] = def.hasSockets ? QJsonValue(def.sockets) : QJsonValue();
-    obj[QStringLiteral("blendshapes")] =
-        def.hasBlendshapes ? QJsonValue(def.blendshapes) : QJsonValue();
-    return obj;
+    return Value(Value::Object{
+        {"format", Value("jah-avatar")},
+        {"version", Value(AvatarDefinition::kFormatVersion)},
+        {"name", S(def.name)},
+        {"model", Value(Value::Object{{"asset", S(def.modelAsset)}})},
+        {"rig", Value(Value::Object{{"rigId", S(def.rig.rigId)}, {"bones", Value(def.rig.bones)},
+                                    {"boneNames", Value(std::move(boneNames))}, {"unitScale", unitScale}})},
+        {"clips", Value(std::move(clips))},
+        {"defaults", Value(Value::Object{{"activeClip", S(def.defaultClip)}})},
+        {"locomotion", locomotion},
+        {"movement", movement},
+        {"sockets", def.hasSockets ? def.sockets : Value()},
+        {"blendshapes", def.hasBlendshapes ? def.blendshapes : Value()}});
 }
 
-bool avatarDefinitionFromJson(const QJsonObject &obj, AvatarDefinition &out, QString *error)
+bool avatarDefinitionFromJson(const Value &obj, AvatarDefinition &out, QString *error)
 {
     const auto refuse = [&](const QString &message) {
         if (error) *error = message;
         return false;
     };
+    // A member that is absent or of another kind reads as QJsonValue's default did (valueshapes.h).
+    const auto Q = [](const Value &o, const char *key) { return QString::fromStdString(stringOr(o, key)); };
 
-    const QString format = obj.value(QStringLiteral("format")).toString();
+    const QString format = Q(obj, "format");
     if (format != QStringLiteral("jah-avatar"))
         return refuse(QStringLiteral("not an avatar definition: format is '%1', expected "
                                      "'jah-avatar'").arg(format));
-    const int version = obj.value(QStringLiteral("version")).toInt();
+    const int version = intOr(obj, "version", 0);
     // FORWARD refusal, not a silent partial read: a v2 file this build cannot
     // understand must say so rather than load as an avatar missing whatever v2
     // added.
@@ -141,32 +122,32 @@ bool avatarDefinitionFromJson(const QJsonObject &obj, AvatarDefinition &out, QSt
                           .arg(version).arg(AvatarDefinition::kFormatVersion));
 
     AvatarDefinition def;
-    def.name = obj.value(QStringLiteral("name")).toString();
-    def.modelAsset = obj.value(QStringLiteral("model")).toObject()
-                         .value(QStringLiteral("asset")).toString();
+    def.name = Q(obj, "name");
+    def.modelAsset = Q(obj["model"], "asset");
     if (def.modelAsset.isEmpty())
         return refuse(QStringLiteral("the avatar definition names no model asset"));
 
-    const QJsonObject rig = obj.value(QStringLiteral("rig")).toObject();
-    def.rig.rigId = rig.value(QStringLiteral("rigId")).toString();
-    def.rig.bones = rig.value(QStringLiteral("bones")).toInt();
-    for (const auto &v : rig.value(QStringLiteral("boneNames")).toArray())
-        def.rig.boneNames.append(v.toString());
-    const QJsonValue unitScale = rig.value(QStringLiteral("unitScale"));
-    if (unitScale.isDouble()) {
+    const Value &rig = obj["rig"];
+    def.rig.rigId = Q(rig, "rigId");
+    def.rig.bones = intOr(rig, "bones", 0);
+    const Value boneNamesIn = arrayOr(rig, "boneNames");   // bound: a temporary's asArray() would not outlive the loop
+    for (const Value &v : boneNamesIn.asArray())
+        def.rig.boneNames.append(v.kind() == Kind::String ? QString::fromStdString(v.asString()) : QString());
+    const Value &unitScale = rig["unitScale"];
+    if (unitScale.kind() == Kind::Number || unitScale.kind() == Kind::Int) {
         def.rig.hasUnitScale = true;
-        def.rig.unitScale = unitScale.toDouble();
+        def.rig.unitScale = unitScale.asNumber();
     }
 
     QSet<QString> names;
-    for (const auto &v : obj.value(QStringLiteral("clips")).toArray()) {
-        const QJsonObject entry = v.toObject();
+    const Value clipsIn = arrayOr(obj, "clips");   // bound: a temporary's asArray() would not outlive the loop
+    for (const Value &entry : clipsIn.asArray()) {
         AvatarClipEntry clip;
-        clip.asset = entry.value(QStringLiteral("asset")).toString();
-        clip.rawName = entry.value(QStringLiteral("rawName")).toString();
-        clip.name = entry.value(QStringLiteral("name")).toString();
-        clip.looping = entry.value(QStringLiteral("looping")).toBool(true);
-        clip.rootMotion = entry.value(QStringLiteral("rootMotion")).toBool(false);
+        clip.asset = Q(entry, "asset");
+        clip.rawName = Q(entry, "rawName");
+        clip.name = Q(entry, "name");
+        clip.looping = boolOr(entry, "looping", true);
+        clip.rootMotion = boolOr(entry, "rootMotion", false);
         if (clip.name.isEmpty())
             return refuse(QStringLiteral("a clip entry has no name"));
         if (clip.asset.isEmpty())
@@ -180,66 +161,66 @@ bool avatarDefinitionFromJson(const QJsonObject &obj, AvatarDefinition &out, QSt
         def.clips.append(clip);
     }
 
-    def.defaultClip = obj.value(QStringLiteral("defaults")).toObject()
-                          .value(QStringLiteral("activeClip")).toString();
+    def.defaultClip = Q(obj["defaults"], "activeClip");
     if (!def.defaultClip.isEmpty() && !names.contains(def.defaultClip))
         return refuse(QStringLiteral("the default clip '%1' is not one of this avatar's clips")
                           .arg(def.defaultClip));
 
-    const QJsonValue loco = obj.value(QStringLiteral("locomotion"));
-    if (loco.isObject()) {
-        const QJsonObject locoObj = loco.toObject();
+    const Value &loco = obj["locomotion"];
+    if (loco.kind() == Kind::Object) {
         QString locoError;
-        if (locoObj.contains(QStringLiteral("asset"))
-            && !locomotionAssetFromJson(locoObj.value(QStringLiteral("asset")).toObject(),
-                                        def.locomotion, &locoError))
+        if (loco.find("asset")
+            && !locomotionAssetFromJson(objectOr(loco, "asset"), def.locomotion, &locoError))
             return refuse(QStringLiteral("the locomotion asset is not readable: %1").arg(locoError));
-        const QJsonObject roles = locoObj.value(QStringLiteral("roles")).toObject();
-        for (auto it = roles.constBegin(); it != roles.constEnd(); ++it) {
+        // In the order a QJsonObject held them (sorted by name): the first unknown role is the one named.
+        const Value roles = objectOr(loco, "roles");
+        std::vector<const Value::Member *> sorted;
+        for (const Value::Member &m : roles.asObject()) sorted.push_back(&m);
+        std::sort(sorted.begin(), sorted.end(), [](const Value::Member *a, const Value::Member *b) {
+            return QString::fromStdString(a->first) < QString::fromStdString(b->first);
+        });
+        for (const Value::Member *m : sorted) {
             ClipRole role;
-            if (!clipRoleFromName(it.key(), role))
-                return refuse(QStringLiteral("'%1' is not a clip role").arg(it.key()));
-            def.locomotionRoles.set(role, it.value().toString());
+            const QString key = QString::fromStdString(m->first);
+            if (!clipRoleFromName(key, role))
+                return refuse(QStringLiteral("'%1' is not a clip role").arg(key));
+            def.locomotionRoles.set(role, m->second.kind() == Kind::String ? QString::fromStdString(m->second.asString())
+                                                                           : QString());
         }
         def.hasLocomotion = true;
     }
 
-    const QJsonValue move = obj.value(QStringLiteral("movement"));
-    if (move.isObject()) {
-        const QJsonObject m = move.toObject();
+    const Value &m = obj["movement"];
+    if (m.kind() == Kind::Object) {
         AvatarMovementParams p;
-        const auto f = [&m](const char *key, float fallback) {
-            const QJsonValue v = m.value(QLatin1String(key));
-            return v.isDouble() ? float(v.toDouble()) : fallback;
-        };
+        const auto f = [&m](const char *key, float fallback) { return float(numberOr(m, key, fallback)); };
         p.walkSpeed = f("walkSpeed", p.walkSpeed);
         p.runSpeed = f("runSpeed", p.runSpeed);
         p.maxAcceleration = f("maxAcceleration", p.maxAcceleration);
         p.brakingDeceleration = f("brakingDeceleration", p.brakingDeceleration);
         p.groundFriction = f("groundFriction", p.groundFriction);
         p.jumpVelocity = f("jumpVelocity", p.jumpVelocity);
-        p.jumpCount = m.value(QStringLiteral("jumpCount")).toInt(p.jumpCount);
+        p.jumpCount = intOr(m, "jumpCount", p.jumpCount);
         p.coyoteTime = f("coyoteTime", p.coyoteTime);
         p.jumpReArm = f("jumpReArm", p.jumpReArm);
         p.airControl = f("airControl", p.airControl);
         p.gravityScale = f("gravityScale", p.gravityScale);
         p.maxStepHeight = f("maxStepHeight", p.maxStepHeight);
         p.walkableFloorAngle = f("walkableFloorAngle", p.walkableFloorAngle);
-        p.orientRotationToMovement =
-            m.value(QStringLiteral("orientRotationToMovement")).toBool(p.orientRotationToMovement);
+        p.orientRotationToMovement = boolOr(m, "orientRotationToMovement", p.orientRotationToMovement);
         p.rotationRate = f("rotationRate", p.rotationRate);
-        p.capsuleAuto = m.value(QStringLiteral("capsuleAuto")).toBool(p.capsuleAuto);
+        p.capsuleAuto = boolOr(m, "capsuleAuto", p.capsuleAuto);
         p.capsuleRadius = f("capsuleRadius", p.capsuleRadius);
         p.capsuleHeight = f("capsuleHeight", p.capsuleHeight);
         def.movement = p;
         def.hasMovement = true;
     }
 
-    const QJsonValue sockets = obj.value(QStringLiteral("sockets"));
-    if (sockets.isObject()) { def.sockets = sockets.toObject(); def.hasSockets = true; }
-    const QJsonValue blendshapes = obj.value(QStringLiteral("blendshapes"));
-    if (blendshapes.isObject()) {
-        def.blendshapes = blendshapes.toObject();
+    const Value &sockets = obj["sockets"];
+    if (sockets.kind() == Kind::Object) { def.sockets = sockets; def.hasSockets = true; }
+    const Value &blendshapes = obj["blendshapes"];
+    if (blendshapes.kind() == Kind::Object) {
+        def.blendshapes = blendshapes;
         def.hasBlendshapes = true;
     }
 

@@ -78,8 +78,8 @@ For more information see the LICENSE file
 #include <functional>
 
 #include "irisglfwd.h"
+#include "core/value.h"
 
-class QJsonObject;
 
 namespace iris
 {
@@ -266,10 +266,10 @@ const char *defaultLocomotionAssetName();
 // an int would freeze today's enum order (the rule giMode and playMode are
 // written under) and a human reading the scene JSON would learn nothing.
 
-QJsonObject locomotionAssetToJson(const LocomotionAsset &asset);
+Value locomotionAssetToJson(const LocomotionAsset &asset);
 /// Parses AND validates. On refusal `out` is untouched and `*error` names the
 /// offending transition and condition text (gate S5).
-bool locomotionAssetFromJson(const QJsonObject &obj, LocomotionAsset &out, QString *error);
+bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *error);
 
 /// clip name -> length in seconds, for one avatar wrapper. The FIRST node in
 /// the subtree (the wrapper included, depth-first) carrying skeletal animations

@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/scenegraph/scene.h"
-#include "document/qt/colorjson.h"
+#include "document/properties/valueshapes.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/decalnode.h"
@@ -147,35 +147,34 @@ CloudLayer CloudLayer::clamped(CloudLayer c)
     return c;
 }
 
-QJsonObject CloudLayer::toJson() const
+Value CloudLayer::toJson() const
 {
-    QJsonObject o;
-    o.insert("enabled",   enabled);
-    o.insert("coverage",  double(coverage));
-    o.insert("density",   double(density));
-    o.insert("speed",     double(speed));
-    o.insert("direction", double(direction));
-    o.insert("altitude",  double(altitude));
-    o.insert("shadow",    double(shadow));
-    if (!weatherMapGuid.isEmpty()) o.insert("weatherMap", weatherMapGuid);
-    return o;
+    Value::Object o{{"enabled",   Value(enabled)},
+                    {"coverage",  Value(double(coverage))},
+                    {"density",   Value(double(density))},
+                    {"speed",     Value(double(speed))},
+                    {"direction", Value(double(direction))},
+                    {"altitude",  Value(double(altitude))},
+                    {"shadow",    Value(double(shadow))}};
+    if (!weatherMapGuid.isEmpty()) o.emplace_back("weatherMap", Value(weatherMapGuid.toStdString()));
+    return Value(std::move(o));
 }
 
-CloudLayer CloudLayer::fromJson(const QJsonObject &o)
+CloudLayer CloudLayer::fromJson(const Value &o)
 {
     // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law):
     // every default below is the constructor's own value, read off a default
     // instance rather than spelled a second time.
     const CloudLayer d;
     CloudLayer c;
-    c.enabled   = o.value("enabled").toBool(d.enabled);
-    c.coverage  = float(o.value("coverage").toDouble(d.coverage));
-    c.density   = float(o.value("density").toDouble(d.density));
-    c.speed     = float(o.value("speed").toDouble(d.speed));
-    c.direction = float(o.value("direction").toDouble(d.direction));
-    c.altitude  = float(o.value("altitude").toDouble(d.altitude));
-    c.shadow    = float(o.value("shadow").toDouble(d.shadow));
-    c.weatherMapGuid = o.value("weatherMap").toString(d.weatherMapGuid);
+    c.enabled   = boolOr(o, "enabled", d.enabled);
+    c.coverage  = float(numberOr(o, "coverage", d.coverage));
+    c.density   = float(numberOr(o, "density", d.density));
+    c.speed     = float(numberOr(o, "speed", d.speed));
+    c.direction = float(numberOr(o, "direction", d.direction));
+    c.altitude  = float(numberOr(o, "altitude", d.altitude));
+    c.shadow    = float(numberOr(o, "shadow", d.shadow));
+    c.weatherMapGuid = QString::fromStdString(stringOr(o, "weatherMap", d.weatherMapGuid.toStdString()));
     return clamped(c);
 }
 
@@ -195,27 +194,25 @@ HeightFog HeightFog::clamped(HeightFog h)
     return h;
 }
 
-QJsonObject HeightFog::toJson() const
+Value HeightFog::toJson() const
 {
-    QJsonObject o;
-    o.insert("enabled",       enabled);
-    o.insert("density",       double(density));
-    o.insert("heightFalloff", double(heightFalloff));
-    o.insert("baseHeight",    double(baseHeight));
-    o.insert("startDistance", double(startDistance));
-    return o;
+    return Value(Value::Object{{"enabled",       Value(enabled)},
+                               {"density",       Value(double(density))},
+                               {"heightFalloff", Value(double(heightFalloff))},
+                               {"baseHeight",    Value(double(baseHeight))},
+                               {"startDistance", Value(double(startDistance))}});
 }
 
-HeightFog HeightFog::fromJson(const QJsonObject &o)
+HeightFog HeightFog::fromJson(const Value &o)
 {
     // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
     const HeightFog d;
     HeightFog h;
-    h.enabled       = o.value("enabled").toBool(d.enabled);
-    h.density       = float(o.value("density").toDouble(d.density));
-    h.heightFalloff = float(o.value("heightFalloff").toDouble(d.heightFalloff));
-    h.baseHeight    = float(o.value("baseHeight").toDouble(d.baseHeight));
-    h.startDistance = float(o.value("startDistance").toDouble(d.startDistance));
+    h.enabled       = boolOr(o, "enabled", d.enabled);
+    h.density       = float(numberOr(o, "density", d.density));
+    h.heightFalloff = float(numberOr(o, "heightFalloff", d.heightFalloff));
+    h.baseHeight    = float(numberOr(o, "baseHeight", d.baseHeight));
+    h.startDistance = float(numberOr(o, "startDistance", d.startDistance));
     return clamped(h);
 }
 
@@ -248,24 +245,22 @@ bool SunContact::resolutionFromName(const QString &name, SunContactResolution &o
 	return false;
 }
 
-QJsonObject SunContact::toJson() const
+Value SunContact::toJson() const
 {
-	QJsonObject o;
-	o.insert("enabled", enabled);
-	o.insert("range", double(range));
-	o.insert("resolution", QString::fromLatin1(resolutionName(resolution)));
-	return o;
+	return Value(Value::Object{{"enabled", Value(enabled)},
+	                           {"range", Value(double(range))},
+	                           {"resolution", Value(resolutionName(resolution))}});
 }
 
-SunContact SunContact::fromJson(const QJsonObject &o)
+SunContact SunContact::fromJson(const Value &o)
 {
 	// AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults law).
 	const SunContact d;
 	SunContact c;
-	c.enabled = o.value("enabled").toBool(d.enabled);
-	c.range = float(o.value("range").toDouble(d.range));
+	c.enabled = boolOr(o, "enabled", d.enabled);
+	c.range = float(numberOr(o, "range", d.range));
 	SunContactResolution r = d.resolution;
-	if (resolutionFromName(o.value("resolution").toString(), r)) c.resolution = r;
+	if (resolutionFromName(QString::fromStdString(stringOr(o, "resolution")), r)) c.resolution = r;
 	return clamped(c);
 }
 
@@ -282,29 +277,27 @@ SkyRealistic Scene::clampSkyRealistic(SkyRealistic r)
     return r;
 }
 
-QJsonObject Scene::skyRealisticJson(const SkyRealistic &r)
+Value Scene::skyRealisticJson(const SkyRealistic &r)
 {
-    QJsonObject o;
-    o.insert("sunHaze",       double(r.sunHaze));
-    o.insert("aerialScale",   double(r.aerialScale));
-    o.insert("skyBrightness", double(r.skyBrightness));
-    o.insert("groundAlbedo",  double(r.groundAlbedo));
-    o.insert("rayleighScale", double(r.rayleighScale));
-    o.insert("ozone",         r.ozone);
-    return o;
+    return Value(Value::Object{{"sunHaze",       Value(double(r.sunHaze))},
+                               {"aerialScale",   Value(double(r.aerialScale))},
+                               {"skyBrightness", Value(double(r.skyBrightness))},
+                               {"groundAlbedo",  Value(double(r.groundAlbedo))},
+                               {"rayleighScale", Value(double(r.rayleighScale))},
+                               {"ozone",         Value(r.ozone)}});
 }
 
-SkyRealistic Scene::skyRealisticFromJson(const QJsonObject &o)
+SkyRealistic Scene::skyRealisticFromJson(const Value &o)
 {
     // AN ABSENT KEY MEANS WHAT A NEW SCENE MEANS (the reader-defaults trap).
     const SkyRealistic d = SkyRealistic::defaults();
     SkyRealistic r = d;
-    r.sunHaze       = float(o.value("sunHaze").toDouble(d.sunHaze));
-    r.aerialScale   = float(o.value("aerialScale").toDouble(d.aerialScale));
-    r.skyBrightness = float(o.value("skyBrightness").toDouble(d.skyBrightness));
-    r.groundAlbedo  = float(o.value("groundAlbedo").toDouble(d.groundAlbedo));
-    r.rayleighScale = float(o.value("rayleighScale").toDouble(d.rayleighScale));
-    r.ozone         = o.value("ozone").toBool(d.ozone);
+    r.sunHaze       = float(numberOr(o, "sunHaze", d.sunHaze));
+    r.aerialScale   = float(numberOr(o, "aerialScale", d.aerialScale));
+    r.skyBrightness = float(numberOr(o, "skyBrightness", d.skyBrightness));
+    r.groundAlbedo  = float(numberOr(o, "groundAlbedo", d.groundAlbedo));
+    r.rayleighScale = float(numberOr(o, "rayleighScale", d.rayleighScale));
+    r.ozone         = boolOr(o, "ozone", d.ozone);
     return r;
 }
 
@@ -318,7 +311,7 @@ bool Scene::skyRealisticInSync() const
 {
     // Through the JSON both ways, so the comparison is of the two things that
     // actually exist rather than of six floats somebody remembered to list.
-    const QJsonObject mine = skyRealisticJson(skyRealistic);
+    const Value mine = skyRealisticJson(skyRealistic);
     const auto it = skyData.constFind(QStringLiteral("Realistic"));
     if (it == skyData.constEnd()) return false;
     return skyRealisticJson(skyRealisticFromJson(*it)) == mine;
@@ -482,7 +475,7 @@ Scene::Scene()
     // new scenes to Epic — that would turn VCT GI, 4x MSAA and a 4096 shadow
     // atlas on for every scene and every test, so it is left to the owner.
     worldMode = -1;
-    worldOverrides = QJsonObject();
+    worldOverrides = Value(Value::Object{});
     folders.clear();
 
     // selection outline: width in Preferences units (SceneMirror maps it to the
@@ -509,22 +502,21 @@ Scene::Scene()
 
 	skyGuid = QString::fromStdString(iris::newGuid());
 
-	QJsonObject singleColourBlock;
-	singleColourBlock.insert("skyColor", iris::colorToJson(skyColor));
+	// The colours in the colour's Value shape (valueshapes.h colourToValue: the file codec's four numbers).
+	const Value singleColourBlock(Value::Object{{"skyColor", colourToValue(skyColor)}});
 
-	QJsonObject gradientBlock;
-	gradientBlock.insert("gradientTop", iris::colorToJson(SrgbColor(255, 146, 138)));
-	gradientBlock.insert("gradientMid", iris::colorToJson(SrgbColor(255, 255, 255)));
-	gradientBlock.insert("gradientBot", iris::colorToJson(SrgbColor(64, 128, 255)));
-	gradientBlock.insert("gradientOffset", .73f);
+	const Value gradientBlock(Value::Object{{"gradientTop", colourToValue(SrgbColor(255, 146, 138))},
+	                                        {"gradientMid", colourToValue(SrgbColor(255, 255, 255))},
+	                                        {"gradientBot", colourToValue(SrgbColor(64, 128, 255))},
+	                                        {"gradientOffset", Value(double(.73f))}});
 
 	skyData.insert("SingleColor", singleColourBlock);
 	// THROUGH THE ONE PATH, like every other write of these dials: the typed
 	// fields and the JSON block cannot start out disagreeing either.
 	setSkyRealistic(skyRealistic);
 	skyData.insert("Gradient", gradientBlock);
-	skyData.insert("Equirectangular", QJsonObject());
-	skyData.insert("Cubemap", QJsonObject());
+	skyData.insert("Equirectangular", Value(Value::Object{}));
+	skyData.insert("Cubemap", Value(Value::Object{}));
 
     // end sky init
 

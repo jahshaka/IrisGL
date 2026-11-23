@@ -11,8 +11,7 @@ For more information see the LICENSE file
 
 #include "document/animation/locomotion.h"
 
-#include <QJsonArray>
-#include <QJsonObject>
+#include "document/properties/valueshapes.h"
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
@@ -450,92 +449,81 @@ LocomotionAsset buildDefaultLocomotionAsset(const ClipRoles &roles, float walkSp
 // and `avatar.setLocomotionAsset` can never drift apart (gate S6 covers both
 // paths because they are the same code).
 
-QJsonObject locomotionAssetToJson(const LocomotionAsset &asset)
+Value locomotionAssetToJson(const LocomotionAsset &asset)
 {
-    QJsonObject out;
-    out[QStringLiteral("name")] = asset.name;
-    out[QStringLiteral("entry")] = asset.entry;
-
-    QJsonArray states;
+    const auto S = [](const QString &q) { return Value(q.toStdString()); };
+    Value::Array states;
     for (const auto &s : asset.states) {
-        QJsonObject o;
-        o[QStringLiteral("name")] = s.name;
-        o[QStringLiteral("loop")] = s.loop;
-        QJsonObject src;
+        Value::Object src;
         if (s.kind == LocomotionSourceKind::Clip) {
-            src[QStringLiteral("kind")] = QStringLiteral("clip");
-            src[QStringLiteral("clip")] = s.clip;
-            src[QStringLiteral("speed")] = double(s.speed);
+            src.emplace_back("kind", Value("clip"));
+            src.emplace_back("clip", S(s.clip));
+            src.emplace_back("speed", Value(double(s.speed)));
         } else {
-            src[QStringLiteral("kind")] = QStringLiteral("blendspace");
-            src[QStringLiteral("syncClips")] = s.space.syncClips;
-            QJsonArray samples;
-            for (const auto &sm : s.space.samples) {
-                QJsonObject so;
-                so[QStringLiteral("clip")] = sm.clip;
-                so[QStringLiteral("position")] = double(sm.position);
-                so[QStringLiteral("authoredSpeed")] = double(sm.authoredSpeed);
-                samples.append(so);
-            }
-            src[QStringLiteral("samples")] = samples;
+            src.emplace_back("kind", Value("blendspace"));
+            src.emplace_back("syncClips", Value(s.space.syncClips));
+            Value::Array samples;
+            for (const auto &sm : s.space.samples)
+                samples.push_back(Value(Value::Object{{"clip", S(sm.clip)},
+                                                      {"position", Value(double(sm.position))},
+                                                      {"authoredSpeed", Value(double(sm.authoredSpeed))}}));
+            src.emplace_back("samples", Value(std::move(samples)));
         }
-        o[QStringLiteral("source")] = src;
-        states.append(o);
+        states.push_back(Value(Value::Object{{"name", S(s.name)}, {"loop", Value(s.loop)},
+                                             {"source", Value(std::move(src))}}));
     }
-    out[QStringLiteral("states")] = states;
 
-    QJsonArray transitions;
+    Value::Array transitions;
     for (const auto &t : asset.transitions) {
-        QJsonObject o;
-        o[QStringLiteral("from")] = t.from;
-        o[QStringLiteral("to")] = t.to;
         // The CANONICAL TEXT, not the enum: a file that stored an int would
         // freeze today's enum order, and a human reading the scene JSON would
         // learn nothing. `text()` round-trips through `parse` byte for byte.
-        o[QStringLiteral("condition")] = t.condition.text();
-        o[QStringLiteral("blendDuration")] = double(t.blendDuration);
-        transitions.append(o);
+        transitions.push_back(Value(Value::Object{{"from", S(t.from)}, {"to", S(t.to)},
+                                                  {"condition", S(t.condition.text())},
+                                                  {"blendDuration", Value(double(t.blendDuration))}}));
     }
-    out[QStringLiteral("transitions")] = transitions;
-    return out;
+    return Value(Value::Object{{"name", S(asset.name)}, {"entry", S(asset.entry)},
+                               {"states", Value(std::move(states))}, {"transitions", Value(std::move(transitions))}});
 }
 
-bool locomotionAssetFromJson(const QJsonObject &obj, LocomotionAsset &out, QString *error)
+bool locomotionAssetFromJson(const Value &obj, LocomotionAsset &out, QString *error)
 {
     auto fail = [&](const QString &msg) {
         if (error) *error = msg;
         return false;
     };
+    // A member that is absent or of another kind reads as QJsonValue's default did (valueshapes.h).
+    const auto Q = [](const Value &o, const char *key, const std::string &d = std::string()) {
+        return QString::fromStdString(stringOr(o, key, d));
+    };
 
     LocomotionAsset a;
-    a.name = obj.value(QStringLiteral("name")).toString(
-        QLatin1String(defaultLocomotionAssetName()));
-    a.entry = obj.value(QStringLiteral("entry")).toString();
+    a.name = Q(obj, "name", defaultLocomotionAssetName());
+    a.entry = Q(obj, "entry");
 
-    const QJsonArray states = obj.value(QStringLiteral("states")).toArray();
-    for (int i = 0; i < states.size(); ++i) {
-        const QJsonObject o = states.at(i).toObject();
+    const Value statesIn = arrayOr(obj, "states");   // bound: a temporary's asArray() would not outlive the loop
+
+    for (const Value &o : statesIn.asArray()) {
         LocomotionStateDef s;
-        s.name = o.value(QStringLiteral("name")).toString();
-        s.loop = o.value(QStringLiteral("loop")).toBool(true);
-        const QJsonObject src = o.value(QStringLiteral("source")).toObject();
-        const QString kind = src.value(QStringLiteral("kind")).toString().toLower();
+        s.name = Q(o, "name");
+        s.loop = boolOr(o, "loop", true);
+        const Value &src = o["source"];
+        const QString kind = Q(src, "kind").toLower();
         if (kind == QLatin1String("blendspace")) {
             s.kind = LocomotionSourceKind::BlendSpace;
-            s.space.syncClips = src.value(QStringLiteral("syncClips")).toBool(true);
-            const QJsonArray samples = src.value(QStringLiteral("samples")).toArray();
-            for (const auto &sv : samples) {
-                const QJsonObject so = sv.toObject();
+            s.space.syncClips = boolOr(src, "syncClips", true);
+            const Value samplesIn = arrayOr(src, "samples");   // bound: a temporary's asArray() would not outlive the loop
+            for (const Value &so : samplesIn.asArray()) {
                 LocomotionBlendSample sm;
-                sm.clip = so.value(QStringLiteral("clip")).toString();
-                sm.position = float(so.value(QStringLiteral("position")).toDouble());
-                sm.authoredSpeed = float(so.value(QStringLiteral("authoredSpeed")).toDouble());
+                sm.clip = Q(so, "clip");
+                sm.position = float(numberOr(so, "position", 0.0));
+                sm.authoredSpeed = float(numberOr(so, "authoredSpeed", 0.0));
                 s.space.samples.append(sm);
             }
         } else if (kind == QLatin1String("clip") || kind.isEmpty()) {
             s.kind = LocomotionSourceKind::Clip;
-            s.clip = src.value(QStringLiteral("clip")).toString();
-            s.speed = float(src.value(QStringLiteral("speed")).toDouble(1.0));
+            s.clip = Q(src, "clip");
+            s.speed = float(numberOr(src, "speed", 1.0));
         } else {
             return fail(QStringLiteral("state '%1': unknown source kind '%2' (known: clip, "
                                        "blendspace)").arg(s.name, kind));
@@ -543,16 +531,15 @@ bool locomotionAssetFromJson(const QJsonObject &obj, LocomotionAsset &out, QStri
         a.states.append(s);
     }
 
-    const QJsonArray transitions = obj.value(QStringLiteral("transitions")).toArray();
-    for (int i = 0; i < transitions.size(); ++i) {
-        const QJsonObject o = transitions.at(i).toObject();
+    const Value transitions = arrayOr(obj, "transitions");
+    for (int i = 0; i < int(transitions.asArray().size()); ++i) {
+        const Value &o = transitions.asArray()[size_t(i)];
         LocomotionTransitionDef t;
-        t.from = o.value(QStringLiteral("from")).toString();
-        t.to = o.value(QStringLiteral("to")).toString();
-        t.blendDuration = float(o.value(QStringLiteral("blendDuration")).toDouble(0.15));
+        t.from = Q(o, "from");
+        t.to = Q(o, "to");
+        t.blendDuration = float(numberOr(o, "blendDuration", 0.15));
         QString err;
-        if (!LocomotionCondition::parse(o.value(QStringLiteral("condition")).toString(),
-                                        t.condition, &err))
+        if (!LocomotionCondition::parse(Q(o, "condition"), t.condition, &err))
             return fail(QStringLiteral("transition %1 (%2 -> %3): %4")
                             .arg(i).arg(t.from, t.to, err));
         a.transitions.append(t);

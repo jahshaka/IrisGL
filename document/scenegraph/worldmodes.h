@@ -43,7 +43,6 @@ For more information see the LICENSE file
 // Shadows) must route through setRowValue() or the override bookkeeping goes
 // stale — that is the bug this design invites, and the one the tests pin.
 
-#include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <QVector>
