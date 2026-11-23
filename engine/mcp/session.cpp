@@ -112,9 +112,11 @@ Value toolList()
     tools.push_back(object(
         {{"name", Value("picture")},
          {"title", Value("See pictures")},
-         {"description", Value("Return existing picture handles (from engine.view.readPixels) as PNG images, one per handle "
-                               "(two eyes = two handles, in order). Draws no frame and waits for nothing. A radiance handle "
-                               "is not a picture; at most 1 MiB of PNG each, 2 MiB in all.")},
+         {"description", Value("Return existing picture handles (from engine.view.readPixels) as PNG images, one per handle, "
+                               "in order (a layered view's picture holds both eyes side by side in one image). Draws no "
+                               "frame and waits for nothing. A radiance handle is not a picture; at most 1 MiB of PNG each, "
+                               "2 MiB in all. An opaque picture's PNG may carry no alpha channel: its alpha is 255 by the "
+                               "PNG's own rule.")},
          {"inputSchema",
           object({{"type", Value("object")},
                   {"properties", object({{"pictures", object({{"type", Value("array")},
@@ -436,7 +438,11 @@ Value Session::pictureTool(const Value &args, bool &isError)
         const Result r = mEngine->callNamed("engine.picture.png", std::move(named));
         if (r.status != Status::Ok) return fail(at + r.message);
         std::string text;
-        if (!script::toJson(r.value["png"], text, why)) return fail(at + why);   // the 1 MiB, in the codec's words
+        if (!script::toJson(r.value["png"], text, why)) {   // the CODEC's writer decides; the tool names what it carried
+            const std::size_t n = r.value["png"].kind() == Kind::Bytes ? r.value["png"].asBytes().size() : 0;
+            return fail(at + (n > script::kJsonBytesCap ? "its PNG is " + std::to_string(n) + " bytes: over the 1 MiB (" +
+                                                              std::to_string(script::kJsonBytesCap) + ") cap" : why));
+        }
         if (text.size() < kHead.size() + kTail.size() || text.compare(0, kHead.size(), kHead) != 0 ||
             text.compare(text.size() - kTail.size(), kTail.size(), kTail) != 0)
             return fail(at + "engine.picture.png answered no bytes (its png is not the codec's {\"$bytes\": ...} form)");
