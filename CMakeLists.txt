@@ -335,7 +335,6 @@ set(SRCS
     document/animation/keyframeset.cpp
     import/materialhelper.cpp
     document/scenegraph/particlesystemnode.cpp
-    core/math/mathhelper.cpp
     document/materials/pbrmaterial.cpp
     document/animation/propertyanim.cpp
     document/scenegraph/lightnode.cpp

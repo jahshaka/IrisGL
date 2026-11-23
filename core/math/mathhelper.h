@@ -15,8 +15,8 @@ For more information see the LICENSE file
 #include "core/math/mat4.h"
 #include "core/math/trs.h"
 #include "core/math/quat.h"
+#include "core/math/scalar.h"
 #include "core/math/vec.h"
-#include <QtMath>
 
 namespace iris
 {
@@ -84,18 +84,18 @@ public:
         if (a <= EPILSON) {
             s = 0;
             t = f/e;
-            t = qBound(0.0f, t, 1.0f);
+            t = iris::bound(0.0f, t, 1.0f);
         } else {
             float c = iris::Vec3::dotProduct(d1, r);
             if (e <= EPILSON) {
                 t = 0;
-                s = qBound(0.0f, -c/a, 1.0f);
+                s = iris::bound(0.0f, -c/a, 1.0f);
             } else {
                 float b = iris::Vec3::dotProduct(d1, d2);
                 float denom = a*e - b*b;
 
                 if (denom != 0) {
-                    s = qBound(0.0f, (b*f - c*e)/denom, 1.0f);
+                    s = iris::bound(0.0f, (b*f - c*e)/denom, 1.0f);
                 } else {
                     s = 0;
                 }
@@ -104,10 +104,10 @@ public:
 
                 if (t < 0) {
                     t = 0;
-                    s = qBound(0.0f, -c/a, 1.0f);
+                    s = iris::bound(0.0f, -c/a, 1.0f);
                 } else if (t > 1) {
                     t = 1.0f;
-                    s = qBound(0.0f, (b-c)/a, 1.0f);
+                    s = iris::bound(0.0f, (b-c)/a, 1.0f);
                 }
             }
         }

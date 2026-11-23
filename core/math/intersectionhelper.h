@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #define INTERSECTIONHELPER_H
 
 #include "core/math/vec.h"
-#include <qmath.h>
+#include <cmath>
 #include "core/geometry/plane.h"
 
 namespace iris
@@ -50,7 +50,7 @@ public:
 
         if (discr < 0) return false;
 
-        t = -b -qSqrt(discr);
+        t = -b - std::sqrt(discr);
 
         if (t < 0) t = 0;
 
