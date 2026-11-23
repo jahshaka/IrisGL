@@ -401,11 +401,9 @@ void OgreScene::rebuildPlanar() {
     // Re-arm every reflector the document already has. A node whose mesh has
     // since stopped being plate-like simply fails to arm; it keeps its flag so
     // the document is not silently rewritten.
-    // (a failed arm is the reflector's state, never setPlanarReflections' error: TRUE LEAVES NO ERROR, as rederiveReflector)
-    const std::string before = mError;
     for (NodeId id : mReflectors) {
         auto it = mNodes.find(id);
-        if (it != mNodes.end() && !armReflector(id, it->second)) mError = before;
+        if (it != mNodes.end()) armReflector(id, it->second);
     }
 }
 
@@ -472,12 +470,7 @@ void OgreScene::disarmReflector(NodeId id, Node &n) {
 void OgreScene::rederiveReflector(NodeId id, Node &n) {
     if (!mReflectors.count(id)) return;
     disarmReflector(id, n);
-    // TRUE LEAVES NO ERROR (SCRIPT-IN-ENGINE-1 2e e1; the train's card, the lead's ruling): the callers are verbs that
-    // SUCCEED (setNodeFaceCull, setNodeMaterial) - a failed re-arm is the REFLECTOR's state (it stops reflecting: the
-    // active planes fall), never the verb's error, or the record route publishes it as a refusal at every sync; the
-    // reason is asked of setNodePlanarReflector, which refuses in its own words (attachMesh's restore, OgreMaterials.cpp)
-    const std::string before = mError;
-    if (!armReflector(id, n)) mError = before;
+    armReflector(id, n);   // a refusal leaves lastError() naming the reason
 }
 
 void OgreScene::disarmAllReflectors() {
