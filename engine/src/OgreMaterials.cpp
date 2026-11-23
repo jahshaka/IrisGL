@@ -1270,7 +1270,12 @@ bool OgreScene::attachMesh(NodeId id, MeshId meshId, MaterialId matId) {
     if (tit == mMaterials.end()) { mError = "attachMesh: unknown material"; return false; }
     JAH_TRY {
         Node &n = nit->second;
+        // A TRUE MEANS NO ERROR (SCRIPT-IN-ENGINE-1 2e e1, the audit's C2): the old item's detach can leave the error
+        // of an Ogre exception its helpers caught (disarmReflector, unshareFollower: JAH_CATCH(mError, )) - then the
+        // attach answers false in those words, never true with an error left
+        const std::string beforeDetach = mError;
         detachItem(id, n);
+        if (mError != beforeDetach) return false;
         // THE ITEM IS BORN IN ITS NODE'S CLASS (SCENEGRAPH_SPEC §6 rule 3):
         // SceneNode::attachObject THROWS when the object's static flag and the
         // node's disagree, and the document marks never-moving geometry

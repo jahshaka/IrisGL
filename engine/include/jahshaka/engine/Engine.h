@@ -788,8 +788,10 @@ public:
     /// The system rides on the node: it moves with it, hides with it, and
     /// removeNode frees it. False with lastError() set; never throws.
     /// A REFUSAL IS FINAL AND ATOMIC (SCRIPT-IN-ENGINE-1 2e e1): a colour ramp whose image is not there refuses the
-    /// call before anything of the system changes, and this VALUE is refused again - a host does not retry it, it
-    /// pushes again when its value changes. A ramp affector with no image path yet is accepted (dropped).
+    /// call before anything of the system changes, and it is refused again while the file is missing (no memo: each
+    /// call looks) - a host does not retry it, it pushes again when its value changes (the mirror pushes the emitter
+    /// once more with the ramp dropped: a missing ramp must not take the whole emitter down). A ramp affector with no
+    /// image path yet is accepted (dropped).
     virtual bool setParticleSystem(NodeId, const ParticleSystemDesc &) = 0;
     /// KEPT as the explicit counterpart of setParticleSystem: a node may stop
     /// being an emitter without being removed. Live particles vanish with it.
@@ -807,8 +809,10 @@ public:
     // shine down the node's -Y (the document's convention: identity = straight down).
     /// Creates or updates the node's light. A REFUSAL IS FINAL AND ATOMIC (SCRIPT-IN-ENGINE-1 2e e1): an IES profile
     /// that cannot be assigned (a spot or point light's file not there: lastError names it) refuses the call before
-    /// anything of the light changes, and this VALUE is refused again in the same words - a host does not retry it, it
-    /// pushes again when its value changes. A directional or area light reads no profile; an empty path is none.
+    /// anything of the light changes, and this VALUE is refused again in the same words (the node remembers the
+    /// failing path without looking again: another path, or a new node, is looked for afresh) - a host does not retry
+    /// it, it pushes again when its value changes (the mirror pushes the lamp once more with the profile dropped: the
+    /// lamp drawn, no lobe). A directional or area light reads no profile; an empty path is none.
     virtual bool        setLight(NodeId, const LightDesc &) = 0;
     /// KEPT as the explicit counterpart of setLight: a node may stop being a light
     /// without being removed (the document changes a node's type in place).
