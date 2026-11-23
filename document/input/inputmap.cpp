@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #include "document/input/inputmap.h"
 
 #include <QKeySequence>
-#include "document/qt/keyvaluestore.h"
+#include "document/input/keyvaluestore.h"
 #include <cmath>
 
 namespace iris {
@@ -234,34 +234,41 @@ QString InputMap::displayText(InputAction a) const
     return names.join(QStringLiteral(" / "));
 }
 
-QVariantMap InputMap::toVariantMap() const
+Value InputMap::toValue() const
 {
-    QVariantMap m;
+    Value::Object m;
     for (int i = 0; i < kInputActionCount; ++i) {
         const InputAction a = InputAction(i);
         const bool axis = typeOf(a) == InputActionType::Axis2D;
-        QStringList encoded;
+        Value::Array encoded;
         for (const auto &b : mBindings[i]) {
             const QString s = encodeKey(b, axis);
-            if (!s.isEmpty()) encoded << s;
+            if (!s.isEmpty()) encoded.push_back(Value(s.toStdString()));
         }
-        m.insert(actionName(a), encoded);
+        m.emplace_back(actionName(a).toStdString(), Value(std::move(encoded)));
     }
-    return m;
+    return Value(std::move(m));
 }
 
-bool InputMap::fromVariantMap(const QVariantMap &m)
+bool InputMap::fromValue(const Value &m)
 {
     bool understoodAny = false;
-    for (auto it = m.constBegin(); it != m.constEnd(); ++it) {
+    if (m.kind() != Kind::Object) return false;
+    for (const Value::Member &member : m.asObject()) {
         InputAction a;
-        if (!actionFromName(it.key(), a)) continue;   // tolerant: a future action
+        if (!actionFromName(QString::fromStdString(member.first), a)) continue;   // tolerant: a future action
         const bool axis = typeOf(a) == InputActionType::Axis2D;
         QVector<InputKeyBinding> keys;
-        const QStringList rows = it.value().toStringList();
-        for (const QString &row : rows) {
+        // The rows: an Array of Strings; ONE String is one row (a one-entry list the settings file hands back as a
+        // single string, which QVariant::toStringList read the same way).
+        std::vector<std::string> rows;
+        if (member.second.kind() == Kind::String) rows.push_back(member.second.asString());
+        if (member.second.kind() == Kind::Array)
+            for (const Value &row : member.second.asArray())
+                if (row.kind() == Kind::String) rows.push_back(row.asString());
+        for (const std::string &row : rows) {
             InputKeyBinding b;
-            if (decodeKey(row, axis, b)) keys.append(b);
+            if (decodeKey(QString::fromStdString(row), axis, b)) keys.append(b);
         }
         mBindings[int(a)] = keys;
         understoodAny = true;
@@ -271,26 +278,27 @@ bool InputMap::fromVariantMap(const QVariantMap &m)
 
 void InputMap::load(const KeyValueStore &settings)
 {
-    QVariantMap m;
+    Value::Object m;
     for (int i = 0; i < kInputActionCount; ++i) {
-        const QString key = QStringLiteral("input/") + actionName(InputAction(i));
-        if (!settings.contains(key)) continue;    // no row = keep the default
-        m.insert(actionName(InputAction(i)), settings.value(key).toStringList());
+        const std::string name = actionName(InputAction(i)).toStdString();
+        const std::optional<Value> row = settings.value("input/" + name);
+        if (!row) continue;                       // no row = keep the default
+        m.emplace_back(name, *row);
     }
-    if (!m.isEmpty()) fromVariantMap(m);
+    if (!m.empty()) fromValue(Value(std::move(m)));
 }
 
 void InputMap::save(KeyValueStore &settings) const
 {
-    const QVariantMap m = toVariantMap();
-    for (auto it = m.constBegin(); it != m.constEnd(); ++it)
-        settings.setValue(QStringLiteral("input/") + it.key(), it.value().toStringList());
+    const Value m = toValue();
+    for (const Value::Member &member : m.asObject())
+        settings.setValue("input/" + member.first, member.second);
 }
 
 void InputMap::clearPersisted(KeyValueStore &settings)
 {
     for (int i = 0; i < kInputActionCount; ++i)
-        settings.remove(QStringLiteral("input/") + actionName(InputAction(i)));
+        settings.remove("input/" + actionName(InputAction(i)).toStdString());
 }
 
 // ---------------------------------------------------------------------------

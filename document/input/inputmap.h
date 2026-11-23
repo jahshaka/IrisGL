@@ -37,11 +37,12 @@ For more information see the LICENSE file
 // window-scoped). Gameplay keys are held, combined and polled — they appear
 // in Preferences as read-only `addFixed` rows only so they are discoverable.
 
+#include "core/value.h"
+
 #include <QHash>
 #include <QSet>
 #include <QString>
 #include <QStringList>
-#include <QVariantMap>
 #include <QVector>
 
 namespace iris { class KeyValueStore; }
@@ -140,13 +141,14 @@ public:
     QString displayText(InputAction a) const;
 
     // ---- persistence ------------------------------------------------------
-    /// { "Move": ["W:0,1", "S:0,-1", …], "Jump": ["Space"], … }. Axis keys
+    /// { "Move": ["W:0,1", "S:0,-1", …], "Jump": ["Space"], … } as an iris::Value
+    /// Object of Arrays of Strings, the actions in their own order. Axis keys
     /// carry their contribution; button keys are the bare name.
-    QVariantMap toVariantMap() const;
+    Value toValue() const;
     /// Tolerant: an unknown action name or an unparseable key is SKIPPED, not
     /// an error — a settings file written by a future build must not brick the
     /// input layer. Returns false when nothing at all was understood.
-    bool fromVariantMap(const QVariantMap &m);
+    bool fromValue(const Value &m);
 
     /// jahsettings.ini "input/<Action>" — the same shape ShortcutRegistry uses
     /// for "shortcut/<id>". An action with no stored row keeps its default.

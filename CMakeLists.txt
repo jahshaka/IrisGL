@@ -380,7 +380,7 @@ set (HEADERS
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
-    document/qt/keyvaluestore.h
+    document/input/keyvaluestore.h
     core/threadbudget.h
     import/meshprewarm.h
     import/parsecensus.h
