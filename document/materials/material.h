@@ -135,9 +135,14 @@ public:
     std::uint32_t revision() const { return mRevision; }
     /// "Something in this material changed." Called by every setter below and
     /// by host code that writes a field by hand.
-    /// OUT OF LINE, both (NOQT-DOCUMENT-1 stage 6): sGlobalRevision is defined
-    /// in libIrisDocument ALONE - an inline read in the app made the linker give
-    /// the app its own copy (a copy relocation), a second definition.
+    /// OUT OF LINE, both (NOQT-DOCUMENT-1 stage 6): sGlobalRevision is touched
+    /// only inside libIrisDocument. An inline access from the app made the ELF
+    /// linker COPY it into the executable (a copy relocation): still one
+    /// instance while the library's own accesses go through its GOT (default
+    /// visibility, interposable) - two the day the library binds locally
+    /// (-fno-semantic-interposition, -Bsymbolic, protected visibility) or on
+    /// Windows, where an inline access needs the data imported. Out of line,
+    /// the count is ONE on every platform and every link mode.
     void touch();
     /// How many material writes this process has made, ever. Relaxed: the only
     /// requirement is that a change moves it, never that it orders anything.

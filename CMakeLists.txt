@@ -296,10 +296,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE "${_jah_outer_pic}")
 
 # THE Qt-FREE CORE (NOQT-CORE-1): irisgl/core's sources that no longer need Qt build into IrisCore (core/CMakeLists.txt)
 add_subdirectory(core)
+# THE Qt-FREE DOCUMENT (NOQT-DOCUMENT-1 stage 6): the scene graph and its assets build into IrisDocument
+# (document/CMakeLists.txt), after _jah_bake_fp above (its physics TUs read it); IrisGL links it PUBLIC.
+add_subdirectory(document)
 
 set(SRCS
-    document/assets/mesh.cpp
-    document/scenegraph/meshnode.cpp
     import/meshprewarm.cpp
     import/parsecensus.cpp
     import/meshbake.cpp
@@ -321,66 +322,13 @@ set(SRCS
     import/nodeclips.cpp
     import/modelsceneinfo.cpp
     import/clipfileinfo.cpp
-    document/scenegraph/cameranode.cpp
-    document/scenegraph/cameralens.cpp
-    document/assets/livetextures.cpp
-    document/assets/shippedmeshes.cpp
-    document/assets/texture2d.cpp
-    document/materials/material.cpp
-    document/assets/vertexlayout.cpp
-    document/scenegraph/shadowmap.cpp
-    document/animation/animation.cpp
-    document/animation/keyframeset.cpp
     import/materialhelper.cpp
-    document/scenegraph/particlesystemnode.cpp
-    document/materials/pbrmaterial.cpp
-    document/animation/propertyanim.cpp
-    document/scenegraph/lightnode.cpp
-    document/scenegraph/decalnode.cpp
-    document/animation/skeletalanimation.cpp
-    document/animation/clipextractor.cpp
-    document/animation/locomotion.cpp
-    document/assets/skeleton.cpp
-    document/assets/avatardefinition.cpp
-    document/scenegraph/looks.cpp
-    document/scenegraph/scene.cpp
-    document/scenegraph/worldmodes.cpp
-    document/scenegraph/skybake.cpp
-    document/scenegraph/scenenode.cpp
-    document/scenegraph/nodegraph.cpp
-    document/scenegraph/scenepicking.cpp
-    document/scenegraph/socket.cpp
-    document/assets/linemeshbuilder.cpp
-    document/assets/shapehelper.cpp
-    document/physics/avatarmovement.cpp
-    document/physics/environment.cpp
-    document/physics/physicshelper.cpp
-    document/input/inputmap.cpp
-    document/input/possession.cpp
 
 )
 
 set (HEADERS
-    document/animation/keyframeanimation.h
-    document/scenegraph/lightnode.h
-    document/scenegraph/decalnode.h
-    document/assets/livetextures.h
-    document/assets/shippedmeshes.h
-    document/assets/image.h
-    document/srgbcolor.h
     document/qt/colour.h
-    document/assets/texture2d.h
-    document/assets/texture.h
-    document/scenegraph/shadowmap.h
-    document/assets/mesh.h
-    document/materials/material.h
-    document/scenegraph/cameranode.h
-    document/scenegraph/cameralens.h
-    document/scenegraph/meshnode.h
-    document/assets/vertexlayout.h
-    document/assets/vertexbuffer.h
     core/viewport.h
-    document/input/keyvaluestore.h
     core/threadbudget.h
     import/meshprewarm.h
     import/parsecensus.h
@@ -408,40 +356,10 @@ set (HEADERS
     irisglfwd.h
     irisgl.h
     core/math/intersectionhelper.h
-    document/animation/keyframeset.h
     core/math/bezierhelper.h
-    document/animation/animation.h
     import/materialhelper.h
-    document/scenegraph/particlesystemnode.h
-    document/materials/pbrmaterial.h
-    document/animation/propertyanim.h
-    document/animation/animableproperty.h
-    document/assets/skeleton.h
-    document/assets/avatardefinition.h
-    document/animation/skeletalanimation.h
-    document/animation/clipextractor.h
-    document/animation/locomotion.h
     core/math/trs.h
-    document/scenegraph/looks.h
-    document/scenegraph/scene.h
-    document/scenegraph/worldmodes.h
-    document/scenegraph/simulationclock.h
-    document/scenegraph/skybake.h
-    document/scenegraph/scenenode.h
-    document/scenegraph/nodegraph.h
-    document/scenegraph/scenepicking.h
-    document/scenegraph/socket.h
-    document/properties/property.h
-    document/properties/valueshapes.h
     core/geometry/boundingsphere.h
-    document/assets/linemeshbuilder.h
-    document/assets/shapehelper.h
-    document/physics/avatarmovement.h
-    document/physics/environment.h
-    document/physics/physicshelper.h
-    document/physics/physicsproperties.h
-    document/input/inputmap.h
-    document/input/possession.h
 )
 
 set(QRCS assets.qrc)
@@ -620,10 +538,6 @@ set_source_files_properties(import/meshbake.cpp import/atomdag/adjacency.cpp imp
     PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>;${_jah_bake_fp}")
 # THE PICKING INDEX (core/geometry/trianglebvh.cpp) keeps the same -O2 / never-contract rule: it builds in IrisCore
 # since NOQT-CORE-1 stage 2, so its property is set there (core/CMakeLists.txt).
-# THE PHYSICS TUs NEVER CONTRACT (BULLET-BATCHING-1): they inline Bullet's header math, which Bullet's own targets
-# compile with -ffp-contract=off (above) — the same rule here, every configuration, at the configuration's level.
-set_source_files_properties(document/physics/avatarmovement.cpp document/physics/environment.cpp
-    document/physics/physicshelper.cpp PROPERTIES COMPILE_OPTIONS "${_jah_bake_fp}")
 add_library(IrisGL SHARED ${SRCS} ${HEADERS} ${QRCS})
 
 # useful to move away from include_directories() - https://stackoverflow.com/a/38158071/996468
@@ -651,6 +565,7 @@ target_include_directories(IrisGL PRIVATE "${PROJECT_SOURCE_DIR}/engine/include"
 
 target_link_libraries (IrisGL PUBLIC zip BulletDynamics BulletCollision LinearMath Bullet3Common Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent)
 target_link_libraries (IrisGL PUBLIC IrisCore)   # the Qt-free core (NOQT-CORE-1)
+target_link_libraries (IrisGL PUBLIC IrisDocument)   # the Qt-free document (NOQT-DOCUMENT-1 stage 6)
 target_compile_definitions(IrisGL PUBLIC BT_THREADSAFE=1)   # Bullet's multi-threaded build (above)
 target_link_libraries (IrisGL PRIVATE assimp)
 # meshoptimizer is PRIVATE for the same reason assimp is: the LOD chain it builds
