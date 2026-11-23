@@ -64,7 +64,7 @@ For more information see the LICENSE file
 #include <unordered_map>
 
 #include "core/geometry/trimesh.h"
-#include "core/logger.h"
+#include "core/log.h"
 #include "core/math/trs.h"
 #include "document/animation/animation.h"
 #include "document/animation/skeletalanimation.h"
@@ -298,7 +298,10 @@ namespace
 // colours (scenebuilder.h), materialhelper.cpp's srgbOf callers; its dead generateTexGUID() deleted. Every byte of a
 // blob but this version and the fingerprint is equal to v34's (40 fixtures, spikes/noqt-document-1/s3/). Every bake
 // re-bakes.
-constexpr int kFormatVersion = 35;
+// v36 (2026-11-23, NOQT-CORE-1 stage 2): A BUMP FOR THE KEY's SAKE, THE OUTPUT UNCHANGED — this file's nine log lines
+// write IrisCore's log (core/log.h) at their level; the DAG's per-piece stats are a RESULT on the Model
+// (meshbake.h `dagStats`, never serialized: serialize writes named fields). No write path edited. Every bake re-bakes.
+constexpr int kFormatVersion = 36;
 constexpr quint32 kMagic = 0x4A4D424Bu;       // 'JMBK'
 constexpr quint32 kClipMagic = 0x4A434C50u;   // 'JCLP'
 
@@ -2149,7 +2152,8 @@ void MeshBake::buildClusterDag(const MeshPtr &mesh, ClusterDagStats *stats, cons
     if (!dagInput(mesh, &view, &base)) return;
     atomdag::Appended appended;
     if (!atomdag::build(view, base, &mesh->clusterDag, stats, options, &appended))
-        irisLog(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles) — the mesh draws level 0").arg(base.size() / 3));
+        iris::log::warn(QStringLiteral("mesh bake: cluster DAG NOT BUILT (%1 triangles) — the mesh draws level 0")
+                            .arg(base.size() / 3).toStdString());
     applyAppended(mesh, appended);   // the card quads' vertices (the DAG names them)
 }
 
@@ -2375,10 +2379,11 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, const QStringLi
     // THE DEPTH CAP, named (the chain closed with the empty top over its remaining pool — a DAG all the same).
     for (size_t i = 0; i < meshes; ++i)
         if (dagStats[i].depthCapHit)
-            irisLog(QStringLiteral("mesh bake: WARNING %1 mesh %2 \"%3\" (%4 clusters, %5 groups) met the cluster DAG's depth "
-                                   "cap of %6 — closed with the empty top over the clusters it still held")
-                        .arg(filePath).arg(i).arg(i < size_t(meshNames.size()) ? meshNames.at(int(i)) : QString())
-                        .arg(dagStats[i].clusters).arg(dagStats[i].groups).arg(atomdag::kMaxLevels));
+            iris::log::warn(QStringLiteral("mesh bake: WARNING %1 mesh %2 \"%3\" (%4 clusters, %5 groups) met the cluster DAG's "
+                                           "depth cap of %6 — closed with the empty top over the clusters it still held")
+                                .arg(filePath).arg(i).arg(i < size_t(meshNames.size()) ? meshNames.at(int(i)) : QString())
+                                .arg(dagStats[i].clusters).arg(dagStats[i].groups).arg(atomdag::kMaxLevels)
+                                .toStdString());
     model.meshesMs = msSince(start);
 #if defined(__GLIBC__)
     // THE POOL'S FREED MEMORY GOES BACK. glibc gives every thread its own malloc
@@ -2392,15 +2397,17 @@ void bakeStages(MeshBake::Model &model, const QString &filePath, const QStringLi
     for (size_t i = 0; i < meshes; ++i) {
         const MeshBake::ClusterDagStats &st = dagStats[i];
         if (st.clusters > 0)
-            irisLog(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
-                                   "%6 ms (leaves %7, groups %8, reduce %9); ladder: %10 reductions, %11 carried, "
-                                   "%12 retries, %13 pieces pruned")
-                        .arg(QFileInfo(filePath).fileName()).arg(i).arg(st.clusters)
-                        .arg(st.groups).arg(st.depth)
-                        .arg(st.msTotal, 0, 'f', 1).arg(st.msLeaves, 0, 'f', 1).arg(st.msGroups, 0, 'f', 1)
-                        .arg(st.msReduce, 0, 'f', 1).arg(st.reductions).arg(st.carried).arg(st.retries)
-                        .arg(st.prunedPieces));
+            iris::log::info(QStringLiteral("mesh bake: cluster DAG %1 (mesh %2): %3 clusters, %4 groups, depth %5; "
+                                           "%6 ms (leaves %7, groups %8, reduce %9); ladder: %10 reductions, %11 carried, "
+                                           "%12 retries, %13 pieces pruned")
+                                .arg(QFileInfo(filePath).fileName()).arg(i).arg(st.clusters)
+                                .arg(st.groups).arg(st.depth)
+                                .arg(st.msTotal, 0, 'f', 1).arg(st.msLeaves, 0, 'f', 1).arg(st.msGroups, 0, 'f', 1)
+                                .arg(st.msReduce, 0, 'f', 1).arg(st.reductions).arg(st.carried).arg(st.retries)
+                                .arg(st.prunedPieces).toStdString());
     }
+    // THE DAG's STATS ARE A RESULT (NOQT-CORE-1 stage 2: a tool never reads a log line): the Model carries them.
+    model.dagStats = std::move(dagStats);
 }
 
 }   // namespace
@@ -2438,14 +2445,14 @@ MeshBake::Model MeshBake::buildFromScene(const aiScene *scene, const QString &fi
     try {
         return buildFromSceneUnguarded(scene, filePath, fingerprint, extractDir, xf, cancel);
     } catch (const BakeCancelled &) {
-        irisLog(QStringLiteral("mesh bake: %1 cancelled").arg(QFileInfo(filePath).fileName()));
+        iris::log::info(QStringLiteral("mesh bake: %1 cancelled").arg(QFileInfo(filePath).fileName()).toStdString());
         return Model();
     } catch (const std::exception &e) {
-        irisLog(QStringLiteral("mesh bake: %1 could not be baked (%2); the open path will parse it instead")
-                    .arg(QFileInfo(filePath).fileName(), QString::fromLocal8Bit(e.what())));
+        iris::log::warn(QStringLiteral("mesh bake: %1 could not be baked (%2); the open path will parse it instead")
+                            .arg(QFileInfo(filePath).fileName(), QString::fromLocal8Bit(e.what())).toStdString());
     } catch (...) {
-        irisLog(QStringLiteral("mesh bake: %1 could not be baked (unknown exception); the open path will "
-                               "parse it instead").arg(QFileInfo(filePath).fileName()));
+        iris::log::warn(QStringLiteral("mesh bake: %1 could not be baked (unknown exception); the open path will "
+                                       "parse it instead").arg(QFileInfo(filePath).fileName()).toStdString());
     }
     return Model();
 }
@@ -2592,9 +2599,10 @@ MeshBake::Model MeshBake::buildFromFile(const QString &filePath, const QString &
     const aiScene *scene = readSceneFile(importer, filePath, iris::ImportFlags::Canonical, xf);
     if (!scene) {
         if (cancel && cancel->load())
-            irisLog(QStringLiteral("mesh bake: %1 cancelled during its parse").arg(QFileInfo(filePath).fileName()));
+            iris::log::info(QStringLiteral("mesh bake: %1 cancelled during its parse").arg(QFileInfo(filePath).fileName())
+                                .toStdString());
         else
-            irisLog("mesh bake: assimp could not read " + filePath);
+            iris::log::warn(("mesh bake: assimp could not read " + filePath).toStdString());
         return Model();
     }
     return buildFromScene(scene, filePath, fingerprint, extractDir, xf, cancel);
@@ -2819,7 +2827,7 @@ MeshBake::Clip MeshBake::buildClipFromFile(const QString &filePath, const QStrin
     // applied at read (clipAnimations).
     const aiScene *scene = readSceneFile(importer, filePath, ImportFlags::ClipNamesOnly);
     if (!scene) {
-        irisLog("clip bake: assimp could not read " + filePath);
+        iris::log::warn(("clip bake: assimp could not read " + filePath).toStdString());
         return Clip();
     }
     return buildClipFromScene(scene, filePath, fingerprint);

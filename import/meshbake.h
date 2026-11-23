@@ -105,6 +105,7 @@ For more information see the LICENSE file
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include "irisglfwd.h"
 #include "import/clipfileinfo.h"
@@ -170,6 +171,9 @@ public:
         QVector<StageMs> stageMs;   ///< aiScene mesh order, as `meshes`
         double meshesMs = 0.0;      ///< the wall time of all meshes' stages together
         int bakeThreads = 0;        ///< the width this bake ran at (MeshBake::bakeThreads when it started)
+        /// THE CLUSTER DAG's STATS per mesh (ClusterDagStats, aiScene mesh order, as `meshes`; NOQT-CORE-1 stage 2: a
+        /// tool reads them here, never from the bake's log line): filled by a bake, empty on a read. Never serialized.
+        std::vector<atomdag::Stats> dagStats;
         /// "m0 99875t levels 12 cards 12 dag 567 | m1 ..." — the per-stage ms.
         QString stageSummary() const;
     };
