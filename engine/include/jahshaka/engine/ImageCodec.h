@@ -18,7 +18,8 @@ struct Image;
 Image boxDownscale(const Image &in, unsigned maxEdge);
 
 /// The image as PNG bytes (8 bits a channel, RGBA, its alpha kept - an all-opaque image may be written as RGB, colour type 2:
-/// its alpha is 255 by the PNG's own rule) into `out`; false with `why` when the engine has no PNG codec, the encode threw,
+/// its alpha is 255 by the PNG's own rule) into `out`; false with `why` when the engine has no PNG codec or one that cannot
+/// encode (STBI's), the encode threw,
 /// the codec wrote no complete PNG (pngComplete), or the image is empty (a zero width or height) - nothing is thrown.
 bool encodePng(const Image &image, std::vector<std::uint8_t> &out, std::string &why);
 
