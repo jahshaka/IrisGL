@@ -57,6 +57,20 @@ void registerStatusCommands(Host &host, const Commands &k)
               if (!e) return Value();
               return selected(c, e->published(), c[0]);
           });
+    r.add({"engine.scene.published",
+           {Access::Reads, {target(handle("scene", kScene)), selectParam<PublishedFrame>()}, Kind::Object},
+           "The scene's half of the last closed frame (PublishedFrame): its frame, step and clock, the GI machine's "
+           "status (gi), the sky, atmosphere, clouds and fog, the ray tier, completeness, Atom's hidden share, the "
+           "counters, and giApplied: the GI configuration the FrameInput drain last applied (GiParams as the record "
+           "holds it - cascadeCount and cascadeSet) - the RECORD ROUTE's field (the app's mirror), written only by the "
+           "drain's part.gi branch: null for GI a script set by engine.gi.set (a direct setter: its effect shows in gi, "
+           "e.g. gi.updateBudget). {select: [members]} answers "
+           "only those top-level members (a whole one is the costliest conversion)."},
+          [k](Call &c) -> Value {
+              Scene *s = k.scene(c, c[0]);
+              if (!s) return Value();
+              return selected(c, s->published(), c[1]);
+          });
     r.add({"engine.view.published",
            {Access::Reads, {target(handle("view", kView)), selectParam<ViewFrames>()}, Kind::Object},
            "The view's row of the last closed frame (ViewFrames): its id and name, the frames presented and blank, "

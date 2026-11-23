@@ -6,6 +6,55 @@
 
 namespace jahshaka { namespace engine { namespace script {
 
+const Table<PublishedFrame> &Record<PublishedFrame>::table()
+{
+    static const Table<PublishedFrame> t({
+        JAH_FIELD(PublishedFrame, frame),
+        JAH_FIELD(PublishedFrame, serial),
+        JAH_FIELD(PublishedFrame, stepSerial),
+        JAH_FIELD(PublishedFrame, sceneSeconds),
+        JAH_FIELD(PublishedFrame, frameSceneSeconds),
+        JAH_FIELD(PublishedFrame, riderTags),
+        JAH_FIELD(PublishedFrame, facts),
+        JAH_FIELD(PublishedFrame, completions),
+        JAH_FIELD(PublishedFrame, gi),
+        JAH_FIELD(PublishedFrame, atmosphere),
+        JAH_FIELD(PublishedFrame, heightFog),
+        JAH_FIELD(PublishedFrame, skyAmbientShValid),
+        JAH_FIELD(PublishedFrame, skyAmbientSh),
+        JAH_FIELD(PublishedFrame, environmentPending),
+        JAH_FIELD(PublishedFrame, skyShDeferredReads),
+        JAH_FIELD(PublishedFrame, iblConvolutionDeferrals),
+        JAH_FIELD(PublishedFrame, completeness),
+        JAH_FIELD(PublishedFrame, cloudClearDeferredReads),
+        JAH_FIELD(PublishedFrame, clouds),
+        JAH_FIELD(PublishedFrame, atmosphereStatus),
+        JAH_FIELD(PublishedFrame, rayQuery),
+        JAH_FIELD(PublishedFrame, sunContact),
+        JAH_FIELD(PublishedFrame, areaVis),
+        JAH_FIELD(PublishedFrame, activePlanarReflectors),
+        JAH_FIELD(PublishedFrame, atomViewPaintable),
+        JAH_FIELD(PublishedFrame, atomHidden),
+        JAH_FIELD(PublishedFrame, photonViewRefusals),
+        JAH_FIELD(PublishedFrame, mobility),
+        JAH_FIELD(PublishedFrame, rigs),
+        JAH_FIELD(PublishedFrame, changes),
+        JAH_FIELD(PublishedFrame, particleDefinitionsCreated),
+        JAH_FIELD(PublishedFrame, lightWriteSerial),
+        JAH_FIELD(PublishedFrame, decalAtlasCapacity),
+        JAH_FIELD(PublishedFrame, decalAtlasUsed),
+        JAH_FIELD(PublishedFrame, gpuScene),
+        JAH_FIELD(PublishedFrame, cullTwins),
+        JAH_FIELD(PublishedFrame, cullTwinCandidates),
+        JAH_FIELD(PublishedFrame, particles),
+        JAH_FIELD(PublishedFrame, streamedBones),
+        JAH_FIELD(PublishedFrame, bonePoses),
+        JAH_FIELD(PublishedFrame, nodePoses),
+        JAH_FIELD(PublishedFrame, giApplied),
+    });
+    return t;
+}
+
 const Table<PublishedFrame::RiderTag> &Record<PublishedFrame::RiderTag>::table()
 {
     static const Table<PublishedFrame::RiderTag> t({

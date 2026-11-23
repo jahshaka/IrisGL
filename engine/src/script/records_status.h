@@ -7,6 +7,7 @@
 // fields_status.cpp in the same commit), and their enums with JAH_ENUM_NAMES. The tables in fields_status.cpp; the
 // GI enums are records_shared.h's, the post chain's records records_view.h's.
 #include "script/records.h"
+#include "script/records_gi.h"   // (GiParams: PublishedFrame::giApplied - builder Q's table)
 #include "script/records_shared.h"
 #include "script/records_view.h"
 #include "jahshaka/engine/Atom.h"
@@ -31,6 +32,7 @@ JAH_ENUM_NAMES(PassBucket, {JAH_ENUMERATOR(PassBucket, Other), JAH_ENUMERATOR(Pa
 JAH_ENUM_NAMES(CacheKind, {JAH_ENUMERATOR(CacheKind, Probe), JAH_ENUMERATOR(CacheKind, ShadowMap), JAH_ENUMERATOR(CacheKind, Gi), JAH_ENUMERATOR(CacheKind, Planar), JAH_ENUMERATOR(CacheKind, Shader), JAH_ENUMERATOR(CacheKind, Texture), JAH_ENUMERATOR(CacheKind, Atmosphere), JAH_ENUMERATOR(CacheKind, Cull), JAH_ENUMERATOR(CacheKind, Video)});
 JAH_ENUM_NAMES(WorkReason, {JAH_ENUMERATOR(WorkReason, None), JAH_ENUMERATOR(WorkReason, Build), JAH_ENUMERATOR(WorkReason, Rebuild), JAH_ENUMERATOR(WorkReason, Refresh), JAH_ENUMERATOR(WorkReason, Sweep), JAH_ENUMERATOR(WorkReason, Moved), JAH_ENUMERATOR(WorkReason, Caster), JAH_ENUMERATOR(WorkReason, Light), JAH_ENUMERATOR(WorkReason, Material), JAH_ENUMERATOR(WorkReason, Sky), JAH_ENUMERATOR(WorkReason, Ambient), JAH_ENUMERATOR(WorkReason, Fog), JAH_ENUMERATOR(WorkReason, Mobility), JAH_ENUMERATOR(WorkReason, Added), JAH_ENUMERATOR(WorkReason, Removed), JAH_ENUMERATOR(WorkReason, Bounds), JAH_ENUMERATOR(WorkReason, Resolution), JAH_ENUMERATOR(WorkReason, Camera), JAH_ENUMERATOR(WorkReason, Permutation), JAH_ENUMERATOR(WorkReason, Request)});
 JAH_ENUM_NAMES(MonitorEventKind, {JAH_ENUMERATOR(MonitorEventKind, GiRebuild), JAH_ENUMERATOR(MonitorEventKind, GiRefresh), JAH_ENUMERATOR(MonitorEventKind, ProbeGridBuild), JAH_ENUMERATOR(MonitorEventKind, AtlasRebuild), JAH_ENUMERATOR(MonitorEventKind, WorkspaceRebuild), JAH_ENUMERATOR(MonitorEventKind, ShaderCompile), JAH_ENUMERATOR(MonitorEventKind, TextureLoad), JAH_ENUMERATOR(MonitorEventKind, VramFlush), JAH_ENUMERATOR(MonitorEventKind, DeviceLost), JAH_ENUMERATOR(MonitorEventKind, ViewDestroyed), JAH_ENUMERATOR(MonitorEventKind, Host)});
+JAH_RECORD_COUNT(PublishedFrame, 42);
 JAH_RECORD_COUNT(PublishedFrame::RiderTag, 6);
 JAH_RECORD_COUNT(PublishedFrame::Facts, 4);
 JAH_RECORD_COUNT(PublishedFrame::Facts::Share, 2);
