@@ -20,7 +20,7 @@ PropertyRows LightNode::getProperties()
     auto colorProp = std::make_unique<ColorProperty>();
     colorProp->displayName = "Light Color";
     colorProp->name = "lightColor";
-    colorProp->value = toQColor(color);
+    colorProp->value = color;
     props.add(std::move(colorProp));
 
     auto prop = std::make_unique<FloatProperty>();

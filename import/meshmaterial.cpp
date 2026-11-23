@@ -10,7 +10,7 @@ For more information see the LICENSE file
 *************************************************************************/
 
 #include "import/meshmaterial.h"
-#include "document/qt/colour.h"
+#include "document/properties/valueshapes.h"
 
 #include <QFileInfo>
 #include <algorithm>
@@ -43,11 +43,13 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
     auto mat = PbrMaterial::create();
     // THE SOURCE'S COVERAGE (BISTRO-IMPORT-1): a cutout, a glass and its alpha, read
     // by MaterialHelper from the file's own facts — on both arms below.
-    mat->setValue(QStringLiteral("alphaMode"), data.alphaMode);
-    mat->setValue(QStringLiteral("alpha"), data.alpha);
-    mat->setValue(QStringLiteral("alphaCutoff"), data.alphaCutoff);
-    auto bindIfFile = [&mat](const QString &row, const QString &path) {
-        if (!path.isEmpty() && QFileInfo(path).isFile()) mat->setValue(row, path);
+    mat->setValue("alphaMode", Value(data.alphaMode));
+    mat->setValue("alpha", Value(double(data.alpha)));
+    mat->setValue("alphaCutoff", Value(double(data.alphaCutoff)));
+    // Every Value below is of its row's own kind (the material's strict setter takes it): the importer's
+    // answers are not read. A colour crosses as its Value shape (valueshapes.h), no Qt.
+    auto bindIfFile = [&mat](const char *row, const QString &path) {
+        if (!path.isEmpty() && QFileInfo(path).isFile()) mat->setValue(row, Value(path.toStdString()));
     };
 
     const auto isFile = [](const QString &p) {
@@ -59,12 +61,12 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // rather than round-tripping through assimp's lossy shininess
         // back-conversion, which is what produced near-mirror imports. A
         // spec-gloss source arrives already converted (MaterialHelper).
-        mat->setValue(QStringLiteral("baseColor"), iris::toQColor(data.baseColorFactor));
-        mat->setValue(QStringLiteral("metallic"), data.metallicFactor);
-        mat->setValue(QStringLiteral("roughness"), data.roughnessFactor);
-        bindIfFile(QStringLiteral("baseColorMap"), data.baseColorTexture);
-        bindIfFile(QStringLiteral("metallicMap"),  data.metallicTexture);
-        bindIfFile(QStringLiteral("roughnessMap"), data.roughnessTexture);
+        mat->setValue("baseColor", colourToValue(data.baseColorFactor));
+        mat->setValue("metallic", Value(double(data.metallicFactor)));
+        mat->setValue("roughness", Value(double(data.roughnessFactor)));
+        bindIfFile("baseColorMap", data.baseColorTexture);
+        bindIfFile("metallicMap",  data.metallicTexture);
+        bindIfFile("roughnessMap", data.roughnessTexture);
 
         // ---- the WORKFLOW (MATERIAL_GAPS_SPEC GAP 1) ----------------------
         // A spec-gloss or KHR_materials_specular source now arrives in its own
@@ -72,22 +74,22 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // (inert on metallic, restored by a switch); kS and F0 only mean
         // something on the two specular ones but are stored the same way, for
         // the same reason.
-        mat->setValue(QStringLiteral("workflow"), data.workflow);
-        mat->setValue(QStringLiteral("ior"), data.ior);
+        mat->setValue("workflow", Value(data.workflow));
+        mat->setValue("ior", Value(double(data.ior)));
         if (data.workflow != 0) {
-            mat->setValue(QStringLiteral("specularColor"), iris::toQColor(data.specularFactor));
-            mat->setValue(QStringLiteral("useFresnelColor"), data.useFresnelColor);
+            mat->setValue("specularColor", colourToValue(data.specularFactor));
+            mat->setValue("useFresnelColor", Value(data.useFresnelColor));
             if (data.useFresnelColor)
-                mat->setValue(QStringLiteral("fresnelColor"), iris::toQColor(data.fresnelFactor));
+                mat->setValue("fresnelColor", colourToValue(data.fresnelFactor));
             // The specular / spec-gloss map binds to the SHARED metallic-specular
             // texture unit — the renderer reinterprets one unit by workflow, so
             // `metallicMap` is the right row and only one of the two sources can
             // fill it. Before the workflow switch this map had nowhere to go and
             // was dropped with a warning.
-            bindIfFile(QStringLiteral("metallicMap"), data.specularMapTexture);
+            bindIfFile("metallicMap", data.specularMapTexture);
         }
-        bindIfFile(QStringLiteral("normalMap"),    data.normalTexture);
-        bindIfFile(QStringLiteral("emissiveMap"),  data.emissiveTexture);
+        bindIfFile("normalMap",    data.normalTexture);
+        bindIfFile("emissiveMap",  data.emissiveTexture);
 
         // EMISSIVE INTENSITY IS PART OF "THERE IS EMISSION" (2026-09-08).
         // emissiveColor without emissiveIntensity is emission multiplied by
@@ -107,8 +109,8 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         const bool emissiveTinted =
             data.emissionColor.isValid() && data.emissionColor != SrgbColor(0, 0, 0);
         if (emissiveTinted) {
-            mat->setValue(QStringLiteral("emissiveColor"), iris::toQColor(data.emissionColor));
-            mat->setValue(QStringLiteral("emissiveIntensity"), 1.0f);
+            mat->setValue("emissiveColor", colourToValue(data.emissionColor));
+            mat->setValue("emissiveIntensity", Value(1.0));
         }
 
         // KHR_materials_unlit. The engine's Unlit family consumes NO lighting
@@ -121,24 +123,24 @@ PbrMaterialPtr materialFromMeshData(const MeshMaterialData &data)
         // imported. So on an unlit material the emissive slot BECOMES the
         // colour slot when the base-colour one is empty or black.
         if (data.unlit) {
-            mat->setValue(QStringLiteral("shadingModel"), 1);
+            mat->setValue("shadingModel", Value(1));
             const bool baseIsBlack = !data.baseColorFactor.isValid() ||
                                      data.baseColorFactor == SrgbColor(0, 0, 0);
             if (!isFile(data.baseColorTexture) && emissiveMap)
-                mat->setValue(QStringLiteral("baseColorMap"), data.emissiveTexture);
+                mat->setValue("baseColorMap", Value(data.emissiveTexture.toStdString()));
             if (baseIsBlack && (emissiveTinted || emissiveMap))
-                mat->setValue(QStringLiteral("baseColor"),
-                              iris::toQColor(emissiveTinted ? data.emissionColor : SrgbColor(255, 255, 255)));
+                mat->setValue("baseColor",
+                              colourToValue(emissiveTinted ? data.emissionColor : SrgbColor(255, 255, 255)));
         }
         return mat;
     }
 
-    mat->setValue(QStringLiteral("baseColor"),
-                  iris::toQColor(data.diffuseColor.isValid() ? data.diffuseColor : SrgbColor(200, 200, 200)));
-    mat->setValue(QStringLiteral("metallic"), 0.0f);
-    mat->setValue(QStringLiteral("roughness"), roughnessFromShininess(data.shininess));
-    bindIfFile(QStringLiteral("baseColorMap"), data.diffuseTexture);
-    bindIfFile(QStringLiteral("normalMap"),    data.normalTexture);
+    mat->setValue("baseColor",
+                  colourToValue(data.diffuseColor.isValid() ? data.diffuseColor : SrgbColor(200, 200, 200)));
+    mat->setValue("metallic", Value(0.0));
+    mat->setValue("roughness", Value(double(roughnessFromShininess(data.shininess))));
+    bindIfFile("baseColorMap", data.diffuseTexture);
+    bindIfFile("normalMap",    data.normalTexture);
     // specularTexture / hightTexture have no metallic-roughness home, and never
     // reached the renderer through the old path either.
     return mat;

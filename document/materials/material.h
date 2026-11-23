@@ -15,12 +15,14 @@ For more information see the LICENSE file
 #include "irisglfwd.h"
 #include "document/properties/property.h"
 
-#include <QList>
+#include <QMap>
+#include <QSet>
 #include <QString>
-#include <QVariant>
 #include <QtGlobal>
 #include <atomic>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace iris
@@ -59,7 +61,7 @@ public:
     /// material can be rendered by the material property panel. The material
     /// OWNS them (iris::PropertyRows, property.h — its copy is the deep copy,
     /// which is what duplicate() starts from); this is the view.
-    const QList<Property *> &properties() const { return mRows.view(); }
+    const std::vector<Property *> &properties() const { return mRows.view(); }
 
     /// Display name, and the asset/preset GUID this material came from.
     ///
@@ -77,8 +79,12 @@ public:
 
     // Applies a value by property name. Virtual so the property panel and the
     // scene reader can drive any material without knowing its concrete type.
-    // Default is a no-op: materials with no editable parameters ignore it.
-    virtual void setValue(const QString& name, const QVariant& value) { Q_UNUSED(name); Q_UNUSED(value); }
+    // STRICT (NOQT-DOCUMENT-1 stage 4): the value's kind must be the row's own
+    // (a Float row takes an Int too); an unknown name or a wrong kind returns
+    // false and changes NOTHING - no field, no row, no touch(). The editor
+    // converts a Qt value by the row's kind first (src/app/qtstdgui.h).
+    // Default: no editable parameters, every name unknown.
+    virtual bool setValue(std::string_view name, const Value &value) { (void)name; (void)value; return false; }
 
     // ---- A TEXTURE ROW'S IDENTITY (TEX-REF-1) ------------------------------
     //
@@ -101,11 +107,11 @@ public:
     // saved scene cannot keep. An undo entry restores textureRefOf(row).
 
     /// The asset guid a texture row names; empty for no row / no identity.
-    QString textureGuid(const QString &row) const;
-    /// The value that binds a texture row's file AND its asset: {path, guid}.
-    static QVariant textureRef(const QString &path, const QString &guid);
+    std::string textureGuid(std::string_view row) const;
+    /// The value that binds a texture row's file AND its asset: the Object {"guid", "path"}.
+    static Value textureRef(const std::string &path, const std::string &guid);
     /// The row's current {path, guid} — what an undo entry restores.
-    QVariant textureRefOf(const QString &row) const;
+    Value textureRefOf(std::string_view row) const;
 
     // ---- THE CHANGE MARK (SPECS/DIRTY_SET_MIRROR_SPEC.md §3.6) ------------
     //

@@ -603,19 +603,19 @@ PropertyRows SceneNode::getProperties()
     auto prop = std::make_unique<Vec3Property>();
     prop->displayName = "Position";
     prop->name = "position";
-    prop->value = iris::toQt(getLocalPos());
+    prop->value = getLocalPos();
     props.add(std::move(prop));
 
     prop = std::make_unique<Vec3Property>();
     prop->displayName = "Rotation";
     prop->name = "rotation";
-    prop->value = iris::toQt(getLocalRot().toEulerAngles());
+    prop->value = getLocalRot().toEulerAngles();
     props.add(std::move(prop));
 
     prop = std::make_unique<Vec3Property>();
     prop->displayName = "Scale";
     prop->name = "scale";
-    prop->value = iris::toQt(getLocalScale());
+    prop->value = getLocalScale();
     props.add(std::move(prop));
 
     // There is no StringProperty in document/properties/property.h; FileProperty is
@@ -623,7 +623,7 @@ PropertyRows SceneNode::getProperties()
     auto nameProp = std::make_unique<FileProperty>();
     nameProp->displayName = "Name";
     nameProp->name = "name";
-    nameProp->value = name;
+    nameProp->value = name.toStdString();
     props.add(std::move(nameProp));
 
     auto boolProp = std::make_unique<BoolProperty>();

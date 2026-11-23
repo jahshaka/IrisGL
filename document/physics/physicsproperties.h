@@ -1,5 +1,8 @@
 
 #include "core/math/vec.h"
+
+#include <QString>
+#include <QVector>
 #ifndef PHYSICS_PROPERTIES
 #define PHYSICS_PROPERTIES
 

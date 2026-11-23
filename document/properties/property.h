@@ -1,15 +1,18 @@
 #ifndef PROPERTYTYPE_H
 #define PROPERTYTYPE_H
 
-#include <QVariant>
-#include <QColor>
-#include <QVector2D>
-#include <QVector3D>
-#include <QVector4D>
+// THE DOCUMENT's PROPERTY ROWS (NOQT-DOCUMENT-1 stage 4: std types, no Qt). A row's value is carried as an iris::Value
+// in the shapes of document/properties/valueshapes.h; its setter is STRICT: it takes its own kind only (a Float row
+// an Int too: one JSON number type) and otherwise returns false with NOTHING changed. The editor converts a Qt value
+// to the row's kind at its own edge (src/app/qtstdgui.h, qtstd::toRowValue), never here.
 
-#include <QList>
+#include "core/math/vec.h"
+#include "core/value.h"
+#include "document/properties/valueshapes.h"
+#include "document/srgbcolor.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace iris
@@ -21,9 +24,7 @@ enum class PropertyType
     Bool,
     Int,
     Float,
-    Vec2,
-	Vec3,
-	Vec4,
+    Vec3,
     Color,
     Texture,
     File,
@@ -38,9 +39,9 @@ struct Property
     /// properties handed to the same widget carried an indeterminate index.
     /// Zero-initialised: an unnumbered row is row 0, not garbage.
     unsigned            id = 0;
-    QString             displayName;
-    QString             name;
-    QString             uniform;
+    std::string         displayName;
+    std::string         name;
+    std::string         uniform;
     PropertyType        type = PropertyType::None;
 
     /// Reflected, but not writable through setPropertyValue: the field behind
@@ -52,8 +53,10 @@ struct Property
     /// the silent-success defect class AI_SURFACE_AUDIT catalogued.
     bool                readOnly = false;
 
-    virtual QVariant    getValue() = 0;
-    virtual void        setValue(QVariant val) = 0;
+    /// The row's value in its Value shape (valueshapes.h).
+    virtual Value       getValue() const = 0;
+    /// The row takes `value` when its kind is the row's own; false, nothing changed, otherwise.
+    virtual bool        setValue(const Value &value) = 0;
 
     /// A DEEP COPY of the row, of its own type — every field, the value, the
     /// range, the labels, a texture row's asset identity. What an owner that
@@ -91,14 +94,14 @@ public:
     {
         Property *raw = row.get();
         mOwned.push_back(std::move(row));
-        mView.append(raw);
+        mView.push_back(raw);
         return raw;
     }
-    const QList<Property *> &view() const { return mView; }
+    const std::vector<Property *> &view() const { return mView; }
 
 private:
     std::vector<std::unique_ptr<Property>> mOwned;
-    QList<Property *> mView;   // mOwned's pointers, same order
+    std::vector<Property *> mView;   // mOwned's pointers, same order
 };
 
 class PropertyListener
@@ -117,17 +120,19 @@ struct BoolProperty : public Property
 
     bool value;
 
-    BoolProperty () {
+    BoolProperty() {
         type = PropertyType::Bool;
         value = false;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return Value(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.toBool();
+    bool setValue(const Value &v) override {
+        if (v.kind() != Kind::Bool) return false;
+        value = v.asBool();
+        return true;
     }
 };
 
@@ -152,12 +157,15 @@ struct IntProperty : public Property
         type = PropertyType::Int;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return Value(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.toInt();
+    /// An Int only (an integral Number is refused: the edge converts by the row's kind).
+    bool setValue(const Value &v) override {
+        if (v.kind() != Kind::Int) return false;
+        value = static_cast<int>(v.asInt());
+        return true;
     }
 };
 
@@ -173,12 +181,17 @@ struct FloatProperty : public Property
         type = PropertyType::Float;
     }
 
-    QVariant getValue() {
-        return QVariant::fromValue(value);
+    /// The float widened to a Number (the bits a QVariant's toFloat() handed QJsonValue).
+    Value getValue() const override {
+        return Value(double(value));
     }
 
-    void setValue(QVariant val) {
-        value = val.toFloat();
+    /// A Number, or an Int (one JSON number type).
+    bool setValue(const Value &v) override {
+        double d = 0.0;
+        if (!numberOf(v, d)) return false;
+        value = float(d);
+        return true;
     }
 };
 
@@ -186,18 +199,21 @@ struct ColorProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<ColorProperty>(*this); }
 
-    QColor value;
+    SrgbColor value;
 
-    ColorProperty () {
+    ColorProperty() {
         type = PropertyType::Color;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return colourToValue(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.value<QColor>();
+    /// The colour's Object shape (valueshapes.h); an empty object reads as the invalid colour.
+    bool setValue(const Value &v) override {
+        if (v.kind() != Kind::Object) return false;
+        value = colourFromValue(v);
+        return true;
     }
 };
 
@@ -207,38 +223,42 @@ struct TextureProperty : public Property
 
     /// The file this session renders from (a store object's path, or a
     /// "live://" reference) — what the panel shows and material.get reports.
-    QString value;
+    std::string value;
     /// THE ROW'S IDENTITY (TEX-REF-1): the library asset `value` is, kept from
     /// the moment the row is bound until it is written. A saved scene persists
     /// THIS, never a guid derived back from the path; a reference the store
     /// could not resolve keeps its guid with an empty `value`
     /// (iris::Material::textureRef says how a row is bound).
-    QString assetGuid;
-    QString toggleValue;
+    std::string assetGuid;
+    std::string toggleValue;
     bool toggle = false;
 
-    TextureProperty () {
+    TextureProperty() {
         type = PropertyType::Texture;
-        toggle = false;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return Value(value);
     }
 
-    /// A {path, guid} map binds both; a bare path binds a file nobody named,
-    /// so the identity goes — unless it is the path already held.
-    void setValue(QVariant val) {
-        if (val.typeId() == QMetaType::QVariantMap) {
-            const QVariantMap ref = val.toMap();
-            value = ref.value(QStringLiteral("path")).toString();
-            assetGuid = ref.value(QStringLiteral("guid")).toString();
+    /// A {path, guid} Object binds both (a member absent reads ""); a bare path
+    /// String binds a file nobody named, so the identity goes — unless it is the
+    /// path already held. Any other kind, or a member that is not a String: false.
+    bool setValue(const Value &v) override {
+        if (v.kind() == Kind::Object) {
+            const Value *path = v.find("path");
+            const Value *guid = v.find("guid");
+            if ((path && path->kind() != Kind::String) || (guid && guid->kind() != Kind::String)) return false;
+            value = path ? path->asString() : std::string();
+            assetGuid = guid ? guid->asString() : std::string();
+        } else if (v.kind() == Kind::String) {
+            if (v.asString() != value) assetGuid.clear();
+            value = v.asString();
         } else {
-            const QString path = val.toString();
-            if (path != value) assetGuid.clear();
-            value = path;
+            return false;
         }
-        toggle = !value.isEmpty();
+        toggle = !value.empty();
+        return true;
     }
 };
 
@@ -246,19 +266,21 @@ struct FileProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<FileProperty>(*this); }
 
-    QString value;
-    QString suffix;
+    std::string value;
+    std::string suffix;
 
-    FileProperty () {
+    FileProperty() {
         type = PropertyType::File;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return Value(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.toString();
+    bool setValue(const Value &v) override {
+        if (v.kind() != Kind::String) return false;
+        value = v.asString();
+        return true;
     }
 };
 
@@ -282,40 +304,21 @@ struct ListProperty : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<ListProperty>(*this); }
 
-    int value = 0;          ///< the selected enum value == index into `labels`
-    QStringList labels;     ///< one label per value, in value order
+    int value = 0;                    ///< the selected enum value == index into `labels`
+    std::vector<std::string> labels;  ///< one label per value, in value order
 
-    ListProperty () {
+    ListProperty() {
         type = PropertyType::List;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return Value(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.toInt();
-    }
-};
-
-/* more abstract types without a physical widget */
-
-struct Vec2Property : public Property
-{
-    std::unique_ptr<Property> clone() const override { return std::make_unique<Vec2Property>(*this); }
-
-    QVector2D value;
-
-    Vec2Property() {
-        type = PropertyType::Vec2;
-    }
-
-    QVariant getValue() {
-        return value;
-    }
-
-    void setValue(QVariant val) {
-        value = val.value<QVector2D>();
+    bool setValue(const Value &v) override {
+        if (v.kind() != Kind::Int) return false;
+        value = static_cast<int>(v.asInt());
+        return true;
     }
 };
 
@@ -323,38 +326,20 @@ struct Vec3Property : public Property
 {
     std::unique_ptr<Property> clone() const override { return std::make_unique<Vec3Property>(*this); }
 
-    QVector3D value;
+    Vec3 value;
 
     Vec3Property() {
         type = PropertyType::Vec3;
     }
 
-    QVariant getValue() {
-        return value;
+    Value getValue() const override {
+        return vec3ToValue(value);
     }
 
-    void setValue(QVariant val) {
-        value = val.value<QVector3D>();
+    /// An Array of three numbers.
+    bool setValue(const Value &v) override {
+        return vec3FromValue(v, value);
     }
-};
-
-struct Vec4Property : public Property
-{
-    std::unique_ptr<Property> clone() const override { return std::make_unique<Vec4Property>(*this); }
-
-	QVector4D value;
-
-	Vec4Property() {
-		type = PropertyType::Vec4;
-	}
-
-	QVariant getValue() {
-		return value;
-	}
-
-	void setValue(QVariant val) {
-        value = val.value<QVector3D>().toVector4D();
-	}
 };
 
 }

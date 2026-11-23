@@ -13,34 +13,32 @@ For more information see the LICENSE file
 #include "document/assets/texture2d.h"
 #include "document/properties/property.h"
 
-#include <QVariantMap>
-
 namespace iris
 {
 
 std::atomic<quint64> Material::sGlobalRevision{1};
 
-QVariant Material::textureRef(const QString &path, const QString &guid)
+Value Material::textureRef(const std::string &path, const std::string &guid)
 {
-    return QVariantMap{ { QStringLiteral("path"), path }, { QStringLiteral("guid"), guid } };
+    return Value(Value::Object{{"guid", Value(guid)}, {"path", Value(path)}});
 }
 
-QString Material::textureGuid(const QString &row) const
+std::string Material::textureGuid(std::string_view row) const
 {
     for (const Property *prop : properties())
         if (prop && prop->name == row && prop->type == PropertyType::Texture)
             return static_cast<const TextureProperty *>(prop)->assetGuid;
-    return QString();
+    return std::string();
 }
 
-QVariant Material::textureRefOf(const QString &row) const
+Value Material::textureRefOf(std::string_view row) const
 {
     for (const Property *prop : properties())
         if (prop && prop->name == row && prop->type == PropertyType::Texture) {
             const auto *texture = static_cast<const TextureProperty *>(prop);
             return textureRef(texture->value, texture->assetGuid);
         }
-    return textureRef(QString(), QString());
+    return textureRef(std::string(), std::string());
 }
 
 void Material::addTexture(QString name,Texture2DPtr texture)

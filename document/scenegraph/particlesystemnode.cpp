@@ -399,7 +399,7 @@ PropertyRows ParticleSystemNode::getProperties()
 
     auto addVec3 = [&props](const char *display, const char *name, const iris::Vec3 &value) {
         auto p = std::make_unique<Vec3Property>();
-        p->displayName = display; p->name = name; p->value = iris::toQt(value);
+        p->displayName = display; p->name = name; p->value = value;
         props.add(std::move(p));
     };
     addVec3("Extents",       "extents",      extents);
@@ -408,7 +408,7 @@ PropertyRows ParticleSystemNode::getProperties()
 
     auto addColour = [&props](const char *display, const char *name, const SrgbColor &value) {
         auto p = std::make_unique<ColorProperty>();
-        p->displayName = display; p->name = name; p->value = toQColor(value);
+        p->displayName = display; p->name = name; p->value = value;
         props.add(std::move(p));
     };
     addColour("Colour Fade 1 (rate)", "colourFade1", colourFade1);
@@ -422,7 +422,7 @@ PropertyRows ParticleSystemNode::getProperties()
     auto addString = [&props](const char *display, const char *name, const QString &value,
                               bool readOnly = false) {
         auto p = std::make_unique<FileProperty>();
-        p->displayName = display; p->name = name; p->value = value;
+        p->displayName = display; p->name = name; p->value = value.toStdString();
         p->readOnly = readOnly;
         props.add(std::move(p));
     };

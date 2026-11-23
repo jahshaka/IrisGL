@@ -433,6 +433,7 @@ set (HEADERS
     document/scenegraph/scenepicking.h
     document/scenegraph/socket.h
     document/properties/property.h
+    document/properties/valueshapes.h
     core/geometry/boundingsphere.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h

@@ -15,7 +15,6 @@ For more information see the LICENSE file
 #include "core/log.h"
 #include "document/properties/property.h"
 
-#include "document/qt/colour.h"
 
 namespace iris
 {
@@ -405,8 +404,8 @@ void PbrMaterial::setTextureScale(float u, float v) {
     // BOTH rows, always (SMOKE_FIX S11 — see setValue's note): the rows are
     // what gets saved, and a V row left behind is a floor that squashes on
     // reopen.
-    syncProperty(QStringLiteral("textureScale"), u);
-    syncProperty(QStringLiteral("textureScaleV"), v);
+    syncProperty("textureScale", Value(double(u)));
+    syncProperty("textureScaleV", Value(double(v)));
 }
 void PbrMaterial::setTextureOffset(float u, float v) { textureOffsetU = u; textureOffsetV = v; touch(); }
 void PbrMaterial::setTextureRotation(float degrees)  { textureRotation = degrees; touch(); }
@@ -435,52 +434,88 @@ Texture2DPtr PbrMaterial::loadTexture(const QString& path)
     return Texture2D::load(path);
 }
 
-void PbrMaterial::setValue(const QString& name, const QVariant& in)
+bool PbrMaterial::setValue(std::string_view name, const Value &in)
 {
+    // STRICT (Material's header, NOQT-DOCUMENT-1 stage 4): the value's kind must
+    // be the row's own — a Float field takes a Number or an Int, an Int / List
+    // field an Int, a Bool field a Bool, a colour the colour's Object
+    // (valueshapes.h), a map row a path String or a {path, guid} Object — else
+    // false, and NOTHING moves: no field, no row, no touch(). Every branch
+    // checks the kind BEFORE it writes. An unknown name is false too.
+    Property *row = nullptr;
+    for (Property *prop : properties())
+        if (prop->name == name) { row = prop; break; }
+
     // A TEXTURE ROW takes its file AND its identity (TEX-REF-1, Material's
     // header): the row itself keeps the guid (TextureProperty::setValue reads a
     // {path, guid} reference, and a bare path that differs from the held one
-    // clears it). From here on the row is driven by its path alone.
-    QVariant value = in;
-    for (Property *prop : properties()) {
-        if (prop->name != name) continue;
-        if (prop->type != PropertyType::Texture) break;
-        prop->setValue(in);
-        value = prop->getValue();
-        break;
-    }
+    // clears it). From here on the row is driven by its path alone. Its refusal
+    // is this call's: nothing else has moved yet.
+    const bool textureRow = row && row->type == PropertyType::Texture;
+    if (textureRow && !row->setValue(in)) return false;
 
-    if      (name == "baseColor")         baseColor         = toSrgbColor(value.value<QColor>());
-    else if (name == "metallic")          metallicFactor    = value.toFloat();
-    else if (name == "roughness")         roughnessFactor   = value.toFloat();
-    else if (name == "normalFactor")      normalFactor      = value.toFloat();
-    else if (name == "emissiveColor")     emissiveColor     = toSrgbColor(value.value<QColor>());
-    else if (name == "emissiveIntensity") emissiveIntensity = value.toFloat();
-    else if (name == "alpha")             alpha             = value.toFloat();
+    double num = 0.0;
+    const bool isNum = numberOf(in, num);
+    const auto F = [&](float &field) { if (!isNum) return false; field = float(num); return true; };
+    const auto I = [&](int &field) {
+        if (in.kind() != Kind::Int) return false;
+        field = static_cast<int>(in.asInt());
+        return true;
+    };
+    const auto B = [&](bool &field) { if (in.kind() != Kind::Bool) return false; field = in.asBool(); return true; };
+    const auto C = [&](SrgbColor &field) {
+        if (in.kind() != Kind::Object) return false;
+        field = colourFromValue(in);
+        return true;
+    };
+    const auto S = [&](QString &field) {
+        if (in.kind() != Kind::String) return false;
+        field = QString::fromStdString(in.asString());
+        return true;
+    };
+    // A map's file: the texture row's path (set above), else a bare path String.
+    QString path;
+    const auto T = [&]() {
+        if (textureRow) { path = QString::fromStdString(static_cast<TextureProperty *>(row)->value); return true; }
+        if (in.kind() != Kind::String) return false;
+        path = QString::fromStdString(in.asString());
+        return true;
+    };
+
+    // -1: not a field of this material (the row alone, if there is one, decides); 0: refused; 1: written.
+    int field = -1;
+    const auto take = [&field](bool ok) { field = ok ? 1 : 0; };
+    if      (name == "baseColor")         take(C(baseColor));
+    else if (name == "metallic")          take(F(metallicFactor));
+    else if (name == "roughness")         take(F(roughnessFactor));
+    else if (name == "normalFactor")      take(F(normalFactor));
+    else if (name == "emissiveColor")     take(C(emissiveColor));
+    else if (name == "emissiveIntensity") take(F(emissiveIntensity));
+    else if (name == "alpha")             take(F(alpha));
     // "textureScale" sets BOTH axes (see setTextureScale): a file or a script
     // that only knows the old key means uniform tiling. "textureScaleV" then
     // overrides V — and because both readers walk `properties` IN ORDER and V
     // is registered after U, a new file's explicit pair always lands correctly.
-    else if (name == "textureScale")      setTextureScale(value.toFloat());
-    else if (name == "textureScaleV")     textureScaleV     = value.toFloat();
-    else if (name == "textureOffsetU")    textureOffsetU    = value.toFloat();
-    else if (name == "textureOffsetV")    textureOffsetV    = value.toFloat();
-    else if (name == "textureRotation")   textureRotation   = value.toFloat();
-    else if (name == "roughnessLowerBound") roughnessLowerBound = value.toFloat();
-    else if (name == "roughnessUpperBound") roughnessUpperBound = value.toFloat();
-    else if (name == "alphaCutoff")       alphaCutoff       = value.toFloat();
-    else if (name == "alphaMode")         alphaMode         = value.toInt();
-    else if (name == "refractionStrength") refractionStrength = value.toFloat();
-    else if (name == "clearCoat")          clearCoat          = value.toFloat();
-    else if (name == "clearCoatRoughness") clearCoatRoughness = value.toFloat();
-    else if (name == "shadingModel")       shadingModel       = value.toInt();
-    else if (name == "workflow")           workflow           = value.toInt();
-    else if (name == "specularColor")      specularColor      = toSrgbColor(value.value<QColor>());
-    else if (name == "ior")                ior                = value.toFloat();
-    else if (name == "fresnelColor")       fresnelColor       = toSrgbColor(value.value<QColor>());
-    else if (name == "useFresnelColor")    useFresnelColor    = value.toBool();
-    else if (name == "separateFresnel")    separateFresnel    = value.toBool();
-    else if (name == "detailWeightMap")    setDetailWeightMap(loadTexture(value.toString()));
+    else if (name == "textureScale")      { float s = 0.0f; take(F(s)); if (field == 1) setTextureScale(s); }
+    else if (name == "textureScaleV")     take(F(textureScaleV));
+    else if (name == "textureOffsetU")    take(F(textureOffsetU));
+    else if (name == "textureOffsetV")    take(F(textureOffsetV));
+    else if (name == "textureRotation")   take(F(textureRotation));
+    else if (name == "roughnessLowerBound") take(F(roughnessLowerBound));
+    else if (name == "roughnessUpperBound") take(F(roughnessUpperBound));
+    else if (name == "alphaCutoff")       take(F(alphaCutoff));
+    else if (name == "alphaMode")         take(I(alphaMode));
+    else if (name == "refractionStrength") take(F(refractionStrength));
+    else if (name == "clearCoat")          take(F(clearCoat));
+    else if (name == "clearCoatRoughness") take(F(clearCoatRoughness));
+    else if (name == "shadingModel")       take(I(shadingModel));
+    else if (name == "workflow")           take(I(workflow));
+    else if (name == "specularColor")      take(C(specularColor));
+    else if (name == "ior")                take(F(ior));
+    else if (name == "fresnelColor")       take(C(fresnelColor));
+    else if (name == "useFresnelColor")    take(B(useFresnelColor));
+    else if (name == "separateFresnel")    take(B(separateFresnel));
+    else if (name == "detailWeightMap")    { take(T()); if (field == 1) setDetailWeightMap(loadTexture(path)); }
     else if (name == "anisotropy") {
         // THE ROW IS AN ENUM ("Off", "2x", "4x", "8x", "16x") and its stored
         // value is the INDEX; the field is the COUNT the renderer wants, which
@@ -490,67 +525,79 @@ void PbrMaterial::setValue(const QString& name, const QVariant& in)
         // the "does something else than it says" surface these rows exist to
         // avoid. Scripts write the NAME ("8x"); material.set refuses anything
         // that is not in the vocabulary rather than coercing it.
-        anisotropy = float(1 << qBound(0, value.toInt(), 4));
+        int index = 0;
+        take(I(index));
+        if (field == 1) anisotropy = float(1 << iris::bound(0, index, 4));
     }
-    else if (name.endsWith(QLatin1String("Address")) &&
-             mapRowNames().contains(name.left(name.size() - 7)))
-        mapAddress[name.left(name.size() - 7)] = value.toInt();
-    else if (name == "brdf")               brdf               = value.toInt();
-    else if (name == "receiveShadows")     receiveShadows     = value.toBool();
-    else if (name == "emissiveAsLightmap") emissiveAsLightmap = value.toBool();
-    else if (name == "customPiecePixel")   customPiecePixel   = value.toString();
-    else if (name == "customPieceVertex")  customPieceVertex  = value.toString();
-    else if (name == "textureVelocityU")   textureVelocityU   = value.toFloat();
-    else if (name == "textureVelocityV")   textureVelocityV   = value.toFloat();
+    else if (name.size() > 7 && name.substr(name.size() - 7) == "Address" &&
+             mapRowNames().contains(QString::fromUtf8(name.data(), qsizetype(name.size() - 7)))) {
+        int mode = 0;
+        take(I(mode));
+        if (field == 1) mapAddress[QString::fromUtf8(name.data(), qsizetype(name.size() - 7))] = mode;
+    }
+    else if (name == "brdf")               take(I(brdf));
+    else if (name == "receiveShadows")     take(B(receiveShadows));
+    else if (name == "emissiveAsLightmap") take(B(emissiveAsLightmap));
+    else if (name == "customPiecePixel")   take(S(customPiecePixel));
+    else if (name == "customPieceVertex")  take(S(customPieceVertex));
+    else if (name == "textureVelocityU")   take(F(textureVelocityU));
+    else if (name == "textureVelocityV")   take(F(textureVelocityV));
 
     // Texture properties arrive as a path, matching how CustomMaterial::setValue
     // is driven from the material presets.
-    else if (name == "baseColorMap")  setBaseColorMap(loadTexture(value.toString()));
-    else if (name == "metallicMap")   setMetallicMap(loadTexture(value.toString()));
-    else if (name == "roughnessMap")  setRoughnessMap(loadTexture(value.toString()));
-    else if (name == "normalMap")     setNormalMap(loadTexture(value.toString()));
-    else if (name == "emissiveMap")   setEmissiveMap(loadTexture(value.toString()));
-    else if (name == "reflectionMap") setReflectionMap(loadTexture(value.toString()));
+    else if (name == "baseColorMap")  { take(T()); if (field == 1) setBaseColorMap(loadTexture(path)); }
+    else if (name == "metallicMap")   { take(T()); if (field == 1) setMetallicMap(loadTexture(path)); }
+    else if (name == "roughnessMap")  { take(T()); if (field == 1) setRoughnessMap(loadTexture(path)); }
+    else if (name == "normalMap")     { take(T()); if (field == 1) setNormalMap(loadTexture(path)); }
+    else if (name == "emissiveMap")   { take(T()); if (field == 1) setEmissiveMap(loadTexture(path)); }
+    else if (name == "reflectionMap") { take(T()); if (field == 1) setReflectionMap(loadTexture(path)); }
 
     // ---- detail layers: flat rows, one branch (MATERIAL_GAPS_SPEC §3.4) ----
     // `detail<N><Suffix>` for N in [0, kDetailLayers). Parsed rather than
     // enumerated so raising kDetailLayers needs no edit here.
-    else if (name.startsWith(QLatin1String("detail")) && name.size() > 7 &&
-             name.at(6).isDigit()) {
-        const int layer = name.at(6).digitValue();
-        const QString suffix = name.mid(7);
-        if (layer >= 0 && layer < kDetailLayers) {
+    else if (name.size() > 7 && name.substr(0, 6) == "detail" && name[6] >= '0' && name[6] <= '9') {
+        const int layer = name[6] - '0';
+        const std::string_view suffix = name.substr(7);
+        if (layer < kDetailLayers) {
             DetailLayer &d = detail[layer];
-            if      (suffix == QLatin1String("Map"))          setDetailMap(layer, loadTexture(value.toString()));
-            else if (suffix == QLatin1String("NormalMap"))    setDetailNormalMap(layer, loadTexture(value.toString()));
-            else if (suffix == QLatin1String("Blend"))        d.blend        = value.toInt();
-            else if (suffix == QLatin1String("OffsetU"))      d.offsetU      = value.toFloat();
-            else if (suffix == QLatin1String("OffsetV"))      d.offsetV      = value.toFloat();
-            else if (suffix == QLatin1String("ScaleU"))       d.scaleU       = value.toFloat();
-            else if (suffix == QLatin1String("ScaleV"))       d.scaleV       = value.toFloat();
-            else if (suffix == QLatin1String("Weight"))       d.weight       = value.toFloat();
-            else if (suffix == QLatin1String("NormalWeight")) d.normalWeight = value.toFloat();
+            if      (suffix == "Map")          { take(T()); if (field == 1) setDetailMap(layer, loadTexture(path)); }
+            else if (suffix == "NormalMap")    { take(T()); if (field == 1) setDetailNormalMap(layer, loadTexture(path)); }
+            else if (suffix == "Blend")        take(I(d.blend));
+            else if (suffix == "OffsetU")      take(F(d.offsetU));
+            else if (suffix == "OffsetV")      take(F(d.offsetV));
+            else if (suffix == "ScaleU")       take(F(d.scaleU));
+            else if (suffix == "ScaleV")       take(F(d.scaleV));
+            else if (suffix == "Weight")       take(F(d.weight));
+            else if (suffix == "NormalWeight") take(F(d.normalWeight));
         }
     }
 
-    // KEEP THE PROPERTY ROWS IN STEP WITH THE FIELDS — every field this call
-    // touched, not just the row that was named (SMOKE_FIX S11).
-    //
-    // The rows are what SceneWriter serializes (scenewriter.cpp's values loop),
-    // so a row that disagrees with its field is a scene that reopens wrong.
-    // "textureScale" writes BOTH axes (setTextureScale above, which now syncs
-    // both rows itself), and syncing only the named row left `textureScaleV` at
-    // 1 in the file while the live material tiled 4x4: every scene built by
-    // createDefaultScene saved a (4, 1) floor and reopened with the checkers
-    // squashed along V. A caller that wants non-uniform tiling still gets it —
-    // it sets "textureScaleV" after "textureScale", which is the order both
-    // readers already apply.
-    syncProperty(name, value);
+    if (field == 0) return false;          // the field refused the kind: nothing written
+    if (field == -1) {
+        // No field by that name: the row alone (a row with no field branch), or an unknown name.
+        if (!row) return false;
+        if (!textureRow && !row->setValue(in)) return false;
+    } else if (!textureRow) {
+        // KEEP THE PROPERTY ROWS IN STEP WITH THE FIELDS — every field this call
+        // touched, not just the row that was named (SMOKE_FIX S11).
+        //
+        // The rows are what SceneWriter serializes (scenewriter.cpp's values loop),
+        // so a row that disagrees with its field is a scene that reopens wrong.
+        // "textureScale" writes BOTH axes (setTextureScale above, which now syncs
+        // both rows itself), and syncing only the named row left `textureScaleV` at
+        // 1 in the file while the live material tiled 4x4: every scene built by
+        // createDefaultScene saved a (4, 1) floor and reopened with the checkers
+        // squashed along V. A caller that wants non-uniform tiling still gets it —
+        // it sets "textureScaleV" after "textureScale", which is the order both
+        // readers already apply. (The field took this kind, so its row does too.)
+        syncProperty(name, in);
+    }
     // THE MATERIAL'S CHANGE MARK (DIRTY_SET_MIRROR_SPEC §3.6). One bump for
     // the whole call, whichever field it landed on — the mirror's memo keys on
     // it, so an edit that does not bump is an edit that never reaches the
     // screen until the verifier catches it a second or two later.
     touch();
+    return true;
 }
 
 MaterialPtr PbrMaterial::duplicate() const
@@ -566,7 +613,7 @@ MaterialPtr PbrMaterial::duplicate() const
     return PbrMaterialPtr(new PbrMaterial(*this));
 }
 
-void PbrMaterial::syncProperty(const QString& name, const QVariant& value)
+void PbrMaterial::syncProperty(std::string_view name, const Value &value)
 {
     for (auto prop : properties())
         if (prop->name == name) { prop->setValue(value); return; }
@@ -586,7 +633,7 @@ void PbrMaterial::createProperties()
     colProp->id          = id++;
     colProp->displayName = "Base Color";
     colProp->name        = "baseColor";
-    colProp->value       = toQColor(baseColor);
+    colProp->value       = baseColor;
     addProperty(std::move(colProp));
 
     auto metallicProp         = std::make_unique<FloatProperty>();
@@ -620,7 +667,7 @@ void PbrMaterial::createProperties()
     emissiveColProp->id          = id++;
     emissiveColProp->displayName = "Emissive Color";
     emissiveColProp->name        = "emissiveColor";
-    emissiveColProp->value       = toQColor(emissiveColor);
+    emissiveColProp->value       = emissiveColor;
     addProperty(std::move(emissiveColProp));
 
     auto emissiveProp         = std::make_unique<FloatProperty>();
@@ -755,7 +802,7 @@ void PbrMaterial::createProperties()
     workflowProp->id          = id++;
     workflowProp->displayName = "Workflow";
     workflowProp->name        = "workflow";
-    for (const char *n : workflowNames()) workflowProp->labels << QString::fromLatin1(n);
+    for (const char *n : workflowNames()) workflowProp->labels.push_back(n);
     workflowProp->value       = workflow;
     addProperty(std::move(workflowProp));
 
@@ -765,7 +812,7 @@ void PbrMaterial::createProperties()
     specColProp->id          = id++;
     specColProp->displayName = "Specular Color";
     specColProp->name        = "specularColor";
-    specColProp->value       = toQColor(specularColor);
+    specColProp->value       = specularColor;
     addProperty(std::move(specColProp));
 
     // 1.0 (vacuum, F0 = 0) to 3.0 (diamond is 2.42): the authoring range that
@@ -790,7 +837,7 @@ void PbrMaterial::createProperties()
     fresnelColProp->id          = id++;
     fresnelColProp->displayName = "Fresnel Color (F0)";
     fresnelColProp->name        = "fresnelColor";
-    fresnelColProp->value       = toQColor(fresnelColor);
+    fresnelColProp->value       = fresnelColor;
     addProperty(std::move(fresnelColProp));
 
     // Not a slider: flipping it changes the size of the renderer's fresnel term
@@ -810,7 +857,7 @@ void PbrMaterial::createProperties()
     shadingProp->id          = id++;
     shadingProp->displayName = "Shading Model";
     shadingProp->name        = "shadingModel";
-    for (const char *n : shadingModelNames()) shadingProp->labels << QString::fromLatin1(n);
+    for (const char *n : shadingModelNames()) shadingProp->labels.push_back(n);
     shadingProp->value       = shadingModel;
     addProperty(std::move(shadingProp));
 
@@ -823,7 +870,7 @@ void PbrMaterial::createProperties()
     brdfProp->id          = id++;
     brdfProp->displayName = "Shading BRDF";
     brdfProp->name        = "brdf";
-    for (const auto &n : brdfNames()) brdfProp->labels << QString::fromLatin1(n.displayName);
+    for (const auto &n : brdfNames()) brdfProp->labels.push_back(n.displayName);
     brdfProp->value       = brdf;
     addProperty(std::move(brdfProp));
 
@@ -906,25 +953,25 @@ void PbrMaterial::createProperties()
     // — at which the renderer sets NO shader property for the layer at all, so
     // this section existing cannot move an existing material's pixels.
     for (int layer = 0; layer < kDetailLayers; ++layer) {
-        const QString label = QStringLiteral("Detail %1 ").arg(layer);
+        const std::string label = "Detail " + std::to_string(layer) + " ";
 
         auto mapProp         = std::make_unique<TextureProperty>();
         mapProp->id          = id++;
-        mapProp->displayName = label + QStringLiteral("Map");
-        mapProp->name        = detailRow(layer, "Map");
+        mapProp->displayName = label + "Map";
+        mapProp->name        = detailRow(layer, "Map").toStdString();
         addProperty(std::move(mapProp));
 
         auto nmProp         = std::make_unique<TextureProperty>();
         nmProp->id          = id++;
-        nmProp->displayName = label + QStringLiteral("Normal Map");
-        nmProp->name        = detailRow(layer, "NormalMap");
+        nmProp->displayName = label + "Normal Map";
+        nmProp->name        = detailRow(layer, "NormalMap").toStdString();
         addProperty(std::move(nmProp));
 
         auto blendProp         = std::make_unique<ListProperty>();
         blendProp->id          = id++;
-        blendProp->displayName = label + QStringLiteral("Blend");
-        blendProp->name        = detailRow(layer, "Blend");
-        for (const char *n : detailBlendNames()) blendProp->labels << QString::fromLatin1(n);
+        blendProp->displayName = label + "Blend";
+        blendProp->name        = detailRow(layer, "Blend").toStdString();
+        for (const char *n : detailBlendNames()) blendProp->labels.push_back(n);
         blendProp->value       = detail[layer].blend;
         addProperty(std::move(blendProp));
 
@@ -945,8 +992,8 @@ void PbrMaterial::createProperties()
         for (const Scalar &sc : scalars) {
             auto p         = std::make_unique<FloatProperty>();
             p->id          = id++;
-            p->displayName = label + QString::fromLatin1(sc.label);
-            p->name        = detailRow(layer, sc.suffix);
+            p->displayName = label + sc.label;
+            p->name        = detailRow(layer, sc.suffix).toStdString();
             p->minValue    = sc.lo;
             p->maxValue    = sc.hi;
             p->value       = sc.value;
@@ -986,9 +1033,9 @@ void PbrMaterial::createProperties()
         addrProp->id          = id++;
         // "Base Color Map Address" would be a fifth column of noise; the row
         // sits directly under its map and says only what it varies.
-        addrProp->displayName = QStringLiteral("  Address");
-        addrProp->name        = addressRow(mapRow);
-        for (const char *n : addressModeNames()) addrProp->labels << QString::fromLatin1(n);
+        addrProp->displayName = "  Address";
+        addrProp->name        = addressRow(mapRow).toStdString();
+        for (const char *n : addressModeNames()) addrProp->labels.push_back(n);
         addrProp->value       = addressFor(mapRow);
         addProperty(std::move(addrProp));
     }

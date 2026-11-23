@@ -22,6 +22,12 @@ For more information see the LICENSE file
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"
 
+#include <QHash>
+#include <QList>
+#include <QString>
+#include <QVariant>
+#include <QtGlobal>
+
 namespace iris
 {
 

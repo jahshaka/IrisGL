@@ -235,7 +235,9 @@ public:
     // list onto the real fields. Without this, editing a property in the panel
     // or loading one from a scene would update the Property object but change
     // nothing that the shader actually reads.
-    void setValue(const QString& name, const QVariant& value) override;
+    // STRICT: Material::setValue's law (the value's kind is the row's own, else
+    // false and nothing changed).
+    bool setValue(std::string_view name, const Value &value) override;
 
     /// Every field, every map, every row — a new material that renders and
     /// saves exactly like this one and shares nothing with it but the texture
@@ -543,7 +545,7 @@ private:
     /// rows are what SceneWriter serializes, so every field write that does not
     /// come through setValue() has to say so here or the saved file disagrees
     /// with the material that is rendering (SMOKE_FIX S11).
-    void syncProperty(const QString& name, const QVariant& value);
+    void syncProperty(std::string_view name, const Value &value);
     static Texture2DPtr loadTexture(const QString& path);
 };
 

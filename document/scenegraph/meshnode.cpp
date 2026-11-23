@@ -74,7 +74,7 @@ PropertyRows MeshNode::getProperties()
     auto pathProp = std::make_unique<FileProperty>();
     pathProp->displayName = "Mesh Path";
     pathProp->name = "meshPath";
-    pathProp->value = meshPath;
+    pathProp->value = meshPath.toStdString();
     pathProp->readOnly = true;      // matches the setPropertyValue refusal below
     props.add(std::move(pathProp));
 

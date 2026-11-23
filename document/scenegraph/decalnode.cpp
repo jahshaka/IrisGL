@@ -16,7 +16,7 @@ PropertyRows DecalNode::getProperties()
     auto texProp = std::make_unique<TextureProperty>();
     texProp->displayName = "Decal Image";
     texProp->name = "decalTexture";
-    texProp->value = textureGuid;
+    texProp->value = textureGuid.toStdString();
     props.add(std::move(texProp));
 
     auto prop = std::make_unique<FloatProperty>();
