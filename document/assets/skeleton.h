@@ -6,6 +6,9 @@
 #include "core/math/vec.h"
 #include "irisglfwd.h"
 #include <Qt>
+#include <QList>
+#include <QMap>
+#include <QString>
 
 namespace iris
 {

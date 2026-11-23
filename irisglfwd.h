@@ -17,7 +17,6 @@ For more information see the LICENSE file
  */
 
 #include <memory>
-#include "core/logger.h"
 
 namespace iris
 {

@@ -5,6 +5,9 @@
 #include "irisglfwd.h"
 #include "document/srgbcolor.h"
 
+#include <QList>
+#include <QString>
+
 namespace iris {
 
 

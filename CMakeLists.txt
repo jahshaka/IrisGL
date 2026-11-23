@@ -355,7 +355,6 @@ set(SRCS
     document/scenegraph/socket.cpp
     core/geometry/frustum.cpp
     core/geometry/aabb.cpp
-    core/logger.cpp
     document/assets/linemeshbuilder.cpp
     document/assets/shapehelper.cpp
     document/physics/avatarmovement.cpp
@@ -445,7 +444,6 @@ set (HEADERS
     core/geometry/boundingsphere.h
     core/geometry/frustum.h
     core/geometry/aabb.h
-    core/logger.h
     document/assets/linemeshbuilder.h
     document/assets/shapehelper.h
     document/physics/avatarmovement.h

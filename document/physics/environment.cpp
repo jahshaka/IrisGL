@@ -24,6 +24,7 @@
 #include "document/scenegraph/scenenode.h"
 #include "document/assets/mesh.h"
 #include "core/geometry/trimesh.h"
+#include "core/log.h"
 #include "core/threadbudget.h"
 
 namespace iris
@@ -805,8 +806,8 @@ void Environment::createPickingConstraint(PickingHandleType handleType, const QS
 	// Showroom floor in play mode).
 	handle.activeRigidBodyBeingManipulated = hashBodies.value(pickedNodeGUID);
 	if (!handle.activeRigidBodyBeingManipulated) {
-		irisLog("physics: no rigid body in the world for picked node " +
-		        pickedNodeGUID + " — picking constraint refused");
+		iris::log::warn(("physics: no rigid body in the world for picked node " +
+		                 pickedNodeGUID + " — picking constraint refused").toStdString());
 		return;
 	}
 	// Prevent the picked object from falling asleep while it is being moved

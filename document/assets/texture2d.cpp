@@ -14,7 +14,7 @@ For more information see the LICENSE file
 #include <cassert>
 #include <utility>
 
-#include "core/logger.h"
+#include "core/log.h"
 #include "document/assets/livetextures.h"
 
 namespace iris
@@ -31,8 +31,8 @@ bool Texture2D::installReadableProbe(ReadableProbe probe)
     ReadableProbe expected = nullptr;
     if (sProbe.compare_exchange_strong(expected, probe)) return true;
     if (expected == probe) return true;   // the same function again: nothing changes
-    irisLog("Texture2D::installReadableProbe: REFUSED - a different readable-image probe is already installed "
-            "(the probe is installed once, at boot, never swapped)");
+    iris::log::warn("Texture2D::installReadableProbe: REFUSED - a different readable-image probe is already installed "
+                    "(the probe is installed once, at boot, never swapped)");
     assert(!"Texture2D::installReadableProbe: a second, different probe");
     return false;
 }
@@ -52,7 +52,7 @@ Texture2DPtr Texture2D::load(QString path)
     // image": the host's probe answers that (texture2d.h).
     if (const ReadableProbe probe = sProbe.load()) {
         if (!probe(path.toStdString())) {
-            irisLog("error loading image: " + path);
+            iris::log::warn(("error loading image: " + path).toStdString());
             return Texture2DPtr(nullptr);
         }
     }

@@ -19,7 +19,6 @@ For more information see the LICENSE file
 #include <QFile>
 
 #include "irisglfwd.h"
-#include "core/logger.h"
 
 
 

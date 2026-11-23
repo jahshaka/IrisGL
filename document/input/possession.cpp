@@ -14,7 +14,7 @@ For more information see the LICENSE file
 #include <QtGlobal>
 #include <cmath>
 
-#include "core/logger.h"
+#include "core/log.h"
 #include "core/math/mat4.h"
 #include "document/input/inputmap.h"
 #include "document/physics/avatarmovement.h"
@@ -351,9 +351,9 @@ void AvatarPossession::onPlayStarted()
         // rewritten — the user's choice survives adding a character later.
         mFellBack = true;
         unpossess();
-        irisLog("playMode 'third-person': this scene contains no avatar — "
-                "falling back to 'explorer' (free camera, nobody possessed). "
-                "Drop a character in, or set scene.playMode('explorer').");
+        iris::log::warn("playMode 'third-person': this scene contains no avatar — "
+                        "falling back to 'explorer' (free camera, nobody possessed). "
+                        "Drop a character in, or set scene.playMode('explorer').");
         return;
     }
     possess(avatar);

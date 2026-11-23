@@ -4,6 +4,9 @@
 #include "irisglfwd.h"
 #include "document/animation/keyframeanimation.h"
 
+#include <QMap>
+#include <QScopedPointer>
+
 namespace iris {
 
 // keyframe animation for a single animation for a single bone

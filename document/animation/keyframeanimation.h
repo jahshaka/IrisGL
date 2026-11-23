@@ -15,6 +15,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include <QString>
+#include <QVector>
 
 #include "core/math/bezierhelper.h"
 

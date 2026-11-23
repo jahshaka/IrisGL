@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #include "document/materials/pbrmaterial.h"
 #include "document/assets/livetextures.h"
 #include "document/assets/texture2d.h"
-#include "core/logger.h"
+#include "core/log.h"
 #include "document/qt/property.h"
 
 #include "document/qt/colour.h"
@@ -429,7 +429,7 @@ Texture2DPtr PbrMaterial::loadTexture(const QString& path)
     if (LiveTextures::isLiveRef(path)) {
         Texture2DPtr live = LiveTextures::find(path);
         if (!live)
-            irisLog("live texture not in this session, slot left empty: " + path);
+            iris::log::warn(("live texture not in this session, slot left empty: " + path).toStdString());
         return live;
     }
     return Texture2D::load(path);
