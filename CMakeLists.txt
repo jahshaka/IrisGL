@@ -383,7 +383,7 @@ set (HEADERS
     document/assets/vertexlayout.h
     document/assets/vertexbuffer.h
     core/viewport.h
-    core/keyvaluestore.h
+    document/qt/keyvaluestore.h
     core/threadbudget.h
     import/meshprewarm.h
     import/parsecensus.h
@@ -418,7 +418,7 @@ set (HEADERS
     document/animation/animation.h
     import/materialhelper.h
     core/irisutils.h
-    core/colorjson.h
+    document/qt/colorjson.h
     document/scenegraph/particlesystemnode.h
     document/materials/pbrmaterial.h
     document/animation/propertyanim.h
@@ -438,7 +438,7 @@ set (HEADERS
     document/scenegraph/nodegraph.h
     document/scenegraph/scenepicking.h
     document/scenegraph/socket.h
-    core/properties/property.h
+    document/qt/property.h
     core/geometry/boundingsphere.h
     core/geometry/frustum.h
     core/geometry/aabb.h

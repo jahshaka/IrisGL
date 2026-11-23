@@ -12,7 +12,7 @@ For more information see the LICENSE file
 #include "document/input/inputmap.h"
 
 #include <QKeySequence>
-#include "core/keyvaluestore.h"
+#include "document/qt/keyvaluestore.h"
 #include <cmath>
 
 namespace iris {

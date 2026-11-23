@@ -14,7 +14,7 @@ For more information see the LICENSE file
 
 #include "irisglfwd.h"
 #include "document/materials/material.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 #include <QColor>
 #include <QHash>
 #include <QList>

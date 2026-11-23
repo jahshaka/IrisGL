@@ -11,7 +11,7 @@ For more information see the LICENSE file
 
 #include "document/materials/material.h"
 #include "document/assets/texture2d.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 
 #include <QVariantMap>
 

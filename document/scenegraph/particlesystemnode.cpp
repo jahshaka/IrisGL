@@ -9,11 +9,11 @@ and/or modify it under the terms of the MIT License
 For more information see the LICENSE file
 *************************************************************************/
 
-#include "core/math/qtinterop.h"
+#include "document/qt/qtinterop.h"
 #include "core/math/vec.h"
 #include <QColor>
 
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 #include "document/scenegraph/particlesystemnode.h"
 
 namespace iris

@@ -17,7 +17,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "irisglfwd.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 #include "document/physics/physicsproperties.h"
 #include "document/scenegraph/nodegraph.h"
 #include "document/scenegraph/nodedirtyset.h"

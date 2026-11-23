@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #define MATERIAL_H
 
 #include "irisglfwd.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 
 #include <QList>
 #include <QString>

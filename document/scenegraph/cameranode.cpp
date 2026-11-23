@@ -21,7 +21,7 @@ For more information see the LICENSE file
 #include <cmath>
 
 #include "core/math/mathhelper.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 
 namespace
 {

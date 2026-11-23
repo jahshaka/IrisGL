@@ -11,7 +11,7 @@ For more information see the LICENSE file
 
 #include "jahshaka/engine/Ids.h"
 #include "core/math/trs.h"
-#include "core/math/qtinterop.h"
+#include "document/qt/qtinterop.h"
 #include "core/math/mat4.h"
 #include "core/math/quat.h"
 #include "core/math/vec.h"
@@ -26,7 +26,7 @@ For more information see the LICENSE file
 #include "document/animation/propertyanim.h"
 #include "document/animation/skeletalanimation.h"
 #include "document/animation/locomotion.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 #include "document/assets/mesh.h"
 #include "document/assets/skeleton.h"
 #include "document/physics/avatarmovement.h"
@@ -618,7 +618,7 @@ PropertyRows SceneNode::getProperties()
     prop->value = iris::toQt(getLocalScale());
     props.add(std::move(prop));
 
-    // There is no StringProperty in core/properties/property.h; FileProperty is
+    // There is no StringProperty in document/qt/property.h; FileProperty is
     // the QString-valued Property, so the name rides on it.
     auto nameProp = std::make_unique<FileProperty>();
     nameProp->displayName = "Name";

@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #include "core/math/quat.h"
 #include "core/math/vec.h"
 #include "document/scenegraph/scene.h"
-#include "core/colorjson.h"
+#include "document/qt/colorjson.h"
 #include "document/scenegraph/scenenode.h"
 #include "document/scenegraph/lightnode.h"
 #include "document/scenegraph/decalnode.h"

@@ -13,7 +13,7 @@ For more information see the LICENSE file
 #include "document/assets/livetextures.h"
 #include "document/assets/texture2d.h"
 #include "core/logger.h"
-#include "core/properties/property.h"
+#include "document/qt/property.h"
 
 namespace iris
 {
