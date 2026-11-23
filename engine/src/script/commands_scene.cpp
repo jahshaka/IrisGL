@@ -62,8 +62,9 @@ void registerSceneCommands(Host &host, const Commands &k)
           });
     r.add({"engine.scene.setAmbient",
            {Access::Changes,
-            {target(handle("scene", kScene)), object("ambient", {numbers("upper", 3), numbers("lower", 3)})}, Kind::Null},
-           "The scene's hemisphere ambient, {upper, lower}: the upper and the lower colour (linear RGB)."},
+            {target(handle("scene", kScene)), object("ambient", {numbers("upper", 4), numbers("lower", 4)})}, Kind::Null},
+           "The scene's hemisphere ambient, {upper, lower}: the upper and the lower colour (linear r g b a: a Colour is "
+           "four numbers; the alpha is carried, not read - the engine reads r g b, OgreScene.cpp setAmbient)."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               if (s && k.settable(c, s)) s->setAmbient(toColour(c[1]["upper"]), toColour(c[1]["lower"]));

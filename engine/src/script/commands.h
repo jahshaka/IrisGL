@@ -82,16 +82,17 @@ struct EngineState {
 SceneRecord &sceneRecord(EngineState &st, Scene *scene);
 
 inline Value vec(const Vec3 &v) { return Value(Value::Array{Value(double(v.x)), Value(double(v.y)), Value(double(v.z))}); }
-inline Value rgb(const Colour &c) { return Value(Value::Array{Value(double(c.r)), Value(double(c.g)), Value(double(c.b))}); }
 inline Vec3 toVec3(const Value &v)
 {
     const Value::Array &a = v.asArray();
     return Vec3(float(a[0].asNumber()), float(a[1].asNumber()), float(a[2].asNumber()));
 }
+/// A COLOUR IS FOUR NUMBERS (r g b a: records.h's Colour, every family): the parameter declares 4, the registry's
+/// count check refuses 3 before this is read.
 inline Colour toColour(const Value &v)
 {
     const Value::Array &a = v.asArray();
-    return Colour(float(a[0].asNumber()), float(a[1].asNumber()), float(a[2].asNumber()));
+    return Colour(float(a[0].asNumber()), float(a[1].asNumber()), float(a[2].asNumber()), float(a[3].asNumber()));
 }
 
 class Commands {
