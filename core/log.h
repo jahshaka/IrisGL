@@ -1,4 +1,4 @@
-// iris::log - THE ONE LOG BELOW THE EDITOR (NOQT-CORE-1 stage 2; V2 plan 0.12), in place of the Qt logger (core/logger.h).
+// iris::log - THE ONE LOG BELOW THE EDITOR (NOQT-CORE-1 stage 2; V2 plan 0.12), in place of the Qt logger it replaced.
 // Three levels, one host sink, no file. A record is one line of UTF-8 text; a line is never a RESULT (a tool that needs a
 // fact reads a returned value, never a log line).
 //

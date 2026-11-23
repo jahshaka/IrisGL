@@ -6,6 +6,7 @@
 
 #include <QMap>
 #include <QScopedPointer>
+#include <QString>
 
 namespace iris {
 
