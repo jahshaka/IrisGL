@@ -10,7 +10,6 @@
 #include "script/commands.h"
 #include "script/records_effects.h"
 
-#include <filesystem>
 #include <vector>
 
 namespace jahshaka { namespace engine { namespace script {
@@ -105,7 +104,8 @@ void registerEffectsCommands(Host &host, const Commands &k)
             Kind::Bool},
            "The IMAGE of a colour-ramp affector (row 0 sampled over a particle's life): re-applies THIS HOST's own last "
            "engine.particles.set of the node with the path at affector `affector` (which must be a \"colourRamp\"); \"\" "
-           "clears it. FAILS on a node this host set no particle system on; REFUSED for an image that is not there."},
+           "clears it. FAILS on a node this host set no particle system on, and with the engine's words where the engine "
+           "does not take the image."},
           [k](Call &c) -> Value {
               Scene *s = k.scene(c, c[0]);
               const std::uint32_t n = Call::idOf(c[1]);
@@ -121,13 +121,11 @@ void registerEffectsCommands(Host &host, const Commands &k)
               if (last->affectors[a].kind != ParticleAffectorDesc::Kind::ColourRamp)
                   return c.fail("ramp.affector " + std::to_string(a) + " is a \"" + toValue(last->affectors[a].kind).asString() +
                                 "\" affector, not a \"colourRamp\"");
-              const std::string path = c[2]["path"].asString();
-              std::error_code ec;
-              if (!path.empty() && !std::filesystem::is_regular_file(path, ec))
-                  return c.refuse("the colour ramp's image is not there: " + path);
               ParticleSystemDesc d = *last;
-              d.affectors[a].colourRampPath = path;
-              if (!s->setParticleSystem(NodeId(n), d)) return c.refuse(k.st->engine->lastError());
+              d.affectors[a].colourRampPath = c[2]["path"].asString();
+              // THE ENGINE JUDGES THE FILE (one owner of the law: builder P's e1 makes the setter answer false for a
+              // ramp image that is not there, naming it): a false FAILS with the engine's words and keeps no record
+              if (!s->setParticleSystem(NodeId(n), d)) return c.fail(k.st->engine->lastError());
               k.keep(s, KeptKind::ParticleSystem, n, std::move(d));
               return Value(true);
           });
