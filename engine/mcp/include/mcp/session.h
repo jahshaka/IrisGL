@@ -68,6 +68,13 @@ struct Incoming {
     bool overlong = false;
 };
 
+/// THE PICTURE TOOL's ANSWER CAP (stage 3): at most 2 MiB of PNG in one answer (each PNG at most the codec's 1 MiB a value
+/// carries as bytes); a larger answer is REFUSED by name, never truncated or scaled. Its base64 rides in the reply's line:
+/// THE REPLY FITS THE LINE CAP (checked here, as the run_script reply is above).
+constexpr std::size_t kPictureAnswerBytes = std::size_t(2) << 20;
+static_assert((kPictureAnswerBytes + 2) / 3 * 4 + kEnvelopeBytes < kLineCap,
+              "a picture answer at its cap must fit one line under the cap");
+
 class Session {
 public:
     struct Doors {
@@ -102,6 +109,7 @@ private:
     void request(const script::Value &id, const std::string &method, const script::Value &params);
     script::Value toolCall(const std::string &tool, const script::Value &args, bool &isError);
     script::Value apiDocs(const script::Value &args, bool &isError);
+    script::Value pictureTool(const script::Value &args, bool &isError);
     script::Host *host(bool engine);
     bool keepGoing(double done, double total);
     void cancelled(const script::Value &requestId);
@@ -121,6 +129,8 @@ private:
     // the running call's console capture
     std::vector<std::string> mConsole;
     std::size_t mConsoleBytes = 0, mConsoleLeftOut = 0;
+    // the running picture call's images (base64 PNG), set only when every handle passed; they ride the reply's content
+    std::vector<std::string> mImages;
 };
 
 }}}  // namespace jahshaka::engine::mcp

@@ -113,7 +113,8 @@ Value toolList()
         {{"name", Value("picture")},
          {"title", Value("See pictures")},
          {"description", Value("Return existing picture handles (from engine.view.readPixels) as PNG images, one per handle "
-                               "(two eyes = two handles, in order). Draws no frame and waits for nothing.")},
+                               "(two eyes = two handles, in order). Draws no frame and waits for nothing. A radiance handle "
+                               "is not a picture; at most 1 MiB of PNG each, 2 MiB in all.")},
          {"inputSchema",
           object({{"type", Value("object")},
                   {"properties", object({{"pictures", object({{"type", Value("array")},
@@ -256,6 +257,7 @@ void Session::request(const Value &id, const std::string &method, const Value &p
     mCancelled = false;
     mProgressToken = meta["progressToken"];
     mProgressSent = 0;
+    mImages.clear();
     bool isError = false;
     Value structured = toolCall(tool, args.isNull() ? Value(Value::Object{}) : args, isError);
     mRunning = nullptr;
@@ -272,8 +274,12 @@ void Session::request(const Value &id, const std::string &method, const Value &p
         structured = object({{"error", Value("the answer cannot be carried: " + why)}});
         iris::json::write(structured, text, why);
     }
-    Value::Object result{{"content", Value(Value::Array{object({{"type", Value("text")}, {"text", Value(text)}})})},
-                         {"structuredContent", std::move(structured)}};
+    Value::Array content;   // the picture tool's images first (each PNG rides once), then the one text item every tool has
+    for (std::string &data : mImages)
+        content.push_back(object({{"type", Value("image")}, {"data", Value(std::move(data))}, {"mimeType", Value("image/png")}}));
+    mImages.clear();
+    content.push_back(object({{"type", Value("text")}, {"text", Value(text)}}));
+    Value::Object result{{"content", Value(std::move(content))}, {"structuredContent", std::move(structured)}};
     if (isError) result.emplace_back("isError", Value(true));
     reply(id, Value(std::move(result)));
 }
@@ -324,7 +330,7 @@ Value Session::toolCall(const std::string &tool, const Value &args, bool &isErro
         if (!mConsole.empty()) o.emplace_back("console", strings(mConsole));
         return Value(std::move(o));
     };
-    if (tool == "picture") return fail("picture: not yet (MCP-ON-HOST-1 stage 3)");
+    if (tool == "picture") return pictureTool(args, isError);
     if (tool == "run_script") {
         if (!onlyMembers(args, {"script", "language"}, why)) return fail("run_script: " + why);
         const Value &language = args["language"];
@@ -395,6 +401,57 @@ Value Session::apiDocs(const Value &args, bool &isError)
         }
     }
     return object({{"commands", Value(std::move(found))}});
+}
+
+/// THE PICTURE TOOL (stage 3; L5: its ONE command, engine.picture.png): each handle's PNG, in order, as an image item; the
+/// structured answer carries the sizes, never the PNG (each PNG rides once). ATOMIC: a failure at handle k sends no image.
+/// Each PNG is capped at the carriage by the codec's own writer (the 1 MiB a value carries as bytes), the answer's sum at
+/// kPictureAnswerBytes. The tool's own law is `pictures` (1..4 integers); maxEdge is the command's (its declared range the
+/// one check), passed through untouched - absent stays absent. Between handles the session's keep-going is polled as
+/// (0, 0): a cancel stops it (no reply: L8), no progress line (a frame count would be a lie).
+Value Session::pictureTool(const Value &args, bool &isError)
+{
+    std::string why;
+    const auto fail = [&isError](const std::string &message) {
+        isError = true;
+        return object({{"error", Value(message)}});
+    };
+    if (!onlyMembers(args, {"pictures", "maxEdge"}, why)) return fail("picture: " + why);
+    const Value &pictures = args["pictures"];
+    bool handles = pictures.kind() == Kind::Array && !pictures.asArray().empty() && pictures.asArray().size() <= 4;
+    for (std::size_t k = 0; handles && k < pictures.asArray().size(); ++k) handles = pictures.asArray()[k].kind() == Kind::Int;
+    if (!handles) return fail("picture: pictures must be an array of 1 to 4 integers (picture handles)");
+    const Value *maxEdge = args.find("maxEdge");
+    if (maxEdge && maxEdge->kind() != Kind::Int) return fail("picture: maxEdge must be an integer");
+    static const std::string kHead = "{\"$bytes\":\"", kTail = "\"}";
+    std::vector<std::string> images;
+    Value::Array sizes;
+    std::size_t sum = 0;
+    for (std::size_t k = 0; k < pictures.asArray().size(); ++k) {
+        const Value &handle = pictures.asArray()[k];
+        const std::string at = "picture: pictures[" + std::to_string(k) + "] (handle " + std::to_string(handle.asInt()) + "): ";
+        if (!keepGoing(0, 0)) return fail(at + "cancelled");   // request() writes no reply for a cancelled request (L8)
+        Value::Object named{{"picture", handle}};
+        if (maxEdge) named.emplace_back("maxEdge", *maxEdge);
+        const Result r = mEngine->callNamed("engine.picture.png", std::move(named));
+        if (r.status != Status::Ok) return fail(at + r.message);
+        std::string text;
+        if (!script::toJson(r.value["png"], text, why)) return fail(at + why);   // the 1 MiB, in the codec's words
+        if (text.size() < kHead.size() + kTail.size() || text.compare(0, kHead.size(), kHead) != 0 ||
+            text.compare(text.size() - kTail.size(), kTail.size(), kTail) != 0)
+            return fail(at + "engine.picture.png answered no bytes (its png is not the codec's {\"$bytes\": ...} form)");
+        const std::size_t bytes = r.value["png"].asBytes().size();
+        sum += bytes;
+        if (sum > kPictureAnswerBytes)
+            return fail("picture: the answer would carry " + std::to_string(sum) + " bytes of PNG, over the 2 MiB (" +
+                        std::to_string(kPictureAnswerBytes) + ") one answer carries: ask for fewer pictures or a smaller "
+                        "maxEdge");
+        images.push_back(text.substr(kHead.size(), text.size() - kHead.size() - kTail.size()));
+        sizes.push_back(object({{"picture", handle}, {"width", r.value["width"]}, {"height", r.value["height"]},
+                                {"pngBytes", Value(std::int64_t(bytes))}}));
+    }
+    mImages = std::move(images);   // every handle passed: the images ride
+    return object({{"pictures", Value(std::move(sizes))}});
 }
 
 bool Session::keepGoing(double done, double total)
