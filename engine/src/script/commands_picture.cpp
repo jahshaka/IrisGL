@@ -1,7 +1,7 @@
 // THE PICTURE FAMILY (SCRIPT-IN-ENGINE-1; the lead's S3): PICTURES BY HANDLE. A picture (engine.view.readPixels'
 // answer, or engine.picture.create's) is held NATIVELY by the host and addressed by a picture handle: its reductions
 // (hash, columnStep, mean) read it in place - the script language is an interpreter, a pixel loop is never a script's,
-// and no picture crosses into the script unless engine.picture.bytes asks (one copy, then). A picture LIVES ACROSS
+// and no picture crosses into the script unless engine.picture.bytes (one copy, then) or engine.picture.png (its PNG) asks. A picture LIVES ACROSS
 // CALLS until engine.picture.release (MCP-ON-HOST-1: a session drives the host call by call); the host's end releases
 // every one. THE CAP: the live pictures hold at most the host's Options::pictureBytesCap (512 MiB unless
 // its caller says otherwise) - a picture past it FAILS by name (release one first).
@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include "jahshaka/engine/ImageCodec.h"
 #include "jahshaka/engine/Pictures.h"
 
 namespace jahshaka { namespace engine { namespace script {
@@ -153,6 +154,23 @@ void registerPictureCommands(Host &host, const Commands &k)
            "The picture's RGBA bytes, copied into the script (width x height x 4, row-major, top-left origin): for a "
            "script that truly needs the pixels - a reduction is a native command."},
           [](Call &c) -> Value { return Value::bytes(c.object<Image>(c[0])->rgba); });
+    // THE PICTURE FOR A VIEWER (MCP-ON-HOST-1 stage 3): ImageCodec.h's box downscale, then its PNG (the engine's codec);
+    // no size cap of its own - a carriage that carries bytes checks its own cap
+    r.add({"engine.picture.png",
+           {Access::Reads, {pic, arg("maxEdge", Kind::Int, Value(1024)).range(16, 2048).in("px")}, Kind::Object},
+           "The picture as a PNG, for a viewer: a box downscale so its longest edge is at most maxEdge (never an upscale), "
+           "then encoded with its alpha (an opaque picture's PNG may carry no alpha channel: its alpha is 255 by the PNG's "
+           "own rule). Answers {png: bytes, width, height}, the encoded size. Reads the held picture in "
+           "place; needs the engine (its image codec)."},
+          [k](Call &c) -> Value {
+              if (!k.engine(c)) return Value();
+              const Image small = boxDownscale(*c.object<Image>(c[0]), unsigned(c[1].asInt()));
+              std::vector<std::uint8_t> png;
+              std::string why;
+              if (!encodePng(small, png, why)) return c.fail(why);
+              return Value(Value::Object{{"png", Value::bytes(std::move(png))}, {"width", Value(small.width)},
+                                         {"height", Value(small.height)}});
+          });
     r.add({"engine.picture.release", {Access::Changes, {pic}, Kind::Bool},
            "Releases the picture: its handle is stale from here on, its bytes leave the live pictures' cap."},
           [](Call &c) -> Value { return Value(c.registry().release(c[0].asInt())); });
