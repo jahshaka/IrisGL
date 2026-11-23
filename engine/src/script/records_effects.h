@@ -6,27 +6,28 @@
 // planar reflections (PlanarReflectionParams, Planar.h). A billboard set's instances are FLAT arrays (the batch's
 // form: engine.billboards.set), no record.
 #include "script/records.h"
+#include "script/records_shared.h"   // JAH_FIELD / JAH_ENUMERATOR: their one home
 #include "jahshaka/engine/Lights.h"
 #include "jahshaka/engine/Particles.h"
 #include "jahshaka/engine/Planar.h"
 
 namespace jahshaka { namespace engine { namespace script {
 
-JAH_ENUM_NAMES(ParticleEmitterShape, {{ParticleEmitterShape::Point, "point"}, {ParticleEmitterShape::Box, "box"},
-                                      {ParticleEmitterShape::Cylinder, "cylinder"}, {ParticleEmitterShape::Ellipsoid, "ellipsoid"},
-                                      {ParticleEmitterShape::HollowEllipsoid, "hollowEllipsoid"},
-                                      {ParticleEmitterShape::Ring, "ring"}});
-JAH_ENUM_NAMES(ParticleOrientation, {{ParticleOrientation::Point, "point"}, {ParticleOrientation::OrientedCommon, "orientedCommon"},
-                                     {ParticleOrientation::OrientedSelf, "orientedSelf"},
-                                     {ParticleOrientation::PerpendicularCommon, "perpendicularCommon"},
-                                     {ParticleOrientation::PerpendicularSelf, "perpendicularSelf"}});
+JAH_ENUM_NAMES(ParticleEmitterShape, {JAH_ENUMERATOR(ParticleEmitterShape, Point), JAH_ENUMERATOR(ParticleEmitterShape, Box),
+                                      JAH_ENUMERATOR(ParticleEmitterShape, Cylinder), JAH_ENUMERATOR(ParticleEmitterShape, Ellipsoid),
+                                      JAH_ENUMERATOR(ParticleEmitterShape, HollowEllipsoid),
+                                      JAH_ENUMERATOR(ParticleEmitterShape, Ring)});
+JAH_ENUM_NAMES(ParticleOrientation, {JAH_ENUMERATOR(ParticleOrientation, Point), JAH_ENUMERATOR(ParticleOrientation, OrientedCommon),
+                                     JAH_ENUMERATOR(ParticleOrientation, OrientedSelf),
+                                     JAH_ENUMERATOR(ParticleOrientation, PerpendicularCommon),
+                                     JAH_ENUMERATOR(ParticleOrientation, PerpendicularSelf)});
 JAH_ENUM_NAMES(ParticleAffectorDesc::Kind,
-               {{ParticleAffectorDesc::Kind::ColourKeys, "colourKeys"}, {ParticleAffectorDesc::Kind::ScaleKeys, "scaleKeys"},
-                {ParticleAffectorDesc::Kind::Rotator, "rotator"}, {ParticleAffectorDesc::Kind::LinearForce, "linearForce"},
-                {ParticleAffectorDesc::Kind::Turbulence, "turbulence"}, {ParticleAffectorDesc::Kind::DeflectorPlane, "deflectorPlane"},
-                {ParticleAffectorDesc::Kind::ColourFade, "colourFade"}, {ParticleAffectorDesc::Kind::ColourRamp, "colourRamp"},
-                {ParticleAffectorDesc::Kind::ScaleRate, "scaleRate"}});
-JAH_ENUM_NAMES(BillboardLayer, {{BillboardLayer::Scene, "scene"}, {BillboardLayer::Overlay, "overlay"}});
+               {JAH_ENUMERATOR(ParticleAffectorDesc::Kind, ColourKeys), JAH_ENUMERATOR(ParticleAffectorDesc::Kind, ScaleKeys),
+                JAH_ENUMERATOR(ParticleAffectorDesc::Kind, Rotator), JAH_ENUMERATOR(ParticleAffectorDesc::Kind, LinearForce),
+                JAH_ENUMERATOR(ParticleAffectorDesc::Kind, Turbulence), JAH_ENUMERATOR(ParticleAffectorDesc::Kind, DeflectorPlane),
+                JAH_ENUMERATOR(ParticleAffectorDesc::Kind, ColourFade), JAH_ENUMERATOR(ParticleAffectorDesc::Kind, ColourRamp),
+                JAH_ENUMERATOR(ParticleAffectorDesc::Kind, ScaleRate)});
+JAH_ENUM_NAMES(BillboardLayer, {JAH_ENUMERATOR(BillboardLayer, Scene), JAH_ENUMERATOR(BillboardLayer, Overlay)});
 
 JAH_RECORD_COUNT(DecalDesc, 9);
 JAH_RECORD_COUNT(ParticleEmitterDesc, 18);

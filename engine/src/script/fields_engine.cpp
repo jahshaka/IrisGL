@@ -7,19 +7,19 @@ namespace jahshaka { namespace engine { namespace script {
 const Table<TextureMemoryEntry> &Record<TextureMemoryEntry>::table()
 {
     using T = TextureMemoryEntry;
-    static const Table<T> t({field("name", &T::name), field("resource", &T::resource), field("width", &T::width).in("px"),
-                             field("height", &T::height).in("px"), field("depth", &T::depth), field("slices", &T::slices),
-                             field("mipmaps", &T::mipmaps), field("msaa", &T::msaa), field("format", &T::format),
-                             field("bytes", &T::bytes).in("bytes"), field("renderTarget", &T::renderTarget), field("uav", &T::uav),
-                             field("manual", &T::manual), field("pooled", &T::pooled), field("residency", &T::residency)});
+    static const Table<T> t({JAH_FIELD(T, name), JAH_FIELD(T, resource), JAH_FIELD(T, width).in("px"),
+                             JAH_FIELD(T, height).in("px"), JAH_FIELD(T, depth), JAH_FIELD(T, slices),
+                             JAH_FIELD(T, mipmaps), JAH_FIELD(T, msaa), JAH_FIELD(T, format),
+                             JAH_FIELD(T, bytes).in("bytes"), JAH_FIELD(T, renderTarget), JAH_FIELD(T, uav),
+                             JAH_FIELD(T, manual), JAH_FIELD(T, pooled), JAH_FIELD(T, residency)});
     return t;
 }
 
 const Table<ValidationStatus> &Record<ValidationStatus>::table()
 {
     using V = ValidationStatus;
-    static const Table<V> t({field("requested", &V::requested), field("active", &V::active),
-                             field("layers", &V::layers).upTo(64), field("drawEntry", &V::drawEntry)});
+    static const Table<V> t({JAH_FIELD(V, requested), JAH_FIELD(V, active),
+                             JAH_FIELD(V, layers).upTo(64), JAH_FIELD(V, drawEntry)});
     return t;
 }
 

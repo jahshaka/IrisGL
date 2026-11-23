@@ -21,33 +21,33 @@ template <class R> Field<R> oneOf(Field<R> f, std::vector<std::string> names)
 const Table<PbrParams::DetailLayer> &Record<PbrParams::DetailLayer>::table()
 {
     using D = PbrParams::DetailLayer;
-    static const Table<D> t({field("blend", &D::blend).range(0, double(PbrParams::detailBlendNames().size() - 1)),
-                             field("offsetU", &D::offsetU), field("offsetV", &D::offsetV), field("scaleU", &D::scaleU),
-                             field("scaleV", &D::scaleV), field("weight", &D::weight), field("normalWeight", &D::normalWeight)});
+    static const Table<D> t({JAH_FIELD(D, blend).range(0, double(PbrParams::detailBlendNames().size() - 1)),
+                             JAH_FIELD(D, offsetU), JAH_FIELD(D, offsetV), JAH_FIELD(D, scaleU),
+                             JAH_FIELD(D, scaleV), JAH_FIELD(D, weight), JAH_FIELD(D, normalWeight)});
     return t;
 }
 
 const Table<PbrParams> &Record<PbrParams>::table()
 {
     using P = PbrParams;
-    static const Table<P> t({field("albedo", &P::albedo).range(0, 1), field("metalness", &P::metalness).range(0, 1),
-                             field("roughness", &P::roughness).range(0, 1), field("emissive", &P::emissive).atLeast(0),
-                             field("alphaMode", &P::alphaMode), field("alpha", &P::alpha).range(0, 1),
-                             field("alphaCutoff", &P::alphaCutoff).range(0, 1),
-                             field("normalMapWeight", &P::normalMapWeight).atLeast(0), field("uvScale", &P::uvScale),
-                             field("uvOffset", &P::uvOffset), field("uvRotation", &P::uvRotation).in("degrees"),
-                             field("uvVelocity", &P::uvVelocity), field("refractionStrength", &P::refractionStrength).atLeast(0),
-                             field("clearCoat", &P::clearCoat).range(0, 1),
-                             field("clearCoatRoughness", &P::clearCoatRoughness).range(0, 1),
-                             oneOf(field("brdf", &P::brdf), {"Default", "CookTorrance", "BlinnPhong", "DefaultSeparateDiffuseFresnel",
+    static const Table<P> t({JAH_FIELD(P, albedo).range(0, 1), JAH_FIELD(P, metalness).range(0, 1),
+                             JAH_FIELD(P, roughness).range(0, 1), JAH_FIELD(P, emissive).atLeast(0),
+                             JAH_FIELD(P, alphaMode), JAH_FIELD(P, alpha).range(0, 1),
+                             JAH_FIELD(P, alphaCutoff).range(0, 1),
+                             JAH_FIELD(P, normalMapWeight).atLeast(0), JAH_FIELD(P, uvScale),
+                             JAH_FIELD(P, uvOffset), JAH_FIELD(P, uvRotation).in("degrees"),
+                             JAH_FIELD(P, uvVelocity), JAH_FIELD(P, refractionStrength).atLeast(0),
+                             JAH_FIELD(P, clearCoat).range(0, 1),
+                             JAH_FIELD(P, clearCoatRoughness).range(0, 1),
+                             oneOf(JAH_FIELD(P, brdf), {"Default", "CookTorrance", "BlinnPhong", "DefaultSeparateDiffuseFresnel",
                                                              "CookTorranceSeparateDiffuseFresnel",
                                                              "BlinnPhongSeparateDiffuseFresnel"}),
-                             field("receiveShadows", &P::receiveShadows), field("emissiveAsLightmap", &P::emissiveAsLightmap),
-                             field("shadingModel", &P::shadingModel), field("workflow", &P::workflow), field("detail", &P::detail),
-                             field("anisotropy", &P::anisotropy).range(1, 16), field("address", &P::address),
-                             field("specularColour", &P::specularColour).atLeast(0), field("ior", &P::ior).atLeast(1),
-                             field("fresnelColour", &P::fresnelColour).range(0, 1),
-                             field("useFresnelColour", &P::useFresnelColour), field("separateFresnel", &P::separateFresnel)});
+                             JAH_FIELD(P, receiveShadows), JAH_FIELD(P, emissiveAsLightmap),
+                             JAH_FIELD(P, shadingModel), JAH_FIELD(P, workflow), JAH_FIELD(P, detail),
+                             JAH_FIELD(P, anisotropy).range(1, 16), JAH_FIELD(P, address),
+                             JAH_FIELD(P, specularColour).atLeast(0), JAH_FIELD(P, ior).atLeast(1),
+                             JAH_FIELD(P, fresnelColour).range(0, 1),
+                             JAH_FIELD(P, useFresnelColour), JAH_FIELD(P, separateFresnel)});
     return t;
 }
 

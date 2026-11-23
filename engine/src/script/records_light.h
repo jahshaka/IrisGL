@@ -4,12 +4,13 @@
 // JAH_ENUM_NAMES; the tables in fields_light.cpp. LightDesc is this family's (Lights.h's DecalDesc is the effects
 // family's).
 #include "script/records.h"
+#include "script/records_shared.h"   // JAH_FIELD / JAH_ENUMERATOR: their one home
 #include "jahshaka/engine/Lights.h"
 
 namespace jahshaka { namespace engine { namespace script {
 
-JAH_ENUM_NAMES(LightType, {{LightType::Directional, "directional"}, {LightType::Point, "point"}, {LightType::Spot, "spot"},
-                           {LightType::Area, "area"}});
+JAH_ENUM_NAMES(LightType, {JAH_ENUMERATOR(LightType, Directional), JAH_ENUMERATOR(LightType, Point), JAH_ENUMERATOR(LightType, Spot),
+                           JAH_ENUMERATOR(LightType, Area)});
 JAH_RECORD_COUNT(LightDesc, 16);
 
 }}}  // namespace jahshaka::engine::script

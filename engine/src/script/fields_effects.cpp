@@ -20,69 +20,69 @@ constexpr double kColourLo = -4.0, kColourHi = 120.0;   // the particle colour's
 const Table<DecalDesc> &Record<DecalDesc>::table()
 {
     using D = DecalDesc;
-    static const Table<D> t({field("diffuse", &D::diffuse).handle("decalTexture"), field("normal", &D::normal).handle("decalTexture"),
-                             field("emissive", &D::emissive).handle("decalTexture"), field("width", &D::width).atLeast(0.001).in("m"),
-                             field("height", &D::height).atLeast(0.001).in("m"), field("depth", &D::depth).atLeast(0.001).in("m"),
-                             field("metalness", &D::metalness).range(0, 1), field("roughness", &D::roughness).range(0, 1),
-                             field("ignoreAlphaDiffuse", &D::ignoreAlphaDiffuse)});
+    static const Table<D> t({JAH_FIELD(D, diffuse).handle("decalTexture"), JAH_FIELD(D, normal).handle("decalTexture"),
+                             JAH_FIELD(D, emissive).handle("decalTexture"), JAH_FIELD(D, width).atLeast(0.001).in("m"),
+                             JAH_FIELD(D, height).atLeast(0.001).in("m"), JAH_FIELD(D, depth).atLeast(0.001).in("m"),
+                             JAH_FIELD(D, metalness).range(0, 1), JAH_FIELD(D, roughness).range(0, 1),
+                             JAH_FIELD(D, ignoreAlphaDiffuse)});
     return t;
 }
 
 const Table<ParticleEmitterDesc> &Record<ParticleEmitterDesc>::table()
 {
     using E = ParticleEmitterDesc;
-    static const Table<E> t({field("shape", &E::shape), field("position", &E::position).in("m"), field("direction", &E::direction),
-                             field("angleDegrees", &E::angleDegrees).range(0, 180).in("degrees"),
-                             field("rate", &E::rate).atLeast(0).in("/s"), field("velocityMin", &E::velocityMin).atLeast(0).in("m/s"),
-                             field("velocityMax", &E::velocityMax).atLeast(0).in("m/s"), field("ttlMin", &E::ttlMin).atLeast(0.01).in("s"),
-                             field("ttlMax", &E::ttlMax).atLeast(0.01).in("s"), field("sizeWidth", &E::sizeWidth).atLeast(0).in("m"),
-                             field("sizeHeight", &E::sizeHeight).atLeast(0).in("m"),
-                             field("colourStart", &E::colourStart).range(kColourLo, kColourHi),
-                             field("colourEnd", &E::colourEnd).range(kColourLo, kColourHi), field("extents", &E::extents).atLeast(0).in("m"),
-                             field("innerExtents", &E::innerExtents).range(0, 0.999), field("duration", &E::duration).atLeast(0).in("s"),
-                             field("repeatDelay", &E::repeatDelay).atLeast(0).in("s"), field("startTime", &E::startTime).atLeast(0).in("s")});
+    static const Table<E> t({JAH_FIELD(E, shape), JAH_FIELD(E, position).in("m"), JAH_FIELD(E, direction),
+                             JAH_FIELD(E, angleDegrees).range(0, 180).in("degrees"),
+                             JAH_FIELD(E, rate).atLeast(0).in("/s"), JAH_FIELD(E, velocityMin).atLeast(0).in("m/s"),
+                             JAH_FIELD(E, velocityMax).atLeast(0).in("m/s"), JAH_FIELD(E, ttlMin).atLeast(0.01).in("s"),
+                             JAH_FIELD(E, ttlMax).atLeast(0.01).in("s"), JAH_FIELD(E, sizeWidth).atLeast(0).in("m"),
+                             JAH_FIELD(E, sizeHeight).atLeast(0).in("m"),
+                             JAH_FIELD(E, colourStart).range(kColourLo, kColourHi),
+                             JAH_FIELD(E, colourEnd).range(kColourLo, kColourHi), JAH_FIELD(E, extents).atLeast(0).in("m"),
+                             JAH_FIELD(E, innerExtents).range(0, 0.999), JAH_FIELD(E, duration).atLeast(0).in("s"),
+                             JAH_FIELD(E, repeatDelay).atLeast(0).in("s"), JAH_FIELD(E, startTime).atLeast(0).in("s")});
     return t;
 }
 
 const Table<ParticleAffectorDesc> &Record<ParticleAffectorDesc>::table()
 {
     using A = ParticleAffectorDesc;
-    static const Table<A> t({field("kind", &A::kind), field("keyCount", &A::keyCount).range(0, 6),
-                             field("colourKeys", &A::colourKeys).range(kColourLo, kColourHi),
-                             field("colourKeyTimes", &A::colourKeyTimes).range(0, 1), field("scaleKeys", &A::scaleKeys).atLeast(0),
-                             field("scaleKeyTimes", &A::scaleKeyTimes).range(0, 1),
-                             field("rotSpeedMin", &A::rotSpeedMin).in("degrees/s"), field("rotSpeedMax", &A::rotSpeedMax).in("degrees/s"),
-                             field("rotStart", &A::rotStart).in("degrees"), field("rotEnd", &A::rotEnd).in("degrees"),
-                             field("force", &A::force).in("m/s2"), field("forceAverage", &A::forceAverage),
-                             field("randomness", &A::randomness).atLeast(0), field("scope", &A::scope).range(0, 1),
-                             field("keepVelocity", &A::keepVelocity), field("planePoint", &A::planePoint).in("m"),
-                             field("planeNormal", &A::planeNormal), field("bounce", &A::bounce).atLeast(0),
-                             field("colourAdjust1", &A::colourAdjust1).in("/s"), field("colourAdjust2", &A::colourAdjust2).in("/s"),
-                             field("colourSwitchAt", &A::colourSwitchAt).atLeast(0).in("s"),
-                             field("colourMin", &A::colourMin).range(kColourLo, kColourHi),
-                             field("colourMax", &A::colourMax).range(kColourLo, kColourHi), field("colourRampPath", &A::colourRampPath),
-                             field("scaleRate", &A::scaleRate), field("scaleMultiply", &A::scaleMultiply)});
+    static const Table<A> t({JAH_FIELD(A, kind), JAH_FIELD(A, keyCount).range(0, 6),
+                             JAH_FIELD(A, colourKeys).range(kColourLo, kColourHi),
+                             JAH_FIELD(A, colourKeyTimes).range(0, 1), JAH_FIELD(A, scaleKeys).atLeast(0),
+                             JAH_FIELD(A, scaleKeyTimes).range(0, 1),
+                             JAH_FIELD(A, rotSpeedMin).in("degrees/s"), JAH_FIELD(A, rotSpeedMax).in("degrees/s"),
+                             JAH_FIELD(A, rotStart).in("degrees"), JAH_FIELD(A, rotEnd).in("degrees"),
+                             JAH_FIELD(A, force).in("m/s2"), JAH_FIELD(A, forceAverage),
+                             JAH_FIELD(A, randomness).atLeast(0), JAH_FIELD(A, scope).range(0, 1),
+                             JAH_FIELD(A, keepVelocity), JAH_FIELD(A, planePoint).in("m"),
+                             JAH_FIELD(A, planeNormal), JAH_FIELD(A, bounce).atLeast(0),
+                             JAH_FIELD(A, colourAdjust1).in("/s"), JAH_FIELD(A, colourAdjust2).in("/s"),
+                             JAH_FIELD(A, colourSwitchAt).atLeast(0).in("s"),
+                             JAH_FIELD(A, colourMin).range(kColourLo, kColourHi),
+                             JAH_FIELD(A, colourMax).range(kColourLo, kColourHi), JAH_FIELD(A, colourRampPath),
+                             JAH_FIELD(A, scaleRate), JAH_FIELD(A, scaleMultiply)});
     return t;
 }
 
 const Table<ParticleSystemDesc> &Record<ParticleSystemDesc>::table()
 {
     using S = ParticleSystemDesc;
-    static const Table<S> t({field("quota", &S::quota).range(1, 16000), field("texture", &S::texture).handle("texture"),
-                             field("additive", &S::additive), field("alphaHash", &S::alphaHash), field("distortion", &S::distortion),
-                             field("orientation", &S::orientation), field("commonDirection", &S::commonDirection),
-                             field("commonUp", &S::commonUp), field("emitters", &S::emitters).upTo(kParticleEmittersMax),
-                             field("affectors", &S::affectors).upTo(kParticleAffectorsMax)});
+    static const Table<S> t({JAH_FIELD(S, quota).range(1, 16000), JAH_FIELD(S, texture).handle("texture"),
+                             JAH_FIELD(S, additive), JAH_FIELD(S, alphaHash), JAH_FIELD(S, distortion),
+                             JAH_FIELD(S, orientation), JAH_FIELD(S, commonDirection),
+                             JAH_FIELD(S, commonUp), JAH_FIELD(S, emitters).upTo(kParticleEmittersMax),
+                             JAH_FIELD(S, affectors).upTo(kParticleAffectorsMax)});
     return t;
 }
 
 const Table<PlanarReflectionParams> &Record<PlanarReflectionParams>::table()
 {
     using P = PlanarReflectionParams;
-    static const Table<P> t({field("budget", &P::budget).range(0, 8), field("resolution", &P::resolution).range(64, 2048).in("px"),
-                             field("mipmaps", &P::mipmaps), field("shadows", &P::shadows), field("hdr", &P::hdr),
-                             field("accurateLighting", &P::accurateLighting), field("maxDistance", &P::maxDistance).atLeast(0.01).in("m"),
-                             field("background", &P::background)});
+    static const Table<P> t({JAH_FIELD(P, budget).range(0, 8), JAH_FIELD(P, resolution).range(64, 2048).in("px"),
+                             JAH_FIELD(P, mipmaps), JAH_FIELD(P, shadows), JAH_FIELD(P, hdr),
+                             JAH_FIELD(P, accurateLighting), JAH_FIELD(P, maxDistance).atLeast(0.01).in("m"),
+                             JAH_FIELD(P, background)});
     return t;
 }
 

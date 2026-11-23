@@ -3,11 +3,12 @@
 // commands take or answer, declared with JAH_RECORD_COUNT beside its table's declaration, and its enums with
 // JAH_ENUM_NAMES; the tables in fields_atom.cpp. The atom commands take no record: the Atom view's names only.
 #include "script/records.h"
+#include "script/records_shared.h"   // JAH_FIELD / JAH_ENUMERATOR: their one home
 #include "jahshaka/engine/Overlay.h"
 
 namespace jahshaka { namespace engine { namespace script {
 
-JAH_ENUM_NAMES(AtomView, {{AtomView::Off, "off"}, {AtomView::Triangles, "triangles"}, {AtomView::Levels, "levels"},
-                          {AtomView::Buckets, "buckets"}, {AtomView::Objects, "objects"}, {AtomView::Density, "density"}});
+JAH_ENUM_NAMES(AtomView, {JAH_ENUMERATOR(AtomView, Off), JAH_ENUMERATOR(AtomView, Triangles), JAH_ENUMERATOR(AtomView, Levels),
+                          JAH_ENUMERATOR(AtomView, Buckets), JAH_ENUMERATOR(AtomView, Objects), JAH_ENUMERATOR(AtomView, Density)});
 
 }}}  // namespace jahshaka::engine::script

@@ -4,6 +4,7 @@
 // JAH_ENUM_NAMES; the tables in fields_engine.cpp. The engine-wide reads' answers: what the renderer's texture manager
 // holds (TextureMemoryEntry, Stats.h) and the validation layer's proof (ValidationStatus, Monitor.h).
 #include "script/records.h"
+#include "script/records_shared.h"   // JAH_FIELD / JAH_ENUMERATOR: their one home
 #include "jahshaka/engine/Monitor.h"
 #include "jahshaka/engine/Stats.h"
 

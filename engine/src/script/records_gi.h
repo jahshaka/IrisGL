@@ -11,8 +11,8 @@
 
 namespace jahshaka { namespace engine { namespace script {
 
-JAH_ENUM_NAMES(SunContactResolution, {{SunContactResolution::Auto, "auto"}, {SunContactResolution::Full, "full"},
-                                      {SunContactResolution::Half, "half"}});
+JAH_ENUM_NAMES(SunContactResolution, {JAH_ENUMERATOR(SunContactResolution, Auto), JAH_ENUMERATOR(SunContactResolution, Full),
+                                      JAH_ENUMERATOR(SunContactResolution, Half)});
 
 JAH_RECORD_COUNT(GiParams::GiCascadeDesc, 3);
 JAH_RECORD_COUNT(GiParams, 25);

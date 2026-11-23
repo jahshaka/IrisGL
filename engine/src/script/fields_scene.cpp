@@ -12,17 +12,17 @@ namespace jahshaka { namespace engine { namespace script {
 const Table<AtmosphereSky> &Record<AtmosphereSky>::table()
 {
     static const Table<AtmosphereSky> t({
-        field("sunHaze", &AtmosphereSky::sunHaze).atLeast(0),
-        field("rayleighScale", &AtmosphereSky::rayleighScale).atLeast(0),
-        field("ozone", &AtmosphereSky::ozone),
-        field("groundAlbedo", &AtmosphereSky::groundAlbedo).range(0, 1),
-        field("aerialScale", &AtmosphereSky::aerialScale).atLeast(0),
-        field("skyBrightness", &AtmosphereSky::skyBrightness).range(0, 10),
-        field("planetRadiusKm", &AtmosphereSky::planetRadiusKm).above(0).in("km"),
-        field("atmosphereHeightKm", &AtmosphereSky::atmosphereHeightKm).above(0).in("km"),
-        field("sunDir", &AtmosphereSky::sunDir).range(-1, 1),
-        field("hasSun", &AtmosphereSky::hasSun),
-        field("sunIlluminance", &AtmosphereSky::sunIlluminance).atLeast(0),
+        JAH_FIELD(AtmosphereSky, sunHaze).atLeast(0),
+        JAH_FIELD(AtmosphereSky, rayleighScale).atLeast(0),
+        JAH_FIELD(AtmosphereSky, ozone),
+        JAH_FIELD(AtmosphereSky, groundAlbedo).range(0, 1),
+        JAH_FIELD(AtmosphereSky, aerialScale).atLeast(0),
+        JAH_FIELD(AtmosphereSky, skyBrightness).range(0, 10),
+        JAH_FIELD(AtmosphereSky, planetRadiusKm).above(0).in("km"),
+        JAH_FIELD(AtmosphereSky, atmosphereHeightKm).above(0).in("km"),
+        JAH_FIELD(AtmosphereSky, sunDir).range(-1, 1),
+        JAH_FIELD(AtmosphereSky, hasSun),
+        JAH_FIELD(AtmosphereSky, sunIlluminance).atLeast(0),
     });
     return t;
 }
@@ -32,11 +32,11 @@ const Table<AtmosphereSky> &Record<AtmosphereSky>::table()
 const Table<SunDisc> &Record<SunDisc>::table()
 {
     static const Table<SunDisc> t({
-        field("enabled", &SunDisc::enabled),
-        field("dir", &SunDisc::dir).range(-1, 1),
-        field("angularDiameterDeg", &SunDisc::angularDiameterDeg).range(0, 180).in("degrees"),
-        field("colour", &SunDisc::colour).atLeast(0),
-        field("inProbes", &SunDisc::inProbes),
+        JAH_FIELD(SunDisc, enabled),
+        JAH_FIELD(SunDisc, dir).range(-1, 1),
+        JAH_FIELD(SunDisc, angularDiameterDeg).range(0, 180).in("degrees"),
+        JAH_FIELD(SunDisc, colour).atLeast(0),
+        JAH_FIELD(SunDisc, inProbes),
     });
     return t;
 }
@@ -46,16 +46,16 @@ const Table<SunDisc> &Record<SunDisc>::table()
 const Table<CloudLayerDesc> &Record<CloudLayerDesc>::table()
 {
     static const Table<CloudLayerDesc> t({
-        field("enabled", &CloudLayerDesc::enabled),
-        field("coverage", &CloudLayerDesc::coverage).range(0, 1),
-        field("density", &CloudLayerDesc::density).range(0, 4),
-        field("altitude", &CloudLayerDesc::altitude).atLeast(0).in("m"),
-        field("shadow", &CloudLayerDesc::shadow).range(0, 1),
-        field("wind", &CloudLayerDesc::wind).in("m/s"),
-        field("weatherMap", &CloudLayerDesc::weatherMap).handle(kTexture),
-        field("hasSun", &CloudLayerDesc::hasSun),
-        field("sunDir", &CloudLayerDesc::sunDir).range(-1, 1),
-        field("sunIrradiance", &CloudLayerDesc::sunIrradiance).atLeast(0),
+        JAH_FIELD(CloudLayerDesc, enabled),
+        JAH_FIELD(CloudLayerDesc, coverage).range(0, 1),
+        JAH_FIELD(CloudLayerDesc, density).range(0, 4),
+        JAH_FIELD(CloudLayerDesc, altitude).atLeast(0).in("m"),
+        JAH_FIELD(CloudLayerDesc, shadow).range(0, 1),
+        JAH_FIELD(CloudLayerDesc, wind).in("m/s"),
+        JAH_FIELD(CloudLayerDesc, weatherMap).handle(kTexture),
+        JAH_FIELD(CloudLayerDesc, hasSun),
+        JAH_FIELD(CloudLayerDesc, sunDir).range(-1, 1),
+        JAH_FIELD(CloudLayerDesc, sunIrradiance).atLeast(0),
     });
     return t;
 }
@@ -65,12 +65,12 @@ const Table<CloudLayerDesc> &Record<CloudLayerDesc>::table()
 const Table<SkyDesc> &Record<SkyDesc>::table()
 {
     static const Table<SkyDesc> t({
-        field("mode", &SkyDesc::mode),
-        field("equirect", &SkyDesc::equirect).handle(kTexture),
-        field("faces", &SkyDesc::faces).handle(kTexture),
-        field("atmosphere", &SkyDesc::atmosphere),
-        field("sun", &SkyDesc::sun),
-        field("clouds", &SkyDesc::clouds),
+        JAH_FIELD(SkyDesc, mode),
+        JAH_FIELD(SkyDesc, equirect).handle(kTexture),
+        JAH_FIELD(SkyDesc, faces).handle(kTexture),
+        JAH_FIELD(SkyDesc, atmosphere),
+        JAH_FIELD(SkyDesc, sun),
+        JAH_FIELD(SkyDesc, clouds),
     });
     return t;
 }
@@ -80,12 +80,12 @@ const Table<SkyDesc> &Record<SkyDesc>::table()
 const Table<FogDesc> &Record<FogDesc>::table()
 {
     static const Table<FogDesc> t({
-        field("enabled", &FogDesc::enabled),
-        field("colour", &FogDesc::colour).atLeast(0),
-        field("density", &FogDesc::density).atLeast(0),
-        field("heightDensity", &FogDesc::heightDensity).atLeast(0),
-        field("heightFalloff", &FogDesc::heightFalloff).atLeast(0),
-        field("heightLevel", &FogDesc::heightLevel).in("m"),
+        JAH_FIELD(FogDesc, enabled),
+        JAH_FIELD(FogDesc, colour).atLeast(0),
+        JAH_FIELD(FogDesc, density).atLeast(0),
+        JAH_FIELD(FogDesc, heightDensity).atLeast(0),
+        JAH_FIELD(FogDesc, heightFalloff).atLeast(0),
+        JAH_FIELD(FogDesc, heightLevel).in("m"),
     });
     return t;
 }
@@ -95,9 +95,9 @@ const Table<FogDesc> &Record<FogDesc>::table()
 const Table<ShadowDesc> &Record<ShadowDesc>::table()
 {
     static const Table<ShadowDesc> t({
-        field("hasFilter", &ShadowDesc::hasFilter),
-        field("filter", &ShadowDesc::filter),
-        field("resolution", &ShadowDesc::resolution).range(0, 8192).in("px"),
+        JAH_FIELD(ShadowDesc, hasFilter),
+        JAH_FIELD(ShadowDesc, filter),
+        JAH_FIELD(ShadowDesc, resolution).range(0, 8192).in("px"),
     });
     return t;
 }
@@ -106,12 +106,12 @@ const Table<ShadowDesc> &Record<ShadowDesc>::table()
 const Table<MeshCardDesc> &Record<MeshCardDesc>::table()
 {
     static const Table<MeshCardDesc> t({
-        field("axis", &MeshCardDesc::axis).range(0, 5),
-        field("lodLevel", &MeshCardDesc::lodLevel).range(0, kMeshLevels),
-        field("origin", &MeshCardDesc::origin),
-        field("halfU", &MeshCardDesc::halfU).atLeast(0),
-        field("halfV", &MeshCardDesc::halfV).atLeast(0),
-        field("halfDepth", &MeshCardDesc::halfDepth).atLeast(0),
+        JAH_FIELD(MeshCardDesc, axis).range(0, 5),
+        JAH_FIELD(MeshCardDesc, lodLevel).range(0, kMeshLevels),
+        JAH_FIELD(MeshCardDesc, origin),
+        JAH_FIELD(MeshCardDesc, halfU).atLeast(0),
+        JAH_FIELD(MeshCardDesc, halfV).atLeast(0),
+        JAH_FIELD(MeshCardDesc, halfDepth).atLeast(0),
     });
     return t;
 }
@@ -120,12 +120,12 @@ const Table<MeshCardDesc> &Record<MeshCardDesc>::table()
 const Table<MeshCluster> &Record<MeshCluster>::table()
 {
     static const Table<MeshCluster> t({
-        field("firstIndex", &MeshCluster::firstIndex),
-        field("indexCount", &MeshCluster::indexCount),
-        field("group", &MeshCluster::group).range(-1, kMeshClusters),
-        field("refined", &MeshCluster::refined).range(-1, kMeshClusters),
-        field("centre", &MeshCluster::centre),
-        field("radius", &MeshCluster::radius).atLeast(0),
+        JAH_FIELD(MeshCluster, firstIndex),
+        JAH_FIELD(MeshCluster, indexCount),
+        JAH_FIELD(MeshCluster, group).range(-1, kMeshClusters),
+        JAH_FIELD(MeshCluster, refined).range(-1, kMeshClusters),
+        JAH_FIELD(MeshCluster, centre),
+        JAH_FIELD(MeshCluster, radius).atLeast(0),
     });
     return t;
 }
@@ -135,11 +135,11 @@ const Table<MeshCluster> &Record<MeshCluster>::table()
 const Table<MeshClusterGroup> &Record<MeshClusterGroup>::table()
 {
     static const Table<MeshClusterGroup> t({
-        field("depth", &MeshClusterGroup::depth).range(0, kMeshLevels),
-        field("centre", &MeshClusterGroup::centre),
-        field("radius", &MeshClusterGroup::radius).atLeast(0),
-        field("error", &MeshClusterGroup::error).atLeast(0),
-        field("estimate", &MeshClusterGroup::estimate),
+        JAH_FIELD(MeshClusterGroup, depth).range(0, kMeshLevels),
+        JAH_FIELD(MeshClusterGroup, centre),
+        JAH_FIELD(MeshClusterGroup, radius).atLeast(0),
+        JAH_FIELD(MeshClusterGroup, error).atLeast(0),
+        JAH_FIELD(MeshClusterGroup, estimate),
     });
     return t;
 }
@@ -151,22 +151,22 @@ const Table<MeshClusterGroup> &Record<MeshClusterGroup>::table()
 const Table<MeshData> &Record<MeshData>::table()
 {
     static const Table<MeshData> t({
-        field("positions", &MeshData::positions).upTo(3 * kMeshVertices),
-        field("normals", &MeshData::normals).upTo(3 * kMeshVertices),
-        field("uvs", &MeshData::uvs).upTo(2 * kMeshVertices),
-        field("tangents", &MeshData::tangents).upTo(4 * kMeshVertices),
-        field("indices", &MeshData::indices).upTo(kMeshIndices),
-        field("blendIndices", &MeshData::blendIndices).upTo(4 * kMeshVertices),
-        field("blendWeights", &MeshData::blendWeights).range(0, 1).upTo(4 * kMeshVertices),
-        field("dynamic", &MeshData::dynamic),
-        field("lodIndices", &MeshData::lodIndices).upTo(kMeshLevels),
-        field("lodErrors", &MeshData::lodErrors).upTo(kMeshLevels),
-        field("lodBounds", &MeshData::lodBounds).atLeast(0).upTo(kMeshLevels),
-        field("cards", &MeshData::cards).upTo(kMeshCards),
-        field("cardCoverage", &MeshData::cardCoverage).range(0, 1),
-        field("clusterIndices", &MeshData::clusterIndices).upTo(kMeshIndices),
-        field("clusters", &MeshData::clusters).upTo(kMeshClusters),
-        field("clusterGroups", &MeshData::clusterGroups).upTo(kMeshClusters),
+        JAH_FIELD(MeshData, positions).upTo(3 * kMeshVertices),
+        JAH_FIELD(MeshData, normals).upTo(3 * kMeshVertices),
+        JAH_FIELD(MeshData, uvs).upTo(2 * kMeshVertices),
+        JAH_FIELD(MeshData, tangents).upTo(4 * kMeshVertices),
+        JAH_FIELD(MeshData, indices).upTo(kMeshIndices),
+        JAH_FIELD(MeshData, blendIndices).upTo(4 * kMeshVertices),
+        JAH_FIELD(MeshData, blendWeights).range(0, 1).upTo(4 * kMeshVertices),
+        JAH_FIELD(MeshData, dynamic),
+        JAH_FIELD(MeshData, lodIndices).upTo(kMeshLevels),
+        JAH_FIELD(MeshData, lodErrors).upTo(kMeshLevels),
+        JAH_FIELD(MeshData, lodBounds).atLeast(0).upTo(kMeshLevels),
+        JAH_FIELD(MeshData, cards).upTo(kMeshCards),
+        JAH_FIELD(MeshData, cardCoverage).range(0, 1),
+        JAH_FIELD(MeshData, clusterIndices).upTo(kMeshIndices),
+        JAH_FIELD(MeshData, clusters).upTo(kMeshClusters),
+        JAH_FIELD(MeshData, clusterGroups).upTo(kMeshClusters),
     });
     return t;
 }

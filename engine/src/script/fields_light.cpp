@@ -12,22 +12,22 @@ namespace jahshaka { namespace engine { namespace script {
 const Table<LightDesc> &Record<LightDesc>::table()
 {
     static const Table<LightDesc> t({
-        field("type", &LightDesc::type),
-        field("colour", &LightDesc::colour).atLeast(0),
-        field("intensity", &LightDesc::intensity).atLeast(0),
-        field("range", &LightDesc::range).atLeast(0.01).in("m"),
-        field("sourceRadius", &LightDesc::sourceRadius).atLeast(0.001).in("m"),
-        field("spotAngleDegrees", &LightDesc::spotAngleDegrees).range(1, 85).in("degrees"),
-        field("spotSoftness", &LightDesc::spotSoftness).range(0, 0.99),
-        field("spotFalloff", &LightDesc::spotFalloff).atLeast(0),
-        field("castShadows", &LightDesc::castShadows),
-        field("rectWidth", &LightDesc::rectWidth).atLeast(0.01).in("m"),
-        field("rectHeight", &LightDesc::rectHeight).atLeast(0.01).in("m"),
-        field("doubleSided", &LightDesc::doubleSided),
-        field("iesProfilePath", &LightDesc::iesProfilePath),
-        field("lightMask", &LightDesc::lightMask),
-        field("forwardShadingPriority", &LightDesc::forwardShadingPriority),
-        field("primaryDirectional", &LightDesc::primaryDirectional),
+        JAH_FIELD(LightDesc, type),
+        JAH_FIELD(LightDesc, colour).atLeast(0),
+        JAH_FIELD(LightDesc, intensity).atLeast(0),
+        JAH_FIELD(LightDesc, range).atLeast(0.01).in("m"),
+        JAH_FIELD(LightDesc, sourceRadius).atLeast(0.001).in("m"),
+        JAH_FIELD(LightDesc, spotAngleDegrees).range(1, 85).in("degrees"),
+        JAH_FIELD(LightDesc, spotSoftness).range(0, 0.99),
+        JAH_FIELD(LightDesc, spotFalloff).atLeast(0),
+        JAH_FIELD(LightDesc, castShadows),
+        JAH_FIELD(LightDesc, rectWidth).atLeast(0.01).in("m"),
+        JAH_FIELD(LightDesc, rectHeight).atLeast(0.01).in("m"),
+        JAH_FIELD(LightDesc, doubleSided),
+        JAH_FIELD(LightDesc, iesProfilePath),
+        JAH_FIELD(LightDesc, lightMask),
+        JAH_FIELD(LightDesc, forwardShadingPriority),
+        JAH_FIELD(LightDesc, primaryDirectional),
     });
     return t;
 }

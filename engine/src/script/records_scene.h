@@ -5,6 +5,7 @@
 // and a mesh's data (MeshData with its cards and its cluster DAG). EnvironmentDesc is NOT here: Scene::setEnvironment is
 // declared, not wrapped (tests/hygiene/script_census/declared.txt).
 #include "script/records.h"
+#include "script/records_shared.h"   // JAH_FIELD / JAH_ENUMERATOR: their one home
 #include "jahshaka/engine/Fog.h"
 #include "jahshaka/engine/Lights.h"
 #include "jahshaka/engine/Mesh.h"
@@ -12,9 +13,9 @@
 
 namespace jahshaka { namespace engine { namespace script {
 
-JAH_ENUM_NAMES(SkyMode, {{SkyMode::NoSky, "noSky"}, {SkyMode::Equirectangular, "equirectangular"}, {SkyMode::Cubemap, "cubemap"},
-                         {SkyMode::Atmosphere, "atmosphere"}});
-JAH_ENUM_NAMES(ShadowFilter, {{ShadowFilter::Hard, "hard"}, {ShadowFilter::Soft, "soft"}, {ShadowFilter::VerySoft, "verySoft"}});
+JAH_ENUM_NAMES(SkyMode, {JAH_ENUMERATOR(SkyMode, NoSky), JAH_ENUMERATOR(SkyMode, Equirectangular), JAH_ENUMERATOR(SkyMode, Cubemap),
+                         JAH_ENUMERATOR(SkyMode, Atmosphere)});
+JAH_ENUM_NAMES(ShadowFilter, {JAH_ENUMERATOR(ShadowFilter, Hard), JAH_ENUMERATOR(ShadowFilter, Soft), JAH_ENUMERATOR(ShadowFilter, VerySoft)});
 JAH_RECORD_COUNT(AtmosphereSky, 11);
 JAH_RECORD_COUNT(SunDisc, 5);
 JAH_RECORD_COUNT(CloudLayerDesc, 10);
