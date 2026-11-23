@@ -69,7 +69,11 @@ struct WindowTargetShape {
 /// (OgreScene's gpuKeyOf), never this.
 using NodeId = unsigned long long;
 /// One counter for the process: a function-local static of an inline function is ONE object across the shared
-/// libraries and the executable (GCC's unique-object binding on ELF; a coalesced weak definition on Mach-O).
+/// libraries and the executable (GCC's unique-object binding on ELF; a coalesced weak definition on Mach-O) while it is
+/// VISIBLE: libIrisDocument's -fvisibility-inlines-hidden would make its copy local, a second counter (NOQT-DOCUMENT-1).
+#if defined(__GNUC__)
+__attribute__((visibility("default")))
+#endif
 inline NodeId reserveNodeId()
 {
     static std::atomic<NodeId> next{1};
