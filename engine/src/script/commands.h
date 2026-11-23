@@ -8,13 +8,16 @@
 #include "jahshaka/engine/Script.h"
 #include "script/RouteDeclaration.h"
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
-namespace jahshaka { namespace engine { namespace script {
+namespace jahshaka { namespace engine {
+struct FrameInputScene;   // (jahshaka/engine/FrameInput.h: a family that submits a part includes it)
+namespace script {
 
 /// A route declaration not yet judged held (engine.view.declareRoutes): its view, its scene, the words, the frames since.
 struct DeclaredRoutes {
@@ -24,15 +27,19 @@ struct DeclaredRoutes {
     int frames = 0;
 };
 
-/// AN ENGINE OBJECT A COMMAND MADE by the engine's own id (a node, mesh or material): removed at the host's end (THE
-/// OWNERSHIP LAW: a scene the host's owner handed in outlives the host, and what a run made in it must not), and the
-/// authority of what this host may change or destroy in a scene it does not own. Its key in a scene: kind << 32 | id.
-enum class MadeKind { Node, Mesh, Material };
+/// AN ENGINE OBJECT A COMMAND MADE by the engine's own id (a node, mesh, material, texture or decal image): removed at
+/// the host's end (THE OWNERSHIP LAW: a scene the host's owner handed in outlives the host, and what a run made in it
+/// must not - a decal image's atlas slice included: Scene::destroyTexture releases it, refcounted), and the authority of
+/// what this host may change or destroy in a scene it does not own. Its key in a scene: kind << 32 | id.
+enum class MadeKind { Node, Mesh, Material, Texture, DecalTexture };
 inline std::uint64_t madeKey(MadeKind kind, std::uint32_t id) { return std::uint64_t(kind) << 32 | id; }
 
 struct EngineState {
     Host *host = nullptr;
     Engine *engine = nullptr;
+    /// The engine's identity (Engine::serial): the host's every call and its end ask Engine::isLive of it, never trust
+    /// the pointer alone (a dead engine, or another at its address).
+    unsigned long long engineSerial = 0;
     std::string bootError;
     bool testDoors = false;
     std::vector<DeclaredRoutes> declared;
@@ -70,16 +77,13 @@ class Commands {
 public:
     explicit Commands(std::shared_ptr<EngineState> s) : st(std::move(s)) {}
 
-    /// The engine, or the call FAILS saying why it is absent.
-    Engine *engine(Call &c) const
-    {
-        if (!st->engine) c.fail("the engine did not start: " + st->bootError);
-        return st->engine;
-    }
-    /// The scene / view a checked handle names (the registry checked its kind and that it is live), or null when
-    /// the engine is absent (the call FAILED saying why).
-    Scene *scene(Call &c, const Value &h) const { return engine(c) ? c.object<Scene>(h) : nullptr; }
-    View *view(Call &c, const Value &h) const { return engine(c) ? c.object<View>(h) : nullptr; }
+    /// The engine, or the call FAILS saying why it is absent (it did not start, or it is gone: Engine::isLive).
+    Engine *engine(Call &c) const;
+    /// The scene / view a checked handle names (the registry checked its kind and that its handle is live), or null -
+    /// the call FAILED saying why - when the engine is absent or the engine no longer holds it (one its owner handed in
+    /// and destroyed before the host ended: Engine::scenePresence / viewPresence; Script.h, WHAT IS HANDED IN).
+    Scene *scene(Call &c, const Value &h) const;
+    View *view(Call &c, const Value &h) const;
     /// One lockstep frame: one grid step of every scene this host made, through its FrameInput part (commands_engine.cpp:
     /// THE FRAME's PUBLIC DOOR), then the frame; then EVERY PENDING
     /// ROUTE DECLARATION JUDGED on it (RouteDeclaration.h: held or broken, each a law of the host's verdict; a product
@@ -89,8 +93,19 @@ public:
     /// the call FAILED by name, past the live pictures' cap; roomForPicture: the cap's check alone (before a copy).
     Value holdPicture(Call &c, Image img) const;
     bool roomForPicture(Call &c, std::size_t bytes) const;
+    /// THE RADIANCE PICTURE (a second held kind, `radiance`, bound to ImageF: the view's linear scene radiance in
+    /// float, View::readPixelsHdr): held as holdPicture holds, {radiance: radiance handle, width, height}, its bytes
+    /// counted under the SAME live-pictures cap.
+    Value holdRadiance(Call &c, ImageF img) const;
+    /// ONE SCENE SETTING THROUGH THE FRAME's RECORD (FrameInput: a scene's part merges field by field, FrameInput.h): a
+    /// part for `s` alone, `fill` setting its one field, submitted for the next frame - false, the call FAILED by name,
+    /// when the engine is absent or the scene was handed in (its settings are not this host's: settable).
+    bool submitScene(Call &c, Scene *s, const std::function<void(FrameInputScene &)> &fill) const;
+    /// AN ENGINE-WIDE SETTING (beyond the scenes and views this host made: an arm, a shadow resolution, the shader
+    /// cache): false, the call FAILED by name, in a host that serves an OUTSIDE client (Host::Options::outsideClient).
+    bool engineWide(Call &c) const;
     /// THE OWNERSHIP LAW AT A CHANGE (2b's final read L-a; the lead's ruling): a command that CHANGES or DESTROYS a
-    /// node, mesh or material (`verb`: "change" / "destroy") may act on every one of a scene this host made, and in a
+    /// node, mesh, material, texture or decal image (`verb`: "change" / "destroy") may act on every one of a scene this host made, and in a
     /// scene its owner handed in ONLY on one this host made there - else the call FAILS by name, false. settable: a
     /// command that changes a SCENE's own settings acts only on a scene this host made (a handed-in one FAILS).
     bool mine(Call &c, Scene *s, MadeKind kind, std::uint32_t id, const char *verb) const;
@@ -108,11 +123,18 @@ std::shared_ptr<View> ownedView(const std::shared_ptr<EngineState> &st, View *v)
 void noteMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
 void forgetMade(EngineState &st, Scene *scene, MadeKind kind, std::uint32_t id);
 void forgetScene(EngineState &st, Scene *scene);
-/// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view) or naming the engine's own id.
+/// The kinds of handle (THE HANDLES, Script.h): held by the host (scene, view, picture, radiance) or naming the engine's
+/// own id (node, mesh, material, texture, decalTexture - a decal image is its own pool: never a texture).
 constexpr const char *kScene = "scene", *kView = "view", *kNode = "node", *kMesh = "mesh", *kMaterial = "material",
-                     *kPicture = "picture";
+                     *kPicture = "picture", *kTexture = "texture", *kDecalTexture = "decalTexture",
+                     *kRadiance = "radiance";
 
-/// Each family's commands (commands_<family>.cpp), registered by registerEngineCommands (commands_engine.cpp).
+/// THE ENGINE's COMMANDS ON A HOST (registerEngineCommands, Script.h, is this and nothing else): the state, the host's
+/// end, the kinds bound and checked, the test doors' switch, and every family's commands - answering the state, so a
+/// test's own commands reach it (script.commands' fixture).
+Commands makeEngineCommands(Host &host, Engine *engine, std::string bootError, bool testDoors);
+
+/// Each family's commands (commands_<family>.cpp), registered by makeEngineCommands (commands_engine.cpp).
 void registerSceneCommands(Host &host, const Commands &k);
 void registerNodeCommands(Host &host, const Commands &k);
 void registerViewCommands(Host &host, const Commands &k);
@@ -125,5 +147,6 @@ void registerLightCommands(Host &host, const Commands &k);
 void registerEffectsCommands(Host &host, const Commands &k);
 void registerAtomCommands(Host &host, const Commands &k);
 void registerStatusCommands(Host &host, const Commands &k);
+void registerGiReadCommands(Host &host, const Commands &k);
 
 }}}  // namespace jahshaka::engine::script
