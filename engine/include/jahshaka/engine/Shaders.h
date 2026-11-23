@@ -17,6 +17,9 @@ struct AsyncShaderStats {
     /// threads. 0 threads = every view compiles inside the frame, as before.
     bool               running = false;
     unsigned           threads = 0;
+    /// The test door Engine::setAsyncShaderPlaceholdersOnly as the COMPILER holds it (never the host's wish): an
+    /// asynchronous view's waiting objects request only their placeholders while it is on.
+    bool               placeholdersOnly = false;
     /// Permutations submitted and not landed yet (queued + building + built and waiting
     /// for the next frame to publish them). The status bar's "Compiling shaders (N)".
     unsigned           pending = 0;

@@ -9730,6 +9730,7 @@ private:
     /// The background shader compiler's thread count (ASYNC-SHADERS-1;
     /// EngineConfig::asyncShaderThreads - the thread budget's compile tier by default -, JAH_ASYNC_SHADER_THREADS).
     unsigned        mAsyncShaderThreads = 0;
+    bool            mAsyncPlaceholdersOnly = false;   ///< setAsyncShaderPlaceholdersOnly's wish (applied at the compiler's start)
     /// Placeholder draws / pending skips of scenes already destroyed (asyncShaderStats).
     unsigned long long mRetiredPlaceholderDraws = 0;
     unsigned long long mRetiredPendingSkips = 0;

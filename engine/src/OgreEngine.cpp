@@ -3693,6 +3693,7 @@ void OgreEngine::startAsyncShaders() {
     // instead, measured: the Mirror Room and Particles samples compiled unlit permutations on
     // the UI thread after their opens.)
     hm->getAsyncCompiler()->setNumThreads(mAsyncShaderThreads, /*nice*/ 10);
+    hm->getAsyncCompiler()->setPlaceholdersOnly(mAsyncPlaceholdersOnly);   // the host's wish, kept from any earlier call
 }
 
 void OgreEngine::setAsyncShaderThreads(unsigned threads) {
@@ -3706,6 +3707,9 @@ void OgreEngine::setAsyncShaderThreads(unsigned threads) {
 void OgreEngine::setAsyncShaderPlaceholdersOnly(bool on) {
     // THE HOST'S CALL IS A MESSAGE of the engine's stream (U3 stage 4a, decision 39 c), applied at the drain.
     if (postedAsMessage([=](OgreEngine &e) { e.setAsyncShaderPlaceholdersOnly(on); return true; })) return;
+    // THE WISH IS KEPT (the landing's red, gi.card_build_late.pso): a call before the first view - no Hlms, no compiler
+    // yet - was dropped here in silence, so that row's door had never been on; startAsyncShaders applies it
+    mAsyncPlaceholdersOnly = on;
     if (!mRoot || mHeadless || !mHlmsRegistered) return;
     mRoot->getHlmsManager()->getAsyncCompiler()->setPlaceholdersOnly(on);
 }
@@ -3716,6 +3720,7 @@ AsyncShaderStats OgreEngine::asyncShaderStats() const {
     const Ogre::HlmsAsyncCompiler *c = mRoot->getHlmsManager()->getAsyncCompiler();
     out.running   = c->isRunning();
     out.threads   = c->getNumThreads();
+    out.placeholdersOnly = c->getPlaceholdersOnly();
     // THE RAY PIPELINES IN FLIGHT COUNT (ORPHAN-REDS-1): the async-shader rule's other compiles (RayQueryTier::aheadReady)
     out.rayBuildsInFlight = rayAheadInFlight();
     out.pending   = c->getNumOutstanding() + out.rayBuildsInFlight;
