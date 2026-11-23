@@ -680,6 +680,51 @@ std::function<void(const std::string &)> SceneMirror::entryRefusal(iris::SceneNo
     };
 }
 
+// A MISSING OPTIONAL FILE MUST NOT TAKE THE LAMP OR THE EMITTER OUT OF THE PICTURE (the lead's ruling C1; what "a missing
+// ramp must not take the whole emitter down" said of the particles before the engine's refusal became atomic): the
+// engine refuses the push whole and finally (Engine.h, setLight / setParticleSystem), the mirror says it once and pushes
+// the same object once more with that file dropped - and keeps the refused path, so the next pushes drop it too.
+std::function<void(const std::string &)> SceneMirror::lightRefusal(iris::SceneNode *node, LightDesc pushed)
+{
+    auto said = entryRefusal(node, "light", nullptr, false);
+    const auto it = mEntries.constFind(node);
+    const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
+    // (the entry found by the node AND its engine id: a node gone, or another made at its address, is not ours)
+    return [this, said, key = node, id, pushed](const std::string &why) {
+        said(why);
+        if (pushed.iesProfilePath.empty()) return;
+        const auto e = mEntries.find(key);
+        if (e == mEntries.end() || e->node != id) return;
+        e->lightProfileRefused = pushed.iesProfilePath;
+        LightDesc lamp = pushed;
+        lamp.iesProfilePath.clear();   // the lamp drawn, its lobe dropped
+        postOk(entryRefusal(key, "light", nullptr, false), &jahshaka::engine::Scene::setLight, e->node, lamp);
+    };
+}
+
+std::function<void(const std::string &)> SceneMirror::particleRefusal(iris::SceneNode *node, ParticleSystemDesc pushed)
+{
+    auto said = entryRefusal(node, "particle system", nullptr, false);
+    const auto it = mEntries.constFind(node);
+    const jahshaka::engine::NodeId id = it != mEntries.cend() ? it->node : 0;
+    return [this, said, key = node, id, pushed](const std::string &why) {
+        said(why);
+        const auto e = mEntries.find(key);
+        if (e == mEntries.end() || e->node != id) return;
+        ParticleSystemDesc emitter = pushed;
+        bool dropped = false;
+        for (ParticleAffectorDesc &a : emitter.affectors)
+            if (a.kind == ParticleAffectorDesc::Kind::ColourRamp && !a.colourRampPath.empty()) {
+                e->particleRampRefused = a.colourRampPath;
+                a.colourRampPath.clear();   // the emitter drawn, its ramp dropped (an empty path: no ramp yet)
+                dropped = true;
+            }
+        if (dropped)
+            postOk(entryRefusal(key, "particle system", nullptr, false), &jahshaka::engine::Scene::setParticleSystem,
+                   e->node, emitter);
+    };
+}
+
 // THE COMPLETIONS, READ AT THE TOP OF A SYNC (U3 stage 3): every named message the engine answered since the last
 // look — a refusal runs its answer (the walk then does what it used to do on the spot, one frame later).
 void SceneMirror::takeCompletions()
@@ -4010,9 +4055,13 @@ SceneMirror::VisitResult SceneMirror::visitNodeBody(iris::SceneNode *node, bool 
             // silently stopping at the first push).
             if (!e.lightPushed || want != e.lastLight) {
                 // (setLight's refusal is FINAL for the value - Engine.h: the push stays latched, made-and-refused, and
-                // goes again only when the document's value changes; no retry - SCRIPT-IN-ENGINE-1 2e e1)
-                if (postOk(entryRefusal(node, "light", nullptr, false),
-                           &jahshaka::engine::Scene::setLight, e.node, want)) {
+                // goes again only when the document's value changes; no retry - SCRIPT-IN-ENGINE-1 2e e1. A profile the
+                // engine refused is DROPPED from every push while the document still names it - lightRefusal: the lamp
+                // stays drawn and its edits reach it; a path the user re-picks is tried again)
+                if (want.iesProfilePath != e.lightProfileRefused) e.lightProfileRefused.clear();
+                LightDesc push = want;
+                if (!e.lightProfileRefused.empty()) push.iesProfilePath.clear();
+                if (postOk(lightRefusal(node, push), &jahshaka::engine::Scene::setLight, e.node, push)) {
                     notePush(node, "light");
                     e.hasLight = true;
                     e.lastLight = want;
@@ -4569,9 +4618,15 @@ void SceneMirror::syncParticles(Entry &e, iris::ParticleSystemNode *ps)
     // whose texture cannot be resolved is left with no texture rather than
     // silently keeping a stale one.
     const TextureId tex = texPath.isEmpty() ? 0 : textureFor(texPath, true);
-    // (setParticleSystem's refusal is FINAL for the value - Engine.h: latched, no retry until the signature changes)
-    if (postOk(entryRefusal(ps, "particle system", nullptr, false),
-               &jahshaka::engine::Scene::setParticleSystem, e.node, toParticleDesc(ps, tex))) {
+    // (setParticleSystem's refusal is FINAL for the value while the file is missing - Engine.h: latched, no retry until
+    // the signature changes. A MISSING RAMP MUST NOT TAKE THE WHOLE EMITTER DOWN: a ramp the engine refused is DROPPED
+    // from every push while the document still names it - particleRefusal: the emitter stays drawn, its edits reach it)
+    if (ps->colourRampImage.toStdString() != e.particleRampRefused) e.particleRampRefused.clear();
+    ParticleSystemDesc desc = toParticleDesc(ps, tex);
+    if (!e.particleRampRefused.empty())
+        for (ParticleAffectorDesc &a : desc.affectors)
+            if (a.kind == ParticleAffectorDesc::Kind::ColourRamp) a.colourRampPath.clear();
+    if (postOk(particleRefusal(ps, desc), &jahshaka::engine::Scene::setParticleSystem, e.node, desc)) {
         notePush(ps, "particles");
         e.hasParticles = true;
         e.particleSignature = sig;

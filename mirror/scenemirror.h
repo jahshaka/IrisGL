@@ -959,6 +959,13 @@ private:
         /// materials (audit F7).
         jahshaka::engine::LightDesc lastLight;
         bool lightPushed = false;
+        /// THE PROFILE THE ENGINE REFUSED (SCRIPT-IN-ENGINE-1 2e e1; the lead's ruling C1): setLight's refusal of a
+        /// missing .ies is FINAL and ATOMIC (Engine.h) - so the mirror, whose job is to show the document as well as the
+        /// engine can, pushes the same lamp once more WITHOUT the profile (the lamp drawn, no lobe) and keeps this path:
+        /// while the document still names it, every push drops it (an edit of colour, intensity, range reaches the lamp).
+        /// The refusal is said ONCE (a user's fixable scene error, the file by name). A file that appears later is
+        /// picked up at the next open (no file watch).
+        std::string lightProfileRefused;
         /// Camera body + frustum (CAMERAS_SPEC phase 2b). The mesh is OWNED by
         /// this entry — it is derived from the camera's own lens, so there is
         /// nothing to share — and rebuilt only when `cameraSignature` moves.
@@ -1005,6 +1012,10 @@ private:
         // under a comment that claimed it allocated nothing.)
         bool hasParticles = false;
         quint64 particleSignature = 0;
+        /// THE COLOUR RAMP THE ENGINE REFUSED (the lead's ruling C1, as `lightProfileRefused`): a missing ramp image
+        /// must not take the whole emitter down - setParticleSystem's refusal is atomic, so the mirror pushes the
+        /// emitter once more WITHOUT the ramp and drops this path while the document still names it.
+        std::string particleRampRefused;
         /// The map the engine's particle definition is holding. Comes out of
         /// the shared texture cache, so reclaimUnused has to see it.
         jahshaka::engine::TextureId particleTexture = 0;
@@ -1457,6 +1468,12 @@ private:
     /// `reset` and the node marked, so the next sync tries again — what a refused direct call did on the spot.
     std::function<void(const std::string &)> entryRefusal(iris::SceneNode *node, const char *what,
                                                           std::function<void(Entry &)> reset, bool retry = true);
+    /// THE LAMP's and THE EMITTER's REFUSAL (SCRIPT-IN-ENGINE-1 2e e1; the lead's ruling C1): the engine's refusal of a
+    /// missing optional file (an .ies, a ramp image) is FINAL and ATOMIC (Engine.h) - said once (entryRefusal, no
+    /// retry), then the same lamp / emitter pushed ONCE MORE without that file, the refused path kept on the entry
+    /// (lightProfileRefused / particleRampRefused): the object is drawn, its lobe or ramp dropped.
+    std::function<void(const std::string &)> lightRefusal(iris::SceneNode *node, jahshaka::engine::LightDesc pushed);
+    std::function<void(const std::string &)> particleRefusal(iris::SceneNode *node, jahshaka::engine::ParticleSystemDesc pushed);
     void takeCompletions();
     void postTransform(jahshaka::engine::NodeId node, const iris::Mat4 &world);
     jahshaka::engine::NodeId newNode(jahshaka::engine::NodeId parent = 0) { notePost(); return scenecmd::newNode(mTarget, parent); }
