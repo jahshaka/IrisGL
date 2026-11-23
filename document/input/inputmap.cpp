@@ -260,7 +260,8 @@ bool InputMap::fromValue(const Value &m)
         const bool axis = typeOf(a) == InputActionType::Axis2D;
         QVector<InputKeyBinding> keys;
         // The rows: an Array of Strings; ONE String is one row (a one-entry list the settings file hands back as a
-        // single string, which QVariant::toStringList read the same way).
+        // single string, which QVariant::toStringList read the same way). An element that is NOT a String is skipped
+        // where toStringList converted it (5 -> "5"): only a hand-made value can carry one (the lead's F15).
         std::vector<std::string> rows;
         if (member.second.kind() == Kind::String) rows.push_back(member.second.asString());
         if (member.second.kind() == Kind::Array)

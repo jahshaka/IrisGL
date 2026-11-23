@@ -139,6 +139,29 @@ inline Value arrayOr(const Value &obj, const char *key)
     return v.kind() == Kind::Array ? v : Value(Value::Array{});
 }
 
+/// TWO VALUES EQUAL WITH EVERY OBJECT's MEMBERS COMPARED AS A SET (recursively; arrays element by element), where
+/// Value == compares an Object's members IN ORDER (core/value.h). For a member that replaced a QJsonObject, whose ==
+/// did not see order: the override map's erase-then-set appends, so the same pins can sit in another order (the
+/// lead's F12). An Int and a Number are equal when their numbers are, as Value == says.
+inline bool sameMembers(const Value &a, const Value &b)
+{
+    if (a.kind() == Kind::Object && b.kind() == Kind::Object) {
+        if (a.asObject().size() != b.asObject().size()) return false;
+        for (const Value::Member &m : a.asObject()) {
+            const Value *other = b.find(m.first);
+            if (!other || !sameMembers(m.second, *other)) return false;
+        }
+        return true;
+    }
+    if (a.kind() == Kind::Array && b.kind() == Kind::Array) {
+        if (a.asArray().size() != b.asArray().size()) return false;
+        for (size_t i = 0; i < a.asArray().size(); ++i)
+            if (!sameMembers(a.asArray()[i], b.asArray()[i])) return false;
+        return true;
+    }
+    return a == b;
+}
+
 /// A Float-kind value's number into `out` (a Number, or an Int: one JSON number type - the spec's RULED E (1));
 /// false, out unchanged, for any other kind.
 inline bool numberOf(const Value &v, double &out)
