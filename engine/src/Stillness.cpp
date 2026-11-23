@@ -396,8 +396,10 @@ struct StillnessRun::Impl {
         setArm("reflect.historyReadback", reflectArmWas);
         if (freezeArmOn) setArm("gi.freeze", freezeArmWas);
         if (pinned) scene.setGiPlacementPin(GiPlacementPin());   // released (a message: the host's next frame)
-        // flushes everything waiting into the queue (and the tee); a level the host set since is the host's
-        if (monitorOurs && engine.published().monitor.level == monitorSet) setMonitor(monitorWas);
+        // flushes everything waiting into the queue (and the tee); a level the host set since is the host's. THE LEVEL
+        // IS THE HOST's OWN RECORD (Engine::frameMonitor), never the published frame's: on the calling thread (no host
+        // records: jahlab, jahengine) a request applies at the call and the published record says so only a frame later
+        if (monitorOurs && engine.frameMonitor() == monitorSet) setMonitor(monitorWas);
         drainRecords();
         if (tee) {
             engine.closeMonitorTee(tee);
@@ -974,7 +976,12 @@ bool StillnessRun::begin(const StillnessSpec &spec, std::string &err)
     // host's running capture is left exactly as it was (and its records in the host's own queue).
     m.tee = m.engine.openMonitorTee();
     if (!m.tee) { err = "stillness: the engine opened no monitor tee"; return false; }
-    m.monitorWas = m.engine.published().monitor.level;
+    // THE HOST's OWN RECORD (Engine::frameMonitor: the level asked for, at the call), never published().monitor.level -
+    // the last PUBLISHED frame's: a second run right after a first read the first run's Review there (its restore to
+    // Off not yet published on the calling thread), took the monitor for the host's, never switched it on and got no
+    // record (LAB-SCRIPTS-1's feature end: lab.stillness_control, lab.camera_cut; the app's framemonitor service reads
+    // the level the same way)
+    m.monitorWas = m.engine.frameMonitor();
     if (m.monitorWas == MonitorLevel::Off) {
         m.monitorSet = MonitorLevel::Review;
         m.setMonitor(m.monitorSet);
