@@ -1380,6 +1380,20 @@ Scene::Presence OgreScene::materialPresence(MaterialId id) const {
     if (hostPosts()) return Presence::Unanswered;
     return mMaterials.count(id) ? Presence::Present : Presence::Absent;
 }
+// ...a texture and a decal image: one record map (mTextures, OgreMaterials.cpp), split by the record's `decal` flag
+// (its own pool: the two ids are never interchangeable - Engine.h, loadDecalTexture).
+Scene::Presence OgreScene::texturePresence(TextureId id) const {
+    JAH_SYNC_GETTER("Scene::texturePresence");
+    if (hostPosts()) return Presence::Unanswered;
+    const auto it = mTextures.find(id);
+    return it != mTextures.end() && !it->second.decal ? Presence::Present : Presence::Absent;
+}
+Scene::Presence OgreScene::decalTexturePresence(TextureId id) const {
+    JAH_SYNC_GETTER("Scene::decalTexturePresence");
+    if (hostPosts()) return Presence::Unanswered;
+    const auto it = mTextures.find(id);
+    return it != mTextures.end() && it->second.decal ? Presence::Present : Presence::Absent;
+}
 
 // WHERE A NODE ACTUALLY IS. `_getDerived*Updated` walks up to whatever parent
 // chain the node hangs from and brings the derived transform up to date first,

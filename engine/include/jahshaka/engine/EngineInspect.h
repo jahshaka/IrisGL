@@ -180,7 +180,6 @@ public:
     /// structure its near copy references in the device-written instance array (0 = untraced) - what a camera walk or a
     /// teleport may not change for a still world (the same TOOL path).
     virtual bool rayNearAddresses(std::vector<unsigned long long> &addresses) const = 0;
-    virtual int giUpdateBudget() const = 0;   ///< GiParams::updateBudget as the scene took it (0 = GI paused)
     /// THE SCENE'S CLOCK (ONE-FRAME-1 stage 1): its time so far (the steps its frames advanced x the period) and the
     /// last frame's (what every reader of the scene took).
     virtual double sceneSeconds() const = 0;

@@ -1299,14 +1299,18 @@ public:
                                         unsigned count) const = 0;
 
     /// DOES THIS SCENE HOLD IT NOW (SCRIPT-IN-ENGINE-1: the script host's handle check - a dead or foreign id FAILS by
-    /// name before a command runs): a node, a mesh or a material by its id. The engine's own lookups (the ones
+    /// name before a command runs): a node, a mesh, a material or a texture by its id. The engine's own lookups (the ones
     /// setNodeTransform and attachMesh make), no copy. A LOCKSTEP read: while a render thread owns the engine
     /// (EngineConfig::hostRecords) the maps are the render side's and the read is UNANSWERED - the host's door there is
-    /// the published record or a request, not served until the editor is a script client (P3).
+    /// the published record or a request, not served until the editor is a script client (P3). ONE READ PER KIND
+    /// (SCRIPT-IN-ENGINE-1 E0): a texture of loadTexture / createTexture is PRESENT to texturePresence only, a decal
+    /// image of loadDecalTexture (its own pool: a slice of a process-wide atlas) to decalTexturePresence only.
     enum class Presence { Absent, Present, Unanswered };
     virtual Presence    nodePresence(NodeId) const = 0;
     virtual Presence    meshPresence(MeshId) const = 0;
     virtual Presence    materialPresence(MaterialId) const = 0;
+    virtual Presence    texturePresence(TextureId) const = 0;
+    virtual Presence    decalTexturePresence(TextureId) const = 0;
 
     /// WHERE A NODE IS RIGHT NOW, in WORLD space, as the graph holds it.
     ///
@@ -2009,8 +2013,21 @@ public:
 
     /// Creates the engine. Returns null on failure and fills `error`.
     static std::unique_ptr<Engine> create(const EngineConfig &, std::string &error);
-    /// True while an Engine exists in this process.
+    /// True while an Engine exists in this process - AND while an exit-only teardown keeps Ogre's Root after the
+    /// Engine object is gone (Engine::create refuses a second engine until then).
     static bool isAlive();
+    /// THE LIVENESS READS (SCRIPT-IN-ENGINE-1 E0: the script host's guard of what it holds - its engine, and the scenes
+    /// and views its owner handed in). AN ENGINE's IDENTITY IS ITS SERIAL, never its address: each Engine takes the
+    /// next of a process-wide count of the engines CREATED (1, 2, ...) at create; isLive(serial) is true only while
+    /// THAT engine exists - false once it is destroyed, whatever a later engine's address is, and false while an
+    /// exit-only teardown keeps Root (where isAlive() is still true). A holder of an Engine* stores its serial.
+    unsigned long long serial() const { return mSerial; }
+    static bool isLive(unsigned long long serial);
+    /// Does this engine hold the scene / the view NOW (made here, not yet destroyed; a scene whose destroy a frame
+    /// deferred is Absent) - the pointer is compared, never read. A LOCKSTEP read, as Scene::nodePresence: UNANSWERED
+    /// while a render thread owns the engine (EngineConfig::hostRecords).
+    virtual Scene::Presence scenePresence(const Scene *scene) const = 0;
+    virtual Scene::Presence viewPresence(const View *view) const = 0;
     /// Program loads that FAILED to compile in this process, every engine's (the fork's GpuProgram::getJahCompileErrors:
     /// AsyncShaderStats::compileErrors' source), readable with no engine alive - the fixtures' exit check
     /// (tests/support/enginetesthelpers.h, URGENT #83's law for the fixtures).
@@ -3225,6 +3242,7 @@ protected:
     bool                mHostRecordsMode = false;   ///< EngineConfig::hostRecords (the snapshot backs the VR records)
     mutable std::mutex  mHostViewsLock;   ///< guards mHostViews: written on the render thread, read on the host's
     bool                mIdentityHeadless = false;
+    unsigned long long  mSerial = 0;   ///< serial(): taken at create, never changed
     View               *mHostVrView = nullptr;
     DeviceInfo          mDeviceInfo;
     bool                mDeviceRayQuery = false;

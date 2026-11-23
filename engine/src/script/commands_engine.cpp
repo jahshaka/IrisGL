@@ -21,11 +21,11 @@
 // renderOneFrame: a script's scenes have no document, so the host that made them is their clock's ONE writer
 // (ONE-FRAME-1). A scene the host's owner handed in keeps its owner's clock: this host never stamps it.
 //
-// TWO READS GO THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only these, because the C++ fixtures' harness has
-// no public equivalent and a script row must give the same route judgement as the fixture it replaces: (1) THE PAUSE
-// in engine.view.routes and the route judgement (inspect::SceneEcho::giUpdateBudget() == 0), the one route word the
-// published record does not carry (2e publishes it); (2) THE ENGINE's OWN CHAIN RECORD (inspect::ViewEcho::routes)
-// that engine.view.declareRoutes' judgement holds the published row against (the two doors agree: requireRoutes' law). R11 (source.testing_rules) bars that header from
+// ONE READ GOES THROUGH THE FIXTURES' DOOR (EngineInspect.h), and only this, because the C++ fixtures' harness has
+// no public equivalent and a script row must give the same route judgement as the fixture it replaces: THE ENGINE's
+// OWN CHAIN RECORD (inspect::ViewEcho::routes) that engine.view.declareRoutes' judgement holds the published row against
+// (the two doors agree: requireRoutes' law). The pause is the published record's (GiStatus::updateBudget == 0), for the
+// fixtures as for the scripts. R11 (source.testing_rules) bars that header from
 // Studio's src/ and irisgl/mirror, the hosts; this is the engine's own file.
 //
 // THE OWNERSHIP LAW (2b; the lead, for the lab's fresh host per Run): an engine object A COMMAND MADE is the host's -
@@ -160,8 +160,7 @@ bool Commands::frame(Call &c) const
         ran.field = g.ifdBound;
         ran.cards = g.cards.built;
         ran.store = !g.cascades.empty();
-        const inspect::SceneEcho *se = inspect::scene(d.scene);
-        ran.paused = se && se->giUpdateBudget() == 0;
+        ran.paused = g.updateBudget == 0;
         const ViewFrames row = d.view->published();
         pub.gather = row.routeGather; pub.integrate = row.routeIntegrate; pub.reflection = row.routeReflect;
         std::string line;

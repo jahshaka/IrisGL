@@ -497,6 +497,25 @@ bool OgreEngine::adoptScene(std::unique_ptr<OgreScene> adopted, unsigned workerT
     } JAH_CATCH(mLastError, false);
 }
 
+// THE LIVENESS READS (Engine.h, Engine::scenePresence): the engine's own lists, the pointer compared and never read; a
+// scene whose destroy a frame deferred is already gone to its host (destroyScene's contract below). Lockstep only.
+Scene::Presence OgreEngine::scenePresence(const Scene *scene) const {
+    JAH_SYNC_GETTER("Engine::scenePresence");
+    if (hostPosts()) return Scene::Presence::Unanswered;
+    if (std::find(mPendingSceneDestroy.begin(), mPendingSceneDestroy.end(), scene) != mPendingSceneDestroy.end())
+        return Scene::Presence::Absent;
+    for (const auto &s : mScenes)
+        if (s.get() == scene) return Scene::Presence::Present;
+    return Scene::Presence::Absent;
+}
+Scene::Presence OgreEngine::viewPresence(const View *view) const {
+    JAH_SYNC_GETTER("Engine::viewPresence");
+    if (hostPosts()) return Scene::Presence::Unanswered;
+    for (const auto &v : mViews)
+        if (v.get() == view) return Scene::Presence::Present;
+    return Scene::Presence::Absent;
+}
+
 // A DESTROY ASKED FOR FROM INSIDE A FRAME IS DEFERRED, NOT REFUSED
 // (VR-INPUT-1E-FIX finding 5).
 //
@@ -4947,6 +4966,10 @@ void markProcessExit() { detail::gProcessExit.store(true, std::memory_order_rele
 bool detail::processExitMarked() { return gProcessExit.load(std::memory_order_acquire); }
 void setProcessExitHook(ProcessExitHook hook) { detail::gProcessExitHook.store(hook, std::memory_order_release); }
 bool Engine::isAlive() { return detail::gLiveEngine != nullptr || Ogre::Root::getSingletonPtr() != nullptr; }
+bool Engine::isLive(unsigned long long serial)
+{
+    return serial && detail::gLiveEngine && detail::gLiveEngine->serial() == serial;
+}
 unsigned long long Engine::processShaderCompileErrors() { return Ogre::GpuProgram::getJahCompileErrors(); }
 
 std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &error) {
@@ -4957,6 +4980,8 @@ std::unique_ptr<Engine> Engine::create(const EngineConfig &cfg, std::string &err
     if (cfg.pluginDir.empty())    { error = "EngineConfig::pluginDir is empty";    return nullptr; }
     if (cfg.hlmsMediaDir.empty()) { error = "EngineConfig::hlmsMediaDir is empty"; return nullptr; }
     auto engine = std::unique_ptr<detail::OgreEngine>(new detail::OgreEngine());
+    static unsigned long long created = 0;   // the engines this process created (Engine::serial; create's thread only)
+    engine->mSerial = ++created;
     detail::gLiveEngine = engine.get();
     // THE RENDER THREAD (U3 stage 4b): Root and the device are made on it; create returns when they are up.
     if (cfg.renderThread) {

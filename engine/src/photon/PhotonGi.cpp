@@ -930,6 +930,7 @@ bool PhotonComponent::refreshGiLighting() {
 GiStatus PhotonComponent::giStatus() const {
     GiStatus st;
     st.mode = mGi.mode;
+    st.updateBudget = mGi.updateBudget;   // (0 = paused: the route judgement's word, GiStatus.h)
     // SSAO-DOUBLE-1: the chain's refusal, from the one rule OgreView::chainDesc reads.
     st.ssaoSuppressed = mScene.ssaoRefused();
     if (st.ssaoSuppressed) st.ssaoSuppressedReason = ssaoSuppressedReason();

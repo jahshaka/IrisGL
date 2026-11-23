@@ -1,7 +1,6 @@
 // THE VIEW FAMILY (SCRIPT-IN-ENGINE-1): engine.view.* - views, their scene, camera and post chain, their routes (the
 // plain reader and the asserting declaration) and their pictures.
 #include "script/commands.h"
-#include "jahshaka/engine/EngineInspect.h"
 
 #include <algorithm>
 #include <cmath>
@@ -135,11 +134,10 @@ void registerViewCommands(Host &host, const Commands &k)
               if (!s) return c.refuse("the view draws no scene");
               const ViewFrames row = v->published();
               const GiStatus g = s->published().gi;
-              const inspect::SceneEcho *echo = inspect::scene(s);
               return Value(Value::Object{{"gather", Value(row.routeGather)}, {"integrate", Value(row.routeIntegrate)},
                                          {"reflection", Value(row.routeReflect)}, {"field", Value(g.ifdBound)},
                                          {"cards", Value(g.cards.built)}, {"store", Value(!g.cascades.empty())},
-                                         {"paused", Value(echo && echo->giUpdateBudget() == 0)}});
+                                         {"paused", Value(g.updateBudget == 0)}});
           });
     r.add({"engine.view.declareRoutes",
            {Access::Reads, {target(handle("view", kView)),
